@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Project Bootstrap & CUDA Environment",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Initialize the uv project, declare/install dependencies (RealtimeSTT + nvidia CUDA wheels), create the LD_LIBRARY_PATH launcher wrapper, verify ctranslate2 sees CUDA, and prefetch both STT models so first real run is instant.",
           "tasks": [
             {
@@ -57,7 +57,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "CUDA bootstrap: LD_LIBRARY_PATH launcher wrapper + CUDA smoke verification",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Create the launcher wrapper that sets LD_LIBRARY_PATH (cublas+cudnn) BEFORE python starts, and a verification script proving ctranslate2 CUDA is usable (with a documented CPU degraded-mode fallback).",
               "subtasks": [
                 {
@@ -80,7 +80,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "CUDA smoke verification script + degraded-mode decision",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -98,14 +98,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Prefetch STT models so first real run is instant",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Download the final and realtime (and fallback) models to ~/.cache/huggingface at install time, verifying the exact repo IDs.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Model prefetch script + run download",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
