@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voice-typing"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "realtimestt",
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12==9.*",
+    "huggingface_hub>=0.23",
+]
+
+[project.scripts]
+voicectl = "voice_typing.ctl:main"
+voice-typing-daemon = "voice_typing.daemon:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["voice_typing"]

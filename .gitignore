@@ -1,0 +1,19 @@
+# Build artifacts
+dist/
+build/
+*.pyc
+__pycache__/
+
+# Dependency directories
+node_modules/
+venv/
+.venv/
+
+# Environment files
+.env
+
+# OS-specific files
+.DS_Store
+
+# Agent harness artifacts (local scratch)
+.pi-subagents/

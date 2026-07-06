@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "MVP — Fully-Local Voice Typing Daemon (RealtimeSTT)",
-      "status": "Researching",
+      "status": "Planned",
       "description": "Deliver the complete voice-typing system per PRD §4: a long-running Python daemon that captures the PipeWire default mic via RealtimeSTT (faster-whisper/CTranslate2 on CUDA), surfaces live partials to a state file + tmux status, and types only finalized text into the focused Wayland window (wtype/ydotool) or a tmux pane. Listening never auto-stops on silence (fixes the WhisperX flaw); it segments utterances only. Controlled via a unix socket + voicectl CLI; runs as a systemd user service starting un-armed. All T1–T4/T6 tests pass.",
       "milestones": [
         {
@@ -18,28 +18,38 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Initialize uv project and declare dependencies",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Create pyproject.toml (python >=3.12,<3.13), package skeleton voice_typing/, and console-script entry points; declare runtime deps including the CUDA cuDNN 9 wheels.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S1",
                   "title": "Scaffold pyproject.toml + package layout + console scripts",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3", "h3.0", "h2.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_be48c74bc590/architecture/system_context.md §2 (target file map) and research_faster_whisper_cuda.md §2. Repo is an empty git repo with a Python 3.12.10 .venv (no packages) and NO pyproject.toml yet. Always use explicit paths in bash: /home/dustin/.local/bin/uv, .venv/bin/python, /usr/bin/tmux.\n2. INPUT: Empty repo at /home/dustin/projects/voice-typing; existing .venv (Python 3.12.10).\n3. LOGIC: Run `/home/dustin/.local/bin/uv init --bare --python 3.12` (keep name voice-typing; it is already a git repo). Author pyproject.toml with: requires-python = \">=3.12,<3.13\"; [project.scripts] voicectl = \"voice_typing.ctl:main\" AND voice-typing-daemon = \"voice_typing.daemon:main\"; [project.dependencies] = [\"realtimestt\", \"nvidia-cublas-cu12\", \"nvidia-cudnn-cu12==9.*\", \"huggingface_hub>=0.23\"]. Create empty voice_typing/__init__.py. NOTE cuDNN is PINNED to 9.* (faster-whisper requires cuDNN 9; PRD §4.4 left it unpinned — research_faster_whisper_cuda.md §2 confirms the correction). Do NOT add torch here (handled in S2 as best-effort CUDA index).\n4. OUTPUT: pyproject.toml declaring the package + scripts + deps; voice_typing/__init__.py present. Consumed by P1.M1.T1.S2 (resolve) and all later modules (import voice_typing).\n5. DOCS: none — no user-facing/config/API surface change yet (README written in final docs task)."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_be48c74bc590/architecture/system_context.md §2 (target file map) and research_faster_whisper_cuda.md §2. Repo is an empty git repo with a Python 3.12.10 .venv (no packages) and NO pyproject.toml yet. Always use explicit paths in bash: /home/dustin/.local/bin/uv, .venv/bin/python, /usr/bin/tmux.\n2. INPUT: Empty repo at /home/dustin/projects/voice-typing; existing .venv (Python 3.12.10).\n3. LOGIC: Run `/home/dustin/.local/bin/uv init --bare --python 3.12` (keep name voice-typing; it is already a git repo). Author pyproject.toml with: requires-python = \">=3.12,<3.13\"; [project.scripts] voicectl = \"voice_typing.ctl:main\" AND voice-typing-daemon = \"voice_typing.daemon:main\"; [project.dependencies] = [\"realtimestt\", \"nvidia-cublas-cu12\", \"nvidia-cudnn-cu12==9.*\", \"huggingface_hub>=0.23\"]. Create empty voice_typing/__init__.py. NOTE cuDNN is PINNED to 9.* (faster-whisper requires cuDNN 9; PRD §4.4 left it unpinned — research_faster_whisper_cuda.md §2 confirms the correction). Do NOT add torch here (handled in S2 as best-effort CUDA index).\n4. OUTPUT: pyproject.toml declaring the package + scripts + deps; voice_typing/__init__.py present. Consumed by P1.M1.T1.S2 (resolve) and all later modules (import voice_typing).\n5. DOCS: none — no user-facing/config/API surface change yet (README written in final docs task).",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.0",
+                    "h2.4"
+                  ]
                 },
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Resolve & install dependencies; verify torch CUDA (best-effort)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.1", "h2.4", "h3.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_faster_whisper_cuda.md §3-4. RealtimeSTT pulls torch, faster-whisper, pyaudio, webrtcvad transitively. ctranslate2 CUDA is the MUST-HAVE; torch.cuda is nice-to-have (Silero VAD runs fine on CPU). Current torch PyPI default is cu130; if torch arrives CPU-only, add via the cu126 index (verified valid July 2026). portaudio is already installed (1:19.7.0-4) — do NOT install it.\n2. INPUT: pyproject.toml from P1.M1.T1.S1.\n3. LOGIC: Run `/home/dustin/.local/bin/uv sync`. Then check `.venv/bin/python -c \"import ctranslate2; print(ctranslate2.get_cuda_device_count())\"` — MUST be >=1 (record the number; if 0, see P1.M1.T2.S2 degraded path). Then `.venv/bin/python -c \"import torch; print(torch.cuda.is_available())\"`; if False AND a CUDA torch is desired, run `/home/dustin/.local/bin/uv add torch --index https://download.pytorch.org/whl/cu126` and re-check (best-effort; do NOT block the project on it — VAD works on CPU). Verify uv.lock exists and is committed-quality. RealtimeSTT v1.0.2 is the target (confirmed in research_realtimestt_api.md §6).\n4. OUTPUT: A populated .venv with realtimestt + faster-whisper + ctranslate2 + nvidia-cublas-cu12 + nvidia-cudnn-cu12(9.x) [+ torch]. Consumed by P1.M1.T2.* and P1.M1.T3.S1.\n5. DOCS: none — installation-level, no user-facing doc surface (install.sh prints snippets in P1.M6)."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_faster_whisper_cuda.md §3-4. RealtimeSTT pulls torch, faster-whisper, pyaudio, webrtcvad transitively. ctranslate2 CUDA is the MUST-HAVE; torch.cuda is nice-to-have (Silero VAD runs fine on CPU). Current torch PyPI default is cu130; if torch arrives CPU-only, add via the cu126 index (verified valid July 2026). portaudio is already installed (1:19.7.0-4) — do NOT install it.\n2. INPUT: pyproject.toml from P1.M1.T1.S1.\n3. LOGIC: Run `/home/dustin/.local/bin/uv sync`. Then check `.venv/bin/python -c \"import ctranslate2; print(ctranslate2.get_cuda_device_count())\"` — MUST be >=1 (record the number; if 0, see P1.M1.T2.S2 degraded path). Then `.venv/bin/python -c \"import torch; print(torch.cuda.is_available())\"`; if False AND a CUDA torch is desired, run `/home/dustin/.local/bin/uv add torch --index https://download.pytorch.org/whl/cu126` and re-check (best-effort; do NOT block the project on it — VAD works on CPU). Verify uv.lock exists and is committed-quality. RealtimeSTT v1.0.2 is the target (confirmed in research_realtimestt_api.md §6).\n4. OUTPUT: A populated .venv with realtimestt + faster-whisper + ctranslate2 + nvidia-cublas-cu12 + nvidia-cudnn-cu12(9.x) [+ torch]. Consumed by P1.M1.T2.* and P1.M1.T3.S1.\n5. DOCS: none — installation-level, no user-facing doc surface (install.sh prints snippets in P1.M6).",
+                  "prd_selectors": [
+                    "h2.1",
+                    "h2.4",
+                    "h3.3"
+                  ]
                 }
               ]
             },
@@ -56,9 +66,15 @@
                   "title": "Create launch_daemon.sh (LD_LIBRARY_PATH for cublas+cudnn)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h3.3", "h3.8", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_faster_whisper_cuda.md §2 — faster-whisper/ctranslate2 REQUIRE cuBLAS+cuDNN9 on LD_LIBRARY_PATH, and it is read at process exec (NOT mutable after import). The wrapper pattern is the documented fix (faster-whisper README). systemd ExecStart will point at this wrapper (P1.M6.T1.S2).\n2. INPUT: .venv with nvidia.cublas + nvidia.cudnn wheels installed (from P1.M1.T1.S2).\n3. LOGIC: Create voice_typing/launch_daemon.sh (chmod +x). It MUST compute the lib dirs from the installed wheels dynamically (so it survives uv sync) and exec python with LD_LIBRARY_PATH set BEFORE python starts:\n   VENV_DIR=\"$(dirname \"$0\")/..\"\n   PY=\"$VENV_DIR/.venv/bin/python\"\n   export LD_LIBRARY_PATH=\"$($PY -c 'import os,nvidia.cublas.lib,nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__)+\":\"+os.path.dirname(nvidia.cudnn.lib.__file__))')${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n   exec \"$PY\" -m voice_typing.daemon \"$@\"\n   Guard: if the nvidia import fails, log a clear warning and exec python WITHOUT the override (CPU fallback path). Do NOT use os.execv inside daemon.py — the wrapper is the sanctioned approach.\n4. OUTPUT: executable voice_typing/launch_daemon.sh that the systemd unit calls. Consumed by P1.M4.T3.S1 (daemon entry) and P1.M6.T1.S2 (service ExecStart).\n5. DOCS: [Mode A] Add a one-line comment block at top of launch_daemon.sh explaining the LD_LIBRARY_PATH requirement and how to debug libcudnn_ops errors (links to PRD §8 risk row)."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_faster_whisper_cuda.md §2 — faster-whisper/ctranslate2 REQUIRE cuBLAS+cuDNN9 on LD_LIBRARY_PATH, and it is read at process exec (NOT mutable after import). The wrapper pattern is the documented fix (faster-whisper README). systemd ExecStart will point at this wrapper (P1.M6.T1.S2).\n2. INPUT: .venv with nvidia.cublas + nvidia.cudnn wheels installed (from P1.M1.T1.S2).\n3. LOGIC: Create voice_typing/launch_daemon.sh (chmod +x). It MUST compute the lib dirs from the installed wheels dynamically (so it survives uv sync) and exec python with LD_LIBRARY_PATH set BEFORE python starts:\n   VENV_DIR=\"$(dirname \"$0\")/..\"\n   PY=\"$VENV_DIR/.venv/bin/python\"\n   export LD_LIBRARY_PATH=\"$($PY -c 'import os,nvidia.cublas.lib,nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__)+\":\"+os.path.dirname(nvidia.cudnn.lib.__file__))')${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n   exec \"$PY\" -m voice_typing.daemon \"$@\"\n   Guard: if the nvidia import fails, log a clear warning and exec python WITHOUT the override (CPU fallback path). Do NOT use os.execv inside daemon.py — the wrapper is the sanctioned approach.\n4. OUTPUT: executable voice_typing/launch_daemon.sh that the systemd unit calls. Consumed by P1.M4.T3.S1 (daemon entry) and P1.M6.T1.S2 (service ExecStart).\n5. DOCS: [Mode A] Add a one-line comment block at top of launch_daemon.sh explaining the LD_LIBRARY_PATH requirement and how to debug libcudnn_ops errors (links to PRD §8 risk row).",
+                  "prd_selectors": [
+                    "h3.3",
+                    "h3.8",
+                    "h2.7"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -66,9 +82,15 @@
                   "title": "CUDA smoke verification script + degraded-mode decision",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h2.4", "h3.3", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_faster_whisper_cuda.md §3. Two checks: ctranslate2.get_cuda_device_count() >=1 (MUST) and torch.cuda.is_available() (nice-to-have). PRD §4.4 defines the degraded fallback (device=cpu, compute_type=int8, realtime tiny.en, final small.en) which daemon MUST apply and surface in status.\n2. INPUT: populated .venv from P1.M1.T1.S2; LD_LIBRARY_PATH pattern from P1.M1.T2.S1.\n3. LOGIC: Create voice_typing/cuda_check.py (a small importable + CLI script) that runs under launch_daemon.sh's env (so LD_LIBRARY_PATH is set), prints: ctranslate2 version, cuda device count, torch cuda bool, and a one-line VERDICT (\"cuda-ok\" | \"cpu-fallback-required\"). Expose a function is_cuda_available() -> bool and resolve_device_and_models(defaults) -> dict that returns the chosen {device, compute_type, final_model, realtime_model} applying the PRD §4.4 fallback when ctranslate2 CUDA count == 0. Mock nothing (this is the real smoke check). Run it and record the actual verdict into plan/001_be48c74bc590/architecture/cuda_verdict.md.\n4. OUTPUT: voice_typing/cuda_check.py + a resolve_device_and_models() function consumed by daemon recorder wiring (P1.M4.T1.S1) to pick device/models; cuda_verdict.md records the machine's actual state.\n5. DOCS: [Mode A] Document the degraded-mode knob in a comment in cuda_check.py (the daemon status string and config device=\"cpu\" are user-facing surfaces covered later)."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_faster_whisper_cuda.md §3. Two checks: ctranslate2.get_cuda_device_count() >=1 (MUST) and torch.cuda.is_available() (nice-to-have). PRD §4.4 defines the degraded fallback (device=cpu, compute_type=int8, realtime tiny.en, final small.en) which daemon MUST apply and surface in status.\n2. INPUT: populated .venv from P1.M1.T1.S2; LD_LIBRARY_PATH pattern from P1.M1.T2.S1.\n3. LOGIC: Create voice_typing/cuda_check.py (a small importable + CLI script) that runs under launch_daemon.sh's env (so LD_LIBRARY_PATH is set), prints: ctranslate2 version, cuda device count, torch cuda bool, and a one-line VERDICT (\"cuda-ok\" | \"cpu-fallback-required\"). Expose a function is_cuda_available() -> bool and resolve_device_and_models(defaults) -> dict that returns the chosen {device, compute_type, final_model, realtime_model} applying the PRD §4.4 fallback when ctranslate2 CUDA count == 0. Mock nothing (this is the real smoke check). Run it and record the actual verdict into plan/001_be48c74bc590/architecture/cuda_verdict.md.\n4. OUTPUT: voice_typing/cuda_check.py + a resolve_device_and_models() function consumed by daemon recorder wiring (P1.M4.T1.S1) to pick device/models; cuda_verdict.md records the machine's actual state.\n5. DOCS: [Mode A] Document the degraded-mode knob in a comment in cuda_check.py (the daemon status string and config device=\"cpu\" are user-facing surfaces covered later).",
+                  "prd_selectors": [
+                    "h2.4",
+                    "h3.3",
+                    "h2.7"
+                  ]
                 }
               ]
             },
@@ -85,9 +107,15 @@
                   "title": "Model prefetch script + run download",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h2.2", "h2.4", "h3.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_faster_whisper_cuda.md §1 & §5 — EXACT repo IDs (verified from faster-whisper/utils.py _MODELS): final default = Systran/faster-distil-whisper-large-v3 (short name distil-large-v3); realtime = Systran/faster-whisper-small.en (short name small.en); CPU-fallback models = Systran/faster-whisper-tiny.en + Systran/faster-whisper-small.en; substitute final = mobiuslabsgmbh/faster-whisper-large-v3-turbo (DIFFERENT owner, NOT Systran). Repos are public/ungated (no HF token). Do NOT prefetch distil-whisper/distil-large-v3 (raw PyTorch checkpoint, won't load in CTranslate2).\n2. INPUT: .venv with huggingface_hub from P1.M1.T1.S2.\n3. LOGIC: Create voice_typing/prefetch.py that calls huggingface_hub.snapshot_download(repo_id=...) for the 3 core repos [Systran/faster-distil-whisper-large-v3, Systran/faster-whisper-small.en, Systran/faster-whisper-tiny.en] (and optionally the turbo substitute). Print progress. Run it now via .venv/bin/python so ~/.cache/huggingface is populated. Mock nothing (real download; install.sh will re-invoke this idempotently in P1.M6.T1.S1).\n4. OUTPUT: voice_typing/prefetch.py (reused by install.sh) + cached models under ~/.cache/huggingface so daemon construction is instant. Consumed by P1.M4.T1.S1 (recorder construction).\n5. DOCS: none — internal tooling, no user-facing surface."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_faster_whisper_cuda.md §1 & §5 — EXACT repo IDs (verified from faster-whisper/utils.py _MODELS): final default = Systran/faster-distil-whisper-large-v3 (short name distil-large-v3); realtime = Systran/faster-whisper-small.en (short name small.en); CPU-fallback models = Systran/faster-whisper-tiny.en + Systran/faster-whisper-small.en; substitute final = mobiuslabsgmbh/faster-whisper-large-v3-turbo (DIFFERENT owner, NOT Systran). Repos are public/ungated (no HF token). Do NOT prefetch distil-whisper/distil-large-v3 (raw PyTorch checkpoint, won't load in CTranslate2).\n2. INPUT: .venv with huggingface_hub from P1.M1.T1.S2.\n3. LOGIC: Create voice_typing/prefetch.py that calls huggingface_hub.snapshot_download(repo_id=...) for the 3 core repos [Systran/faster-distil-whisper-large-v3, Systran/faster-whisper-small.en, Systran/faster-whisper-tiny.en] (and optionally the turbo substitute). Print progress. Run it now via .venv/bin/python so ~/.cache/huggingface is populated. Mock nothing (real download; install.sh will re-invoke this idempotently in P1.M6.T1.S1).\n4. OUTPUT: voice_typing/prefetch.py (reused by install.sh) + cached models under ~/.cache/huggingface so daemon construction is instant. Consumed by P1.M4.T1.S1 (recorder construction).\n5. DOCS: none — internal tooling, no user-facing surface.",
+                  "prd_selectors": [
+                    "h2.2",
+                    "h2.4",
+                    "h3.3"
+                  ]
                 }
               ]
             }
@@ -113,9 +141,15 @@
                   "title": "Config dataclasses + tomllib loader + search order + unit tests",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.3", "h3.4", "h3.0"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: system_context.md §4. PRD §4.5 is the authoritative schema. Use stdlib tomllib (Python 3.12). Search order: $XDG_CONFIG_HOME/voice-typing/config.toml (fallback ~/.config/...) → repo ./config.toml → built-in defaults.\n2. INPUT: pyproject.toml/package from P1.M1.T1.S1.\n3. LOGIC: Implement voice_typing/config.py: dataclasses AsrConfig(final_model, realtime_model, language, device, post_speech_silence_duration, realtime_processing_pause), OutputConfig(backend, tmux_target, append_space), FeedbackConfig(state_file, hypr_notify, notify_ms), FilterConfig(min_chars, blocklist:list[str]), and a VoiceTypingConfig aggregating them with a from_toml()/load(path=None) classmethod implementing the search order (empty state_file → $XDG_RUNTIME_DIR/voice-typing/state.json resolved lazily). Defaults must match PRD §4.5 exactly (backend=\"wtype\", final_model=\"distil-large-v3\", realtime_model=\"small.en\", language=\"en\", device=\"cuda\", post_speech_silence_duration=0.6, realtime_processing_pause=0.15, min_chars=2, blocklist=[\"thank you.\",\"thanks for watching.\",\"you\",\"bye.\",\"thank you for watching\"], hypr_notify=true, notify_ms=2500, append_space=true). TDD: write tests/test_config.py first covering defaults, search-order precedence (XDG wins over repo), and missing-file → built-ins.\n4. OUTPUT: voice_typing/config.py exporting VoiceTypingConfig + load(). Consumed by textproc (P1.M2.T2.S1), typing_backends (P1.M3.T1.S1), feedback (P1.M3.T2.S1), and daemon (P1.M4.T1.S1).\n5. DOCS: [Mode A] config.toml (created in S2) IS the user-facing config doc — keep its comments in sync with any default changed here."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: system_context.md §4. PRD §4.5 is the authoritative schema. Use stdlib tomllib (Python 3.12). Search order: $XDG_CONFIG_HOME/voice-typing/config.toml (fallback ~/.config/...) → repo ./config.toml → built-in defaults.\n2. INPUT: pyproject.toml/package from P1.M1.T1.S1.\n3. LOGIC: Implement voice_typing/config.py: dataclasses AsrConfig(final_model, realtime_model, language, device, post_speech_silence_duration, realtime_processing_pause), OutputConfig(backend, tmux_target, append_space), FeedbackConfig(state_file, hypr_notify, notify_ms), FilterConfig(min_chars, blocklist:list[str]), and a VoiceTypingConfig aggregating them with a from_toml()/load(path=None) classmethod implementing the search order (empty state_file → $XDG_RUNTIME_DIR/voice-typing/state.json resolved lazily). Defaults must match PRD §4.5 exactly (backend=\"wtype\", final_model=\"distil-large-v3\", realtime_model=\"small.en\", language=\"en\", device=\"cuda\", post_speech_silence_duration=0.6, realtime_processing_pause=0.15, min_chars=2, blocklist=[\"thank you.\",\"thanks for watching.\",\"you\",\"bye.\",\"thank you for watching\"], hypr_notify=true, notify_ms=2500, append_space=true). TDD: write tests/test_config.py first covering defaults, search-order precedence (XDG wins over repo), and missing-file → built-ins.\n4. OUTPUT: voice_typing/config.py exporting VoiceTypingConfig + load(). Consumed by textproc (P1.M2.T2.S1), typing_backends (P1.M3.T1.S1), feedback (P1.M3.T2.S1), and daemon (P1.M4.T1.S1).\n5. DOCS: [Mode A] config.toml (created in S2) IS the user-facing config doc — keep its comments in sync with any default changed here.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.4",
+                    "h3.0"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -123,9 +157,13 @@
                   "title": "Write self-documenting default config.toml",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h3.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.5 gives the canonical TOML. config.toml is both a runtime default AND the primary user configuration doc (Mode A surface).\n2. INPUT: VoiceTypingConfig defaults from P1.M2.T1.S1.\n3. LOGIC: Create config.toml at repo root with the four [asr]/[output]/[feedback]/[filter] tables EXACTLY matching the dataclass defaults, each line commented to explain its effect and valid values (e.g. device \"cuda\"|\"cpu\", backend \"wtype\"|\"ydotool\"|\"tmux\"). install.sh (P1.M6.T1.S1) will copy this to XDG if absent. Verify load() parses it with no overrides.\n4. OUTPUT: config.toml (repo default). Consumed by P1.M6.T1.S1 (install copies to XDG).\n5. DOCS: [Mode A] This file IS documentation — comments are the user-facing config reference."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.5 gives the canonical TOML. config.toml is both a runtime default AND the primary user configuration doc (Mode A surface).\n2. INPUT: VoiceTypingConfig defaults from P1.M2.T1.S1.\n3. LOGIC: Create config.toml at repo root with the four [asr]/[output]/[feedback]/[filter] tables EXACTLY matching the dataclass defaults, each line commented to explain its effect and valid values (e.g. device \"cuda\"|\"cpu\", backend \"wtype\"|\"ydotool\"|\"tmux\"). install.sh (P1.M6.T1.S1) will copy this to XDG if absent. Verify load() parses it with no overrides.\n4. OUTPUT: config.toml (repo default). Consumed by P1.M6.T1.S1 (install copies to XDG).\n5. DOCS: [Mode A] This file IS documentation — comments are the user-facing config reference.",
+                  "prd_selectors": [
+                    "h3.4"
+                  ]
                 }
               ]
             },
@@ -142,9 +180,14 @@
                   "title": "clean(text) implementation + tests/test_textproc.py (= test T2)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h3.6", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.7 is the exact spec. This is PRD test T2 (§6). Whisper's silence-hallucination (\"thank you.\") is a top-3 project risk (§8); this filter + VAD gating + T4 assert it.\n2. INPUT: FilterConfig (min_chars, blocklist) from P1.M2.T1.S1.\n3. LOGIC: Implement voice_typing/textproc.py: clean(text: str, cfg: FilterConfig) -> str | None. Steps (PRD §4.7): (1) text.strip(); strip trailing newlines; collapse internal whitespace runs to single spaces; (2) return None if len < cfg.min_chars; (3) return None if the lowercase form with trailing punctuation stripped is in {b.lower().rstrip(\".!?,;\") for b in cfg.blocklist} (case-insensitive exact-ish match per PRD); (4) return cleaned text. Caller appends a space when append_space (daemon's job, not here). TDD: write tests/test_textproc.py FIRST (this is PRD test T2) covering: blocklist filtering (\"Thank you.\" → None, case-insensitive), whitespace collapse, min-length rejection, punctuation preserved (\"Hello, world!\" kept).\n4. OUTPUT: voice_typing/textproc.py clean(). Consumed by daemon on_final (P1.M4.T1.S2).\n5. DOCS: none — internal function, no user-facing/config/API surface change."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.7 is the exact spec. This is PRD test T2 (§6). Whisper's silence-hallucination (\"thank you.\") is a top-3 project risk (§8); this filter + VAD gating + T4 assert it.\n2. INPUT: FilterConfig (min_chars, blocklist) from P1.M2.T1.S1.\n3. LOGIC: Implement voice_typing/textproc.py: clean(text: str, cfg: FilterConfig) -> str | None. Steps (PRD §4.7): (1) text.strip(); strip trailing newlines; collapse internal whitespace runs to single spaces; (2) return None if len < cfg.min_chars; (3) return None if the lowercase form with trailing punctuation stripped is in {b.lower().rstrip(\".!?,;\") for b in cfg.blocklist} (case-insensitive exact-ish match per PRD); (4) return cleaned text. Caller appends a space when append_space (daemon's job, not here). TDD: write tests/test_textproc.py FIRST (this is PRD test T2) covering: blocklist filtering (\"Thank you.\" → None, case-insensitive), whitespace collapse, min-length rejection, punctuation preserved (\"Hello, world!\" kept).\n4. OUTPUT: voice_typing/textproc.py clean(). Consumed by daemon on_final (P1.M4.T1.S2).\n5. DOCS: none — internal function, no user-facing/config/API surface change.",
+                  "prd_selectors": [
+                    "h3.6",
+                    "h2.5"
+                  ]
                 }
               ]
             }
@@ -170,9 +213,15 @@
                   "title": "Backend interface + Wtype/Ydotool/Tmux impls + auto-fallback",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h3.2", "h2.3", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md & system_context.md §1. wtype (Wayland virtual-keyboard-v1, full Unicode) is default; ydotool (uinput, XWayland-capable, layout quirks) is fallback; tmux (explicit target) for E2E test/SSH. ydotoold already running as user service; /dev/uinput crw-rw-rw-. ALWAYS call /usr/bin/tmux in subprocess (zsh aliases tmux).\n2. INPUT: OutputConfig(backend, tmux_target, append_space) from P1.M2.T1.S1.\n3. LOGIC: Implement voice_typing/typing_backends.py: abstract TypingBackend.type_text(text:str)->None; WtypeBackend runs subprocess.run([\"wtype\",\"--\",text]); YdotoolBackend runs subprocess.run([\"ydotool\",\"type\",\"--key-delay\",\"2\",\"--\",text]); TmuxBackend runs subprocess.run([\"/usr/bin/tmux\",\"send-keys\",\"-t\",cfg.tmux_target,\"-l\",\"--\",text]). Factory make_backend(cfg)->TypingBackend. CRITICAL: a WtypeBackend wrapper that, on subprocess non-zero exit / FileNotFoundError, logs a warning and retries once via a YdotoolBackend (PRD §4.3 auto-fallback). Never emit Enter/newline (caller strips in textproc; backends must not append newline). type_text must be safe to call from the on_final callback thread.\n4. OUTPUT: voice_typing/typing_backends.py make_backend(). Consumed by daemon on_final (P1.M4.T1.S2) and the E2E test (P1.M7.T3.S1 via backend=\"tmux\").\n5. DOCS: none — backend selection is config.toml surface (documented in S2 P1.M2.T1.S2); final README troubleshooting covers wtype-vs-ydotool."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md & system_context.md §1. wtype (Wayland virtual-keyboard-v1, full Unicode) is default; ydotool (uinput, XWayland-capable, layout quirks) is fallback; tmux (explicit target) for E2E test/SSH. ydotoold already running as user service; /dev/uinput crw-rw-rw-. ALWAYS call /usr/bin/tmux in subprocess (zsh aliases tmux).\n2. INPUT: OutputConfig(backend, tmux_target, append_space) from P1.M2.T1.S1.\n3. LOGIC: Implement voice_typing/typing_backends.py: abstract TypingBackend.type_text(text:str)->None; WtypeBackend runs subprocess.run([\"wtype\",\"--\",text]); YdotoolBackend runs subprocess.run([\"ydotool\",\"type\",\"--key-delay\",\"2\",\"--\",text]); TmuxBackend runs subprocess.run([\"/usr/bin/tmux\",\"send-keys\",\"-t\",cfg.tmux_target,\"-l\",\"--\",text]). Factory make_backend(cfg)->TypingBackend. CRITICAL: a WtypeBackend wrapper that, on subprocess non-zero exit / FileNotFoundError, logs a warning and retries once via a YdotoolBackend (PRD §4.3 auto-fallback). Never emit Enter/newline (caller strips in textproc; backends must not append newline). type_text must be safe to call from the on_final callback thread.\n4. OUTPUT: voice_typing/typing_backends.py make_backend(). Consumed by daemon on_final (P1.M4.T1.S2) and the E2E test (P1.M7.T3.S1 via backend=\"tmux\").\n5. DOCS: none — backend selection is config.toml surface (documented in S2 P1.M2.T1.S2); final README troubleshooting covers wtype-vs-ydotool.",
+                  "prd_selectors": [
+                    "h3.2",
+                    "h2.3",
+                    "h2.7"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -180,9 +229,14 @@
                   "title": "Unit tests for typing backends (subprocess mocked)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M3.T1.S1"],
-                  "prd_selectors": ["h3.2", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Per SOW §3 tests ride with the work; this is the test harness for the typing backends. Mock subprocess so tests run without a display/ydotoold.\n2. INPUT: typing_backends.py from P1.M3.T1.S1.\n3. LOGIC: Write tests/test_typing_backends.py (TDD): assert WtypeBackend calls [\"wtype\",\"--\",text]; TmuxBackend calls /usr/bin/tmux send-keys -t <target> -l -- text; YdotoolBackend uses --key-delay 2; and the auto-fallback wrapper invokes ydotool when wtype raises/subprocess returns nonzero (monkeypatch subprocess.run to simulate failure). No real keystrokes must be sent during tests (mock everything).\n4. OUTPUT: tests/test_typing_backends.py passing. Validates P1.M3.T1.S1 before daemon wiring.\n5. DOCS: none — test-only."
+                  "dependencies": [
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Per SOW §3 tests ride with the work; this is the test harness for the typing backends. Mock subprocess so tests run without a display/ydotoold.\n2. INPUT: typing_backends.py from P1.M3.T1.S1.\n3. LOGIC: Write tests/test_typing_backends.py (TDD): assert WtypeBackend calls [\"wtype\",\"--\",text]; TmuxBackend calls /usr/bin/tmux send-keys -t <target> -l -- text; YdotoolBackend uses --key-delay 2; and the auto-fallback wrapper invokes ydotool when wtype raises/subprocess returns nonzero (monkeypatch subprocess.run to simulate failure). No real keystrokes must be sent during tests (mock everything).\n4. OUTPUT: tests/test_typing_backends.py passing. Validates P1.M3.T1.S1 before daemon wiring.\n5. DOCS: none — test-only.",
+                  "prd_selectors": [
+                    "h3.2",
+                    "h2.7"
+                  ]
                 }
               ]
             },
@@ -199,9 +253,15 @@
                   "title": "State-file writer + hyprctl notify + status.sh helper",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h3.5", "h2.3", "h3.0"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.6 is authoritative. State file JSON shape: {listening, phase, partial, last_final, ts}. Atomic write = tempfile in same dir + os.replace. Throttle partial writes to >=10Hz max. hyprctl notifications are NOT replaceable by ID, so only notify on listening-start (\"● listening\"), each final (\"✔ <text>\"), listening-stop — NEVER per partial (partials go to state.json only, consumed by tmux status). Hyprland's hyprctl notify works (no dunst/mako). status.sh avoids inline-jq quoting pain in tmux.conf.\n2. INPUT: FeedbackConfig(state_file, hypr_notify, notify_ms) from P1.M2.T1.S1.\n3. LOGIC: Implement voice_typing/feedback.py: class Feedback with methods update_partial(text) (throttled write, phase stays), set_phase(phase) (writes + may notify on listening transitions), record_final(text) (sets last_final, writes, notifies \"✔ <text>\" if hypr_notify), set_listening(bool). State written atomically (tempfile+os.replace) to resolved state_file ($XDG_RUNTIME_DIR/voice-typing/state.json; mkdir 0700). hyprctl invocation: subprocess.run([\"hyprctl\",\"notify\",\"-1\",str(notify_ms),\"rgb(88c0d0)\",msg], ...) fire-and-forget swallowing all errors. Also create voice_typing/status.sh: a small shell helper that jq-reads state.json for the tmux status-right snippet (prints \"🎤 \"+partial when listening else empty, truncated to 60 chars). TDD where feasible (state-file round-trip + throttle; mock subprocess for hyprctl).\n4. OUTPUT: voice_typing/feedback.py Feedback + voice_typing/status.sh. Consumed by daemon partial/state callbacks (P1.M4.T1.S1) and on_final (P1.M4.T1.S2). status.sh is referenced by the tmux snippet install.sh prints (P1.M6.T1.S1).\n5. DOCS: [Mode A] Add a header comment to status.sh showing the tmux status-right snippet that uses it (PRD §4.6) — this is the user-facing integration doc for tmux."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.6 is authoritative. State file JSON shape: {listening, phase, partial, last_final, ts}. Atomic write = tempfile in same dir + os.replace. Throttle partial writes to >=10Hz max. hyprctl notifications are NOT replaceable by ID, so only notify on listening-start (\"● listening\"), each final (\"✔ <text>\"), listening-stop — NEVER per partial (partials go to state.json only, consumed by tmux status). Hyprland's hyprctl notify works (no dunst/mako). status.sh avoids inline-jq quoting pain in tmux.conf.\n2. INPUT: FeedbackConfig(state_file, hypr_notify, notify_ms) from P1.M2.T1.S1.\n3. LOGIC: Implement voice_typing/feedback.py: class Feedback with methods update_partial(text) (throttled write, phase stays), set_phase(phase) (writes + may notify on listening transitions), record_final(text) (sets last_final, writes, notifies \"✔ <text>\" if hypr_notify), set_listening(bool). State written atomically (tempfile+os.replace) to resolved state_file ($XDG_RUNTIME_DIR/voice-typing/state.json; mkdir 0700). hyprctl invocation: subprocess.run([\"hyprctl\",\"notify\",\"-1\",str(notify_ms),\"rgb(88c0d0)\",msg], ...) fire-and-forget swallowing all errors. Also create voice_typing/status.sh: a small shell helper that jq-reads state.json for the tmux status-right snippet (prints \"🎤 \"+partial when listening else empty, truncated to 60 chars). TDD where feasible (state-file round-trip + throttle; mock subprocess for hyprctl).\n4. OUTPUT: voice_typing/feedback.py Feedback + voice_typing/status.sh. Consumed by daemon partial/state callbacks (P1.M4.T1.S1) and on_final (P1.M4.T1.S2). status.sh is referenced by the tmux snippet install.sh prints (P1.M6.T1.S1).\n5. DOCS: [Mode A] Add a header comment to status.sh showing the tmux status-right snippet that uses it (PRD §4.6) — this is the user-facing integration doc for tmux.",
+                  "prd_selectors": [
+                    "h3.5",
+                    "h2.3",
+                    "h3.0"
+                  ]
                 }
               ]
             }
@@ -227,9 +287,18 @@
                   "title": "cfg_to_kwargs + recorder construction + partial/state callback wiring + CPU fallback",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T3.S1", "P1.M2.T1.S1", "P1.M3.T2.S1"],
-                  "prd_selectors": ["h3.1", "h3.3", "h2.3", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md §1 & §3 (VERIFIED v1.0.2 constructor kwargs). CONFIRMED kwargs: model, realtime_model_type, language, device(\"cuda\" default), compute_type(\"float16\"), gpu_device_index, enable_realtime_transcription, realtime_processing_pause, use_main_model_for_realtime, post_speech_silence_duration, min_length_of_recording, min_gap_between_recordings, silero_sensitivity, webrtc_sensitivity, spinner, use_microphone, input_device_index, on_realtime_transcription_stabilized(str), on_realtime_transcription_update(str), on_recording_start, on_recording_stop, on_vad_start, on_vad_stop, on_vad_detect_start. CORRECTIONS vs PRD: (a) use silero_backend=\"auto\" (default) — DROP legacy silero_use_onnx=True; (b) set ensure_sentence_starting_uppercase=False and ensure_sentence_ends_with_period=False so textproc owns cleanup; (c) compute_type IS a valid kwarg — pass it directly. Callback phase mapping: on_vad_detect_start→\"listening\", on_vad_start→\"speaking\", on_vad_stop→\"listening\".\n2. INPUT: VoiceTypingConfig from P1.M2.T1.S1; models prefetched (P1.M1.T3.S1); Feedback from P1.M3.T2.S1; resolve_device_and_models() from P1.M1.T2.S2.\n3. LOGIC: Implement voice_typing/daemon.py cfg_to_kwargs(cfg)->dict building the AudioToTextRecorder kwargs (drop any kwarg absent in the installed version defensively per PRD §4.4 note — wrap construction so an unknown kwarg is logged-and-skipped, not a crash). Construct the recorder ONCE (models load here, stay resident). Wire on_realtime_transcription_stabilized→feedback.update_partial (fallback to on_realtime_transcription_update if stabilized proves too laggy), on_vad_detect_start/on_vad_start/on_vad_stop→feedback.set_phase. Apply CPU fallback via resolve_device_and_models() when cuda_check says no CUDA. Provide a build_recorder(cfg, feedback)->AudioToTextRecorder factory. Use if __name__==\"__main__\" guard later (P1.M4.T3.S1).\n4. OUTPUT: a constructible AudioToTextRecorder wired to feedback, exposing a build_recorder() used by the main loop (P1.M4.T1.S2). Mock: in tests, construct with use_microphone=False + feed_audio (P1.M7.T2.S1).\n5. DOCS: none — internal wiring; device=\"cpu\" degraded mode is config surface (documented in config.toml + README final task)."
+                  "dependencies": [
+                    "P1.M1.T3.S1",
+                    "P1.M2.T1.S1",
+                    "P1.M3.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md §1 & §3 (VERIFIED v1.0.2 constructor kwargs). CONFIRMED kwargs: model, realtime_model_type, language, device(\"cuda\" default), compute_type(\"float16\"), gpu_device_index, enable_realtime_transcription, realtime_processing_pause, use_main_model_for_realtime, post_speech_silence_duration, min_length_of_recording, min_gap_between_recordings, silero_sensitivity, webrtc_sensitivity, spinner, use_microphone, input_device_index, on_realtime_transcription_stabilized(str), on_realtime_transcription_update(str), on_recording_start, on_recording_stop, on_vad_start, on_vad_stop, on_vad_detect_start. CORRECTIONS vs PRD: (a) use silero_backend=\"auto\" (default) — DROP legacy silero_use_onnx=True; (b) set ensure_sentence_starting_uppercase=False and ensure_sentence_ends_with_period=False so textproc owns cleanup; (c) compute_type IS a valid kwarg — pass it directly. Callback phase mapping: on_vad_detect_start→\"listening\", on_vad_start→\"speaking\", on_vad_stop→\"listening\".\n2. INPUT: VoiceTypingConfig from P1.M2.T1.S1; models prefetched (P1.M1.T3.S1); Feedback from P1.M3.T2.S1; resolve_device_and_models() from P1.M1.T2.S2.\n3. LOGIC: Implement voice_typing/daemon.py cfg_to_kwargs(cfg)->dict building the AudioToTextRecorder kwargs (drop any kwarg absent in the installed version defensively per PRD §4.4 note — wrap construction so an unknown kwarg is logged-and-skipped, not a crash). Construct the recorder ONCE (models load here, stay resident). Wire on_realtime_transcription_stabilized→feedback.update_partial (fallback to on_realtime_transcription_update if stabilized proves too laggy), on_vad_detect_start/on_vad_start/on_vad_stop→feedback.set_phase. Apply CPU fallback via resolve_device_and_models() when cuda_check says no CUDA. Provide a build_recorder(cfg, feedback)->AudioToTextRecorder factory. Use if __name__==\"__main__\" guard later (P1.M4.T3.S1).\n4. OUTPUT: a constructible AudioToTextRecorder wired to feedback, exposing a build_recorder() used by the main loop (P1.M4.T1.S2). Mock: in tests, construct with use_microphone=False + feed_audio (P1.M7.T2.S1).\n5. DOCS: none — internal wiring; device=\"cpu\" degraded mode is config surface (documented in config.toml + README final task).",
+                  "prd_selectors": [
+                    "h3.1",
+                    "h3.3",
+                    "h2.3",
+                    "h2.7"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -237,9 +306,18 @@
                   "title": "Listen-forever loop + on_final→type + listening gate + toggle (set_microphone+abort)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T1.S1", "P1.M2.T2.S1", "P1.M3.T1.S1"],
-                  "prd_selectors": ["h3.1", "h2.0", "h2.7", "h2.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md §2 & §4 (VERIFIED). Canonical continuous-dictation pattern: `while running: recorder.text(on_final)` — recorder.text(callback) blocks until ONE utterance finalizes (post_speech_silence_duration SEGMENTS only), then fires on_final in a NEW thread and the loop immediately re-listens. THIS IS THE WHISPERX-FLAW FIX (PRD §1 #1): silence never ends the session. Toggle-off (research §4): recorder.set_microphone(False) + recorder.abort() (sets interrupt_stop_event → text() returns \"\") + a gate check INSIDE on_final (one utterance may complete right after stop — PRD §4.2/§8). Models stay resident; instant toggle-on. on_transcription_finished callback receives the final str.\n2. INPUT: build_recorder() from P1.M4.T1.S1; textproc.clean() from P1.M2.T2.S1; make_backend() from P1.M3.T1.S1; Feedback from P1.M3.T2.S1.\n3. LOGIC: Implement the daemon VoiceTypingDaemon class: a threading.Event `listening` (cleared at start → daemon NEVER hot-mics on boot, PRD §4.9); the main thread loop `while not shutdown: if listening.is_set(): recorder.text(on_final) else: sleep(0.05)`. on_final(text): gate — `if not listening.is_set(): return` (race guard); cleaned=textproc.clean(text,cfg.filter); if cleaned: backend.type_text(cleaned + (\" \" if cfg.output.append_space else \"\")); feedback.record_final(cleaned); log timestamps. toggle()/start()/stop(): set/clear listening, and on stop call recorder.set_microphone(False)+recorder.abort() (break any blocked text()); on start call recorder.set_microphone(True). NEVER call recorder.shutdown() on toggle (only on quit, P1.M4.T2.S2). Mock: in offline tests use_microphone=False + feed_audio drives the loop.\n4. OUTPUT: VoiceTypingDaemon with run()/toggle()/start()/stop() consumed by the control socket (P1.M4.T2.S1) and entry point (P1.M4.T3.S1).\n5. DOCS: none — internal; toggle semantics are voicectl/status surface (documented in final README)."
+                  "dependencies": [
+                    "P1.M4.T1.S1",
+                    "P1.M2.T2.S1",
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md §2 & §4 (VERIFIED). Canonical continuous-dictation pattern: `while running: recorder.text(on_final)` — recorder.text(callback) blocks until ONE utterance finalizes (post_speech_silence_duration SEGMENTS only), then fires on_final in a NEW thread and the loop immediately re-listens. THIS IS THE WHISPERX-FLAW FIX (PRD §1 #1): silence never ends the session. Toggle-off (research §4): recorder.set_microphone(False) + recorder.abort() (sets interrupt_stop_event → text() returns \"\") + a gate check INSIDE on_final (one utterance may complete right after stop — PRD §4.2/§8). Models stay resident; instant toggle-on. on_transcription_finished callback receives the final str.\n2. INPUT: build_recorder() from P1.M4.T1.S1; textproc.clean() from P1.M2.T2.S1; make_backend() from P1.M3.T1.S1; Feedback from P1.M3.T2.S1.\n3. LOGIC: Implement the daemon VoiceTypingDaemon class: a threading.Event `listening` (cleared at start → daemon NEVER hot-mics on boot, PRD §4.9); the main thread loop `while not shutdown: if listening.is_set(): recorder.text(on_final) else: sleep(0.05)`. on_final(text): gate — `if not listening.is_set(): return` (race guard); cleaned=textproc.clean(text,cfg.filter); if cleaned: backend.type_text(cleaned + (\" \" if cfg.output.append_space else \"\")); feedback.record_final(cleaned); log timestamps. toggle()/start()/stop(): set/clear listening, and on stop call recorder.set_microphone(False)+recorder.abort() (break any blocked text()); on start call recorder.set_microphone(True). NEVER call recorder.shutdown() on toggle (only on quit, P1.M4.T2.S2). Mock: in offline tests use_microphone=False + feed_audio drives the loop.\n4. OUTPUT: VoiceTypingDaemon with run()/toggle()/start()/stop() consumed by the control socket (P1.M4.T2.S1) and entry point (P1.M4.T3.S1).\n5. DOCS: none — internal; toggle semantics are voicectl/status surface (documented in final README).",
+                  "prd_selectors": [
+                    "h3.1",
+                    "h2.0",
+                    "h2.7",
+                    "h2.3"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -247,9 +325,15 @@
                   "title": "Per-utterance latency logging (timestamps the tests read)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M4.T1.S2"],
-                  "prd_selectors": ["h3.1", "h2.5", "h2.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2 requires logging t_speech_end (VAD closed), t_final_ready, t_typed, and the text — these timestamps are what latency tests T1/T3 (§6) read. Targets: partial cadence <=300ms while speaking; final-typed <=1.5s after end-of-utterance (0.6s is the deliberate segmentation pause). If finals exceed target, ensure both models are on CUDA (log device) then consider large-v3-turbo.\n2. INPUT: VoiceTypingDaemon from P1.M4.T1.S2; on_vad_stop gives t_speech_end.\n3. LOGIC: Add structured INFO logging (stdlib logging to stderr → journald under systemd) per utterance: capture t_speech_end (from on_vad_stop callback), t_final_ready (on_final entry), t_typed (after backend.type_text), plus final text and partial count. Log the resolved device/models at startup (proves CUDA residency). DEBUG level via config. Expose a structured way for tests to parse these (e.g. a recognizable log line prefix, or record into the state file / a small ring buffer queryable by status).\n4. OUTPUT: log lines/state enabling latency assertions in P1.M7.T2.S1 and P1.M7.T4.S1.\n5. DOCS: none — operational logging."
+                  "dependencies": [
+                    "P1.M4.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2 requires logging t_speech_end (VAD closed), t_final_ready, t_typed, and the text — these timestamps are what latency tests T1/T3 (§6) read. Targets: partial cadence <=300ms while speaking; final-typed <=1.5s after end-of-utterance (0.6s is the deliberate segmentation pause). If finals exceed target, ensure both models are on CUDA (log device) then consider large-v3-turbo.\n2. INPUT: VoiceTypingDaemon from P1.M4.T1.S2; on_vad_stop gives t_speech_end.\n3. LOGIC: Add structured INFO logging (stdlib logging to stderr → journald under systemd) per utterance: capture t_speech_end (from on_vad_stop callback), t_final_ready (on_final entry), t_typed (after backend.type_text), plus final text and partial count. Log the resolved device/models at startup (proves CUDA residency). DEBUG level via config. Expose a structured way for tests to parse these (e.g. a recognizable log line prefix, or record into the state file / a small ring buffer queryable by status).\n4. OUTPUT: log lines/state enabling latency assertions in P1.M7.T2.S1 and P1.M7.T4.S1.\n5. DOCS: none — operational logging.",
+                  "prd_selectors": [
+                    "h3.1",
+                    "h2.5",
+                    "h2.3"
+                  ]
                 }
               ]
             },
@@ -266,9 +350,15 @@
                   "title": "Socket server: toggle/start/stop/status/quit JSON protocol",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T1.S2"],
-                  "prd_selectors": ["h3.1", "h3.7", "h2.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2(3) & §4.8. Socket: SOCK_STREAM unix socket at $XDG_RUNTIME_DIR/voice-typing/control.sock; mkdir the dir 0700; remove a stale socket file on startup. Protocol = one JSON object per line in, one per line out. Responses: {\"cmd\":\"toggle\"}->{\"ok\":true,\"listening\":true}; start/stop/status->{\"ok\":true,\"listening\":...,\"partial\":\"...\",\"uptime_s\":...}; unknown->{\"ok\":false,\"error\":\"...\"}.\n2. INPUT: VoiceTypingDaemon toggle/start/stop + a status snapshot (listening, partial, last_final, uptime, device) from P1.M4.T1.S2; Feedback partial from P1.M3.T2.S1.\n3. LOGIC: Implement voice_typing/daemon.py ControlServer: a background threading.Thread accepting connections on the unix socket; per-connection readline loop parsing JSON, dispatching cmd to the daemon, writing one JSON line response. status includes partial, last_final, uptime_s, and the resolved device/models. Make it robust to malformed JSON (reply ok:false). Expose start()/stop(). Handle EADDRINUSE by unlinking the stale socket first.\n4. OUTPUT: ControlServer exposing the documented protocol. Consumed by voicectl (P1.M5.T1.S1) and E2E test (P1.M7.T3.S1).\n5. DOCS: none — protocol is voicectl surface; final README documents voicectl usage."
+                  "dependencies": [
+                    "P1.M4.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2(3) & §4.8. Socket: SOCK_STREAM unix socket at $XDG_RUNTIME_DIR/voice-typing/control.sock; mkdir the dir 0700; remove a stale socket file on startup. Protocol = one JSON object per line in, one per line out. Responses: {\"cmd\":\"toggle\"}->{\"ok\":true,\"listening\":true}; start/stop/status->{\"ok\":true,\"listening\":...,\"partial\":\"...\",\"uptime_s\":...}; unknown->{\"ok\":false,\"error\":\"...\"}.\n2. INPUT: VoiceTypingDaemon toggle/start/stop + a status snapshot (listening, partial, last_final, uptime, device) from P1.M4.T1.S2; Feedback partial from P1.M3.T2.S1.\n3. LOGIC: Implement voice_typing/daemon.py ControlServer: a background threading.Thread accepting connections on the unix socket; per-connection readline loop parsing JSON, dispatching cmd to the daemon, writing one JSON line response. status includes partial, last_final, uptime_s, and the resolved device/models. Make it robust to malformed JSON (reply ok:false). Expose start()/stop(). Handle EADDRINUSE by unlinking the stale socket first.\n4. OUTPUT: ControlServer exposing the documented protocol. Consumed by voicectl (P1.M5.T1.S1) and E2E test (P1.M7.T3.S1).\n5. DOCS: none — protocol is voicectl surface; final README documents voicectl usage.",
+                  "prd_selectors": [
+                    "h3.1",
+                    "h3.7",
+                    "h2.3"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -276,9 +366,15 @@
                   "title": "quit/clean-shutdown wiring (recorder.shutdown + socket close)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M4.T2.S1"],
-                  "prd_selectors": ["h3.1", "h3.7", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2 — {\"cmd\":\"quit\"} triggers clean shutdown. recorder.shutdown() (VERIFIED exists, research §4/§5) is the ONLY sanctioned full teardown — never use it on toggle. The blocked recorder.text() must be interrupted so the main thread can exit.\n2. INPUT: ControlServer + VoiceTypingDaemon from P1.M4.T2.S1.\n3. LOGIG: (LOGIC) On \"quit\": set shutdown flag, recorder.abort() (break blocked text()), recorder.shutdown() (release GPU workers), ControlServer.stop(), unlink socket. Also handle SIGTERM/SIGINT (systemd Restart / journald) → same clean path. Ensure no orphaned model worker processes.\n4. OUTPUT: clean daemon teardown. Consumed by entry point (P1.M4.T3.S1) and systemd Restart=on-failure (P1.M6.T1.S2).\n5. DOCS: none — operational."
+                  "dependencies": [
+                    "P1.M4.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2 — {\"cmd\":\"quit\"} triggers clean shutdown. recorder.shutdown() (VERIFIED exists, research §4/§5) is the ONLY sanctioned full teardown — never use it on toggle. The blocked recorder.text() must be interrupted so the main thread can exit.\n2. INPUT: ControlServer + VoiceTypingDaemon from P1.M4.T2.S1.\n3. LOGIG: (LOGIC) On \"quit\": set shutdown flag, recorder.abort() (break blocked text()), recorder.shutdown() (release GPU workers), ControlServer.stop(), unlink socket. Also handle SIGTERM/SIGINT (systemd Restart / journald) → same clean path. Ensure no orphaned model worker processes.\n4. OUTPUT: clean daemon teardown. Consumed by entry point (P1.M4.T3.S1) and systemd Restart=on-failure (P1.M6.T1.S2).\n5. DOCS: none — operational.",
+                  "prd_selectors": [
+                    "h3.1",
+                    "h3.7",
+                    "h2.7"
+                  ]
                 }
               ]
             },
@@ -295,9 +391,16 @@
                   "title": "main() with __main__ guard, signal handlers, logging setup",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M4.T2.S2", "P1.M1.T2.S1"],
-                  "prd_selectors": ["h3.1", "h3.0", "h3.8"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md §2 & §6 — README mandates `if __name__ == \"__main__\":` because RealtimeSTT uses multiprocessing for model work. systemd ExecStart runs `.venv/bin/python -m voice_typing.daemon` (sets __name__==\"__main__\"). Logging to stderr at INFO (journald captures under systemd); DEBUG via config. NOTE: the LD_LIBRARY_PATH must already be set by launch_daemon.sh (P1.M1.T2.S1) before this process starts — do NOT try to set it in-process.\n2. INPUT: VoiceTypingDaemon + ControlServer from P1.M4.T2.S2; VoiceTypingConfig.load() from P1.M2.T1.S1; cuda_check verdict from P1.M1.T2.S2.\n3. LOGIC: Implement voice_typing/daemon.py main(): configure logging (stderr, INFO/DEBUG from cfg), load config, build daemon + control server, register SIGTERM/SIGINT → clean shutdown (from P1.M4.T2.S2), run the main loop. MUST be guarded by `if __name__ == \"__main__\": main()`. Add the [project.scripts] voice-typing-daemon = \"voice_typing.ctl:main\" entry (already declared in P1.M1.T1.S1 pyproject). Start in NOT-LISTENING state (listening Event cleared) so it never hot-mics on boot (PRD §4.9).\n4. OUTPUT: a runnable `python -m voice_typing.daemon` and the voice-typing-daemon console script. Consumed by install.sh/systemd (P1.M6.T1.S2) and tests (P1.M7.*).\n5. DOCS: none — entry point; first-run usage is documented in final README."
+                  "dependencies": [
+                    "P1.M4.T2.S2",
+                    "P1.M1.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md §2 & §6 — README mandates `if __name__ == \"__main__\":` because RealtimeSTT uses multiprocessing for model work. systemd ExecStart runs `.venv/bin/python -m voice_typing.daemon` (sets __name__==\"__main__\"). Logging to stderr at INFO (journald captures under systemd); DEBUG via config. NOTE: the LD_LIBRARY_PATH must already be set by launch_daemon.sh (P1.M1.T2.S1) before this process starts — do NOT try to set it in-process.\n2. INPUT: VoiceTypingDaemon + ControlServer from P1.M4.T2.S2; VoiceTypingConfig.load() from P1.M2.T1.S1; cuda_check verdict from P1.M1.T2.S2.\n3. LOGIC: Implement voice_typing/daemon.py main(): configure logging (stderr, INFO/DEBUG from cfg), load config, build daemon + control server, register SIGTERM/SIGINT → clean shutdown (from P1.M4.T2.S2), run the main loop. MUST be guarded by `if __name__ == \"__main__\": main()`. Add the [project.scripts] voice-typing-daemon = \"voice_typing.ctl:main\" entry (already declared in P1.M1.T1.S1 pyproject). Start in NOT-LISTENING state (listening Event cleared) so it never hot-mics on boot (PRD §4.9).\n4. OUTPUT: a runnable `python -m voice_typing.daemon` and the voice-typing-daemon console script. Consumed by install.sh/systemd (P1.M6.T1.S2) and tests (P1.M7.*).\n5. DOCS: none — entry point; first-run usage is documented in final README.",
+                  "prd_selectors": [
+                    "h3.1",
+                    "h3.0",
+                    "h3.8"
+                  ]
                 }
               ]
             }
@@ -323,9 +426,15 @@
                   "title": "voicectl client: socket connect, JSON line, human output, exit codes 0/1/2",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T2.S1"],
-                  "prd_selectors": ["h3.7", "h3.1", "h2.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.8. Commands: toggle|start|stop|status|quit. Connects to $XDG_RUNTIME_DIR/voice-typing/control.sock, sends one JSON line, prints human-readable result (\"listening: on\"), exit 0 on success / 1 on logical fail (ok:false) / 2 if daemon not running (socket absent). status pretty-prints listening + partial + models loaded. Console script voicectl already declared in pyproject (P1.M1.T1.S1).\n2. INPUT: Control socket protocol from P1.M4.T2.S1.\n3. LOGIC: Implement voice_typing/ctl.py main(argv): argparse subcommand; open the unix socket (FileNotFoundError/ConnectionRefused → print clear \"daemon not running\" message + exit 2); send {\"cmd\":<cmd>}+newline; read one JSON line; print human-readable; exit 0 if ok else 1. Keep it dependency-light (stdlib only). TDD: unit-test the response-formatting/exit-code logic by feeding canned JSON (mock the socket).\n4. OUTPUT: voice_typing/ctl.py main() + the voicectl console script. Consumed by the E2E test (P1.M7.T3.S1), the Hyprland keybind (P2.M1.T1.S1), and users.\n5. DOCS: [Mode A] Add argparse help strings + a module docstring listing the 5 subcommands (user-facing CLI surface); full usage table is in the final README."
+                  "dependencies": [
+                    "P1.M4.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.8. Commands: toggle|start|stop|status|quit. Connects to $XDG_RUNTIME_DIR/voice-typing/control.sock, sends one JSON line, prints human-readable result (\"listening: on\"), exit 0 on success / 1 on logical fail (ok:false) / 2 if daemon not running (socket absent). status pretty-prints listening + partial + models loaded. Console script voicectl already declared in pyproject (P1.M1.T1.S1).\n2. INPUT: Control socket protocol from P1.M4.T2.S1.\n3. LOGIC: Implement voice_typing/ctl.py main(argv): argparse subcommand; open the unix socket (FileNotFoundError/ConnectionRefused → print clear \"daemon not running\" message + exit 2); send {\"cmd\":<cmd>}+newline; read one JSON line; print human-readable; exit 0 if ok else 1. Keep it dependency-light (stdlib only). TDD: unit-test the response-formatting/exit-code logic by feeding canned JSON (mock the socket).\n4. OUTPUT: voice_typing/ctl.py main() + the voicectl console script. Consumed by the E2E test (P1.M7.T3.S1), the Hyprland keybind (P2.M1.T1.S1), and users.\n5. DOCS: [Mode A] Add argparse help strings + a module docstring listing the 5 subcommands (user-facing CLI surface); full usage table is in the final README.",
+                  "prd_selectors": [
+                    "h3.7",
+                    "h3.1",
+                    "h2.3"
+                  ]
                 }
               ]
             }
@@ -351,9 +460,20 @@
                   "title": "Idempotent install.sh (sync, prefetch, CUDA smoke, service, print snippets)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T3.S1", "P1.M5.T1.S1", "P1.M1.T2.S1", "P1.M1.T3.S1", "P1.M2.T1.S2"],
-                  "prd_selectors": ["h2.4", "h3.8", "h3.5", "h2.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §5 & §4.9. install.sh is idempotent and the single setup entrypoint. ALWAYS use explicit paths in the script: /home/dustin/.local/bin/uv, .venv/bin/python, /usr/bin/tmux (zsh aliases break bare names). It copies config.toml to $XDG_CONFIG_HOME/voice-typing/ if absent. The systemd unit ExecStart points at launch_daemon.sh (so LD_LIBRARY_PATH is set). It prints the tmux status snippet (using status.sh) and the hypr source instruction (P2.M1).\n2. INPUT: daemon entry (P1.M4.T3.S1), voicectl (P1.M5.T1.S1), launch_daemon.sh (P1.M1.T2.S1), prefetch.py (P1.M1.T3.S1), config.toml (P1.M2.T1.S2), status.sh (P1.M3.T2.S1).\n3. LOGIC: Create install.sh: (1) cd to repo; (2) uv sync; (3) run cuda_check.py via launch_daemon.sh env, print verdict; (4) run prefetch.py (idempotent); (5) systemctl --user daemon-reload + install+enable+start the unit (idempotent: skip if already); (6) copy config.toml to XDG if absent; (7) print: usage (voicectl toggle...), the tmux status-right snippet referencing status.sh, and the instruction to source hypr-binds.conf. Use `set -euo pipefail` and bash, not zsh.\n4. OUTPUT: install.sh. Re-runnable; leaves the daemon running un-armed.\n5. DOCS: [Mode A] install.sh's printed output IS the user-facing install/usage quick-start; keep it accurate and copy the same into README in the final docs task."
+                  "dependencies": [
+                    "P1.M4.T3.S1",
+                    "P1.M5.T1.S1",
+                    "P1.M1.T2.S1",
+                    "P1.M1.T3.S1",
+                    "P1.M2.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §5 & §4.9. install.sh is idempotent and the single setup entrypoint. ALWAYS use explicit paths in the script: /home/dustin/.local/bin/uv, .venv/bin/python, /usr/bin/tmux (zsh aliases break bare names). It copies config.toml to $XDG_CONFIG_HOME/voice-typing/ if absent. The systemd unit ExecStart points at launch_daemon.sh (so LD_LIBRARY_PATH is set). It prints the tmux status snippet (using status.sh) and the hypr source instruction (P2.M1).\n2. INPUT: daemon entry (P1.M4.T3.S1), voicectl (P1.M5.T1.S1), launch_daemon.sh (P1.M1.T2.S1), prefetch.py (P1.M1.T3.S1), config.toml (P1.M2.T1.S2), status.sh (P1.M3.T2.S1).\n3. LOGIC: Create install.sh: (1) cd to repo; (2) uv sync; (3) run cuda_check.py via launch_daemon.sh env, print verdict; (4) run prefetch.py (idempotent); (5) systemctl --user daemon-reload + install+enable+start the unit (idempotent: skip if already); (6) copy config.toml to XDG if absent; (7) print: usage (voicectl toggle...), the tmux status-right snippet referencing status.sh, and the instruction to source hypr-binds.conf. Use `set -euo pipefail` and bash, not zsh.\n4. OUTPUT: install.sh. Re-runnable; leaves the daemon running un-armed.\n5. DOCS: [Mode A] install.sh's printed output IS the user-facing install/usage quick-start; keep it accurate and copy the same into README in the final docs task.",
+                  "prd_selectors": [
+                    "h2.4",
+                    "h3.8",
+                    "h3.5",
+                    "h2.3"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -361,9 +481,15 @@
                   "title": "systemd/voice-typing.service unit (ExecStart→wrapper, un-armed, auto-restart)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M6.T1.S1"],
-                  "prd_selectors": ["h3.8", "h2.3", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.9. Unit starts NOT-LISTENING (never hot-mic on boot; voicectl start/toggle arms it). After=pipewire.service ydotool.service. Restart=on-failure RestartSec=2. ExecStart must go through launch_daemon.sh so LD_LIBRARY_PATH (cublas+cudnn) is set before python (research_faster_whisper_cuda.md §2 — cannot be set in-process).\n2. INPUT: launch_daemon.sh from P1.M1.T2.S1; daemon main from P1.M4.T3.S1.\n3. LOGIC: Create systemd/voice-typing.service per PRD §4.9 template: ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh; Restart=on-failure; RestartSec=2; After=pipewire.service ydotool.service; [Install] WantedBy=default.target. Do NOT set Environment=LD_LIBRARY_PATH in the unit (the wrapper handles it dynamically). install.sh (P1.M6.T1.S1) installs it to ~/.config/systemd/user/ and daemon-reload+enable+start.\n4. OUTPUT: systemd/voice-typing.service. Consumed by install.sh and acceptance criterion 6.\n5. DOCS: [Mode A] Add an inline comment in the unit explaining the wrapper + un-armed-start rationale (user-facing operational doc)."
+                  "dependencies": [
+                    "P1.M6.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.9. Unit starts NOT-LISTENING (never hot-mic on boot; voicectl start/toggle arms it). After=pipewire.service ydotool.service. Restart=on-failure RestartSec=2. ExecStart must go through launch_daemon.sh so LD_LIBRARY_PATH (cublas+cudnn) is set before python (research_faster_whisper_cuda.md §2 — cannot be set in-process).\n2. INPUT: launch_daemon.sh from P1.M1.T2.S1; daemon main from P1.M4.T3.S1.\n3. LOGIC: Create systemd/voice-typing.service per PRD §4.9 template: ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh; Restart=on-failure; RestartSec=2; After=pipewire.service ydotool.service; [Install] WantedBy=default.target. Do NOT set Environment=LD_LIBRARY_PATH in the unit (the wrapper handles it dynamically). install.sh (P1.M6.T1.S1) installs it to ~/.config/systemd/user/ and daemon-reload+enable+start.\n4. OUTPUT: systemd/voice-typing.service. Consumed by install.sh and acceptance criterion 6.\n5. DOCS: [Mode A] Add an inline comment in the unit explaining the wrapper + un-armed-start rationale (user-facing operational doc).",
+                  "prd_selectors": [
+                    "h3.8",
+                    "h2.3",
+                    "h2.7"
+                  ]
                 }
               ]
             }
@@ -389,9 +515,15 @@
                   "title": "make_test_audio.sh — espeak→sox/ffmpeg WAVs (simple, pause, multi, punct)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.5", "h2.3", "h3.0"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6. espeak-ng (150 wpm, voice en-us) → sox/ffmpeg resample to 16kHz mono 16-bit PCM (RealtimeSTT SAMPLE_RATE=16000, research §5). utt_pause.wav is THE test proving the WhisperX flaw is fixed: \"...this system\" + 3.0s PURE SILENCE (inside one file) + \"keeps listening after a pause.\" Concatenate silence with sox. espeak is robotic → assertions use fuzzy >=80% token overlap, not exact match.\n2. INPUT: project skeleton P1.M1.T1.S1; espeak-ng/sox/ffmpeg present (PRD §2).\n3. LOGIC: Create tests/make_test_audio.sh generating into tests/out/: utt_simple.wav (\"The quick brown fox jumps over the lazy dog.\"), utt_pause.wav (sentence + 3.0s silence + second sentence, sox-concatenated), utt_multi.wav (3 sentences separated by 1.5s silences), utt_punct.wav (\"Hello, world! Does punctuation, like commas, question marks? It should.\"). All 16kHz mono s16le. Idempotent (skip if present). tests/out/ is gitignored (PRD §4.1 .gitignore).\n4. OUTPUT: tests/out/*.wav consumed by offline (P1.M7.T2.S1) and E2E (P1.M7.T3.S1) tests.\n5. DOCS: none — test fixture generator."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6. espeak-ng (150 wpm, voice en-us) → sox/ffmpeg resample to 16kHz mono 16-bit PCM (RealtimeSTT SAMPLE_RATE=16000, research §5). utt_pause.wav is THE test proving the WhisperX flaw is fixed: \"...this system\" + 3.0s PURE SILENCE (inside one file) + \"keeps listening after a pause.\" Concatenate silence with sox. espeak is robotic → assertions use fuzzy >=80% token overlap, not exact match.\n2. INPUT: project skeleton P1.M1.T1.S1; espeak-ng/sox/ffmpeg present (PRD §2).\n3. LOGIC: Create tests/make_test_audio.sh generating into tests/out/: utt_simple.wav (\"The quick brown fox jumps over the lazy dog.\"), utt_pause.wav (sentence + 3.0s silence + second sentence, sox-concatenated), utt_multi.wav (3 sentences separated by 1.5s silences), utt_punct.wav (\"Hello, world! Does punctuation, like commas, question marks? It should.\"). All 16kHz mono s16le. Idempotent (skip if present). tests/out/ is gitignored (PRD §4.1 .gitignore).\n4. OUTPUT: tests/out/*.wav consumed by offline (P1.M7.T2.S1) and E2E (P1.M7.T3.S1) tests.\n5. DOCS: none — test fixture generator.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.3",
+                    "h3.0"
+                  ]
                 }
               ]
             },
@@ -408,9 +540,17 @@
                   "title": "test_feed_audio.py: feed WAVs, assert partials/pause-fix/multi/fuzzy/latency",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M7.T1.S1", "P1.M4.T1.S2"],
-                  "prd_selectors": ["h2.5", "h3.3", "h2.0", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md §5 — VERIFIED feed_audio(chunk, original_sample_rate=16000) accepts bytes or numpy; use_microphone=False switches to the manual input path. This is PRD test T1 (§6). The pause test (T1b) is the core acceptance of criterion 2 (a >=3s pause loses zero words and does not end the session). Fuzzy match >=80% token overlap (case/punct-insensitive).\n2. INPUT: WAV fixtures from P1.M7.T1.S1; build_recorder/use_microphone wiring from P1.M4.T1.S1; latency logging from P1.M4.T1.S3.\n3. LOGIC: Create tests/test_feed_audio.py: construct recorder with use_microphone=False (patch make_backend to a no-op recorder so nothing is typed), feed WAV chunks via feed_audio at real-time pacing, collect on_realtime_* callback events and on_final texts. Assert (a) partials start <1.5s after speech onset and update at least every 500ms while speaking; (b) utt_pause.wav yields BOTH halves across finalized texts (the post-3s-pause words present — the exact WhisperX failure); (c) utt_multi.wav = 3 non-empty finals; (d) fuzzy accuracy >=80% token overlap per utterance; (e) final callback <=1.5s after last speech sample fed. Mock: typing backend (no keystrokes), no real mic.\n4. OUTPUT: passing test_feed_audio.py validating criteria 2,3 (partials) and partial latency. Blocks E2E (P1.M7.T3.S1).\n5. DOCS: none — test."
+                  "dependencies": [
+                    "P1.M7.T1.S1",
+                    "P1.M4.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: research_realtimestt_api.md §5 — VERIFIED feed_audio(chunk, original_sample_rate=16000) accepts bytes or numpy; use_microphone=False switches to the manual input path. This is PRD test T1 (§6). The pause test (T1b) is the core acceptance of criterion 2 (a >=3s pause loses zero words and does not end the session). Fuzzy match >=80% token overlap (case/punct-insensitive).\n2. INPUT: WAV fixtures from P1.M7.T1.S1; build_recorder/use_microphone wiring from P1.M4.T1.S1; latency logging from P1.M4.T1.S3.\n3. LOGIC: Create tests/test_feed_audio.py: construct recorder with use_microphone=False (patch make_backend to a no-op recorder so nothing is typed), feed WAV chunks via feed_audio at real-time pacing, collect on_realtime_* callback events and on_final texts. Assert (a) partials start <1.5s after speech onset and update at least every 500ms while speaking; (b) utt_pause.wav yields BOTH halves across finalized texts (the post-3s-pause words present — the exact WhisperX failure); (c) utt_multi.wav = 3 non-empty finals; (d) fuzzy accuracy >=80% token overlap per utterance; (e) final callback <=1.5s after last speech sample fed. Mock: typing backend (no keystrokes), no real mic.\n4. OUTPUT: passing test_feed_audio.py validating criteria 2,3 (partials) and partial latency. Blocks E2E (P1.M7.T3.S1).\n5. DOCS: none — test.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h3.3",
+                    "h2.0",
+                    "h2.6"
+                  ]
                 }
               ]
             },
@@ -427,9 +567,17 @@
                   "title": "e2e_virtual_mic.sh: null-sink + pw-cat + daemon(tmux) + voicectl; trap cleanup",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M7.T2.S1", "P1.M5.T1.S1"],
-                  "prd_selectors": ["h2.5", "h3.2", "h2.6", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T3. PipeWire null-sink via pactl load-module module-null-sink; play WAVs with pw-cat --playback --target; point daemon at the monitor (pactl set-default-source vt_test.monitor for the test, recording+restoring the original default after via trap — the test MUST NOT leave the user's default source switched). Tmux backend writes to a pane running `cat > file` for deterministic capture. A helper to list PyAudio devices + grep for vt_test.monitor is required (RealtimeSTT input_device_index). voicectl toggle-off must gate output (criterion 4). ALWAYS use /usr/bin/tmux.\n2. INPUT: offline test validated (P1.M7.T2.S1); voicectl (P1.M5.T1.S1); daemon tmux backend (P1.M3.T1.S1); WAVs (P1.M7.T1.S1).\n3. LOGIC: Create tests/e2e_virtual_mic.sh: (1) record original default source; trap to restore it + unload null-sink + kill tmux session on EXIT; (2) load null-sink vt_test; set-default-source vt_test.monitor; (3) /usr/bin/tmux new-session -d -s voicetest 'cat > /tmp/.../vt_out.txt'; (4) start daemon with backend=tmux, tmux_target=voicetest:0.0; (5) voicectl start; play utt_pause.wav then utt_multi.wav; poll state.json snapshots (prove partials observed); wait; voicectl stop; (6) assert vt_out.txt contains fuzzy-matched text of ALL segments incl. post-pause half; (7) play one more WAV while stopped → assert NOTHING new typed (toggle-off gates). Mock: nothing (real PipeWire + tmux); isolation via the null-sink + trap cleanup.\n4. OUTPUT: passing e2e_virtual_mic.sh validating criteria 2,3,4. Blocks idle/GPU (P1.M7.T4.S1).\n5. DOCS: none — test."
+                  "dependencies": [
+                    "P1.M7.T2.S1",
+                    "P1.M5.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T3. PipeWire null-sink via pactl load-module module-null-sink; play WAVs with pw-cat --playback --target; point daemon at the monitor (pactl set-default-source vt_test.monitor for the test, recording+restoring the original default after via trap — the test MUST NOT leave the user's default source switched). Tmux backend writes to a pane running `cat > file` for deterministic capture. A helper to list PyAudio devices + grep for vt_test.monitor is required (RealtimeSTT input_device_index). voicectl toggle-off must gate output (criterion 4). ALWAYS use /usr/bin/tmux.\n2. INPUT: offline test validated (P1.M7.T2.S1); voicectl (P1.M5.T1.S1); daemon tmux backend (P1.M3.T1.S1); WAVs (P1.M7.T1.S1).\n3. LOGIC: Create tests/e2e_virtual_mic.sh: (1) record original default source; trap to restore it + unload null-sink + kill tmux session on EXIT; (2) load null-sink vt_test; set-default-source vt_test.monitor; (3) /usr/bin/tmux new-session -d -s voicetest 'cat > /tmp/.../vt_out.txt'; (4) start daemon with backend=tmux, tmux_target=voicetest:0.0; (5) voicectl start; play utt_pause.wav then utt_multi.wav; poll state.json snapshots (prove partials observed); wait; voicectl stop; (6) assert vt_out.txt contains fuzzy-matched text of ALL segments incl. post-pause half; (7) play one more WAV while stopped → assert NOTHING new typed (toggle-off gates). Mock: nothing (real PipeWire + tmux); isolation via the null-sink + trap cleanup.\n4. OUTPUT: passing e2e_virtual_mic.sh validating criteria 2,3,4. Blocks idle/GPU (P1.M7.T4.S1).\n5. DOCS: none — test.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h3.2",
+                    "h2.6",
+                    "h2.7"
+                  ]
                 }
               ]
             },
@@ -446,9 +594,15 @@
                   "title": "Idle-120s hallucination/CPU test + nvidia-smi VRAM residency + acceptance checklist",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M7.T3.S1"],
-                  "prd_selectors": ["h2.5", "h2.6", "h3.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T4/T6 & §7. T4 catches Whisper silence-hallucination (the blocklist filter from P1.M2.T2.S1 + VAD gating must suppress it). T6 proves models are GPU-resident (~1-5GB VRAM, criterion for the resident-daemon design). Acceptance §7 has 8 criteria to verify with real command output.\n2. INPUT: running daemon (P1.M7.T3.S1 path); textproc blocklist (P1.M2.T2.S1); latency logging (P1.M4.T1.S3).\n3. LOGIC: Create tests/test_idle_and_gpu.sh (or extend the harness): start daemon listening, 120s silence (no playback) → assert no finals typed (grep state.json last_final unchanged / no typed output), no crash, daemon CPU <25% of one core (/proc or pidstat sampling). Then nvidia-smi --query-compute-apps=pid,used_memory --format=csv shows the daemon PID with used_memory between ~1 and ~5GB. Finally walk PRD §7 acceptance criteria 1-8 with actual command output recorded (write a short tests/ACCEPTANCE.md noting evidence). Mock: nothing (real daemon + GPU); the real-hardware smoke T5 is left for the user (documented in README).\n4. OUTPUT: passing idle+GPU tests + tests/ACCEPTANCE.md evidence. Satisfies criteria 5,6(crit),8(crit no-network — models cached by install).\n5. DOCS: [Mode A] tests/ACCEPTANCE.md documents the verified acceptance evidence (referenced by final README)."
+                  "dependencies": [
+                    "P1.M7.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T4/T6 & §7. T4 catches Whisper silence-hallucination (the blocklist filter from P1.M2.T2.S1 + VAD gating must suppress it). T6 proves models are GPU-resident (~1-5GB VRAM, criterion for the resident-daemon design). Acceptance §7 has 8 criteria to verify with real command output.\n2. INPUT: running daemon (P1.M7.T3.S1 path); textproc blocklist (P1.M2.T2.S1); latency logging (P1.M4.T1.S3).\n3. LOGIC: Create tests/test_idle_and_gpu.sh (or extend the harness): start daemon listening, 120s silence (no playback) → assert no finals typed (grep state.json last_final unchanged / no typed output), no crash, daemon CPU <25% of one core (/proc or pidstat sampling). Then nvidia-smi --query-compute-apps=pid,used_memory --format=csv shows the daemon PID with used_memory between ~1 and ~5GB. Finally walk PRD §7 acceptance criteria 1-8 with actual command output recorded (write a short tests/ACCEPTANCE.md noting evidence). Mock: nothing (real daemon + GPU); the real-hardware smoke T5 is left for the user (documented in README).\n4. OUTPUT: passing idle+GPU tests + tests/ACCEPTANCE.md evidence. Satisfies criteria 5,6(crit),8(crit no-network — models cached by install).\n5. DOCS: [Mode A] tests/ACCEPTANCE.md documents the verified acceptance evidence (referenced by final README).",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.6",
+                    "h3.3"
+                  ]
                 }
               ]
             }
@@ -483,9 +637,15 @@
                   "title": "hypr-binds.conf (SUPER+ALT+D toggle) + source instruction",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M5.T1.S1"],
-                  "prd_selectors": ["h3.9", "h2.6", "h2.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.10. Create hypr-binds.conf in the repo containing `bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle`. Print an instruction to `source` it from ~/.config/hypr/hyprland.conf. Do NOT auto-edit the user's Hyprland config. Richer overlay UI is out of scope (state file + tmux status is the UI).\n2. INPUT: voicectl console script from P1.M5.T1.S1.\n3. LOGIC: Create hypr-binds.conf with the single bind line (full path to voicectl). Add a comment with the exact `source = ...` line the user adds to hyprland.conf. install.sh (already built in P1.M6.T1.S1) prints this instruction; ensure the snippet printed by install.sh matches this file.\n4. OUTPUT: hypr-binds.conf. Cross-referenced by README (P2.M1.T2.S1).\n5. DOCS: [Mode A] The file itself + its comment IS the user-facing hotkey doc."
+                  "dependencies": [
+                    "P1.M5.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.10. Create hypr-binds.conf in the repo containing `bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle`. Print an instruction to `source` it from ~/.config/hypr/hyprland.conf. Do NOT auto-edit the user's Hyprland config. Richer overlay UI is out of scope (state file + tmux status is the UI).\n2. INPUT: voicectl console script from P1.M5.T1.S1.\n3. LOGIC: Create hypr-binds.conf with the single bind line (full path to voicectl). Add a comment with the exact `source = ...` line the user adds to hyprland.conf. install.sh (already built in P1.M6.T1.S1) prints this instruction; ensure the snippet printed by install.sh matches this file.\n4. OUTPUT: hypr-binds.conf. Cross-referenced by README (P2.M1.T2.S1).\n5. DOCS: [Mode A] The file itself + its comment IS the user-facing hotkey doc.",
+                  "prd_selectors": [
+                    "h3.9",
+                    "h2.6",
+                    "h2.3"
+                  ]
                 }
               ]
             },
@@ -502,9 +662,40 @@
                   "title": "Write README.md: install, hotkey, tmux status, config tuning, troubleshooting, CPU mode, first-run",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T1.S2", "P1.M1.T2.S1", "P1.M1.T2.S2", "P1.M1.T3.S1", "P1.M2.T1.S1", "P1.M2.T1.S2", "P1.M2.T2.S1", "P1.M3.T1.S1", "P1.M3.T2.S1", "P1.M4.T1.S1", "P1.M4.T1.S2", "P1.M4.T1.S3", "P1.M4.T2.S1", "P1.M4.T2.S2", "P1.M4.T3.S1", "P1.M5.T1.S1", "P1.M6.T1.S1", "P1.M6.T1.S2", "P1.M7.T4.S1", "P2.M1.T1.S1"],
-                  "prd_selectors": ["h2.6", "h3.0", "h3.5", "h3.8", "h3.9", "h3.4", "h2.4", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: SOW §5 Mode B — this is the FINAL task; it depends on every implementing subtask and sweeps whole-feature/overview docs. PRD §7 criterion 7 enumerates exactly what README must contain. Keep README short and credible (no marketing tone).\n2. INPUT: ALL implementing subtasks (listed in dependencies): install.sh output (P1.M6.T1.S1), config.toml (P1.M2.T1.S2), status.sh snippet (P1.M3.T2.S1), hypr-binds.conf (P2.M1.T1.S1), troubleshooting facts from research (cuDNN LD_LIBRARY_PATH from research_faster_whisper_cuda.md, PyAudio device, wtype-vs-ydotool, CPU-only mode), acceptance evidence (P1.M7.T4.S1).\n3. LOGIC: Write README.md covering (PRD §7.7): install (./install.sh), the hotkey snippet (source hypr-binds.conf), the tmux status snippet (status.sh), a config tuning table (the two tunables that matter: post_speech_silence_duration, silero_sensitivity — plus realtime_model/final_model/device), troubleshooting (cuDNN libcudnn_ops → launcher wrapper; PyAudio device selection; wtype vs ydotool auto-fallback), how to switch to CPU-only mode (device=\"cpu\"), and a 'First run' section with the exact real-hardware smoke steps (PRD §6 T5: systemctl --user start voice-typing; voicectl toggle; speak; watch tmux status; voicectl toggle) and expected behavior. Verify against acceptance criteria 1-8.\n4. OUTPUT: README.md — the user-facing entry doc. This task completes the changeset.\n5. DOCS: [Mode B] This IS the changeset-level documentation sync (README + overview). No separate docs subtask elsewhere."
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M1.T1.S2",
+                    "P1.M1.T2.S1",
+                    "P1.M1.T2.S2",
+                    "P1.M1.T3.S1",
+                    "P1.M2.T1.S1",
+                    "P1.M2.T1.S2",
+                    "P1.M2.T2.S1",
+                    "P1.M3.T1.S1",
+                    "P1.M3.T2.S1",
+                    "P1.M4.T1.S1",
+                    "P1.M4.T1.S2",
+                    "P1.M4.T1.S3",
+                    "P1.M4.T2.S1",
+                    "P1.M4.T2.S2",
+                    "P1.M4.T3.S1",
+                    "P1.M5.T1.S1",
+                    "P1.M6.T1.S1",
+                    "P1.M6.T1.S2",
+                    "P1.M7.T4.S1",
+                    "P2.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: SOW §5 Mode B — this is the FINAL task; it depends on every implementing subtask and sweeps whole-feature/overview docs. PRD §7 criterion 7 enumerates exactly what README must contain. Keep README short and credible (no marketing tone).\n2. INPUT: ALL implementing subtasks (listed in dependencies): install.sh output (P1.M6.T1.S1), config.toml (P1.M2.T1.S2), status.sh snippet (P1.M3.T2.S1), hypr-binds.conf (P2.M1.T1.S1), troubleshooting facts from research (cuDNN LD_LIBRARY_PATH from research_faster_whisper_cuda.md, PyAudio device, wtype-vs-ydotool, CPU-only mode), acceptance evidence (P1.M7.T4.S1).\n3. LOGIC: Write README.md covering (PRD §7.7): install (./install.sh), the hotkey snippet (source hypr-binds.conf), the tmux status snippet (status.sh), a config tuning table (the two tunables that matter: post_speech_silence_duration, silero_sensitivity — plus realtime_model/final_model/device), troubleshooting (cuDNN libcudnn_ops → launcher wrapper; PyAudio device selection; wtype vs ydotool auto-fallback), how to switch to CPU-only mode (device=\"cpu\"), and a 'First run' section with the exact real-hardware smoke steps (PRD §6 T5: systemctl --user start voice-typing; voicectl toggle; speak; watch tmux status; voicectl toggle) and expected behavior. Verify against acceptance criteria 1-8.\n4. OUTPUT: README.md — the user-facing entry doc. This task completes the changeset.\n5. DOCS: [Mode B] This IS the changeset-level documentation sync (README + overview). No separate docs subtask elsewhere.",
+                  "prd_selectors": [
+                    "h2.6",
+                    "h3.0",
+                    "h3.5",
+                    "h3.8",
+                    "h3.9",
+                    "h3.4",
+                    "h2.4",
+                    "h2.5"
+                  ]
                 }
               ]
             }
