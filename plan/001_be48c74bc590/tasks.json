@@ -57,14 +57,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "CUDA bootstrap: LD_LIBRARY_PATH launcher wrapper + CUDA smoke verification",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Create the launcher wrapper that sets LD_LIBRARY_PATH (cublas+cudnn) BEFORE python starts, and a verification script proving ctranslate2 CUDA is usable (with a documented CPU degraded-mode fallback).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Create launch_daemon.sh (LD_LIBRARY_PATH for cublas+cudnn)",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -80,7 +80,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "CUDA smoke verification script + degraded-mode decision",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
