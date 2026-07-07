@@ -531,14 +531,14 @@
               "type": "Task",
               "id": "P1.M7.T2",
               "title": "Offline pipeline test (test_feed_audio.py = PRD T1)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "No-mic, no-typing test that constructs the recorder with use_microphone=False, feeds WAVs via feed_audio in real-time pacing, and asserts partials + post-pause words + multi-segment finals + fuzzy accuracy + latency.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T2.S1",
                   "title": "test_feed_audio.py: feed WAVs, assert partials/pause-fix/multi/fuzzy/latency",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M7.T1.S1",
