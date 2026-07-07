@@ -271,7 +271,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Daemon Core — recorder, listen-forever loop, toggle, control socket",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Wire RealtimeSTT (construct once, models resident on GPU), implement the listen-forever loop that segments but never auto-stops (the WhisperX-flaw fix), the toggle gate, the JSON-lines control socket, latency logging, and the multiprocessing-safe entry point.",
           "tasks": [
             {
@@ -341,7 +341,7 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Control socket server (JSON-lines over unix socket)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Background-thread unix socket server implementing the toggle/start/stop/status/quit protocol, with stale-socket cleanup and clean shutdown.",
               "subtasks": [
                 {
@@ -364,7 +364,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T2.S2",
                   "title": "quit/clean-shutdown wiring (recorder.shutdown + socket close)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T2.S1"
@@ -382,14 +382,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "Daemon entry point (multiprocessing-safe main + logging)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "The main() that loads config, configures logging, builds the daemon + control server, and runs — wrapped in the mandatory __main__ guard for RealtimeSTT multiprocessing.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "main() with __main__ guard, signal handlers, logging setup",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T2.S2",

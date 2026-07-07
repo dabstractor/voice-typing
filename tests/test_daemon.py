@@ -801,3 +801,123 @@ def test_resolved_device_failure_degrades_to_unknown(tmp_path, monkeypatch):
     )
     s = d.status_snapshot()
     assert s["device"] == "unknown"             # never raises; degrades gracefully
+
+
+# ===========================================================================
+# P1.M4.T2.S2 — clean-shutdown wiring: VoiceTypingDaemon.shutdown() + SIGTERM/SIGINT handlers
+# (ADDITIVE — everything above is S1/S2/S3/(S1-of-T2); do not change it.)
+# ===========================================================================
+# Reuses _make_daemon() / _StubRecorder / _wait_for from earlier in this file.
+# `daemon` and `logging` are already imported at module top.
+import signal as _signal
+
+
+# --- Layer A: VoiceTypingDaemon.shutdown() ------------------------------------------------
+
+
+def test_shutdown_calls_recorder_shutdown_once():
+    d, fb, rec, be = _make_daemon()
+    assert rec.shutdowns == 0
+    d.shutdown()
+    assert rec.shutdowns == 1
+
+
+def test_shutdown_is_idempotent():
+    d, fb, rec, be = _make_daemon()
+    d.shutdown()
+    d.shutdown()
+    d.shutdown()
+    # our _shutdown_done flag (RealtimeSTT's own guard is also idempotent) -> exactly one call
+    assert rec.shutdowns == 1
+
+
+class _RaisingRecorder(_StubRecorder):
+    """shutdown() always raises — proves daemon.shutdown() is defensive (best-effort)."""
+
+    def shutdown(self):
+        self.shutdowns += 1
+        raise RuntimeError("boom (test)")
+
+
+def test_shutdown_swallows_recorder_failure(caplog):
+    d, fb, rec, be = _make_daemon(recorder=_RaisingRecorder())
+    with caplog.at_level(logging.ERROR, logger="voice_typing.daemon"):
+        d.shutdown()  # must NOT raise
+    assert rec.shutdowns == 1  # it was called once
+    assert any("recorder.shutdown() failed" in r.getMessage() for r in caplog.records)
+
+
+def test_stop_and_request_shutdown_still_never_shutdown():
+    # Regression proof: shutdown() is a NEW path; stop/toggle/request_shutdown keep NOT tearing down.
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d.stop()
+    d.toggle()
+    d.request_shutdown()
+    assert rec.shutdowns == 0
+
+
+# --- Layer B: install_shutdown_signal_handlers() -------------------------------------------
+
+
+def test_install_registers_handler_for_sigterm_and_sigint():
+    d, _, _, _ = _make_daemon()
+    prev_term = _signal.getsignal(_signal.SIGTERM)
+    prev_int = _signal.getsignal(_signal.SIGINT)
+    try:
+        restore = daemon.install_shutdown_signal_handlers(d)
+        assert _signal.getsignal(_signal.SIGTERM) is not _signal.SIG_DFL
+        assert _signal.getsignal(_signal.SIGINT) is not _signal.SIG_DFL
+        restore()
+        assert _signal.getsignal(_signal.SIGTERM) is prev_term
+        assert _signal.getsignal(_signal.SIGINT) is prev_int
+    finally:
+        _signal.signal(_signal.SIGTERM, prev_term)
+        _signal.signal(_signal.SIGINT, prev_int)
+
+
+def test_handler_invocation_requests_shutdown_via_spawned_thread():
+    d, _, rec, _ = _make_daemon()
+    prev = _signal.getsignal(_signal.SIGUSR1)
+    try:
+        daemon.install_shutdown_signal_handlers(d, signals=(_signal.SIGUSR1,))
+        handler = _signal.getsignal(_signal.SIGUSR1)
+        handler(_signal.SIGUSR1, None)  # invoke directly (no real signal) — spawns a thread
+        assert _wait_for(
+            lambda: d._shutdown.is_set() and rec.aborts >= 1, timeout=2.0
+        ), (d._shutdown.is_set(), rec.aborts)
+    finally:
+        _signal.signal(_signal.SIGUSR1, prev)
+
+
+def test_handler_is_idempotent_vs_reentry():
+    d, _, rec, _ = _make_daemon()
+    prev = _signal.getsignal(_signal.SIGUSR1)
+    try:
+        daemon.install_shutdown_signal_handlers(d, signals=(_signal.SIGUSR1,))
+        handler = _signal.getsignal(_signal.SIGUSR1)
+        handler(_signal.SIGUSR1, None)
+        assert _wait_for(lambda: d._shutdown.is_set(), timeout=2.0)
+        aborts_after_first = rec.aborts
+        handler(_signal.SIGUSR1, None)  # _shutdown already set -> no new thread
+        handler(_signal.SIGUSR1, None)
+        _time.sleep(0.1)
+        assert rec.aborts == aborts_after_first  # no further abort spawned
+    finally:
+        _signal.signal(_signal.SIGUSR1, prev)
+
+
+def test_install_custom_signals_set_honored():
+    d, _, _, _ = _make_daemon()
+    prev_usr2 = _signal.getsignal(_signal.SIGUSR2)
+    prev_term = _signal.getsignal(_signal.SIGTERM)
+    try:
+        restore = daemon.install_shutdown_signal_handlers(d, signals=(_signal.SIGUSR2,))
+        assert _signal.getsignal(_signal.SIGUSR2) is not _signal.SIG_DFL
+        # SIGTERM NOT touched (custom set honored)
+        assert _signal.getsignal(_signal.SIGTERM) is prev_term
+        restore()
+        assert _signal.getsignal(_signal.SIGUSR2) is prev_usr2
+    finally:
+        _signal.signal(_signal.SIGUSR2, prev_usr2)
+        _signal.signal(_signal.SIGTERM, prev_term)

@@ -69,6 +69,7 @@ import json
 import logging
 import os
 import select
+import signal
 import socket
 import threading
 import time
@@ -579,6 +580,33 @@ class VoiceTypingDaemon:
             self._resolved_device_cache = resolved
         return resolved
 
+    def shutdown(self) -> None:
+        """Full recorder teardown (PRD §4.2; P1.M4.T2.S2). Idempotent + defensive.
+
+        Calls self._recorder.shutdown(), which terminates the spawn-started transcript_process +
+        reader_process (releases GPU VRAM + the mic device — the "no orphaned model worker
+        processes" guarantee). IDEMPOTENT: a getattr-guarded flag (no __init__ edit) plus
+        RealtimeSTT's own is_shut_down guard make a double call (quit on_quit + main() finally) a
+        no-op the second time. DEFENSIVE: a recorder.shutdown() failure is logged, NOT re-raised —
+        the daemon is exiting and teardown is best-effort (a broken teardown must not mask the
+        original shutdown reason).
+
+        NEVER call this on toggle/stop (models must stay resident — those use set_microphone+
+        abort). The sanctioned callers are the quit on_quit hook (after request_shutdown() broke
+        text()) and main()'s finally block (after run() returns; covers the signal path). Must NOT
+        run while the main thread is inside recorder.text() — request_shutdown()/abort() guarantees
+        it has exited text() before this is reached.
+        """
+        with self._lock:
+            if getattr(self, "_shutdown_done", False):
+                return
+            self._shutdown_done = True
+        try:
+            self._recorder.shutdown()
+            logger.info("recorder shutdown complete (GPU workers released)")
+        except Exception:
+            logger.exception("recorder.shutdown() failed during teardown (best-effort; ignored)")
+
 
 # --- ControlServer (P1.M4.T2.S1; PRD §4.2(3), §4.8) -----------------------------------------
 # The voicectl<->daemon wire surface: an AF_UNIX SOCK_STREAM socket speaking one-JSON-object-
@@ -772,3 +800,49 @@ class ControlServer:
                     logger.exception("on_quit callback failed")
             return {"ok": True, "shutting_down": True}
         return {"ok": False, "error": f"unknown command: {cmd!r}"}
+
+
+def install_shutdown_signal_handlers(
+    daemon: "VoiceTypingDaemon",
+    *,
+    signals: "tuple[int, ...] | None" = None,
+) -> "Callable[[], None]":
+    """Install SIGTERM/SIGINT handlers that request clean daemon shutdown (PRD §4.2/§4.9; P1.M4.T2.S2).
+
+    systemd stop/restart sends SIGTERM (Python's default = immediate process death, NO Python
+    cleanup -> the spawn-started model workers orphan + VRAM leaks). Ctrl-C sends SIGINT. Both
+    route to the SAME clean path. The handler runs in the MAIN thread (CPython signal semantics)
+    and therefore MUST NOT call recorder.abort() or recorder.shutdown() directly: abort() blocks
+    on was_interrupted.wait(), set only by text() in the main thread -> deadlock (CPython #121649);
+    shutdown() joins the very worker threads the main thread is still inside. Instead the handler
+    spawns a daemon THREAD that calls daemon.request_shutdown() (abort OFF the main thread = safe);
+    the handler returns at once. The spawned thread breaks text(); run() exits; main()'s finally
+    calls daemon.shutdown() + ControlServer.stop() (T3.S1 wires; T2.S2 provides this fn).
+
+    Must be called from the MAIN thread (signal.signal() requires it; raises ValueError otherwise).
+    Returns a restore() callable that reinstalls the previous handlers (tests + clean uninstall).
+    Idempotent-vs-reentry: a signal received while _shutdown is already set is ignored (no thread
+    spam).
+    """
+    sigs = signals if signals is not None else (signal.SIGTERM, signal.SIGINT)
+    previous: dict[int, Any] = {}
+
+    def _handler(signum: int, frame: Any) -> None:
+        # Runs in the MAIN thread. Do NOT call abort()/shutdown() here (deadlock, research §3).
+        if daemon._shutdown.is_set():
+            return  # already tearing down — ignore further signals
+        logger.info("received signal %s; requesting clean shutdown", signum)
+        threading.Thread(
+            target=daemon.request_shutdown,
+            name="voice-typing-signal-shutdown",
+            daemon=True,
+        ).start()
+
+    for s in sigs:
+        previous[s] = signal.signal(s, _handler)
+
+    def restore() -> None:
+        for s, prev in previous.items():
+            signal.signal(s, prev)
+
+    return restore
