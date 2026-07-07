@@ -506,14 +506,14 @@
               "type": "Task",
               "id": "P1.M7.T1",
               "title": "Test audio assets (tests/make_test_audio.sh)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Generate the synthetic espeak-ng WAV fixtures at 16kHz mono 16-bit, including the pause-laden clip that proves the no-auto-stop fix.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T1.S1",
                   "title": "make_test_audio.sh — espeak→sox/ffmpeg WAVs (simple, pause, multi, punct)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -531,14 +531,14 @@
               "type": "Task",
               "id": "P1.M7.T2",
               "title": "Offline pipeline test (test_feed_audio.py = PRD T1)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "No-mic, no-typing test that constructs the recorder with use_microphone=False, feeds WAVs via feed_audio in real-time pacing, and asserts partials + post-pause words + multi-segment finals + fuzzy accuracy + latency.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T2.S1",
                   "title": "test_feed_audio.py: feed WAVs, assert partials/pause-fix/multi/fuzzy/latency",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M7.T1.S1",
