@@ -312,3 +312,240 @@ def test_build_recorder_is_callable_and_documented():
     # and that is P1.M7.T2.S1's job via feed_audio). We only assert the contract surface exists.
     assert callable(daemon.build_recorder)
     assert daemon.build_recorder.__doc__, "build_recorder must have a docstring"
+
+
+# ===========================================================================
+# P1.M4.T1.S2 — VoiceTypingDaemon: listen-forever loop + on_final + gate + toggle
+# (ADDITIVE — everything above is S1; do not change it.)
+# ===========================================================================
+import threading
+import time as _time
+
+
+class _DaemonFakeFeedback(_FakeFeedback):
+    """Extends S1's _FakeFeedback with record_final + set_listening (S2's contract)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.finals: list[str] = []
+        self.listening_states: list[bool] = []
+
+    def record_final(self, text: str) -> None:
+        self.finals.append(text)
+
+    def set_listening(self, listening: bool) -> None:
+        self.listening_states.append(listening)
+
+
+class _StubRecorder:
+    """Runtime stand-in for AudioToTextRecorder (held by VoiceTypingDaemon as an INSTANCE).
+    Distinct from S1's _FakeRecorder (which captures **kwargs for construction). text() returns
+    immediately so the loop spins fast when listening (loop-test friendliness — research §5)."""
+
+    def __init__(self) -> None:
+        self.text_calls = 0
+        self.last_callback = None
+        self.mic: list[bool] = []
+        self.aborts = 0
+        self.shutdowns = 0
+
+    def text(self, on_transcription_finished=None):
+        self.text_calls += 1
+        self.last_callback = on_transcription_finished
+        return ""   # mimic RealtimeSTT: returns "" when interrupted/idle; loop re-enters
+
+    def set_microphone(self, microphone_on=True):
+        self.mic.append(microphone_on)
+
+    def abort(self):
+        self.aborts += 1
+
+    def shutdown(self):
+        self.shutdowns += 1
+
+
+class _FakeBackend:
+    """Records type_text calls; optionally raises to test on_final error handling."""
+
+    def __init__(self, *, raise_on: str | None = None) -> None:
+        self.typed: list[str] = []
+        self._raise_on = raise_on
+
+    def type_text(self, text: str) -> None:
+        if self._raise_on is not None and text == self._raise_on:
+            raise RuntimeError("boom (test)")
+        self.typed.append(text)
+
+
+def _wait_for(predicate, timeout=2.0, interval=0.01):
+    """Poll until predicate() is truthy or timeout (s). Returns True if predicate became truthy."""
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if predicate():
+            return True
+        _time.sleep(interval)
+    return predicate()
+
+
+def _make_daemon(*, recorder=None, backend=None, cfg=None):
+    cfg = cfg or VoiceTypingConfig()
+    fb = _DaemonFakeFeedback()
+    rec = recorder if recorder is not None else _StubRecorder()
+    be = backend if backend is not None else _FakeBackend()
+    d = daemon.VoiceTypingDaemon(cfg, fb, recorder=rec, backend=be)
+    return d, fb, rec, be
+
+
+# --- boot: no hot-mic (PRD §4.9) ---
+
+
+def test_fresh_daemon_not_listening():
+    d, _, _, _ = _make_daemon()
+    assert d.is_listening() is False
+
+
+# --- on_final: gate / happy / append_space / reject / typing-error ---
+
+
+def test_on_final_gate_when_not_listening():
+    d, fb, rec, be = _make_daemon()
+    # listening is False at boot → on_final drops everything
+    d.on_final("hello world")
+    assert be.typed == []
+    assert fb.finals == []
+
+
+def test_on_final_happy_path_appends_space():
+    d, fb, rec, be = _make_daemon()
+    d.start()   # arm
+    d.on_final("hello world")
+    assert be.typed == ["hello world "]   # append_space default True
+    assert fb.finals == ["hello world"]   # recorded WITHOUT the trailing space
+
+
+def test_on_final_append_space_false():
+    cfg = VoiceTypingConfig()
+    cfg.output.append_space = False
+    d, fb, rec, be = _make_daemon(cfg=cfg)
+    d.start()
+    d.on_final("hello world")
+    assert be.typed == ["hello world"]
+    assert fb.finals == ["hello world"]
+
+
+def test_on_final_rejects_hallucination():
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d.on_final("thank you.")   # blocklist entry → textproc.clean returns None
+    assert be.typed == []
+    assert fb.finals == []
+
+
+def test_on_final_typing_raises_is_caught_and_record_still_happens():
+    d, fb, rec, be = _make_daemon(backend=_FakeBackend(raise_on="boom "))
+    d.start()
+    d.on_final("boom")   # payload "boom " matches raise_on → type_text raises
+    assert be.typed == []          # nothing typed (it raised)
+    assert fb.finals == ["boom"]   # record_final STILL called (recognition is final regardless)
+
+
+# --- start / stop / toggle ---
+
+
+def test_start_arms():
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    assert d.is_listening() is True
+    assert rec.mic == [True]
+    assert fb.listening_states == [True]
+
+
+def test_stop_disarms_and_aborts():
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d.stop()
+    assert d.is_listening() is False
+    assert rec.mic == [True, False]
+    assert rec.aborts >= 1
+    assert fb.listening_states == [True, False]
+
+
+def test_toggle_off_to_on_arms():
+    d, fb, rec, be = _make_daemon()
+    assert d.is_listening() is False
+    d.toggle()
+    assert d.is_listening() is True
+    assert rec.mic == [True]
+
+
+def test_toggle_on_to_off_disarms():
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d.toggle()
+    assert d.is_listening() is False
+    assert rec.mic == [True, False]
+    assert rec.aborts >= 1
+
+
+def test_toggle_is_an_invololution():
+    d, _, _, _ = _make_daemon()
+    before = d.is_listening()
+    d.toggle(); d.toggle()
+    assert d.is_listening() is before
+
+
+def test_stop_never_calls_recorder_shutdown():
+    d, fb, rec, be = _make_daemon()
+    d.start(); d.stop()
+    assert rec.shutdowns == 0   # Critical #3: shutdown() is ONLY for quit (P1.M4.T2.S2)
+
+
+# --- request_shutdown ---
+
+
+def test_request_shutdown_sets_event_and_aborts_not_shutdown():
+    d, fb, rec, be = _make_daemon()
+    d.request_shutdown()
+    assert rec.aborts >= 1
+    assert rec.shutdowns == 0   # NO full teardown here (P1.M4.T2.S2 owns it)
+
+
+# --- run() loop ---
+
+
+def test_run_loop_not_listening_does_not_call_text():
+    d, fb, rec, be = _make_daemon()
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: True, timeout=0.2)   # let it sleep-loop a moment
+        assert rec.text_calls == 0             # not listening → never calls text()
+    finally:
+        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)
+    assert not t.is_alive()
+
+
+def test_run_loop_calls_text_when_listening_then_exits_on_shutdown():
+    d, fb, rec, be = _make_daemon()
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        d.start()
+        assert _wait_for(lambda: rec.text_calls >= 2, timeout=2.0), rec.text_calls
+    finally:
+        d.request_shutdown()
+    assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
+    t.join(timeout=2.0)
+    assert not t.is_alive()
+
+
+def test_run_sets_uptime_after_start():
+    d, fb, rec, be = _make_daemon()
+    assert d.uptime_s == 0.0   # not started yet
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: d.uptime_s >= 0.0 and d._start_monotonic is not None, timeout=1.0)
+        assert d.uptime_s >= 0.0
+    finally:
+        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)

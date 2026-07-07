@@ -1,14 +1,20 @@
-"""voice_typing.daemon — recorder construction + callback wiring (PRD §4.2, §4.4).
+"""voice_typing.daemon — recorder construction + callback wiring + listen-forever daemon
+(PRD §4.2, §4.4).
 
-SCOPE (P1.M4.T1.S1): cfg_to_kwargs() + build_recorder() factory + RealtimeSTT→Feedback
-callback wiring + cuda_check-gated CPU fallback. The listen-forever loop, on_final→typing,
-the listening gate (set_microphone/abort), the control socket, and the main()/__main__ entry
-point ALL land in later subtasks (P1.M4.T1.S2 / P1.M4.T2.S1 / P1.M4.T3.S1). This module
-currently exposes ONLY the recorder-construction surface the main loop will call.
+SCOPE (P1.M4.T1.S1 + P1.M4.T1.S2):
+  - S1: cfg_to_kwargs() + build_recorder() factory + RealtimeSTT→Feedback callback wiring +
+    cuda_check-gated CPU fallback. The recorder is constructed ONCE so models stay resident.
+  - S2: VoiceTypingDaemon — the listen-forever run() loop (the WhisperX-flaw fix: recorder.text()
+    returning is normal SEGMENTATION, never session end), on_final→gate→clean→type→record, the
+    listening gate (threading.Event cleared at boot → no hot-mic, PRD §4.9), and start/stop/toggle
+    that arm/disarm the mic via set_microphone+abort (models stay resident → instant toggle-on).
+  - LATER: control socket (P1.M4.T2.S1), full clean shutdown (P1.M4.T2.S2 — recorder.shutdown()),
+    precise per-utterance latency timestamps (P1.M4.T1.S3), and the main()/__main__ entry point +
+    signal handlers (P1.M4.T3.S1). These are NOT in this module yet.
 
 CONSTRUCT ONCE (PRD §4.2 "construct once"): AudioToTextRecorder.__init__ loads BOTH whisper
 models (final + realtime) into resident memory (GPU VRAM on cuda, RAM on cpu) — seconds of
-work. build_recorder() constructs exactly ONE recorder; the main loop (S2) reuses it for the
+work. build_recorder() constructs exactly ONE recorder; VoiceTypingDaemon reuses it for the
 daemon's lifetime so a later voicectl toggle arms the mic instantly and VRAM stays resident.
 
 CPU FALLBACK (PRD §4.4): cfg_to_kwargs() resolves device/compute_type/models via
@@ -35,30 +41,45 @@ plan/.../P1M4T1S1/research/daemon_recorder_wiring_verification.md §1):
       textproc (P1.M2.T2.S1) owns cleanup (avoid double capitalization/period processing).
 
 CONSUMES:
-  - voice_typing.config.VoiceTypingConfig (P1.M2.T1.S1): cfg.asr.* (READ ONLY — never mutated).
+  - voice_typing.config.VoiceTypingConfig (P1.M2.T1.S1): cfg.asr.* / cfg.output.append_space /
+    cfg.filter (READ ONLY — never mutated).
   - voice_typing.cuda_check (P1.M1.T2.S2): resolve_device_and_models(), CUDA_DEFAULTS, CPU_FALLBACK.
-  - voice_typing.feedback.Feedback (P1.M3.T2.S1): update_partial(text), set_phase(phase)
-    (duck-typed; only these two methods are touched in S1).
+  - voice_typing.feedback.Feedback (P1.M3.T2.S1): update_partial(text), set_phase(phase) (wired by
+    S1's _build_callbacks) + record_final(text), set_listening(bool) (driven by S2's daemon).
+  - voice_typing.textproc (P1.M2.T2.S1): clean(text, cfg.filter) — the gate inside on_final.
+  - voice_typing.typing_backends (P1.M3.T1.S1): make_backend(cfg.output).type_text(text).
 CONSUMED BY:
-  - the daemon main loop (P1.M4.T1.S2): build_recorder(cfg, feedback) once at startup.
+  - the daemon main loop (P1.M4.T1.S2): build_recorder(cfg, feedback) once in VoiceTypingDaemon.__init__.
+  - the control socket (P1.M4.T2.S1): VoiceTypingDaemon.toggle/start/stop/is_listening/
+    uptime_s/request_shutdown.
+  - the daemon entry point (P1.M4.T3.S1): VoiceTypingDaemon.run() under `if __name__ == "__main__":`.
   - install.sh CUDA smoke (P1.M6.T1.S1): may import cfg_to_kwargs.
-PURE IMPORTS at module top (inspect, logging, typing, voice_typing.config, voice_typing.cuda_check).
-RealtimeSTT is imported LAZILY inside build_recorder so `import voice_typing.daemon` stays cheap and
-unit tests never touch torch/ctranslate2. Feedback is imported only under TYPE_CHECKING.
+PURE IMPORTS at module top (inspect, logging, threading, time, typing, voice_typing.config,
+voice_typing.cuda_check, voice_typing.textproc, voice_typing.typing_backends — all cheap stdlib +
+already-landed pure-stdlib modules). RealtimeSTT is imported LAZILY inside build_recorder so
+`import voice_typing.daemon` stays cheap and unit tests never touch torch/ctranslate2. Feedback is
+imported only under TYPE_CHECKING. The daemon class holds self._recorder as a REFERENCE, never
+importing AudioToTextRecorder (so import purity holds).
 """
 from __future__ import annotations
 
 import inspect
 import logging
+import threading
+import time
 from typing import TYPE_CHECKING, Any, Callable
 
+import voice_typing.textproc as textproc
+import voice_typing.typing_backends as typing_backends
 from voice_typing import cuda_check
 from voice_typing.config import VoiceTypingConfig
 
 if TYPE_CHECKING:
     # Type hint only — never executed at runtime, so importing daemon.py is safe even while
-    # feedback.py (P1.M3.T2.S1) is still absent. S1 wires only update_partial + set_phase.
+    # feedback.py (P1.M3.T2.S1) is still absent. S1 wires only update_partial + set_phase;
+    # S2's VoiceTypingDaemon also calls record_final + set_listening.
     from voice_typing.feedback import Feedback
+    from voice_typing.typing_backends import TypingBackend
 
 logger = logging.getLogger(__name__)
 
@@ -208,3 +229,110 @@ def build_recorder(cfg: VoiceTypingConfig, feedback: "Feedback") -> Any:
     from RealtimeSTT import AudioToTextRecorder  # lazy: keeps `import voice_typing.daemon` cheap
 
     return _construct(cfg, feedback, AudioToTextRecorder)
+
+
+class VoiceTypingDaemon:
+    """The listen-forever daemon core: recorder loop + on_final→type + listening gate + toggle.
+
+    PRD §4.2 items 1+2. run() is the main-thread loop that fixes the WhisperX flaw: recorder.text()
+    returning is normal SEGMENTATION, never session end (PRD §1 #1). on_final gates→cleans→types→records.
+    start/stop/toggle arm/disarm the mic via set_microphone+abort (models stay resident → instant
+    toggle-on). NEVER recorder.shutdown() on toggle/stop — only on quit (P1.M4.T2.S2).
+    """
+
+    def __init__(
+        self,
+        cfg: VoiceTypingConfig,
+        feedback: "Feedback",
+        *,
+        recorder: Any = None,
+        backend: "TypingBackend | None" = None,
+    ) -> None:
+        self._cfg = cfg
+        self._feedback = feedback
+        self._lock = threading.Lock()
+        self._listening = threading.Event()   # cleared → NOT listening at boot (PRD §4.9)
+        self._shutdown = threading.Event()    # cleared → keep looping
+        self._start_monotonic: float | None = None
+        # construct-once (PRD §4.2): build recorder ONCE so models stay resident + toggle/start/stop
+        # can arm the mic immediately. Injectable for unit tests (fakes → cheap, no RealtimeSTT).
+        self._recorder = recorder if recorder is not None else build_recorder(cfg, feedback)
+        self._backend = (
+            backend if backend is not None else typing_backends.make_backend(cfg.output)
+        )
+
+    def run(self) -> None:
+        """The listen-forever loop (main thread, BLOCKS until shutdown)."""
+        self._start_monotonic = time.monotonic()
+        self._feedback.set_listening(False)   # PRD §4.9: starts NOT listening (no hot-mic on boot)
+        logger.info("voice-typing daemon ready (not listening); recorder resident")
+        while not self._shutdown.is_set():
+            if self._listening.is_set():
+                # blocks until ONE utterance finalizes → on_final in a NEW thread → returns → re-listen.
+                # Returning is NORMAL SEGMENTATION, never session end (the WhisperX-flaw fix, PRD §1 #1).
+                self._recorder.text(self.on_final)
+            else:
+                time.sleep(0.05)
+        logger.info("shutdown requested; run() loop exiting")
+
+    def on_final(self, text: str) -> None:
+        """Gate → clean → type → record. Fired by RealtimeSTT in a NEW thread (never raise)."""
+        if not self._listening.is_set():       # GATE: race guard (PRD §4.2/§8 — utterance may
+            return                             #   complete right after stop)
+        cleaned = textproc.clean(text, self._cfg.filter)
+        if not cleaned:                        # rejected: blocklist hallucination / below min_chars
+            return
+        payload = cleaned + (" " if self._cfg.output.append_space else "")
+        try:
+            self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
+        except Exception:
+            logger.exception("typing backend failed for final %r", cleaned)
+        self._feedback.record_final(cleaned)   # recognition is final regardless of typing success
+        logger.info("final typed: %r", cleaned)
+        # NOTE: precise latency timestamps (t_speech_end/t_final_ready/t_typed) land in P1.M4.T1.S3.
+
+    def _arm(self) -> None:
+        """Private: arm mic + set listening + notify. Called under the lock by start/toggle."""
+        self._listening.set()
+        self._recorder.set_microphone(True)
+        self._feedback.set_listening(True)
+
+    def _disarm(self) -> None:
+        """Private: disarm mic + abort blocked text() + clear listening + notify. Called under lock."""
+        self._listening.clear()
+        self._recorder.set_microphone(False)
+        self._recorder.abort()      # breaks any blocked text() so the loop re-checks the cleared gate
+        self._feedback.set_listening(False)
+
+    def start(self) -> None:
+        with self._lock:
+            self._arm()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._disarm()
+
+    def toggle(self) -> None:
+        with self._lock:
+            if self._listening.is_set():
+                self._disarm()
+            else:
+                self._arm()
+
+    def request_shutdown(self) -> None:
+        """Signal run() to exit. Sets the event + aborts (breaks a blocked text()). NO shutdown()."""
+        self._shutdown.set()
+        with self._lock:
+            self._recorder.abort()    # break any blocked text() so run() can return
+        # recorder.shutdown() (full teardown) is wired by the quit handler in P1.M4.T2.S2, NOT here.
+
+    def is_listening(self) -> bool:
+        return self._listening.is_set()
+
+    @property
+    def uptime_s(self) -> float:
+        return (
+            time.monotonic() - self._start_monotonic
+            if self._start_monotonic is not None
+            else 0.0
+        )
