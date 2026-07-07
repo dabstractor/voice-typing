@@ -1,0 +1,30 @@
+[Unit]
+Description=Local voice typing daemon (RealtimeSTT)
+After=pipewire.service ydotool.service
+
+[Service]
+# ExecStart points at the LD_LIBRARY_PATH wrapper (voice_typing/launch_daemon.sh), NOT python
+# directly. faster-whisper / ctranslate2 load cuBLAS + cuDNN 9 shared objects from the nvidia-*-cu12
+# wheels; cuDNN 9's split sub-libs (libcudnn_ops.so.9, libcudnn_cnn.so.9, ...) are resolved by the
+# dynamic linker and the wheels ship no $ORIGIN RUNPATH for them, so they MUST be on LD_LIBRARY_PATH
+# or the daemon dies at startup with "cannot load libcudnn_ops.so.9" (PRD §8 risk row #1).
+#
+# LD_LIBRARY_PATH is read by ld.so ONLY at process exec (execve) — mutating os.environ inside the
+# already-running python has NO effect. The wrapper therefore exports it BEFORE exec'ing python.
+#
+# DO NOT add `Environment=LD_LIBRARY_PATH=...` here. The wrapper recomputes the lib dirs from the
+# LIVE installed nvidia wheels on every launch, so this unit survives `uv sync` reinstalls and
+# version bumps without edits. A baked value would go stale and break the service on the next sync.
+# Debugging a cuDNN load failure: see the header comment in voice_typing/launch_daemon.sh
+# (journalctl --user -u voice-typing -e; systemctl --user show voice-typing -p Environment;
+#  LD_DEBUG=libs voice_typing/launch_daemon.sh 2>&1 | grep -i cudnn).
+#
+# The daemon boots NOT-LISTENING — it never hot-mics on boot / restart. `voicectl start` or
+# `voicectl toggle` arms the mic over the control socket ($XDG_RUNTIME_DIR/voice-typing/control.sock).
+# (PRD §4.9.) Verify with: voicectl status   ->   listening: off
+ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
