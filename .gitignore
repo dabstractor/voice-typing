@@ -4,6 +4,7 @@ build/
 *.pyc
 __pycache__/
 .pytest_cache/
+.ruff_cache/
 
 # Dependency directories
 node_modules/
