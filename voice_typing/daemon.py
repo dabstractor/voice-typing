@@ -65,7 +65,11 @@ from __future__ import annotations
 
 import collections
 import inspect
+import json
 import logging
+import os
+import select
+import socket
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable
@@ -251,6 +255,32 @@ def build_recorder(
     from RealtimeSTT import AudioToTextRecorder  # lazy: keeps `import voice_typing.daemon` cheap
 
     return _construct(cfg, feedback, AudioToTextRecorder, latency)
+
+
+# --- Control socket path resolution (P1.M4.T2.S1; PRD §4.2(3)) -------------------------------
+# The voicectl<->daemon control socket lives at $XDG_RUNTIME_DIR/voice-typing/control.sock
+# (AF_UNIX SOCK_STREAM; owner-only — dir 0700 + socket file 0600 enforced by ControlServer).
+# Mirrors FeedbackConfig.resolved_state_file(): raise if XDG_RUNTIME_DIR is unset (no safe
+# default — fail clearly rather than bind a socket to a wrong path). Tests pass socket_path=.
+_CONTROL_SOCKET_SUBPATH = ("voice-typing", "control.sock")  # under $XDG_RUNTIME_DIR
+
+
+def _default_control_socket_path() -> str:
+    """Resolve $XDG_RUNTIME_DIR/voice-typing/control.sock (PRD §4.2(3)).
+
+    Mirrors FeedbackConfig.resolved_state_file(): raises RuntimeError if XDG_RUNTIME_DIR is
+    unset/empty (no safe default — fail clearly rather than bind a socket to a wrong path).
+    Production runs under a systemd user session (XDG_RUNTIME_DIR=/run/user/$UID, 0700). Tests
+    pass an explicit socket_path so they never hit this.
+    """
+    xdg = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if not xdg:
+        raise RuntimeError(
+            "XDG_RUNTIME_DIR is not set; cannot resolve the control socket path. "
+            "Pass socket_path= explicitly, or run under a session that exports "
+            "XDG_RUNTIME_DIR (systemd user sessions set it)."
+        )
+    return os.path.join(xdg, *_CONTROL_SOCKET_SUBPATH)
 
 
 # --- Per-utterance latency logging (P1.M4.T1.S3; PRD §4.2 logging, §6 latency targets) ---------
@@ -500,3 +530,245 @@ class VoiceTypingDaemon:
             if self._start_monotonic is not None
             else 0.0
         )
+
+    # --- control-socket status surface (P1.M4.T2.S1; additive — no existing-method edit) ---
+
+    def status_snapshot(self) -> dict:
+        """The status payload for the control socket `status`/`toggle`/`start`/`stop` cmds.
+
+        Returns {listening, partial, last_final, uptime_s, device, compute_type, final_model,
+        realtime_model}. partial/last_final come from the LIVE in-memory Feedback state (NOT the
+        throttled state.json, which lags >=10 Hz); device/models come from _resolve_device_config
+        (the SAME resolution build_recorder used -> status matches the actually-loaded models),
+        cached on first call. Safe to call from the socket thread; never raises (device probe
+        failures degrade to 'unknown').
+        """
+        snap = self._feedback.snapshot()
+        dev = self._resolved_device()
+        return {
+            "listening": self.is_listening(),
+            "partial": snap.get("partial", ""),
+            "last_final": snap.get("last_final", ""),
+            "uptime_s": round(self.uptime_s, 3),
+            "device": dev.get("device", "unknown"),
+            "compute_type": dev.get("compute_type", "unknown"),
+            "final_model": dev.get("final_model", "unknown"),
+            "realtime_model": dev.get("realtime_model", "unknown"),
+        }
+
+    def _resolved_device(self) -> dict[str, str]:
+        """Resolved {device,compute_type,final_model,realtime_model}, cached on first call.
+
+        Lazily cached via getattr (no __init__ edit) so S1/S3's __init__ is untouched. The
+        cuda_check probe (inside _resolve_device_config) imports ctranslate2 + calls
+        get_cuda_device_count() — run AT MOST ONCE. Any failure degrades to 'unknown' (a status
+        call must never crash the daemon). In tests, monkeypatch daemon._resolve_device_config.
+        """
+        resolved = getattr(self, "_resolved_device_cache", None)
+        if resolved is None:
+            try:
+                resolved = _resolve_device_config(self._cfg)
+            except Exception as exc:
+                logger.warning("status: device resolution failed (%s); reporting 'unknown'", exc)
+                resolved = {
+                    "device": "unknown",
+                    "compute_type": "unknown",
+                    "final_model": "unknown",
+                    "realtime_model": "unknown",
+                }
+            self._resolved_device_cache = resolved
+        return resolved
+
+
+# --- ControlServer (P1.M4.T2.S1; PRD §4.2(3), §4.8) -----------------------------------------
+# The voicectl<->daemon wire surface: an AF_UNIX SOCK_STREAM socket speaking one-JSON-object-
+# per-line, dispatched to the running VoiceTypingDaemon. Constructed + started by main()
+# (P1.M4.T3.S1) AFTER the daemon is built; stop()'d after run() returns. Pure stdlib (json/os/
+# select/socket/threading) — keeps import purity. The accept loop uses select() polling + a stop
+# Event (NOT close-to-unblock — unreliable on Linux, close(7) NOTES — and NOT settimeout, which
+# breaks makefile()). See plan/.../P1M4T2S1/research/control_socket_design.md §3/§6 for the
+# empirical proof.
+
+
+class ControlServer:
+    """AF_UNIX SOCK_STREAM control socket speaking one-JSON-object-per-line (PRD §4.2(3), §4.8).
+
+    A background daemon thread accepts connections (one daemon worker per connection); each worker
+    reads newline-delimited JSON requests, dispatches cmd to the daemon, and writes one JSON line
+    per request. Robust to malformed JSON, stale socket files, and clean shutdown.
+
+    Lifecycle: construct with the daemon (and optional socket_path + on_quit hook); start() binds
+    + listens + launches the accept thread; stop() sets a stop Event (the accept loop uses
+    select() polling, NOT close-to-unblock, which is unreliable on Linux) and joins the thread.
+    The daemon does NOT own a ControlServer — the entry point (P1.M4.T3.S1 main()) constructs +
+    starts one and calls stop() after run() returns.
+
+    Protocol (PRD §4.2(3); research §2 — uniform status payload):
+      {"cmd":"toggle"|"start"|"stop"|"status"} -> {"ok":true, **daemon.status_snapshot()}
+      {"cmd":"quit"}                           -> {"ok":true,"shutting_down":true}  (+ request_shutdown)
+      malformed JSON                           -> {"ok":false,"error":"malformed JSON: ..."}
+      non-dict JSON                            -> {"ok":false,"error":"request must be a JSON object"}
+      unknown/missing cmd                      -> {"ok":false,"error":"unknown command: ..."}
+    """
+
+    def __init__(
+        self,
+        daemon: "VoiceTypingDaemon",
+        *,
+        socket_path: str | None = None,
+        on_quit: "Callable[[], None] | None" = None,
+        accept_timeout: float = 0.3,
+    ) -> None:
+        self._daemon = daemon
+        self._socket_path = (
+            socket_path if socket_path is not None else _default_control_socket_path()
+        )
+        self._on_quit = on_quit
+        self._accept_timeout = accept_timeout
+        self._sock: Any = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        """Bind + listen + launch the accept thread. Idempotent (no-op if already running).
+
+        Creates the parent dir 0700; unlinks a stale .sock (EADDRINUSE prevention, PRD §4.2(3));
+        binds; chmod 0600; listen(8). Raises RuntimeError if bind still fails (a live daemon
+        holds the path — a real misconfiguration the operator must see).
+        """
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return  # already running
+            directory = os.path.dirname(self._socket_path) or "."
+            os.makedirs(directory, exist_ok=True, mode=0o700)
+            # stale socket: unlink before bind (SO_REUSEADDR is meaningless for AF_UNIX path sockets)
+            try:
+                os.unlink(self._socket_path)
+            except FileNotFoundError:
+                pass
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.bind(self._socket_path)
+            except OSError as exc:
+                sock.close()
+                raise RuntimeError(
+                    f"cannot bind control socket {self._socket_path!r}: {exc}"
+                ) from exc
+            os.chmod(self._socket_path, 0o600)   # owner-only (belt-and-suspenders on the 0700 dir)
+            sock.listen(8)
+            self._sock = sock
+            self._stop = threading.Event()
+            self._thread = threading.Thread(
+                target=self._accept_loop,
+                name="voice-typing-control",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the accept loop to exit + close the listening socket + join the thread.
+
+        Uses the stop Event (the accept loop polls via select(), so it notices within
+        accept_timeout) and ALSO closes the socket (belt-and-suspenders: any blocked select/
+        accept raises immediately). Joins up to 2 s. Unlinks the socket file (next start() also
+        unlinks, but a clean quit leaves no stale .sock).
+        """
+        with self._lock:
+            self._stop.set()
+            sock = self._sock
+            self._sock = None
+            thread = self._thread
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if thread is not None:
+            thread.join(timeout=2.0)
+        try:
+            os.unlink(self._socket_path)
+        except (FileNotFoundError, OSError):
+            pass
+
+    def _accept_loop(self) -> None:
+        """Accept connections until stop(). Uses select() polling (NOT close-to-unblock)."""
+        sock = self._sock
+        if sock is None:
+            return
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([sock], [], [], self._accept_timeout)
+            except (OSError, ValueError):
+                break  # listening socket closed (stop()) -> select raises
+            if not ready:
+                continue  # poll timeout -> re-check the stop Event
+            try:
+                conn, _addr = sock.accept()
+            except OSError:
+                break  # socket closed between select and accept
+            # one daemon worker per connection (voicectl is one-shot; a persistent client also works)
+            threading.Thread(
+                target=self._handle, args=(conn,), daemon=True
+            ).start()
+
+    def _handle(self, conn: Any) -> None:
+        """Per-connection readline loop: parse JSON, dispatch, write one JSON line per request."""
+        rfile = wfile = None
+        try:
+            rfile = conn.makefile("r", encoding="utf-8", newline="\n")
+            wfile = conn.makefile("w", encoding="utf-8", newline="\n")
+            try:
+                for line in rfile:                 # one JSON object per line (PRD §4.2(3))
+                    line = line.strip()
+                    if not line:
+                        continue                   # empty line -> skip (no response)
+                    response = self._dispatch(line)
+                    wfile.write(json.dumps(response) + "\n")
+                    wfile.flush()                  # CRITICAL: makefile("w") buffers; flush every reply
+                    if response.get("shutting_down"):
+                        break                      # quit -> reply sent, then close this connection
+            finally:
+                for f in (rfile, wfile):
+                    if f is not None:
+                        try:
+                            f.close()
+                        except OSError:
+                            pass
+        except OSError:
+            pass  # client gone mid-line; worker exits cleanly
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _dispatch(self, line: str) -> dict:
+        """Parse one request line -> dispatch cmd -> response dict. Never raises (robustness)."""
+        try:
+            msg = json.loads(line)
+        except ValueError as exc:  # json.JSONDecodeError is a ValueError subclass
+            return {"ok": False, "error": f"malformed JSON: {exc}"}
+        if not isinstance(msg, dict):
+            return {"ok": False, "error": "request must be a JSON object"}
+        cmd = msg.get("cmd")
+        if cmd == "toggle":
+            self._daemon.toggle()
+            return {"ok": True, **self._daemon.status_snapshot()}
+        if cmd == "start":
+            self._daemon.start()
+            return {"ok": True, **self._daemon.status_snapshot()}
+        if cmd == "stop":
+            self._daemon.stop()
+            return {"ok": True, **self._daemon.status_snapshot()}
+        if cmd == "status":
+            return {"ok": True, **self._daemon.status_snapshot()}
+        if cmd == "quit":
+            self._daemon.request_shutdown()
+            if self._on_quit is not None:
+                try:
+                    self._on_quit()
+                except Exception:
+                    logger.exception("on_quit callback failed")
+            return {"ok": True, "shutting_down": True}
+        return {"ok": False, "error": f"unknown command: {cmd!r}"}

@@ -348,3 +348,34 @@ def test_no_real_subprocess_run_during_tests(monkeypatch, tmp_path):
     fb.set_listening(True); fb.update_partial("p"); fb.record_final("f")
     # every hyprctl call was captured, none reached the OS
     assert all(a[0] == "hyprctl" for a in rec.argvs) or rec.argvs == []
+
+
+# ===========================================================================
+# P1.M4.T2.S1 — Feedback.snapshot() (additive: a low-latency in-memory read for status)
+# ===========================================================================
+
+def test_snapshot_returns_a_copy_with_the_five_state_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
+    fb = Feedback(FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    fb.set_listening(True)
+    fb.update_partial("hello")
+    snap = fb.snapshot()
+    assert set(snap.keys()) == {"listening", "phase", "partial", "last_final", "ts"}
+    assert snap["listening"] is True and snap["partial"] == "hello"
+
+
+def test_snapshot_is_a_copy_not_an_alias(tmp_path, monkeypatch):
+    # Mutating the snapshot must NOT affect the live in-memory state (concurrent-reader safety).
+    monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
+    fb = Feedback(FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    fb.update_partial("orig")
+    snap = fb.snapshot()
+    snap["partial"] = "mutated"
+    assert fb._state["partial"] == "orig"   # live state untouched
+
+
+def test_snapshot_reflects_recorded_final(tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
+    fb = Feedback(FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    fb.record_final("a final utterance")
+    assert fb.snapshot()["last_final"] == "a final utterance"

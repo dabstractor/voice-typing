@@ -271,7 +271,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Daemon Core — recorder, listen-forever loop, toggle, control socket",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Wire RealtimeSTT (construct once, models resident on GPU), implement the listen-forever loop that segments but never auto-stops (the WhisperX-flaw fix), the toggle gate, the JSON-lines control socket, latency logging, and the multiprocessing-safe entry point.",
           "tasks": [
             {
@@ -341,14 +341,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Control socket server (JSON-lines over unix socket)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Background-thread unix socket server implementing the toggle/start/stop/status/quit protocol, with stale-socket cleanup and clean shutdown.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "Socket server: toggle/start/stop/status/quit JSON protocol",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S2"
@@ -364,7 +364,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T2.S2",
                   "title": "quit/clean-shutdown wiring (recorder.shutdown + socket close)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T2.S1"
@@ -382,14 +382,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "Daemon entry point (multiprocessing-safe main + logging)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The main() that loads config, configures logging, builds the daemon + control server, and runs — wrapped in the mandatory __main__ guard for RealtimeSTT multiprocessing.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "main() with __main__ guard, signal handlers, logging setup",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T2.S2",

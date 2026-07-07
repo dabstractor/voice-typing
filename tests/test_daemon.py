@@ -721,3 +721,83 @@ def test_run_logs_resolved_device_at_startup(monkeypatch, caplog):
     assert any("voice-typing device resolved:" in m for m in msgs), msgs
     dev_line = next(m for m in msgs if "device resolved" in m)
     assert "device=cuda" in dev_line and "final_model=distil-large-v3" in dev_line
+
+
+# ===========================================================================
+# P1.M4.T2.S1 — VoiceTypingDaemon.status_snapshot() + _resolved_device() (ADDITIVE)
+# (status_snapshot reads the LIVE in-memory Feedback state + caches the cuda_check probe once.
+#  Uses a REAL Feedback so .snapshot() exists; reuses S2's _StubRecorder/_FakeBackend for the
+#  daemon's recorder/backend slots, and S1's _cuda_resolve to force the device path hermetically.)
+# ===========================================================================
+from voice_typing.config import FeedbackConfig
+from voice_typing.feedback import Feedback
+
+
+def _make_daemon_with_feedback(tmp_path, monkeypatch, *, cuda=True):
+    """A real VoiceTypingDaemon whose _feedback is a real Feedback (has .snapshot()).
+
+    cuda_check.resolve_device_and_models is monkeypatched (via S1's _cuda_resolve) for hermetic
+    device values. state_file lives under tmp_path so the Feedback write never touches the OS
+    runtime dir. Returns (daemon, feedback).
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS if cuda else daemon.cuda_check.CPU_FALLBACK)
+    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    fb = Feedback(cfg.feedback)
+    rec = _StubRecorder()
+    be = _FakeBackend()
+    return daemon.VoiceTypingDaemon(cfg, fb, recorder=rec, backend=be), fb
+
+
+def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
+    d, fb = _make_daemon_with_feedback(tmp_path, monkeypatch, cuda=True)
+    fb.update_partial("hello")
+    fb.record_final("world")
+    s = d.status_snapshot()
+    assert set(s) == {"listening", "partial", "last_final", "uptime_s",
+                      "device", "compute_type", "final_model", "realtime_model"}
+    assert s["listening"] is False and s["partial"] == "hello" and s["last_final"] == "world"
+    assert s["device"] == "cuda" and s["compute_type"] == "float16"
+    assert s["final_model"] == "distil-large-v3" and s["realtime_model"] == "small.en"
+
+
+def test_status_snapshot_reflects_listening_toggle(tmp_path, monkeypatch):
+    d, _fb = _make_daemon_with_feedback(tmp_path, monkeypatch)
+    assert d.status_snapshot()["listening"] is False
+    d.start()
+    assert d.status_snapshot()["listening"] is True
+
+
+def test_status_snapshot_cpu_fallback_models(tmp_path, monkeypatch):
+    d, _fb = _make_daemon_with_feedback(tmp_path, monkeypatch, cuda=False)
+    s = d.status_snapshot()
+    assert s["device"] == "cpu" and s["final_model"] == "small.en" and s["realtime_model"] == "tiny.en"
+
+
+def test_resolved_device_caches_resolve_called_once(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def _resolve(defaults=None):
+        calls["n"] += 1
+        return dict(daemon.cuda_check.CUDA_DEFAULTS)
+
+    monkeypatch.setattr(daemon.cuda_check, "resolve_device_and_models", _resolve)
+    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    d = daemon.VoiceTypingDaemon(
+        cfg, Feedback(cfg.feedback), recorder=_StubRecorder(), backend=_FakeBackend()
+    )
+    d.status_snapshot()
+    d.status_snapshot()
+    assert calls["n"] == 1                      # cached after the first call
+
+
+def test_resolved_device_failure_degrades_to_unknown(tmp_path, monkeypatch):
+    def boom(defaults=None):
+        raise RuntimeError("cuda exploded")
+
+    monkeypatch.setattr(daemon.cuda_check, "resolve_device_and_models", boom)
+    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    d = daemon.VoiceTypingDaemon(
+        cfg, Feedback(cfg.feedback), recorder=_StubRecorder(), backend=_FakeBackend()
+    )
+    s = d.status_snapshot()
+    assert s["device"] == "unknown"             # never raises; degrades gracefully

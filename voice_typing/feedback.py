@@ -136,6 +136,16 @@ class Feedback:
         if self._cfg.hypr_notify and listening != prev:
             self._notify("● listening" if listening else "■ stopped")
 
+    def snapshot(self) -> dict:
+        """A shallow copy of the live in-memory state {listening,phase,partial,last_final,ts}.
+
+        For low-latency status reads (the control socket `status` cmd) WITHOUT hitting the
+        throttled state.json on disk (which lags >=10 Hz). Returns a COPY (dict(self._state)) so
+        a concurrent reader never aliases the live dict the callback threads mutate. CPython dict
+        copy is atomic; no Lock needed (Feedback is designed lock-free).
+        """
+        return dict(self._state)
+
     # --- internals ---
 
     def _write(self) -> None:
