@@ -628,14 +628,14 @@
               "type": "Task",
               "id": "P2.M1.T1",
               "title": "Hyprland keybind (hypr-binds.conf)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Create the Hyprland bind file for SUPER+ALT+D → voicectl toggle and print the source instruction. Do NOT modify the user's hyprland.conf.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T1.S1",
                   "title": "hypr-binds.conf (SUPER+ALT+D toggle) + source instruction",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T1.S1"

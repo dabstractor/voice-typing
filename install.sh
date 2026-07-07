@@ -134,7 +134,7 @@ echo "tmux status (add these TWO lines to ~/.tmux.conf — we never edit it for 
 echo '  set -g status-interval 1'
 echo "  set -g status-right \"#($REPO/voice_typing/status.sh)\""
 echo
-echo "Hyprland (after P2.M1 creates hypr-binds.conf), add to ~/.config/hypr/hyprland.conf:"
+echo "Hyprland — source the repo's hypr-binds.conf from ~/.config/hypr/hyprland.conf (add this line):"
 echo "  source = $REPO/hypr-binds.conf"
 echo
 echo "logs   : journalctl --user -u voice-typing -f"
