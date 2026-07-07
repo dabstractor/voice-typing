@@ -7,7 +7,7 @@ name = "voice-typing"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "realtimestt",
+    "realtimestt[faster-whisper,silero-vad]",
     "nvidia-cublas-cu12",
     "nvidia-cudnn-cu12==9.*",
     "huggingface_hub>=0.23",
