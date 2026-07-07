@@ -204,14 +204,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "typing_backends.py — wtype / ydotool / tmux + auto-fallback",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Define the TypingBackend interface and the three implementations, including automatic fallback from wtype to ydotool on failure.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Backend interface + Wtype/Ydotool/Tmux impls + auto-fallback",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -227,7 +227,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Unit tests for typing backends (subprocess mocked)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
