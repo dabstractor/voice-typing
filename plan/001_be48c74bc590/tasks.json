@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "MVP — Fully-Local Voice Typing Daemon (RealtimeSTT)",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Deliver the complete voice-typing system per PRD §4: a long-running Python daemon that captures the PipeWire default mic via RealtimeSTT (faster-whisper/CTranslate2 on CUDA), surfaces live partials to a state file + tmux status, and types only finalized text into the focused Wayland window (wtype/ydotool) or a tmux pane. Listening never auto-stops on silence (fixes the WhisperX flaw); it segments utterances only. Controlled via a unix socket + voicectl CLI; runs as a systemd user service starting un-armed. All T1–T4/T6 tests pass.",
       "milestones": [
         {
@@ -499,7 +499,7 @@
           "type": "Milestone",
           "id": "P1.M7",
           "title": "Test Suite & Acceptance (T1–T4, T6)",
-          "status": "Planned",
+          "status": "Complete",
           "description": "Build the test assets and the offline/E2E/idle/GPU acceptance harnesses from PRD §6, and verify acceptance criteria. All must pass (with fuzzy matching on synthetic espeak audio) before declaring success.",
           "tasks": [
             {
@@ -585,14 +585,14 @@
               "type": "Task",
               "id": "P1.M7.T4",
               "title": "Idle stability (T4) + GPU residency (T6) + acceptance verification",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Assert 120s of silence yields no hallucinated finals and low CPU, that nvidia-smi shows the daemon holding VRAM, and run through the full acceptance checklist (PRD §7).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T4.S1",
                   "title": "Idle-120s hallucination/CPU test + nvidia-smi VRAM residency + acceptance checklist",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M7.T3.S1"
@@ -614,28 +614,28 @@
       "type": "Phase",
       "id": "P2",
       "title": "Phase 2 — Hyprland Keybinding & Changeset-Level Documentation",
-      "status": "Planned",
+      "status": "Ready",
       "description": "Small Phase 2 work done in the same run after tests pass (PRD §4.10): the Hyprland toggle keybinding (user sources it manually — never auto-edit user config), and the final changeset-level documentation sync (README + overview) that depends on every implementing subtask.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P2.M1",
           "title": "Hyprland hotkey + final documentation sync",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Provide the Hyprland keybind file and the user instruction to source it, then write/sync the full README and overview docs that span the entire changeset.",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M1.T1",
               "title": "Hyprland keybind (hypr-binds.conf)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Create the Hyprland bind file for SUPER+ALT+D → voicectl toggle and print the source instruction. Do NOT modify the user's hyprland.conf.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T1.S1",
                   "title": "hypr-binds.conf (SUPER+ALT+D toggle) + source instruction",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T1.S1"
@@ -653,14 +653,14 @@
               "type": "Task",
               "id": "P2.M1.T2",
               "title": "Sync changeset-level documentation (README + overview)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Final catch-all documentation task (SOW §5 Mode B) that writes README.md and any overview docs spanning the whole changeset, depending on every implementing subtask so it runs last.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T2.S1",
                   "title": "Write README.md: install, hotkey, tmux status, config tuning, troubleshooting, CPU mode, first-run",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",
