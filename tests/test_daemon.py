@@ -921,3 +921,257 @@ def test_install_custom_signals_set_honored():
     finally:
         _signal.signal(_signal.SIGUSR2, prev_usr2)
         _signal.signal(_signal.SIGTERM, prev_term)
+
+
+# ===========================================================================
+# P1.M4.T3.S1 — daemon main() entry point: _resolve_log_level / _setup_logging /
+# main() lifecycle + the if __name__ == "__main__" guard.
+# (ADDITIVE — everything above is S1/S2/S3/(S1-of-T2)/(T2.S2); do not change it.)
+# ===========================================================================
+import ast
+import sys
+from pathlib import Path
+
+
+# --- Layer A: _resolve_log_level ---------------------------------------------------------
+
+
+def test_resolve_log_level_valid_names():
+    assert daemon._resolve_log_level("INFO") == logging.INFO
+    assert daemon._resolve_log_level("DEBUG") == logging.DEBUG
+    assert daemon._resolve_log_level("warning") == logging.WARNING  # case-insensitive
+    assert daemon._resolve_log_level("  debug  ") == logging.DEBUG  # stripped
+
+
+def test_resolve_log_level_invalid_falls_back_to_info():
+    assert daemon._resolve_log_level("VERBOSE") == logging.INFO  # getLevelName -> "Level VERBOSE"
+    assert daemon._resolve_log_level("") == logging.INFO
+    assert daemon._resolve_log_level(None) == logging.INFO  # non-str
+    assert daemon._resolve_log_level(20) == logging.INFO  # non-str
+
+
+# --- Layer B: _setup_logging (monkeypatch basicConfig — hermetic) -------------------------
+
+
+def test_setup_logging_configures_stderr_at_level(monkeypatch):
+    captured = {}
+
+    def _capture(**kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(logging, "basicConfig", _capture)
+    daemon._setup_logging("DEBUG")
+    assert captured["stream"] is sys.stderr
+    assert captured["level"] == logging.DEBUG
+    assert "asctime" in captured["format"] and "message" in captured["format"]
+
+
+def test_setup_logging_passes_resolved_level(monkeypatch):
+    captured = {}
+
+    def _capture(**kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(logging, "basicConfig", _capture)
+    daemon._setup_logging("not-a-level")  # invalid -> INFO
+    assert captured["level"] == logging.INFO
+
+
+# --- Layer C: main() lifecycle orchestration (all components monkeypatched) ----------------
+
+
+class _MainFakeFeedback:
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+
+class _MainFakeDaemon:
+    def __init__(self, cfg, fb, **kw):
+        self.cfg, self.fb = cfg, fb
+        self.run_called = False
+        self.shutdown_calls = 0
+
+    def run(self):  # return immediately (NO block, NO recorder)
+        self.run_called = True
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+    # on_quit is wired to this bound method; ControlServer must receive it AS-IS
+
+
+class _MainFakeServer:
+    def __init__(self, d, *, on_quit=None, **kw):
+        self.daemon = d
+        self.on_quit = on_quit
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def start(self):
+        self.start_calls += 1
+
+    def stop(self):
+        self.stop_calls += 1
+
+
+def _patch_main_lifecycle(
+    monkeypatch,
+    *,
+    daemon_cls=_MainFakeDaemon,
+    server_cls=_MainFakeServer,
+    feedback_cls=_MainFakeFeedback,
+):
+    refs = {}
+    monkeypatch.setattr(
+        daemon,
+        "VoiceTypingConfig",
+        type("C", (), {"load": classmethod(lambda cls: VoiceTypingConfig())}),
+    )
+    monkeypatch.setattr(daemon, "VoiceTypingDaemon", daemon_cls)
+    monkeypatch.setattr(daemon, "ControlServer", server_cls)
+    monkeypatch.setattr("voice_typing.feedback.Feedback", feedback_cls)
+    restored = {"called": False}
+
+    def _install(d, *, signals=None):
+        refs["install_arg"] = d
+
+        def _restore():
+            restored["called"] = True
+
+        return _restore
+
+    monkeypatch.setattr(daemon, "install_shutdown_signal_handlers", _install)
+    monkeypatch.setattr(logging, "basicConfig", lambda **kw: None)  # don't touch real root
+    return refs, restored
+
+
+def test_main_runs_full_lifecycle_and_returns_zero(monkeypatch):
+    refs, restored = _patch_main_lifecycle(monkeypatch)
+    code = daemon.main()
+    assert code == 0
+    assert daemon.VoiceTypingDaemon is _MainFakeDaemon  # sanity: patch active
+    assert refs["install_arg"] is not None  # install_shutdown_signal_handlers got a daemon
+
+
+def test_main_calls_run_start_stop_and_restore(monkeypatch):
+    bag = {}
+
+    class D(_MainFakeDaemon):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            bag["d"] = self
+
+    class S(_MainFakeServer):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            bag["s"] = self
+
+    refs, restored = _patch_main_lifecycle(monkeypatch, daemon_cls=D, server_cls=S)
+    assert daemon.main() == 0
+    assert bag["d"].run_called is True
+    assert bag["s"].start_calls == 1 and bag["s"].stop_calls == 1
+    assert bag["d"].shutdown_calls == 1  # finally called shutdown() (no quit here)
+    assert restored["called"] is True  # restore() ran in finally
+
+
+def test_main_wires_on_quit_to_daemon_shutdown(monkeypatch):
+    bag = {}
+
+    class D(_MainFakeDaemon):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            bag["d"] = self
+
+    class S(_MainFakeServer):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            bag["s"] = self
+
+    _patch_main_lifecycle(monkeypatch, daemon_cls=D, server_cls=S)
+    daemon.main()
+    # ControlServer MUST have been built with on_quit == the daemon's shutdown bound method.
+    assert bag["s"].on_quit == bag["d"].shutdown
+
+
+def test_main_passes_config_feedback_to_daemon(monkeypatch):
+    bag = {}
+
+    class D(_MainFakeDaemon):
+        def __init__(self, cfg, fb, **k):
+            super().__init__(cfg, fb, **k)
+            bag["cfg"], bag["fb"] = cfg, fb
+
+    _patch_main_lifecycle(monkeypatch, daemon_cls=D)
+    daemon.main()
+    assert isinstance(bag["cfg"], VoiceTypingConfig)
+    assert isinstance(bag["fb"], _MainFakeFeedback) and bag["fb"].cfg is bag["cfg"].feedback
+
+
+# --- Layer E: fatal path -> return 1, no None-deref ---------------------------------------
+
+
+def test_main_returns_one_on_daemon_construction_failure(monkeypatch):
+    class BoomDaemon:
+        def __init__(self, *a, **k):
+            raise RuntimeError("recorder init failed")
+
+        def run(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+    _patch_main_lifecycle(monkeypatch, daemon_cls=BoomDaemon)
+    assert daemon.main() == 1  # caught, logged, returns 1 (systemd Restart)
+
+
+def test_main_returns_one_on_config_load_failure(monkeypatch):
+    def _boom(cls):
+        raise RuntimeError("bad toml")
+
+    monkeypatch.setattr(
+        daemon,
+        "VoiceTypingConfig",
+        type("C", (), {"load": classmethod(_boom)}),
+    )
+    monkeypatch.setattr(logging, "basicConfig", lambda **kw: None)
+    assert daemon.main() == 1
+
+
+# --- Layer F: the __main__ guard (AST — hermetic, no subprocess) --------------------------
+
+
+def test_main_guard_present_and_calls_main():
+    tree = ast.parse(Path("voice_typing/daemon.py").read_text())
+    guard = None
+    for node in tree.body:
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Compare):
+            t = node.test
+            if (
+                isinstance(t.left, ast.Name)
+                and t.left.id == "__name__"
+                and any(isinstance(o, ast.Eq) for o in t.ops)
+                and any(
+                    isinstance(c, ast.Constant) and c.value == "__main__"
+                    for c in t.comparators
+                )
+            ):
+                guard = node
+                break
+    assert guard is not None, "no `if __name__ == '__main__':` guard at module level"
+    # body references main (either `main()` or `sys.exit(main())`).
+    names = set()
+    for stmt in guard.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            if isinstance(call.func, ast.Name):  # main()
+                names.add(call.func.id)
+            elif isinstance(call.func, ast.Attribute):  # sys.exit(...)
+                names.add(call.func.attr)
+            for arg in call.args:
+                if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name):
+                    names.add(arg.func.id)  # exit(main())
+    assert "main" in names, "guard body does not call main()"
+
+
+def test_main_is_callable():
+    assert callable(daemon.main)

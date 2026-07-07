@@ -71,6 +71,7 @@ import os
 import select
 import signal
 import socket
+import sys
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable
@@ -846,3 +847,121 @@ def install_shutdown_signal_handlers(
             signal.signal(s, prev)
 
     return restore
+
+
+def _resolve_log_level(level_name: object) -> int:
+    """Resolve a config log-level name to a logging int (INFO default; PRD §4.2 'DEBUG via config').
+
+    `logging.getLevelName(name)` returns an int for a valid level name ("INFO"->20, "DEBUG"->10)
+    but returns the STRING 'Level <name>' for an unknown one (it does NOT raise) -> the isinstance
+    guard turns any typo/garbage into INFO. Mirrors VoiceTypingDaemon._configure_log_level's
+    defensive posture (an invalid level is ignored, not crashed on). A non-str input (None, int)
+    -> INFO.
+    """
+    if not isinstance(level_name, str):
+        return logging.INFO
+    level = logging.getLevelName(level_name.strip().upper())
+    return level if isinstance(level, int) else logging.INFO
+
+
+def _setup_logging(level_name: object) -> None:
+    """Configure stderr logging at the resolved level (PRD §4.2; P1.M4.T3.S1).
+
+    Closes the gap VoiceTypingDaemon._configure_log_level deliberately left open: that fn sets
+    ONLY the 'voice_typing' namespace logger LEVEL (no handler) -> without this, records pass the
+    logger gate but have nowhere to emit (silent daemon). logging.basicConfig is IDEMPOTENT: a
+    no-op if the root logger already has a handler (e.g. under pytest caplog -> tests keep using
+    caplog, the desired non-intrusive behavior); in a fresh process (systemd, console script,
+    `python -m`) it installs a single StreamHandler on stderr (journald captures unit stderr) at
+    the resolved level. The SAME cfg.log.level is read by run()'s _configure_log_level -> root
+    handler + namespace logger agree, so 'DEBUG' actually shows debug records (not just passes the
+    namespace gate).
+    """
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=_resolve_log_level(level_name),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+def main() -> int:
+    """Daemon process entry point: logging + config + daemon/server + signals + run + teardown.
+
+    (PRD §4.2/§4.9; P1.M4.T3.S1.) Wires together the components built by every prior subtask into
+    the single sanctioned lifecycle. Guarded by `if __name__ == "__main__": sys.exit(main())`
+    (RealtimeSTT uses spawn-started multiprocessing workers that re-import __main__ -> ALL heavy
+    work must live in main(), never at module top; the guard + this invariant keep spawn children
+    clean).
+
+    Lifecycle (the teardown order is the P1.M4.T2.S2 contract):
+      cfg = VoiceTypingConfig.load(); _setup_logging(cfg.log.level)
+      Feedback(cfg.feedback) -> VoiceTypingDaemon(cfg, fb) -> ControlServer(d, on_quit=d.shutdown)
+      srv.start(); restore = install_shutdown_signal_handlers(d);   (both main-thread)
+      try: d.run()                                            # BLOCKS until quit/signal
+      finally: restore(); d.shutdown(); srv.stop()            # idempotent; srv.stop main-thread only
+      return 0
+    Returns 0 on clean shutdown, 1 on a fatal error (config/recorder/server init) so systemd
+    Restart=on-failure restarts the unit. NEVER raises (all fatal paths caught + logged).
+    """
+    # 1. Config first (needed for the logging level). A load failure is fatal + unrecoverable;
+    #    set up a fallback stderr INFO handler so the traceback is visible (logging may not yet
+    #    be configured).
+    try:
+        cfg = VoiceTypingConfig.load()
+    except Exception:
+        _setup_logging("INFO")
+        logger.exception("failed to load config; exiting")
+        return 1
+    # 2. Logging to stderr (journald) at cfg.log.level (PRD §4.2). Closes the gap above.
+    _setup_logging(cfg.log.level)
+    logger.info("voice-typing daemon starting (pid=%s)", os.getpid())
+
+    daemon = None        # type: VoiceTypingDaemon | None
+    server = None        # type: ControlServer | None
+    restore = None       # type: Callable[[], None] | None
+    try:
+        # Lazy import: keeps the module-top change to just `import sys`, and stays monkeypatchable
+        # (tests patch voice_typing.feedback.Feedback; `from X import Y` resolves the live attr).
+        from voice_typing.feedback import Feedback
+
+        daemon = VoiceTypingDaemon(cfg, Feedback(cfg.feedback))
+        # quit path: ControlServer._dispatch("quit") -> request_shutdown() (blocks until text()
+        #   returns) -> on_quit=daemon.shutdown() -> recorder.shutdown() (release VRAM).
+        server = ControlServer(daemon, on_quit=daemon.shutdown)
+        # SIGTERM/SIGINT -> a spawned daemon thread calls daemon.request_shutdown() (NOT abort()
+        #   from the handler — that deadlocks; T2.S2). Returns restore() reinstating prior handlers.
+        restore = install_shutdown_signal_handlers(daemon)
+        server.start()
+        daemon.run()  # BLOCKS until quit/signal; starts NOT-LISTENING (PRD §4.9; no hot-mic).
+    except Exception:
+        logger.exception("fatal error during daemon lifecycle; exiting")
+        return 1
+    finally:
+        # Teardown order (P1.M4.T2.S2 contract): stop diverting signals -> release GPU workers ->
+        # close the control socket. Each step is NULL-SAFE + best-effort (a failure here must not
+        # mask the original reason). server.stop() runs ONLY here (main thread): it joins the
+        # accept thread, and on_quit runs on a worker OF that thread -> calling server.stop() from
+        # on_quit would self-join.
+        if restore is not None:
+            try:
+                restore()
+            except Exception:
+                logger.exception("signal handler restore failed (ignored)")
+        if daemon is not None:
+            try:
+                daemon.shutdown()  # idempotent: no-op if on_quit (quit path) already shut recorder.
+            except Exception:
+                logger.exception("daemon.shutdown() failed during teardown (ignored)")
+        if server is not None:
+            try:
+                server.stop()  # close socket + unlink + join accept thread (main thread only).
+            except Exception:
+                logger.exception("ControlServer.stop() failed during teardown (ignored)")
+    return 0
+
+
+if __name__ == "__main__":
+    # The guard RealtimeSTT's spawn-based multiprocessing requires (re-import of __main__ in
+    # children skips this body). sys.exit propagates main()'s exit code to systemd (Restart=on-
+    # failure).
+    sys.exit(main())

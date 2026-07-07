@@ -271,7 +271,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Daemon Core — recorder, listen-forever loop, toggle, control socket",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Wire RealtimeSTT (construct once, models resident on GPU), implement the listen-forever loop that segments but never auto-stops (the WhisperX-flaw fix), the toggle gate, the JSON-lines control socket, latency logging, and the multiprocessing-safe entry point.",
           "tasks": [
             {
@@ -382,14 +382,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "Daemon entry point (multiprocessing-safe main + logging)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "The main() that loads config, configures logging, builds the daemon + control server, and runs — wrapped in the mandatory __main__ guard for RealtimeSTT multiprocessing.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "main() with __main__ guard, signal handlers, logging setup",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T2.S2",
@@ -410,21 +410,21 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "voicectl — control CLI client",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement the voicectl console-script client that speaks the control socket JSON-lines protocol and prints human-readable results with correct exit codes.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "ctl.py — voicectl client (toggle/start/stop/status/quit)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The CLI that connects to the control socket, sends one JSON line, and prints a human-readable result.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "voicectl client: socket connect, JSON line, human output, exit codes 0/1/2",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T2.S1"
