@@ -19,3 +19,8 @@ voice-typing-daemon = "voice_typing.daemon:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["voice_typing"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

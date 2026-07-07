@@ -132,14 +132,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "config.py — dataclasses + tomllib loader + default config.toml",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Define the config dataclasses matching PRD §4.5 and a loader with the search order XDG_CONFIG_HOME → repo config.toml → built-in defaults.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Config dataclasses + tomllib loader + search order + unit tests",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -155,7 +155,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Write self-documenting default config.toml",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"

@@ -1,0 +1,208 @@
+"""voice-typing configuration: dataclasses + stdlib tomllib loader (PRD §4.5).
+
+Loads user config from TOML into nested dataclasses. The schema and every default
+below mirror config.toml (P1.M2.T1.S2) and PRD §4.5 EXACTLY — they are the single
+source of truth for runtime tuning.
+
+SEARCH ORDER (PRD §4.5), implemented by VoiceTypingConfig.load(path=None):
+  1. $XDG_CONFIG_HOME/voice-typing/config.toml   (XDG_CONFIG_HOME unset/empty → ~/.config/...)
+  2. <repo>/config.toml                          (module-relative; parent dir of voice_typing/)
+  3. built-in dataclass defaults                 (no candidate found → VoiceTypingConfig())
+The FIRST existing file wins. An explicit `path=` disables the search and loads
+that one file (used by tests and a future --config flag).
+
+THIS MODULE IS PURE DATA + A LOADER (stdlib only: os, pathlib, dataclasses,
+tomllib). It must NOT import cuda_check / ctranslate2 / torch / realtimestt —
+config must load in CPU-only and test contexts. The `device="cuda"` default is the
+user's DESIRED setting; whether CUDA is actually available is decided at daemon
+startup by voice_typing.cuda_check.resolve_device_and_models() (P1.M1.T2.S2),
+which the daemon (P1.M4.T1.S1) APPLIES as an override on the loaded config
+(e.g. `cfg.asr.device = "cpu"`). `compute_type` is NOT a config field (it is a
+cuda_check concern per §4.4); do not add it here.
+
+state_file LAZY RESOLUTION: FeedbackConfig.state_file defaults to "" (empty).
+Its effective path ($XDG_RUNTIME_DIR/voice-typing/state.json when empty) is
+resolved lazily by FeedbackConfig.resolved_state_file() — NOT at load time —
+because XDG_RUNTIME_DIR is unset outside real login sessions (cron, tests,
+non-interactive shells). feedback.py (P1.M3.T2.S1) calls resolved_state_file()
+at write time; if state_file is empty AND XDG_RUNTIME_DIR is unset it raises
+RuntimeError (no safe default — fail clearly rather than write to a wrong path).
+
+CONSUMERS: textproc.clean(cfg.filter) (P1.M2.T2.S1), typing_backends (cfg.output)
+(P1.M3.T1.S1), feedback (cfg.feedback) (P1.M3.T2.S1), daemon (whole cfg + the
+cuda_check override) (P1.M4.T1.S1).
+"""
+from __future__ import annotations
+
+import os
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping
+
+
+# ---------------------------------------------------------------------------
+# Sub-config dataclasses (PRD §4.5 — defaults mirror config.toml EXACTLY)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AsrConfig:
+    """[asr] — ASR model + device settings. `device` may be overridden by cuda_check."""
+
+    final_model: str = "distil-large-v3"
+    realtime_model: str = "small.en"
+    language: str = "en"
+    device: str = "cuda"  # "cuda" | "cpu" (daemon may override via cuda_check at startup)
+    post_speech_silence_duration: float = 0.6  # VAD: finalize after this much silence (seconds)
+    realtime_processing_pause: float = 0.15    # partials cadence (seconds)
+
+
+@dataclass
+class OutputConfig:
+    """[output] — typing-output backend selection."""
+
+    backend: str = "wtype"     # "wtype" | "ydotool" | "tmux"
+    tmux_target: str = ""      # used only when backend == "tmux", e.g. "voicetest:0.0"
+    append_space: bool = True  # daemon appends one trailing space to each final
+
+
+@dataclass
+class FeedbackConfig:
+    """[feedback] — state file + Hyprland notification settings."""
+
+    state_file: str = ""       # "" → resolved lazily to $XDG_RUNTIME_DIR/voice-typing/state.json
+    hypr_notify: bool = True   # hyprctl notify one-liner for start/final/stop
+    notify_ms: int = 2500      # hyprctl notify duration (ms)
+
+    def resolved_state_file(self) -> str:
+        """Return the effective state-file path (lazy XDG_RUNTIME_DIR resolution).
+
+        Non-empty state_file → returned verbatim. Empty →
+        $XDG_RUNTIME_DIR/voice-typing/state.json. Raises RuntimeError if empty
+        AND XDG_RUNTIME_DIR is unset/empty (no safe default — fail clearly).
+        """
+        if self.state_file:
+            return self.state_file
+        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+        if not xdg_runtime:
+            raise RuntimeError(
+                "feedback.state_file is empty and XDG_RUNTIME_DIR is not set; "
+                "cannot determine the state-file path. Set state_file in config "
+                "or run under a session that exports XDG_RUNTIME_DIR (systemd "
+                "user sessions set it)."
+            )
+        return os.path.join(xdg_runtime, "voice-typing", "state.json")
+
+
+@dataclass
+class FilterConfig:
+    """[filter] — post-recognition text filter. Consumed by textproc.clean()."""
+
+    min_chars: int = 2
+    # default_factory: each FilterConfig gets its OWN list (mutable-default guard).
+    # Stored VERBATIM; textproc lowercases + strips trailing punctuation at compare
+    # time (PRD §4.7). Defaults are already lowercase per §4.5.
+    blocklist: list[str] = field(
+        default_factory=lambda: [
+            "thank you.",
+            "thanks for watching.",
+            "you",
+            "bye.",
+            "thank you for watching",
+        ]
+    )
+
+
+@dataclass
+class VoiceTypingConfig:
+    """Top-level config aggregating all PRD §4.5 sub-sections."""
+
+    asr: AsrConfig = field(default_factory=AsrConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+    feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
+    filter: FilterConfig = field(default_factory=FilterConfig)
+
+    # --- construction from parsed TOML / files ---
+
+    @classmethod
+    def from_toml(cls, data: Mapping[str, Any]) -> VoiceTypingConfig:
+        """Build a config from an already-parsed TOML mapping.
+
+        Each table ([asr]/[output]/[feedback]/[filter]) overlays its dataclass
+        defaults — only present keys override; missing tables/keys keep defaults.
+        Unknown keys raise TypeError (dataclass __init__ rejects them) so a typo'd
+        config key surfaces loudly instead of being silently ignored. Malformed
+        TOML is caught upstream by tomllib (TOMLDecodeError); a scalar where a
+        table is expected raises TypeError via the Mapping check here.
+        """
+
+        def _overlay(section_cls, table_name):
+            section = data.get(table_name, {})
+            if not isinstance(section, Mapping):
+                raise TypeError(
+                    f"[{table_name}] must be a TOML table, got {type(section).__name__}"
+                )
+            return section_cls(**section)
+
+        return cls(
+            asr=_overlay(AsrConfig, "asr"),
+            output=_overlay(OutputConfig, "output"),
+            feedback=_overlay(FeedbackConfig, "feedback"),
+            filter=_overlay(FilterConfig, "filter"),
+        )
+
+    @classmethod
+    def from_toml_file(cls, path: str | os.PathLike[str]) -> VoiceTypingConfig:
+        """Read + parse a TOML file → config. tomllib requires BINARY mode."""
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+        return cls.from_toml(data)
+
+    @classmethod
+    def load(cls, path: str | os.PathLike[str] | None = None) -> VoiceTypingConfig:
+        """Load from `path`, or via the PRD §4.5 search order when path is None.
+
+        Search order (first EXISTING file wins):
+          1. $XDG_CONFIG_HOME/voice-typing/config.toml (unset/empty → ~/.config/...)
+          2. <repo>/config.toml (module-relative: parent dir of voice_typing/)
+          3. built-in dataclass defaults (no candidate exists)
+        An explicit path= bypasses the search and loads that one file.
+        """
+        if path is not None:
+            return cls.from_toml_file(path)
+        for candidate in _candidate_paths():
+            if os.path.isfile(candidate):
+                return cls.from_toml_file(candidate)
+        return cls()  # built-in defaults
+
+
+# ---------------------------------------------------------------------------
+# Search-order helpers (module-level so tests can monkeypatch them for hermeticity)
+# ---------------------------------------------------------------------------
+
+def _xdg_config_path() -> str:
+    """$XDG_CONFIG_HOME/voice-typing/config.toml (XDG unset/empty → ~/.config/...)."""
+    xdg_config = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if not xdg_config:
+        xdg_config = os.path.expanduser("~/.config")
+    return os.path.join(xdg_config, "voice-typing", "config.toml")
+
+
+def _repo_config_path() -> str:
+    """<repo>/config.toml — module-relative so it resolves regardless of CWD.
+
+    voice_typing/config.py → parent = voice_typing/ → parent = repo root.
+    config.toml is NOT packaged in the wheel (packages=["voice_typing"]); for
+    installed runs this candidate won't exist — install.sh copies it to XDG.
+    """
+    return str(Path(__file__).resolve().parent.parent / "config.toml")
+
+
+def _candidate_paths() -> list[str]:
+    """Ordered search candidates: XDG first, then repo. Defaults are the fallback."""
+    return [_xdg_config_path(), _repo_config_path()]
+
+
+def load(path: str | os.PathLike[str] | None = None) -> VoiceTypingConfig:
+    """Module-level convenience wrapper around VoiceTypingConfig.load()."""
+    return VoiceTypingConfig.load(path)
