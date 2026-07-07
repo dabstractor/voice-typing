@@ -614,14 +614,14 @@
       "type": "Phase",
       "id": "P2",
       "title": "Phase 2 — Hyprland Keybinding & Changeset-Level Documentation",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Small Phase 2 work done in the same run after tests pass (PRD §4.10): the Hyprland toggle keybinding (user sources it manually — never auto-edit user config), and the final changeset-level documentation sync (README + overview) that depends on every implementing subtask.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P2.M1",
           "title": "Hyprland hotkey + final documentation sync",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Provide the Hyprland keybind file and the user instruction to source it, then write/sync the full README and overview docs that span the entire changeset.",
           "tasks": [
             {
@@ -653,14 +653,14 @@
               "type": "Task",
               "id": "P2.M1.T2",
               "title": "Sync changeset-level documentation (README + overview)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Final catch-all documentation task (SOW §5 Mode B) that writes README.md and any overview docs spanning the whole changeset, depending on every implementing subtask so it runs last.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T2.S1",
                   "title": "Write README.md: install, hotkey, tmux status, config tuning, troubleshooting, CPU mode, first-run",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",
