@@ -558,14 +558,14 @@
               "type": "Task",
               "id": "P1.M7.T3",
               "title": "Full E2E with virtual mic + tmux (e2e_virtual_mic.sh = PRD T3)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "End-to-end test using a PipeWire null-sink + pw-cat playback, the daemon with tmux backend, voicectl control, asserting typed content, observed partials, and that toggle-off gates output. Must restore the user's default source via trap.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T3.S1",
                   "title": "e2e_virtual_mic.sh: null-sink + pw-cat + daemon(tmux) + voicectl; trap cleanup",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M7.T2.S1",

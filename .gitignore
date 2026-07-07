@@ -17,5 +17,8 @@ venv/
 # OS-specific files
 .DS_Store
 
+# Runtime logs
+*.log
+
 # Agent harness artifacts (local scratch)
 .pi-subagents/
