@@ -1,0 +1,61 @@
+# =============================================================================
+# voice-typing configuration
+# =============================================================================
+#
+# WHAT THIS FILE IS
+#   Both the daemon's runtime default AND the user-facing config reference (PRD
+#   "Mode A"). The values below ARE the built-in defaults: change one to tune
+#   the daemon and nothing else needs editing. Every line is commented so this
+#   file reads as documentation.
+#
+# SEARCH ORDER  (first existing file wins; lowest priority is the defaults baked
+# into voice_typing/config.py)
+#   1. $XDG_CONFIG_HOME/voice-typing/config.toml   (unset/empty -> ~/.config/...)
+#   2. <repo>/config.toml                          (this file)
+#   3. dataclass defaults in voice_typing/config.py
+#   install.sh copies this file to location (1) if it is missing, so your edits
+#   survive reinstalls.
+#
+# SCHEMA SOURCE
+#   voice_typing/config.py is the single source of truth for the schema and the
+#   default values; this file mirrors it. Keep the two in lockstep: if you change
+#   a default in code, change it here too. Unknown keys are REJECTED at load time
+#   (a typo raises an error instead of being silently ignored).
+#
+# =============================================================================
+
+
+[asr]   # speech recognition: models, device, voice-activity-detection timing
+
+final_model                  = "distil-large-v3"  # final, high-accuracy transcription model (faster-whisper). Sets the quality and latency of the text that actually gets typed.
+realtime_model               = "small.en"          # faster model used for live partial previews (shown in the tmux status line while you speak).
+language                     = "en"                # ISO-639-1 code, e.g. "en", "es", "fr", "de".
+device                       = "cuda"              # "cuda" | "cpu". The daemon AUTO-FALLS-BACK to "cpu" (and smaller models) at startup if ctranslate2 finds no usable CUDA device; see voice_typing/cuda_check.py (PRD 4.4). Usually leave this as "cuda".
+post_speech_silence_duration = 0.6                 # seconds of silence after speech before a final is emitted. Lower = snappier but can cut off pauses; higher = fewer false finals but slower.
+realtime_processing_pause    = 0.15                # seconds between live partial updates. Lower = more responsive status; higher = less CPU.
+
+
+[output]   # how typed text leaves the daemon
+
+backend     = "wtype"   # "wtype" (Wayland virtual keyboard, default) | "ydotool" (kernel uinput, TTY/X fallback) | "tmux" (send-keys to a pane; used for tests and SSH). The daemon auto-falls-back from wtype to ydotool on failure.
+tmux_target = ""        # used ONLY when backend = "tmux", e.g. "voicetest:0.0" (session:window.pane). Ignored for wtype/ydotool.
+append_space = true     # append one trailing space after each final so consecutive utterations flow as words. false = type text verbatim.
+
+
+[feedback]   # runtime state file + Hyprland notifications
+
+state_file  = ""        # "" (empty) -> resolved at runtime to $XDG_RUNTIME_DIR/voice-typing/state.json (set by systemd user sessions). Set an absolute path to override. If empty AND XDG_RUNTIME_DIR is unset, the daemon raises at write time (no silent fallback). Leave empty for normal use.
+hypr_notify = true      # show a hyprctl notify one-liner for start/partial/final/stop. Requires Hyprland; harmless elsewhere (the notify call is skipped when false).
+notify_ms   = 2500      # how long the hyprctl notification stays on screen, in milliseconds.
+
+
+[filter]   # post-recognition text cleanup (consumed by textproc.clean)
+
+min_chars = 2           # finals shorter than this many characters are dropped (filters out "oh", "huh", etc.). Set 1 to type everything.
+blocklist = [           # EXACT, case-insensitive matches that are dropped instead of typed. These are the classic Whisper silence hallucinations. Add your own; remove any you actually say.
+  "thank you.",                   # most common hallucination
+  "thanks for watching.",         # YouTube-style filler
+  "you",                          # single-word false positive
+  "bye.",                         # sign-off hallucination
+  "thank you for watching",       # long-form filler
+]

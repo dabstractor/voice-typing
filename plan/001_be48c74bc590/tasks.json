@@ -125,14 +125,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Configuration & Text Processing (pure-Python, GPU-free, testable early)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement the config dataclass + tomllib loader (with the documented search order and default config.toml) and the textproc.clean() normalizer/hallucination-filter. Both are pure Python with no GPU dependency, so they can be built and unit-tested immediately.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "config.py — dataclasses + tomllib loader + default config.toml",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Define the config dataclasses matching PRD §4.5 and a loader with the search order XDG_CONFIG_HOME → repo config.toml → built-in defaults.",
               "subtasks": [
                 {
@@ -155,7 +155,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Write self-documenting default config.toml",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -171,14 +171,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "textproc.py — clean() normalizer + hallucination filter",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the pure-Python text cleaner that strips whitespace/newlines, enforces min length, and blocks Whisper silence-hallucinations.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "clean(text) implementation + tests/test_textproc.py (= test T2)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"
