@@ -197,14 +197,14 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "IO Backends — typing output + feedback/state",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement the three typing backends (wtype default, ydotool fallback, tmux for tests/SSH) behind a common interface with automatic wtype→ydotool fallback, and the feedback module that writes atomic state.json and fires hyprctl notifications.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "typing_backends.py — wtype / ydotool / tmux + auto-fallback",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Define the TypingBackend interface and the three implementations, including automatic fallback from wtype to ydotool on failure.",
               "subtasks": [
                 {
@@ -227,7 +227,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Unit tests for typing backends (subprocess mocked)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -244,14 +244,14 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "feedback.py — atomic state.json + hyprctl notify + status.sh",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement the feedback module: an atomic state-file writer (throttled) that the tmux status consumes, plus fire-and-forget hyprctl notifications on listening-start/final/stop only.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "State-file writer + hyprctl notify + status.sh helper",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"
