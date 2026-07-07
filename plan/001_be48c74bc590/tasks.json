@@ -285,7 +285,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "cfg_to_kwargs + recorder construction + partial/state callback wiring + CPU fallback",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S1",
@@ -304,7 +304,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Listen-forever loop + on_final→type + listening gate + toggle (set_microphone+abort)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1",
