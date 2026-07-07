@@ -444,21 +444,21 @@
           "type": "Milestone",
           "id": "P1.M6",
           "title": "Installation & systemd user service",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Idempotent install.sh (uv sync, prefetch, CUDA smoke, service install/reload/enable/start, print tmux + hypr snippets) and the systemd user service unit that starts the daemon un-armed via the LD_LIBRARY_PATH launcher wrapper.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "install.sh + systemd/voice-typing.service",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The idempotent installer and the systemd user unit wired to the launcher wrapper.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Idempotent install.sh (sync, prefetch, CUDA smoke, service, print snippets)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T3.S1",
@@ -479,7 +479,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T1.S2",
                   "title": "systemd/voice-typing.service unit (ExecStart→wrapper, un-armed, auto-restart)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M6.T1.S1"
