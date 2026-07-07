@@ -234,3 +234,17 @@ def test_module_level_load_matches_classmethod(tmp_path, monkeypatch):
     monkeypatch.setattr(cfgmod, "_xdg_config_path", lambda: str(tmp_path / "x.toml"))
     monkeypatch.setattr(cfgmod, "_repo_config_path", lambda: str(tmp_path / "r.toml"))
     assert cfgmod.load() == VoiceTypingConfig()
+
+
+# ---------------------------------------------------------------------------
+# [log] config (P1.M4.T1.S3 — daemon logging verbosity)
+# ---------------------------------------------------------------------------
+
+def test_log_config_default_and_override():
+    """LogConfig.level defaults to INFO and round-trips through TOML (PRD §4.2)."""
+    from voice_typing.config import LogConfig, VoiceTypingConfig
+    assert VoiceTypingConfig().log.level == "INFO"
+    assert LogConfig(level="DEBUG").level == "DEBUG"
+    # round-trips through TOML
+    cfg = VoiceTypingConfig.from_toml({"log": {"level": "DEBUG"}})
+    assert cfg.log.level == "DEBUG"

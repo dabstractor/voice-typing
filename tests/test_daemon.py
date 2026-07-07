@@ -16,6 +16,7 @@ Run:
 from __future__ import annotations
 
 import logging
+import re
 
 import pytest
 
@@ -549,3 +550,174 @@ def test_run_sets_uptime_after_start():
         assert d.uptime_s >= 0.0
     finally:
         d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)
+
+
+# ===========================================================================
+# P1.M4.T1.S3 — Per-utterance latency logging (LatencyLog + structured log line + device log)
+# (ADDITIVE — everything above is S1+S2; do not change it.)
+# ===========================================================================
+# NOTE: `re` + `time as _time` are imported at module top (S1/S2 sections) — reused here.
+
+
+# --- LatencyLog unit tests ---
+
+
+def test_latencylog_partial_count_and_reset():
+    lat = daemon.LatencyLog()
+    lat.note_partial("a")
+    lat.note_partial("b")
+    rec = lat.finalize_utterance(text="ab", t_final_ready=10.0, t_typed=10.05)
+    assert rec["partials"] == 2
+    # reset: a new finalize with no partials between reads 0
+    rec2 = lat.finalize_utterance(text="x", t_final_ready=11.0, t_typed=11.01)
+    assert rec2["partials"] == 0
+
+
+def test_latencylog_speech_end_and_deltas():
+    lat = daemon.LatencyLog()
+    t0 = _time.monotonic()
+    lat.note_speech_end()
+    rec = lat.finalize_utterance(text="hi", t_final_ready=t0 + 0.600, t_typed=t0 + 0.634)
+    assert rec["t_speech_end"] is not None
+    assert rec["speech_end_to_final_ms"] == 600.0   # 0.600s -> 600.0ms (rounded 0.1)
+    assert rec["final_to_typed_ms"] == 34.0          # 0.034s -> 34.0ms
+    assert rec["total_ms"] == 634.0
+
+
+def test_latencylog_no_speech_end_yields_na_deltas():
+    lat = daemon.LatencyLog()
+    rec = lat.finalize_utterance(text="hi", t_final_ready=5.0, t_typed=5.02)
+    assert rec["t_speech_end"] is None
+    assert rec["speech_end_to_final_ms"] is None
+    assert rec["total_ms"] is None
+    assert rec["final_to_typed_ms"] == 20.0          # always present
+
+
+def test_latencylog_ring_buffer_bounded_and_snapshot_copy():
+    lat = daemon.LatencyLog(ring_size=3)
+    for i in range(5):
+        lat.finalize_utterance(text=str(i), t_final_ready=float(i), t_typed=float(i) + 0.01)
+    snap = lat.snapshot()
+    assert [r["text"] for r in snap] == ["2", "3", "4"]   # oldest evicted; newest last
+    snap.append("mutate")                                  # snapshot is a copy
+    assert len(lat.snapshot()) == 3
+
+
+# --- _build_callbacks(fb, latency) wiring ---
+
+
+def test_build_callbacks_threads_latency_into_partial_and_vad_stop():
+    fb = _FakeFeedback()
+    lat = daemon.LatencyLog()
+    cb = daemon._build_callbacks(fb, lat)
+    cb["on_realtime_transcription_stabilized"]("hello")
+    cb["on_realtime_transcription_stabilized"]("hello world")
+    cb["on_vad_stop"]()
+    assert fb.partials == ["hello", "hello world"]          # feedback still driven
+    assert fb.phases == ["listening"]                        # set_phase still driven
+    rec = lat.finalize_utterance(text="hello world", t_final_ready=1.0, t_typed=1.02)
+    assert rec["partials"] == 2
+    assert rec["t_speech_end"] is not None                  # note_speech_end fired
+
+
+def test_build_callbacks_latency_none_is_noop():
+    # S1 behavior preserved: latency=None -> no extra side effect; phases/partials unchanged.
+    fb = _FakeFeedback()
+    cb = daemon._build_callbacks(fb, None)
+    cb["on_realtime_transcription_stabilized"]("hi")
+    cb["on_vad_stop"]()
+    assert fb.partials == ["hi"]
+    assert fb.phases == ["listening"]
+
+
+# --- on_final emits the structured latency line + populates the ring buffer ---
+
+
+def _grep_latency_line(messages):
+    for m in messages:
+        if m.startswith(daemon._LATENCY_LOG_PREFIX) and "event=utterance_final" in m:
+            return m
+    return None
+
+
+def test_on_final_emits_structured_latency_line(caplog):
+    d, fb, rec, be = _make_daemon()
+    d._latency.note_speech_end()
+    _time.sleep(0.001)
+    with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
+        d.start()
+        d.on_final("hello world")
+    line = _grep_latency_line([r.getMessage() for r in caplog.records])
+    assert line is not None, "no latency line emitted"
+    assert line.startswith("voice-typing latency: event=utterance_final")
+    assert "final_to_typed_ms=" in line and "total_ms=" in line and "partials=" in line
+    assert "speech_end_to_final_ms=" in line and "ts_epoch=" in line
+    assert "text='hello world'" in line          # %r of cleaned text
+    # total_ms is a number (t_speech_end was set) -> not n/a
+    assert re.search(r"total_ms=\d", line)
+    # S2 behavior preserved:
+    assert be.typed == ["hello world "] and fb.finals == ["hello world"]
+
+
+def test_on_final_latency_line_na_when_no_vad_stop(caplog):
+    d, fb, rec, be = _make_daemon()
+    with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
+        d.start()
+        d.on_final("quick")              # no note_speech_end -> t_speech_end None
+    line = _grep_latency_line([r.getMessage() for r in caplog.records])
+    assert line is not None
+    assert "speech_end_to_final_ms=n/a" in line
+    assert "total_ms=n/a" in line
+    assert re.search(r"final_to_typed_ms=\d", line)      # always numeric
+    # ring buffer still got a record
+    snap = d._latency.snapshot()
+    assert len(snap) == 1 and snap[0]["text"] == "quick"
+
+
+def test_on_final_populates_ring_buffer_snapshot():
+    d, _, _, _ = _make_daemon()
+    d._latency.note_speech_end()
+    d.start()
+    d.on_final("one")
+    d._latency.note_speech_end()
+    d.on_final("two")
+    snap = d._latency.snapshot()
+    assert [r["text"] for r in snap] == ["one", "two"]
+
+
+def test_on_final_rejected_hallucination_emits_no_latency_line(caplog):
+    d, _, _, _ = _make_daemon()
+    with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
+        d.start()
+        d.on_final("thank you.")         # blocklist -> clean() None -> early return
+    line = _grep_latency_line([r.getMessage() for r in caplog.records])
+    assert line is None
+    assert d._latency.snapshot() == []
+
+
+# --- run() logs the resolved device/models at startup ---
+
+
+def test_run_logs_resolved_device_at_startup(monkeypatch, caplog):
+    # Force a deterministic cuda resolution so the startup line is stable + hermetic.
+    monkeypatch.setattr(
+        daemon.cuda_check,
+        "resolve_device_and_models",
+        lambda defaults=None: {"device": "cuda", "compute_type": "float16",
+                               "final_model": "distil-large-v3", "realtime_model": "small.en"},
+    )
+    d, _, _, _ = _make_daemon()
+    import threading
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: any("device resolved" in r.getMessage() for r in caplog.records)
+                  if caplog.records else False, timeout=2.0) or None
+        msgs = [r.getMessage() for r in caplog.records]
+    finally:
+        d.request_shutdown()
+        _wait_for(lambda: not t.is_alive(), timeout=2.0)
+        t.join(timeout=2.0)
+    assert any("voice-typing device resolved:" in m for m in msgs), msgs
+    dev_line = next(m for m in msgs if "device resolved" in m)
+    assert "device=cuda" in dev_line and "final_model=distil-large-v3" in dev_line

@@ -59,3 +59,12 @@ blocklist = [           # EXACT, case-insensitive matches that are dropped inste
   "bye.",                         # sign-off hallucination
   "thank you for watching",       # long-form filler
 ]
+
+
+[log]   # daemon logging verbosity (PRD §4.2)
+
+# "INFO" emits one structured latency line per typed utterance + the startup device/models line.
+# "DEBUG" additionally emits the raw monotonic timestamps per utterance (use when finals exceed
+# the 1.5s target to see exact t_speech_end/t_final_ready/t_typed).
+# Under systemd these flow to journald: `journalctl --user -u voice-typing -f`.
+level = "INFO"

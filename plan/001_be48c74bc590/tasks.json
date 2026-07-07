@@ -278,7 +278,7 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "RealtimeSTT recorder wiring + listen-forever loop + toggle",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Construct the AudioToTextRecorder from config (applying the CUDA/CPU device decision), wire partial + VAD-state callbacks to feedback, run the continuous dictation loop, gate output on the listening flag, and implement pause/resume keeping models resident.",
               "subtasks": [
                 {
@@ -323,7 +323,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S3",
                   "title": "Per-utterance latency logging (timestamps the tests read)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T1.S2"
@@ -348,7 +348,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "Socket server: toggle/start/stop/status/quit JSON protocol",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S2"

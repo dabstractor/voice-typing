@@ -42,6 +42,7 @@ def test_repo_config_toml_has_no_extra_keys():
         "output": {"backend", "tmux_target", "append_space"},
         "feedback": {"state_file", "hypr_notify", "notify_ms"},
         "filter": {"min_chars", "blocklist"},
+        "log": {"level"},
     }
     assert set(data.keys()) == set(expected.keys()), data.keys()
     for section, keys in expected.items():

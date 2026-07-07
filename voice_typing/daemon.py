@@ -63,6 +63,7 @@ importing AudioToTextRecorder (so import purity holds).
 """
 from __future__ import annotations
 
+import collections
 import inspect
 import logging
 import threading
@@ -148,22 +149,36 @@ def cfg_to_kwargs(cfg: VoiceTypingConfig) -> dict[str, Any]:
     return kwargs
 
 
-def _build_callbacks(feedback: "Feedback") -> dict[str, Callable[..., None]]:
-    """Wire RealtimeSTT callbacks -> Feedback (PRD §4.2; item contract point 3).
+def _build_callbacks(
+    feedback: "Feedback", latency: "LatencyLog | None" = None
+) -> dict[str, Callable[..., None]]:
+    """Wire RealtimeSTT callbacks -> Feedback (+ optional LatencyLog; PRD §4.2; P1.M4.T1.S3).
 
-      on_realtime_transcription_stabilized(str) -> feedback.update_partial(text)
+      on_realtime_transcription_stabilized(str) -> feedback.update_partial(text) [+ latency.note_partial]
       on_vad_detect_start() -> feedback.set_phase("listening")   # system starts listening for VAD
       on_vad_start()        -> feedback.set_phase("speaking")    # voice activity detected
       on_vad_stop()         -> feedback.set_phase("listening")   # voice ended -> back to listening
+                           [+ latency.note_speech_end  (t_speech_end for the latency log)]
 
-    Callbacks are simple direct delegations (no try/except) — Feedback is designed robust and the
-    on_final typing-error handling belongs to S2, not these partial/VAD hooks.
+    `latency` is OPTIONAL (default None) so S1's callers (1-arg) keep working unchanged: when None,
+    the partial/on_vad_stop callbacks behave exactly as S1 (no extra side effect). VoiceTypingDaemon
+    passes its LatencyLog so the per-utterance latency log gets t_speech_end + partial count.
     """
+    def _partial(text: str) -> None:
+        feedback.update_partial(text)
+        if latency is not None:
+            latency.note_partial(text)
+
+    def _vad_stop() -> None:
+        feedback.set_phase("listening")
+        if latency is not None:
+            latency.note_speech_end()
+
     return {
-        _PARTIAL_CALLBACK_ATTR: lambda text: feedback.update_partial(text),
+        _PARTIAL_CALLBACK_ATTR: _partial,
         "on_vad_detect_start": lambda: feedback.set_phase("listening"),
         "on_vad_start": lambda: feedback.set_phase("speaking"),
-        "on_vad_stop": lambda: feedback.set_phase("listening"),
+        "on_vad_stop": _vad_stop,
     }
 
 
@@ -200,27 +215,34 @@ def _filter_kwargs_to_signature(
 
 
 def _construct(
-    cfg: VoiceTypingConfig, feedback: "Feedback", recorder_cls: type
+    cfg: VoiceTypingConfig,
+    feedback: "Feedback",
+    recorder_cls: type,
+    latency: "LatencyLog | None" = None,
 ) -> Any:
     """Build kwargs + callbacks, defensively filter to the signature, construct recorder_cls.
 
     Split out from build_recorder() so unit tests pass a fake recorder_cls and NEVER import
     RealtimeSTT / load models / touch CUDA. build_recorder() is the thin production wrapper that
-    supplies the real AudioToTextRecorder via a lazy import.
+    supplies the real AudioToTextRecorder via a lazy import. `latency` (optional, default None) is
+    threaded into _build_callbacks so on_vad_stop/partial feed the per-utterance latency log.
     """
     kwargs = cfg_to_kwargs(cfg)
-    kwargs.update(_build_callbacks(feedback))
+    kwargs.update(_build_callbacks(feedback, latency))
     filtered = _filter_kwargs_to_signature(kwargs, recorder_cls)
     return recorder_cls(**filtered)
 
 
-def build_recorder(cfg: VoiceTypingConfig, feedback: "Feedback") -> Any:
-    """Construct ONE AudioToTextRecorder wired to feedback (PRD §4.2, §4.4).
+def build_recorder(
+    cfg: VoiceTypingConfig, feedback: "Feedback", latency: "LatencyLog | None" = None
+) -> Any:
+    """Construct ONE AudioToTextRecorder wired to feedback (+ optional latency) (PRD §4.2, §4.4).
 
     Resolves device/models (CPU fallback), builds kwargs + callbacks, defensively filters to the
     installed RealtimeSTT signature, then constructs the recorder. Model load happens HERE (in
     __init__) and stays resident — the main loop (P1.M4.T1.S2) reuses this single recorder for the
-    daemon's lifetime. Returns the constructed AudioToTextRecorder.
+    daemon's lifetime. `latency` (optional) threads the per-utterance collector into on_vad_stop/
+    partial. Returns the constructed AudioToTextRecorder.
 
     Heavy: imports RealtimeSTT + loads models on first call (seconds). Unit tests call _construct()
     with a fake class instead; this function is exercised by the feed_audio test (P1.M7.T2.S1) and
@@ -228,7 +250,83 @@ def build_recorder(cfg: VoiceTypingConfig, feedback: "Feedback") -> Any:
     """
     from RealtimeSTT import AudioToTextRecorder  # lazy: keeps `import voice_typing.daemon` cheap
 
-    return _construct(cfg, feedback, AudioToTextRecorder)
+    return _construct(cfg, feedback, AudioToTextRecorder, latency)
+
+
+# --- Per-utterance latency logging (P1.M4.T1.S3; PRD §4.2 logging, §6 latency targets) ---------
+# A bounded ring buffer of recent utterance records + a structured log line the latency tests parse.
+# t_speech_end comes from the on_vad_stop callback (threaded in via _build_callbacks); t_final_ready
+# / t_typed come from on_final. All delta timestamps are time.monotonic() (NTP-safe); ts is wall epoch.
+_LATENCY_LOG_PREFIX = "voice-typing latency:"   # STABLE prefix — T1 greps this (do not rename)
+_LATENCY_RING_SIZE = 64
+
+
+def _ms(seconds: float) -> float:
+    """Seconds → milliseconds, rounded to 0.1 ms (log readability + stable parse)."""
+    return round(seconds * 1000.0, 1)
+
+
+class LatencyLog:
+    """Per-utterance latency capture for the latency tests (PRD §6 T1/T3; PRD §4.2 logging).
+
+    Fed by RealtimeSTT callbacks (note_partial/note_speech_end — wired via _build_callbacks) and by
+    VoiceTypingDaemon.on_final (finalize_utterance). Timestamps are time.monotonic() (delta-safe vs
+    NTP); a wall epoch `ts` is added for journal correlation. A bounded ring buffer (deque maxlen) of
+    recent records is queryable via snapshot() (future status cmd, P1.M4.T2.S1) + by tests.
+
+    Thread-safe: note_partial fires on the realtime thread, note_speech_end on the VAD thread,
+    finalize_utterance on the on_final worker thread, snapshot() on the socket thread — all short,
+    guarded by self._lock.
+    """
+
+    def __init__(self, *, ring_size: int = _LATENCY_RING_SIZE) -> None:
+        self._lock = threading.Lock()
+        self._records: collections.deque = collections.deque(maxlen=ring_size)
+        self._partial_count = 0
+        self._t_speech_end: float | None = None
+
+    def note_partial(self, _text: str) -> None:
+        """Count a realtime partial (partial CADENCE is T1's own measurement; we just count)."""
+        with self._lock:
+            self._partial_count += 1
+
+    def note_speech_end(self) -> None:
+        """Record t_speech_end (on_vad_stop — VAD closed = speech ended)."""
+        with self._lock:
+            self._t_speech_end = time.monotonic()
+
+    def finalize_utterance(self, *, text: str, t_final_ready: float, t_typed: float) -> dict:
+        """Build + store the per-utterance record; reset counters; return the record for logging.
+
+        t_speech_end may be None (no on_vad_stop seen) → the two *_ms fields derived from it are None
+        (rendered 'n/a' in the log line); final_to_typed_ms is always numeric.
+        """
+        with self._lock:
+            t_speech_end = self._t_speech_end
+            partials = self._partial_count
+            self._partial_count = 0
+            self._t_speech_end = None
+        record = {
+            "event": "utterance_final",
+            "t_speech_end": t_speech_end,
+            "t_final_ready": t_final_ready,
+            "t_typed": t_typed,
+            "speech_end_to_final_ms": _ms(t_final_ready - t_speech_end)
+                if t_speech_end is not None else None,
+            "final_to_typed_ms": _ms(t_typed - t_final_ready),
+            "total_ms": _ms(t_typed - t_speech_end) if t_speech_end is not None else None,
+            "partials": partials,
+            "text": text,
+            "ts": time.time(),
+        }
+        with self._lock:
+            self._records.append(record)
+        return record
+
+    def snapshot(self) -> list[dict]:
+        """Newest-last copy of the ring buffer (for status + tests)."""
+        with self._lock:
+            return list(self._records)
 
 
 class VoiceTypingDaemon:
@@ -247,6 +345,7 @@ class VoiceTypingDaemon:
         *,
         recorder: Any = None,
         backend: "TypingBackend | None" = None,
+        latency: "LatencyLog | None" = None,
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
@@ -254,9 +353,15 @@ class VoiceTypingDaemon:
         self._listening = threading.Event()   # cleared → NOT listening at boot (PRD §4.9)
         self._shutdown = threading.Event()    # cleared → keep looping
         self._start_monotonic: float | None = None
+        # Per-utterance latency collector (P1.M4.T1.S3): fed by on_vad_stop/partial (via
+        # build_recorder→_build_callbacks) + on_final. Injectable for tests; a real one otherwise.
+        self._latency = latency if latency is not None else LatencyLog()
         # construct-once (PRD §4.2): build recorder ONCE so models stay resident + toggle/start/stop
         # can arm the mic immediately. Injectable for unit tests (fakes → cheap, no RealtimeSTT).
-        self._recorder = recorder if recorder is not None else build_recorder(cfg, feedback)
+        # Pass self._latency so on_vad_stop/partial feed the latency log (PRD §4.2; P1.M4.T1.S3).
+        self._recorder = (
+            recorder if recorder is not None else build_recorder(cfg, feedback, self._latency)
+        )
         self._backend = (
             backend if backend is not None else typing_backends.make_backend(cfg.output)
         )
@@ -264,6 +369,8 @@ class VoiceTypingDaemon:
     def run(self) -> None:
         """The listen-forever loop (main thread, BLOCKS until shutdown)."""
         self._start_monotonic = time.monotonic()
+        self._configure_log_level()           # PRD §4.2: DEBUG via config (namespace logger; T3 adds handler)
+        self._log_resolved_device()           # PRD §4.2/acceptance T6: prove CUDA residency at startup
         self._feedback.set_listening(False)   # PRD §4.9: starts NOT listening (no hot-mic on boot)
         logger.info("voice-typing daemon ready (not listening); recorder resident")
         while not self._shutdown.is_set():
@@ -275,8 +382,42 @@ class VoiceTypingDaemon:
                 time.sleep(0.05)
         logger.info("shutdown requested; run() loop exiting")
 
+    def _configure_log_level(self) -> None:
+        """Apply cfg.log.level to the `voice_typing` namespace logger (PRD §4.2 'DEBUG via config').
+
+        Namespace-scoped only — NOT basicConfig (handler/root config is P1.M4.T3.S1's job). An invalid
+        level string is ignored (leave the default). Tests use pytest caplog (own handler).
+        """
+        log_cfg = getattr(self._cfg, "log", None)
+        level_name = log_cfg.level.upper() if log_cfg is not None else "INFO"
+        try:
+            logging.getLogger("voice_typing").setLevel(level_name)
+        except (ValueError, TypeError):
+            logger.warning("invalid log level %r; leaving default", getattr(log_cfg, "level", None))
+
+    def _log_resolved_device(self) -> None:
+        """Log the resolved device/models once at startup (CUDA residency proof; PRD acceptance T6).
+
+        Wrapped in try/except so a probe failure (odd env / missing ctranslate2 in a degraded run)
+        NEVER breaks the listen loop. Reuses S1's _resolve_device_config (the same resolution
+        build_recorder applied), so the logged device matches the recorder's actual device.
+        """
+        try:
+            resolved = _resolve_device_config(self._cfg)
+            logger.info(
+                "voice-typing device resolved: device=%s compute_type=%s final_model=%s "
+                "realtime_model=%s",
+                resolved["device"],
+                resolved["compute_type"],
+                resolved["final_model"],
+                resolved["realtime_model"],
+            )
+        except Exception:
+            logger.info("voice-typing device resolved: (resolution failed; see cuda_check logs)")
+
     def on_final(self, text: str) -> None:
-        """Gate → clean → type → record. Fired by RealtimeSTT in a NEW thread (never raise)."""
+        """Gate → clean → type → record + log latency. Fired by RealtimeSTT in a NEW thread."""
+        t_final_ready = time.monotonic()       # entry stamp (PRD §4.2 latency logging)
         if not self._listening.is_set():       # GATE: race guard (PRD §4.2/§8 — utterance may
             return                             #   complete right after stop)
         cleaned = textproc.clean(text, self._cfg.filter)
@@ -287,9 +428,32 @@ class VoiceTypingDaemon:
             self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
         except Exception:
             logger.exception("typing backend failed for final %r", cleaned)
+        t_typed = time.monotonic()             # right after type_text (PRD §4.2 latency logging)
         self._feedback.record_final(cleaned)   # recognition is final regardless of typing success
-        logger.info("final typed: %r", cleaned)
-        # NOTE: precise latency timestamps (t_speech_end/t_final_ready/t_typed) land in P1.M4.T1.S3.
+        record = self._latency.finalize_utterance(
+            text=cleaned, t_final_ready=t_final_ready, t_typed=t_typed
+        )
+        # Structured per-utterance latency line — T1 (test_feed_audio) parses this. Stable prefix +
+        # key=value tokens; text=<repr> is LAST (repr may contain spaces). *_ms are 'n/a' when no
+        # on_vad_stop preceded this final (t_speech_end is None). (PRD §6 latency targets.)
+        logger.info(
+            "%s event=%s speech_end_to_final_ms=%s final_to_typed_ms=%s total_ms=%s "
+            "partials=%d ts_epoch=%.3f text=%r",
+            _LATENCY_LOG_PREFIX,
+            record["event"],
+            record["speech_end_to_final_ms"] if record["speech_end_to_final_ms"] is not None else "n/a",
+            record["final_to_typed_ms"],
+            record["total_ms"] if record["total_ms"] is not None else "n/a",
+            record["partials"],
+            record["ts"],
+            cleaned,
+        )
+        logger.debug(
+            "voice-typing latency debug: t_speech_end=%s t_final_ready=%.4f t_typed=%.4f",
+            record["t_speech_end"] if record["t_speech_end"] is not None else "n/a",
+            record["t_final_ready"],
+            record["t_typed"],
+        )
 
     def _arm(self) -> None:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle."""

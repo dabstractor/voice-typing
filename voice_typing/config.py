@@ -114,6 +114,18 @@ class FilterConfig:
 
 
 @dataclass
+class LogConfig:
+    """[log] — daemon logging verbosity (PRD §4.2 'logging … at INFO; DEBUG via config').
+
+    `level` sets the `voice_typing` namespace logger level (applied in VoiceTypingDaemon.run). The
+    entry point (P1.M4.T3.S1) also reads this for basicConfig's handler/root level. "INFO" ships the
+    per-utterance latency line; "DEBUG" adds the raw monotonic-timestamp line.
+    """
+
+    level: str = "INFO"  # "INFO" | "DEBUG" (case-insensitive at apply time)
+
+
+@dataclass
 class VoiceTypingConfig:
     """Top-level config aggregating all PRD §4.5 sub-sections."""
 
@@ -121,6 +133,7 @@ class VoiceTypingConfig:
     output: OutputConfig = field(default_factory=OutputConfig)
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
     filter: FilterConfig = field(default_factory=FilterConfig)
+    log: LogConfig = field(default_factory=LogConfig)
 
     # --- construction from parsed TOML / files ---
 
@@ -149,6 +162,7 @@ class VoiceTypingConfig:
             output=_overlay(OutputConfig, "output"),
             feedback=_overlay(FeedbackConfig, "feedback"),
             filter=_overlay(FilterConfig, "filter"),
+            log=_overlay(LogConfig, "log"),
         )
 
     @classmethod
