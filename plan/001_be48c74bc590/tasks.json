@@ -197,7 +197,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "IO Backends — typing output + feedback/state",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement the three typing backends (wtype default, ydotool fallback, tmux for tests/SSH) behind a common interface with automatic wtype→ydotool fallback, and the feedback module that writes atomic state.json and fires hyprctl notifications.",
           "tasks": [
             {
@@ -244,14 +244,14 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "feedback.py — atomic state.json + hyprctl notify + status.sh",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Implement the feedback module: an atomic state-file writer (throttled) that the tmux status consumes, plus fire-and-forget hyprctl notifications on listening-start/final/stop only.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "State-file writer + hyprctl notify + status.sh helper",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -285,7 +285,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "cfg_to_kwargs + recorder construction + partial/state callback wiring + CPU fallback",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S1",
