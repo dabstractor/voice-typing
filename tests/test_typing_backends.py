@@ -327,3 +327,21 @@ def test_no_real_subprocess_run_during_tests(monkeypatch):
     result = subprocess.run(["wtype", "--", "x"], check=True)
     assert result.returncode == 0
     assert rec.argvs == [("wtype", "--", "x")]
+
+
+# ---------------------------------------------------------------------------
+# Issue 5 (P1.M2.T2.S2): the THREAD SAFETY module-docstring must NOT restate the
+# FALSE "The daemon serializes on_final calls, so no locking is needed" claim. It
+# must name the actual serialization mechanism — VoiceTypingDaemon._on_final_lock,
+# added by the sibling task P1.M2.T2.S1. Textual guard only (does not import daemon).
+# ---------------------------------------------------------------------------
+
+
+def test_module_docstring_names_on_final_serialization_lock():
+    """Issue 5 regression guard: THREAD SAFETY note names _on_final_lock; stale false claim gone."""
+    import voice_typing.typing_backends as typing_backends
+
+    doc = typing_backends.__doc__ or ""
+    assert "_on_final_lock" in doc, "THREAD SAFETY note must reference _on_final_lock"
+    assert "no locking is needed" not in doc, "stale FALSE claim removed (Issue 5)"
+    assert "serializes on_final calls" not in doc, "stale FALSE claim removed (Issue 5)"

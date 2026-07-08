@@ -379,3 +379,20 @@ def test_snapshot_reflects_recorded_final(tmp_path, monkeypatch):
     fb = Feedback(FeedbackConfig(state_file=str(tmp_path / "state.json")))
     fb.record_final("a final utterance")
     assert fb.snapshot()["last_final"] == "a final utterance"
+
+
+# ---------------------------------------------------------------------------
+# Issue 5 (P1.M2.T2.S2): the THREAD SAFETY module-docstring must NOT restate the
+# FALSE "The daemon serializes on_final anyway" claim. It must name the actual
+# serialization mechanism — VoiceTypingDaemon._on_final_lock (sibling P1.M2.T2.S1).
+# Textual guard only. NOTE: `feedback` is a fixture here, so use a distinct alias.
+# ---------------------------------------------------------------------------
+
+
+def test_module_docstring_names_on_final_serialization_lock():
+    """Issue 5 regression guard: THREAD SAFETY note names _on_final_lock; stale false claim gone."""
+    import voice_typing.feedback as feedback_module  # NOT `feedback` — that's a pytest fixture here
+
+    doc = feedback_module.__doc__ or ""
+    assert "_on_final_lock" in doc, "THREAD SAFETY note must reference _on_final_lock"
+    assert "serializes on_final anyway" not in doc, "stale FALSE claim removed (Issue 5)"

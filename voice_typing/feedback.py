@@ -29,10 +29,11 @@ never sees a half-written file. mkstemp creates the file mode 0o600 (Python 3 de
 the renamed state.json inherits 0o600. Parent dir makedirs(exist_ok=True, mode=0o700).
 
 THREAD SAFETY: Feedback methods are called from RealtimeSTT callback threads (partial/
-final) and the control-socket thread (set_listening). self._state dict updates are
-individually atomic in CPython, and _write()'s tempfile+os.replace is atomic at the OS
-level — a torn write is impossible. No Lock is needed (and would risk deadlock if a future
-caller recurses). The daemon serializes on_final anyway.
+final) and the control-socket thread (set_listening). on_final is serialized by the
+daemon's _on_final_lock (VoiceTypingDaemon). Additionally, self._state dict updates are
+individually atomic in CPython, and _write() uses tempfile + os.replace (atomic at OS
+level) — a torn write is impossible. Feedback itself needs no Lock (it relies on these
+atomic primitives; a lock here would risk deadlock if a future caller recurses).
 
 CONSUMES: voice_typing.config.FeedbackConfig (P1.M2.T1.S1): state_file, hypr_notify, notify_ms.
   resolved_state_file() is the SINGLE source of truth for the path — called lazily inside
@@ -142,7 +143,8 @@ class Feedback:
         For low-latency status reads (the control socket `status` cmd) WITHOUT hitting the
         throttled state.json on disk (which lags >=10 Hz). Returns a COPY (dict(self._state)) so
         a concurrent reader never aliases the live dict the callback threads mutate. CPython dict
-        copy is atomic; no Lock needed (Feedback is designed lock-free).
+        copy is atomic; no Lock is needed in Feedback itself (it is designed lock-free — on_final
+        serialization is the daemon's _on_final_lock; see the THREAD SAFETY note above).
         """
         return dict(self._state)
 

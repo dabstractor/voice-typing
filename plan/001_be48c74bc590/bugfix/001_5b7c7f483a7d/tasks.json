@@ -181,7 +181,7 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Fix on_final concurrency invariant — add serialization lock and correct docstrings",
-              "status": "Researching",
+              "status": "Complete",
               "description": "typing_backends.py:19-23 and feedback.py:31-35 claim 'the daemon serializes on_final calls'. This is false: RealtimeSTT fires on_final via threading.Thread(...).start() (transcription_api.py:40-42), and on_final at daemon.py:450-489 has no lock. Two callbacks can run concurrently, potentially interleaving typed output. Add a serialization lock to make the invariant true, then correct the docstrings.",
               "subtasks": [
                 {
@@ -202,7 +202,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S2",
                   "title": "Correct THREAD SAFETY docstrings to reflect actual serialization",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M2.T2.S1"
@@ -220,14 +220,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Add portaudio preflight to install.sh",
-              "status": "Planned",
+              "status": "Ready",
               "description": "install.sh has no portaudio/pacman check. PRD §5 step 2 mandates 'pacman -Q portaudio || sudo pacman -S --noconfirm portaudio'. Without portaudio, uv sync installs the PyAudio wheel but the daemon fails at PyAudio construction with a confusing dlopen error.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Add portaudio preflight check to install.sh",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: install.sh has set -euo pipefail at line 25. Preflight checks are at lines 36-42: XDG_RUNTIME_DIR set (37-40), uv present (41), systemctl present (42). There is NO portaudio check (grep -in portaudio install.sh → no match). On this machine portaudio 1:19.7.0-4 is already installed. PRD §5 step 2 (PRD.md:261) says 'pacman -Q portaudio || sudo pacman -S --noconfirm portaudio'. PRD §2 notes that if sudo is unavailable non-interactively, the user should be asked to run it manually. README.md:18 already documents portaudio as a requirement.\n2. INPUT: install.sh lines 36-42 (the preflight block, after which the check should be inserted). The pacman command availability.\n3. LOGIC: Insert a portaudio preflight check immediately after the systemctl check at install.sh:42. The check should: (a) verify pacman is available (command -v pacman); if not, print a warning about non-Arch hosts and continue (don't hard-fail). (b) If pacman is available, run 'pacman -Q portaudio' to check if the package is installed. (c) If portaudio is NOT installed, print an actionable message to stderr: 'install.sh: portaudio not installed (PyAudio system dependency). Run: sudo pacman -S --noconfirm portaudio, then re-run ./install.sh' and exit 1. (d) Use if ! ... >/dev/null 2>&1; then ... pattern to handle set -e safely (the pacman -Q return code must not abort the script under set -e). Mirror the existing preflight idiom (echo to stderr, exit 1).\n4. OUTPUT: install.sh now checks for portaudio before proceeding to uv sync. A host without portaudio gets an actionable message and exit 1 instead of a confusing PyAudio dlopen failure later.\n5. DOCS: Mode A — README.md:18 already documents the portaudio requirement. If the README's Install section (lines 21-37) mentions preflight checks, note that install.sh now verifies portaudio automatically. The installer's own stdout output is the primary user-facing doc for this.",

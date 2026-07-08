@@ -16,11 +16,11 @@ unusable binary (subprocess.CalledProcessError / OSError, which includes FileNot
 logs a WARNING and retries ONCE via ydotool. If the fallback also raises, the exception
 propagates to the caller (the daemon logs/handles it) — it is never silently swallowed.
 
-THREAD SAFETY: type_text is safe to call from the daemon's on_final callback thread.
-The backends hold NO shared mutable state (Wtype/Ydotool are stateless; TmuxBackend
-stores one immutable tmux_target at construction), and subprocess.run spawns an
-independent child process per call (reentrant). The daemon serializes on_final calls,
-so no locking is needed.
+THREAD SAFETY: type_text is called from the daemon's on_final callback thread. on_final
+is serialized by the daemon's _on_final_lock (VoiceTypingDaemon), so only one type_text
+call executes at a time. The backends are also individually safe: WtypeBackend/
+YdotoolBackend are stateless and spawn an independent child subprocess per call;
+TmuxBackend stores one immutable tmux_target at construction.
 
 NEVER EMIT ENTER/NEWLINE: the backends type EXACTLY the text passed (no trailing
 newline). textproc.clean() already stripped trailing newlines/whitespace; the daemon
