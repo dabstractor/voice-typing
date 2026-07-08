@@ -920,6 +920,113 @@ def _resolve_log_level(level_name: object) -> int:
     return level if isinstance(level, int) else logging.INFO
 
 
+def _extract_mic_retry_error(message: str) -> str:
+    """Pull <e> out of 'Microphone connection failed: <e>. Retrying...'.
+
+    Returns <e> (or the whole message as a fallback). Keeps the periodic mic-retry summary
+    actionable (bugfix Issue 2 / P1.M1.T2.S3): it names the most recent failure instead of
+    just counting attempts. Strips the known prefix + suffix; falls back to the full message
+    if the shape differs.
+    """
+    prefix = "Microphone connection failed: "
+    suffix = ". Retrying..."
+    text = message
+    if text.startswith(prefix):
+        text = text[len(prefix):]
+    if text.endswith(suffix):
+        text = text[: -len(suffix)]
+    return text
+
+
+def _summarize_mic_retry(record: logging.LogRecord, count: int, message: str) -> None:
+    """Rewrite a mic-retry LogRecord IN PLACE into a single WARNING summary (no traceback).
+
+    Bugfix Issue 2 / P1.M1.T2.S3. CPython Formatter.format appends record.exc_text (a CACHE of
+    the traceback) if truthy, so BOTH exc_info and exc_text must be cleared to fully strip the
+    traceback. getMessage() is not cached, so rewriting record.msg + record.args changes the
+    formatted text. Runs inside a logging.Filter (documented: 'the record may be modified
+    in-place'), before callHandlers -> handler.emit -> Formatter.format.
+    """
+    record.levelno = logging.WARNING
+    record.levelname = "WARNING"
+    record.exc_info = None
+    record.exc_text = None
+    record.msg = (
+        f"Microphone still unavailable after {count} retry attempts "
+        f"(last error: {_extract_mic_retry_error(message)})"
+    )
+    record.args = ()
+
+
+class MicRetryRateLimitFilter(logging.Filter):
+    """Rate-limit RealtimeSTT's per-retry 'Microphone connection failed' ERROR+traceback spam.
+
+    Bugfix Issue 2 / P1.M1.T2.S3. RealtimeSTT's AudioInputWorker retries the mic in an
+    infinite ~3-second loop (core/audio_input_worker.py:162), logging a full traceback
+    (exc_info=True) on EVERY attempt -> thousands of identical errors in journald (2822+
+    observed on the live daemon). Attached to the 'realtimestt' logger via
+    _install_mic_retry_rate_limiter (called from _setup_logging) so a SINGLE filter gates
+    records in Logger.handle BEFORE callHandlers -> it suppresses BOTH the library's own
+    console handler AND propagation to the root stderr/journald handler (CPython:
+    Filterer.filter runs before callHandlers; RealtimeSTT leaves propagate=True).
+
+    Behavior:
+      - first occurrence (count==1): pass through unchanged (the full ERROR+traceback logs ONCE);
+      - subsequent within `dedup_seconds` of the last emitted record, not on a summary tick:
+        SUPPRESSED (return False);
+      - on every `summary_every`-th occurrence OR once `dedup_seconds` elapsed since the last
+        emitted record: rewrite the record in place to a WARNING summary WITHOUT a traceback
+        ('Microphone still unavailable after N retry attempts (last error: <e>)'), pass through.
+
+    This throttles the LOG line only — it does NOT stop the actual ~3s mic retry (that loop
+    lives in the spawned worker thread). Match key: record.getMessage() contains
+    'Microphone connection failed' (robust for f-string and %-style call sites). Non-matching
+    records pass through untouched and do NOT increment the counter.
+    """
+
+    def __init__(self, dedup_seconds: float = 60.0, summary_every: int = 20) -> None:
+        super().__init__()
+        self.dedup_seconds = float(dedup_seconds)
+        self.summary_every = max(1, int(summary_every))
+        self._count = 0
+        self._last_seen = 0.0  # time.monotonic() of the last EMITTED record; 0.0 == never
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "Microphone connection failed" not in message:
+            return True  # unrelated record — never touch it (counter stays clean)
+        self._count += 1
+        now = time.monotonic()
+        if self._count == 1:
+            self._last_seen = now  # first ever: let the full ERROR + traceback through once
+            return True
+        if (
+            now - self._last_seen >= self.dedup_seconds
+            or self._count % self.summary_every == 0
+        ):
+            _summarize_mic_retry(record, self._count, message)
+            self._last_seen = now
+            return True
+        return False  # within the window and not a summary tick — drop the per-attempt spam
+
+
+def _install_mic_retry_rate_limiter(logger_name: str = "realtimestt") -> None:
+    """Attach the mic-retry rate-limit filter to the named logger, IDEMPOTENTLY.
+
+    Bugfix Issue 2 / P1.M1.T2.S3. Removes any already-attached MicRetryRateLimitFilter first,
+    so repeated _setup_logging calls (main() may invoke it on the config-load-fail fallback
+    path AND the normal path) never double-register. CPython addFilter/removeFilter are NOT
+    lock-protected and use __eq__ (distinct instances both register), so this reset-then-add
+    is the safe pattern; it is called once per _setup_logging from the MAIN thread (never
+    concurrently). A fresh instance also resets the dedup counter, so re-calling _setup_logging
+    cannot leave stale state from a prior run.
+    """
+    target = logging.getLogger(logger_name)
+    for existing in [f for f in target.filters if isinstance(f, MicRetryRateLimitFilter)]:
+        target.removeFilter(existing)
+    target.addFilter(MicRetryRateLimitFilter())
+
+
 def _setup_logging(level_name: object) -> None:
     """Configure stderr logging at the resolved level (PRD §4.2; P1.M4.T3.S1).
 
@@ -932,12 +1039,18 @@ def _setup_logging(level_name: object) -> None:
     the resolved level. The SAME cfg.log.level is read by run()'s _configure_log_level -> root
     handler + namespace logger agree, so 'DEBUG' actually shows debug records (not just passes the
     namespace gate).
+
+    Also attaches (idempotently) a MicRetryRateLimitFilter to the 'realtimestt' logger so the
+    library's per-~3s 'Microphone connection failed' ERROR+traceback spam logs once then degrades
+    to periodic WARNING summaries (bugfix Issue 2 / P1.M1.T2.S3).
     """
     logging.basicConfig(
         stream=sys.stderr,
         level=_resolve_log_level(level_name),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # bugfix Issue 2 / P1.M1.T2.S3: rate-limit RealtimeSTT's per-retry mic traceback spam.
+    _install_mic_retry_rate_limiter("realtimestt")
 
 
 def main() -> int:

@@ -1316,3 +1316,171 @@ def test_make_daemon_injection_is_hermetic_no_real_pyaudio():
     assert d._mic_prober is _ok_probe
     assert d._mic_ok is True        # the stub reported healthy
     assert "pyaudio" not in sys.modules or True  # (informational; other tests may have imported it)
+
+
+# ===========================================================================
+# bugfix P1.M1.T2.S3 — rate-limit RealtimeSTT mic-retry traceback spam
+# (MicRetryRateLimitFilter + _install_mic_retry_rate_limiter + _setup_logging wiring.
+#  ADDITIVE: pure filter-logic unit tests (deterministic daemon.time.monotonic) + an
+#  idempotent-install integration test + a chokepoint test. ZERO real RealtimeSTT/mic/CUDA.)
+# ===========================================================================
+
+
+def _mic_retry_record(
+    msg="Microphone connection failed: boom. Retrying...",
+    level=logging.ERROR,
+    exc_info=None,
+):
+    return logging.LogRecord(
+        name="realtimestt",
+        level=level,
+        pathname=__file__,
+        lineno=1,
+        msg=msg,
+        args=(),
+        exc_info=exc_info,
+    )
+
+
+def _fixed_clock(monkeypatch, t):
+    """Freeze daemon.time.monotonic at t (deterministic dedup-window tests)."""
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: t)
+
+
+def test_mic_retry_filter_passes_unrelated_records_untouched():
+    f = daemon.MicRetryRateLimitFilter()
+    rec = _mic_retry_record(msg="Microphone connected and validated (device index: 2)")
+    assert f.filter(rec) is True          # transparent
+    assert f._count == 0                  # unrelated records do NOT increment the counter
+    assert rec.levelno == logging.ERROR    # record untouched
+
+
+def test_mic_retry_filter_first_occurrence_passes_through_unchanged(monkeypatch):
+    _fixed_clock(monkeypatch, 0.0)
+    f = daemon.MicRetryRateLimitFilter()
+    rec = _mic_retry_record()
+    assert f.filter(rec) is True
+    assert rec.levelno == logging.ERROR            # level preserved (full error once)
+    assert "Microphone connection failed" in rec.getMessage()  # message preserved
+    assert f._count == 1
+
+
+def test_mic_retry_filter_first_occurrence_preserves_traceback(monkeypatch):
+    _fixed_clock(monkeypatch, 0.0)
+    f = daemon.MicRetryRateLimitFilter()
+    try:
+        raise RuntimeError("portaudio exploded")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    rec = _mic_retry_record(
+        msg="Microphone connection failed: portaudio exploded. Retrying...",
+        exc_info=exc_info,
+    )
+    assert f.filter(rec) is True
+    assert rec.exc_info is exc_info      # traceback preserved on the first pass
+    assert rec.exc_text is None           # not yet formatted/cached
+    assert rec.levelno == logging.ERROR
+
+
+def test_mic_retry_filter_suppresses_repeats_within_window(monkeypatch):
+    f = daemon.MicRetryRateLimitFilter(dedup_seconds=60, summary_every=20)
+    _fixed_clock(monkeypatch, 0.0)
+    assert f.filter(_mic_retry_record()) is True      # count=1: first (pass)
+    for i in range(2, 20):                             # every ~3s, well within the 60s window
+        _fixed_clock(monkeypatch, (i - 1) * 3.0)
+        assert f.filter(_mic_retry_record()) is False  # count=2..19: suppressed
+    assert f._count == 19
+
+
+def test_mic_retry_filter_summary_on_nth_occurrence(monkeypatch):
+    f = daemon.MicRetryRateLimitFilter(dedup_seconds=60, summary_every=20)
+    _fixed_clock(monkeypatch, 0.0)
+    assert f.filter(_mic_retry_record()) is True       # count=1: first (full error)
+    for i in range(2, 20):
+        _fixed_clock(monkeypatch, (i - 1) * 3.0)
+        assert f.filter(_mic_retry_record()) is False  # 2..19 suppressed
+    _fixed_clock(monkeypatch, 19 * 3.0)                # 57s: within window, but count%20==0
+    summary = _mic_retry_record()
+    assert f.filter(summary) is True                   # count=20: summary tick
+    assert summary.levelno == logging.WARNING
+    assert summary.levelname == "WARNING"
+    assert summary.exc_info is None and summary.exc_text is None   # CRITICAL #2
+    text = summary.getMessage()
+    assert "Microphone still unavailable after 20 retry attempts" in text
+    assert "last error: boom" in text
+    assert f._count == 20
+
+
+def test_mic_retry_filter_summary_after_dedup_window(monkeypatch):
+    # summary_every huge so ONLY the elapsed-window triggers a summary
+    f = daemon.MicRetryRateLimitFilter(dedup_seconds=60, summary_every=10_000)
+    _fixed_clock(monkeypatch, 0.0)
+    assert f.filter(_mic_retry_record()) is True       # count=1 @ t=0
+    _fixed_clock(monkeypatch, 3.0)
+    assert f.filter(_mic_retry_record()) is False      # count=2 suppressed
+    _fixed_clock(monkeypatch, 70.0)                    # > 60s since last emitted record
+    summary = _mic_retry_record()
+    assert f.filter(summary) is True                   # window elapsed -> summary
+    assert summary.levelno == logging.WARNING
+    assert "after 3 retry attempts" in summary.getMessage()
+
+
+def test_mic_retry_filter_count_is_cumulative(monkeypatch):
+    # dedup_seconds=0 -> window always elapsed -> every attempt past the first is a summary
+    f = daemon.MicRetryRateLimitFilter(dedup_seconds=0.0, summary_every=10_000)
+    _fixed_clock(monkeypatch, 0.0)
+    assert f.filter(_mic_retry_record()) is True                    # 1: first
+    _fixed_clock(monkeypatch, 1.0); s = _mic_retry_record()
+    assert f.filter(s) is True and "after 2 retry attempts" in s.getMessage()
+    _fixed_clock(monkeypatch, 2.0); s = _mic_retry_record()
+    assert f.filter(s) is True and "after 3 retry attempts" in s.getMessage()
+
+
+def test_extract_mic_retry_error_parses_message():
+    assert daemon._extract_mic_retry_error(
+        "Microphone connection failed: Selected device validation failed. Retrying..."
+    ) == "Selected device validation failed"
+    assert daemon._extract_mic_retry_error(
+        "Microphone connection failed: boom. Retrying..."
+    ) == "boom"
+    assert daemon._extract_mic_retry_error("something else") == "something else"  # fallback
+
+
+def test_setup_logging_attaches_exactly_one_rate_limit_filter(monkeypatch):
+    rt = logging.getLogger("realtimestt")
+    saved = list(rt.filters)
+    try:
+        monkeypatch.setattr(logging, "basicConfig", lambda **kw: None)  # don't touch root
+        rt.filters[:] = []                                            # start clean
+        daemon._setup_logging("INFO")
+        matches = [f for f in rt.filters if isinstance(f, daemon.MicRetryRateLimitFilter)]
+        assert len(matches) == 1
+        # idempotent: a second call must NOT double-register (CRITICAL #4)
+        daemon._setup_logging("DEBUG")
+        matches = [f for f in rt.filters if isinstance(f, daemon.MicRetryRateLimitFilter)]
+        assert len(matches) == 1
+    finally:
+        rt.filters[:] = saved                                         # restore global state
+
+
+def test_rate_limit_filter_is_logger_level_chokepoint():
+    captured = []
+
+    class _Cap(logging.Handler):
+        def emit(self, record):
+            captured.append(record)
+
+    name = "voice_typing.test.micretry.chokepoint"
+    log = logging.getLogger(name)
+    log.handlers = [_Cap()]
+    log.propagate = False
+    log.setLevel(logging.DEBUG)
+    log.addFilter(daemon.MicRetryRateLimitFilter(dedup_seconds=60, summary_every=20))
+    for _ in range(25):
+        log.error("Microphone connection failed: boom. Retrying...")
+    # first occurrence (count=1) + summary at count=20 = exactly 2 records reach the handler
+    assert len(captured) == 2
+    assert captured[0].levelno == logging.ERROR                       # the first (full)
+    assert "Microphone connection failed" in captured[0].getMessage()
+    assert captured[1].levelno == logging.WARNING                     # the summary
+    assert "after 20 retry attempts" in captured[1].getMessage()

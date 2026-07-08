@@ -222,6 +222,13 @@ journalctl --user -u voice-typing -f
 At `log.level = "INFO"`, each typed utterance prints one structured latency line.
 At `"DEBUG"`, the raw monotonic timestamps are also logged.
 
+If the configured mic is unreachable, RealtimeSTT retries it roughly every 3 seconds. The
+daemon rate-limits that `Microphone connection failed ... Retrying` ERROR so the journal
+shows the full traceback once, then a single `WARNING` summary roughly once per minute
+(`Microphone still unavailable after N retry attempts (last error: ...)`). The retry itself
+still happens; only the repeated traceback log line is throttled. See
+[Wrong microphone](#wrong-microphone) and `voicectl status`'s `mic:` line to fix the source.
+
 Check live state and the resolved device:
 
 ```
