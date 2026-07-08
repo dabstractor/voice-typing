@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bugfix Release — Operational Robustness & Quality",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Fix 7 defects found by creative end-to-end QA of the voice-typing daemon. Three Major issues (unbounded log file, mic-unavailable silent failure, CUDA construction-failure no CPU fallback) affect 24/7 systemd robustness. Four Minor issues (test isolation, concurrency docstring, portaudio preflight, exit code overlap) affect developer experience and correctness. All fixes are grounded in verified codebase research stored in plan/001_be48c74bc590/bugfix/001_5b7c7f483a7d/architecture/.",
       "milestones": [
         {
@@ -135,7 +135,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Minor Issue Fixes — Quality & Correctness",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix the four Minor-severity issues: (4) test isolation failure, (5) incorrect concurrency docstring / missing lock, (6) install.sh portaudio preflight, (7) voicectl exit code overlap.",
           "tasks": [
             {
@@ -243,14 +243,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "Fix voicectl exit code 2 overlap with argparse usage errors",
-              "status": "Researching",
+              "status": "Complete",
               "description": "argparse exits 2 for usage errors (unknown command, no command), the same code PRD §4.8 reserves for 'daemon not running'. A caller checking $? -eq 2 cannot distinguish. Remap usage errors to exit code 64 (BSD EX_USAGE) so 2 is unambiguous for 'daemon not running'.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "Remap argparse usage errors to exit 64 and reserve 2 for daemon-not-running",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/ctl.py:30 defines _COMMANDS = ('toggle', 'start', 'stop', 'status', 'quit'). _build_parser() at ctl.py:78-94 uses parser.add_argument('cmd', choices=_COMMANDS). argparse calls SystemExit(2) for: no command provided, unknown command (e.g. 'voicectl frobnicate'). main() at ctl.py:98-128 returns 2 for: XDG_RUNTIME_DIR unset (~line 112-114), connect OSError (~line 116-118). format_result() at ctl.py:42-73 returns code 0 or 1. tests/test_voicectl.py has test_main_rejects_unknown_command that asserts SystemExit with code 2 for 'frobnicate'. Three other tests (test_main_exit2_when_socket_absent, test_main_exit2_when_stale_socket_no_listener, test_main_exit2_when_xdg_runtime_dir_unset) assert code 2 for genuine daemon-not-running — these MUST stay 2.\n2. INPUT: voice_typing/ctl.py:78-94 (_build_parser with choices=_COMMANDS). voice_typing/ctl.py:98-128 (main function). tests/test_voicectl.py test_main_rejects_unknown_command.\n3. LOGIC: (a) Remove choices=_COMMANDS from the argparse add_argument call in _build_parser() so argparse does not validate the command. (b) In main(), after parse_args(), manually validate args.cmd: if args.cmd not in _COMMANDS, print a usage error to stderr (e.g. 'voicectl: invalid command {cmd!r}; choose from {commands}') and return 64 (BSD EX_USAGE from sysexits.h). (c) Keep all existing exit-2 paths (XDG_RUNTIME_DIR unset, connect OSError) unchanged — 2 remains exclusively for 'daemon not running'. (d) Update test_main_rejects_unknown_command in tests/test_voicectl.py to assert return value 64 instead of SystemExit(2). Since main() now returns 64 instead of raising SystemExit, the test should call ctl.main(['frobnicate']) directly and assert the return value is 64. Verify the three daemon-not-running tests still assert code 2.\n4. OUTPUT: Usage errors (unknown/missing command) exit 64. Daemon-not-running exits 2. A script can distinguish: $? -eq 2 means daemon is down, $? -eq 64 means the user typed the command wrong.\n5. DOCS: Mode A — If README.md or any doc lists voicectl exit codes, update to document the new 64 code for usage errors and clarify 2 is exclusively for daemon-not-running. Update the PRD §4.8 reference in any inline docstring.",
@@ -268,21 +268,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Changeset-Level Documentation Sync & Final Validation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Sweep README.md and overview documentation to reflect all changes from M1 and M2. This is the Mode B catch-all: per-feature docs already rode with each implementing subtask (Mode A), but cross-cutting overview docs that only make sense once the whole changeset is in place are updated here.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Update README.md and any overview documentation to accurately reflect the full bugfix changeset: mic health in voicectl status, CUDA→CPU automatic fallback, rate-limited mic retry logs, portaudio preflight in install.sh, and voicectl exit code 64 for usage errors.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md sections spanning the full changeset",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

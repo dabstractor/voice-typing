@@ -193,9 +193,18 @@ def test_main_exit2_when_xdg_runtime_dir_unset(monkeypatch, capfd):
 # --- argparse / structural ---------------------------------------------------------------
 
 def test_main_rejects_unknown_command():
-    with pytest.raises(SystemExit) as exc:                 # argparse usage error (exit 2, G7)
-        ctl.main(["frobnicate"])
-    assert exc.value.code == 2
+    # Unknown command is now validated in main() (not argparse), returning EX_USAGE (64)
+    # so exit 2 is reserved exclusively for "daemon not running" (PRD §4.8, bugfix Issue 7).
+    code = ctl.main(["frobnicate"])
+    assert code == 64
+
+
+def test_main_rejects_missing_command():
+    # `voicectl` with no command is a usage error -> EX_USAGE (64), NOT argparse SystemExit(2).
+    # Requires the positional to be nargs='?' so argparse does not raise SystemExit(2) for a
+    # missing required arg (see PRP research/exit_code_matrix.md).
+    code = ctl.main([])          # empty list == zero positionals (NOT None == sys.argv)
+    assert code == 64
 
 
 def test_ctl_module_present_and_imports_pure():

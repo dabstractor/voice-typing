@@ -6,7 +6,8 @@ human-readable result, and exits:
 
     0  success            (daemon replied {"ok": true, ...})
     1  logical failure    (daemon replied {"ok": false, "error": ...})
-    2  daemon not running (socket absent / connection refused / XDG_RUNTIME_DIR unset)
+    2  daemon not running (socket absent / connection refused / XDG_RUNTIME_DIR unset) — EXCLUSIVE
+    64 usage error        (unknown or missing command — BSD EX_USAGE)
 
 Subcommands (PRD §4.8):
 
@@ -31,6 +32,9 @@ import sys
 from voice_typing.daemon import _default_control_socket_path  # canonical resolver (P1.M4.T2.S1); reuse, do not duplicate
 
 _COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit")
+# BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
+# so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
+_EX_USAGE: int = 64
 
 
 def format_result(cmd: str, response: dict) -> tuple[str, int]:
@@ -102,33 +106,43 @@ def send_command(socket_path: str, cmd: str) -> dict:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """argparse with one positional `cmd` over the 5 subcommands (Mode A doc surface)."""
+    """argparse with one optional positional `cmd`. choices validation is intentionally NOT done
+    here — main() validates against _COMMANDS so usage errors map to exit 64 (EX_USAGE), not
+    argparse's SystemExit(2) which would collide with the daemon-not-running code (PRD §4.8)."""
     parser = argparse.ArgumentParser(
         prog="voicectl",
         description=(
             "Control the voice-typing daemon. Connects to the control socket, sends one command, "
-            "prints the result. Exits 0 on success, 1 on a logical failure, 2 if the daemon is not running."
+            "prints the result. Exits 0 on success, 1 on a logical failure, 2 if the daemon is not "
+            "running, 64 on a usage error (unknown/missing command)."
         ),
         epilog="subcommands: toggle, start, stop, status, quit  (see the project README for the full usage table)",
     )
     parser.add_argument(
         "cmd",
-        choices=_COMMANDS,
+        nargs="?",
         help="toggle | start | stop | status | quit",
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """voicectl entry point: parse -> resolve socket -> send -> format -> print -> return exit code.
+    """voicectl entry point: parse -> validate command -> resolve socket -> send -> format -> print.
 
-    Returns 0 (success), 1 (logical failure / protocol error), or 2 (daemon not running). NEVER
-    raises: every path returns an int (the [project.scripts] wrapper does sys.exit(main())). argparse
-    handles usage errors itself (SystemExit 2 on an unknown choice — a usage error, not a daemon
-    status; G7).
+    Returns 0 (success), 1 (logical failure / protocol error), 2 (daemon not running), or
+    64 (usage error — unknown/missing command, BSD EX_USAGE). NEVER raises on the usage path:
+    every path returns an int (the [project.scripts] wrapper does sys.exit(main())). The command
+    is validated HERE (not by argparse choices) so usage errors map to 64 while 2 stays exclusive
+    to daemon-not-running (PRD §4.8, bugfix Issue 7). --help still exits 0 via argparse as usual.
     """
     args = _build_parser().parse_args(argv)
-    cmd: str = args.cmd
+    cmd: str | None = args.cmd          # None when no command given (positional is nargs='?')
+    if cmd not in _COMMANDS:            # missing (None) or unknown string -> usage error
+        if cmd is None:
+            print(f"voicectl: a command is required; choose from {', '.join(_COMMANDS)}", file=sys.stderr)
+        else:
+            print(f"voicectl: invalid command {cmd!r}; choose from {', '.join(_COMMANDS)}", file=sys.stderr)
+        return _EX_USAGE
 
     # 1. Resolve the socket path. XDG_RUNTIME_DIR unset -> RuntimeError -> daemon can't be running.
     try:
