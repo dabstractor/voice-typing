@@ -27,13 +27,17 @@ From the repo root:
 
 The script is idempotent and re-runnable. It does, in order:
 
-1. `uv sync` (creates or refreshes `.venv/`).
-2. A CUDA smoke that prints `VERDICT=cuda-ok` or `VERDICT=cpu-fallback-required`.
-3. Prefetches the whisper models into `~/.cache/huggingface` (warn-only on miss).
-4. Installs, daemon-reloads, enables, and restarts the systemd user unit.
-5. Copies `config.toml` to `~/.config/voice-typing/config.toml` if absent (never
+1. Checks that `portaudio` (PyAudio's system dependency) is installed. On Arch it runs
+   `pacman -Q portaudio`; if that fails it aborts with the exact
+   `sudo pacman -S --noconfirm portaudio` command and asks you to re-run `./install.sh`.
+   Hosts without `pacman` get a warning and continue (install portaudio yourself).
+2. `uv sync` (creates or refreshes `.venv/`).
+3. A CUDA smoke that prints `VERDICT=cuda-ok` or `VERDICT=cpu-fallback-required`.
+4. Prefetches the whisper models into `~/.cache/huggingface` (warn-only on miss).
+5. Installs, daemon-reloads, enables, and restarts the systemd user unit.
+6. Copies `config.toml` to `~/.config/voice-typing/config.toml` if absent (never
    overwrites an existing one).
-6. Prints the usage line, the tmux snippet, the Hyprland source line, and the logs
+7. Prints the usage line, the tmux snippet, the Hyprland source line, and the logs
    command.
 
 When install.sh finishes, the daemon is **running and NOT listening**. It never

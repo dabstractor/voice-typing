@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bugfix Release — Operational Robustness & Quality",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Fix 7 defects found by creative end-to-end QA of the voice-typing daemon. Three Major issues (unbounded log file, mic-unavailable silent failure, CUDA construction-failure no CPU fallback) affect 24/7 systemd robustness. Four Minor issues (test isolation, concurrency docstring, portaudio preflight, exit code overlap) affect developer experience and correctness. All fixes are grounded in verified codebase research stored in plan/001_be48c74bc590/bugfix/001_5b7c7f483a7d/architecture/.",
       "milestones": [
         {
@@ -268,21 +268,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Changeset-Level Documentation Sync & Final Validation",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Sweep README.md and overview documentation to reflect all changes from M1 and M2. This is the Mode B catch-all: per-feature docs already rode with each implementing subtask (Mode A), but cross-cutting overview docs that only make sense once the whole changeset is in place are updated here.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Update README.md and any overview documentation to accurately reflect the full bugfix changeset: mic health in voicectl status, CUDA→CPU automatic fallback, rate-limited mic retry logs, portaudio preflight in install.sh, and voicectl exit code 64 for usage errors.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md sections spanning the full changeset",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
