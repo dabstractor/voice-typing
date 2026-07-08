@@ -106,6 +106,7 @@ def test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set(cfg):
         "min_length_of_recording", "min_gap_between_recordings", "silero_sensitivity",
         "webrtc_sensitivity", "silero_backend", "spinner", "use_microphone",
         "ensure_sentence_starting_uppercase", "ensure_sentence_ends_with_period",
+        "no_log_file",
     }
     assert set(kw) == expected, sorted(set(kw) ^ expected)
 
@@ -139,6 +140,16 @@ def test_cfg_to_kwargs_fixed_values(cfg, monkeypatch):
     assert kw["webrtc_sensitivity"] == 3
     assert kw["spinner"] is False
     assert kw["use_microphone"] is True
+
+
+def test_cfg_to_kwargs_no_log_file_suppresses_realtimesst_log(cfg, monkeypatch):
+    """bugfix Issue 1: no_log_file=True is fixed so the production daemon never opens
+    realtimesst.log (PRD §4.2 sole log path is stderr → journald; parity with the
+    tests/test_feed_audio.py G-NOLOGFILE override)."""
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    kw = daemon.cfg_to_kwargs(cfg)
+    assert "no_log_file" in kw, sorted(kw)
+    assert kw["no_log_file"] is True
 
 
 def test_cfg_to_kwargs_silero_correction(cfg, monkeypatch):

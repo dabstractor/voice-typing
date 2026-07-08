@@ -105,6 +105,7 @@ _FIXED_KWARGS: dict[str, Any] = {
     "use_microphone": True,                 # False + feed_audio() in tests (P1.M7.T2.S1)
     "ensure_sentence_starting_uppercase": False,  # item correction (b); textproc owns cleanup
     "ensure_sentence_ends_with_period": False,
+    "no_log_file": True,  # bugfix Issue 1: suppress RealtimeSTT's unbounded realtimesst.log (PRD §4.2 sole path = stderr→journald)
 }
 
 # Which realtime-partial callback to wire. PREFERRED: stabilized (more accurate, slight delay).
