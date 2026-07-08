@@ -14,6 +14,7 @@ NO RealtimeSTT / NO CUDA / NO real VoiceTypingDaemon. Run:
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 
 import pytest
@@ -198,9 +199,26 @@ def test_main_rejects_unknown_command():
 
 
 def test_ctl_module_present_and_imports_pure():
-    # Import purity: importing voice_typing.ctl must NOT pull in RealtimeSTT/torch/ctranslate2.
+    # Import purity, ORDER-INDEPENDENT: a FRESH interpreter importing only voice_typing.ctl
+    # must NOT pull in RealtimeSTT/torch/ctranslate2. Asserting in a child process means the
+    # result reflects ONLY what ctl itself imports — never what earlier tests left in this
+    # process's sys.modules (PRD bugfix Issue 4; defense-in-depth with P1.M2.T1.S1).
     assert importlib.util.find_spec("voice_typing.ctl") is not None
-    assert not [m for m in ("RealtimeSTT", "torch", "ctranslate2") if m in sys.modules]
+    probe = (
+        "import sys, voice_typing.ctl; "
+        "leaked = [m for m in ('RealtimeSTT', 'torch', 'ctranslate2') if m in sys.modules]; "
+        "assert not leaked, f'voice_typing.ctl transitively imports heavy deps: {leaked}'"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        "fresh interpreter importing voice_typing.ctl leaked heavy deps or failed to import:\n"
+        f"--- returncode {result.returncode}\n--- stdout:\n{result.stdout}\n--- stderr:\n{result.stderr}"
+    )
 
 
 def test_main_returns_int(monkeypatch, tmp_path):

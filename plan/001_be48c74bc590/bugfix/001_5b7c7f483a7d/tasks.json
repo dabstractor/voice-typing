@@ -142,7 +142,7 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Fix pytest tests/ fast suite test-isolation failure",
-              "status": "Researching",
+              "status": "Complete",
               "description": "pytest tests/ --ignore=tests/test_feed_audio.py reports 1 failed, 210 passed. The failure is test_voicectl.py::test_ctl_module_present_and_imports_pure asserting torch/ctranslate2 absent from sys.modules, but it runs AFTER test_daemon.py (alphabetical order) where several tests call the REAL cuda_check.resolve_device_and_models() without monkeypatching, importing ctranslate2 (→ torch) into the process-global sys.modules.",
               "subtasks": [
                 {
@@ -163,7 +163,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Harden test_ctl_module_present_and_imports_pure to be order-independent",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -188,7 +188,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Add _on_final_lock to serialize on_final callbacks",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: VoiceTypingDaemon.on_final() at daemon.py:450-489 runs gate → clean → type → record → log with NO lock around the body. grep 'self._lock' over daemon.py shows self._lock is used only in _arm/_disarm/start/stop/toggle/request_shutdown/shutdown. The run() loop at daemon.py:401-414 calls self._recorder.text(self.on_final) which blocks until one utterance finalizes, then RealtimeSTT fires on_final in a NEW threading.Thread (core/transcription_api.py:40-42) and returns immediately — the loop re-enters text() without joining. Two on_final callbacks can overlap if a slow type_text subprocess is still running when the next audio segment finalizes. The typing backends (typing_backends.py) are stateless and spawn an independent child subprocess per call (reentrant), so concurrent calls won't crash — but typed text could interleave or land out of order.\n2. INPUT: VoiceTypingDaemon.__init__ at daemon.py:300-326 (where instance attributes are initialized). VoiceTypingDaemon.on_final() at daemon.py:450-489 (the callback body: gate → clean → type → record → log).\n3. LOGIC: (a) Add self._on_final_lock = threading.Lock() in VoiceTypingDaemon.__init__ (near the other lock/thread initialization, ~line 310-320). Use a SEPARATE lock from self._lock to avoid coupling on_final latency to toggle/stop latency and to avoid any deadlock risk with _arm/_disarm. (b) In on_final(), wrap the clean → type → record → log body (the part AFTER the early-return gate check at the top) in 'with self._on_final_lock:'. The gate check (if not self._listening.is_set(): return) can stay outside the lock since it's a read-only race guard. The textproc.clean, backend.type_text, feedback.record_final, latency.finalize_utterance, and logger.info calls all go inside the lock. This ensures two concurrent on_final callbacks execute sequentially.\n4. OUTPUT: on_final callbacks are serialized. Two finals cannot interleave their type_text calls. The latent concurrent-typing race is eliminated. Tests: add a test that verifies the lock exists and is held during on_final (e.g., two concurrent on_final calls produce output in order, or mock the backend and assert calls don't overlap).\n5. DOCS: none — internal behavioral change. The docstring correction happens in S2.",
