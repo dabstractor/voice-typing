@@ -411,6 +411,13 @@ class VoiceTypingDaemon:
         self._cfg = cfg
         self._feedback = feedback
         self._lock = threading.Lock()
+        # Serializes on_final callbacks (bugfix Issue 5 / P1.M2.T2.S1). RealtimeSTT fires each
+        # on_final in a NEW thread without joining, so a second final can arrive while a slow
+        # type_text is still running. SEPARATE from _lock: a slow type_text must not stall
+        # toggle/start/stop (which take _lock via _arm/_disarm), and on_final never takes _lock
+        # (nor do _arm/_disarm call on_final) -> no lock-ordering deadlock. Held across clean→
+        # type→record→log; the gate check stays OUTSIDE (read-only race guard).
+        self._on_final_lock = threading.Lock()
         self._listening = threading.Event()   # cleared → NOT listening at boot (PRD §4.9)
         self._shutdown = threading.Event()    # cleared → keep looping
         self._start_monotonic: float | None = None
@@ -492,40 +499,44 @@ class VoiceTypingDaemon:
         t_final_ready = time.monotonic()       # entry stamp (PRD §4.2 latency logging)
         if not self._listening.is_set():       # GATE: race guard (PRD §4.2/§8 — utterance may
             return                             #   complete right after stop)
-        cleaned = textproc.clean(text, self._cfg.filter)
-        if not cleaned:                        # rejected: blocklist hallucination / below min_chars
-            return
-        payload = cleaned + (" " if self._cfg.output.append_space else "")
-        try:
-            self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
-        except Exception:
-            logger.exception("typing backend failed for final %r", cleaned)
-        t_typed = time.monotonic()             # right after type_text (PRD §4.2 latency logging)
-        self._feedback.record_final(cleaned)   # recognition is final regardless of typing success
-        record = self._latency.finalize_utterance(
-            text=cleaned, t_final_ready=t_final_ready, t_typed=t_typed
-        )
-        # Structured per-utterance latency line — T1 (test_feed_audio) parses this. Stable prefix +
-        # key=value tokens; text=<repr> is LAST (repr may contain spaces). *_ms are 'n/a' when no
-        # on_vad_stop preceded this final (t_speech_end is None). (PRD §6 latency targets.)
-        logger.info(
-            "%s event=%s speech_end_to_final_ms=%s final_to_typed_ms=%s total_ms=%s "
-            "partials=%d ts_epoch=%.3f text=%r",
-            _LATENCY_LOG_PREFIX,
-            record["event"],
-            record["speech_end_to_final_ms"] if record["speech_end_to_final_ms"] is not None else "n/a",
-            record["final_to_typed_ms"],
-            record["total_ms"] if record["total_ms"] is not None else "n/a",
-            record["partials"],
-            record["ts"],
-            cleaned,
-        )
-        logger.debug(
-            "voice-typing latency debug: t_speech_end=%s t_final_ready=%.4f t_typed=%.4f",
-            record["t_speech_end"] if record["t_speech_end"] is not None else "n/a",
-            record["t_final_ready"],
-            record["t_typed"],
-        )
+        # Serialize clean→type→record→log across concurrent on_final worker threads (bugfix Issue 5 /
+        # P1.M2.T2.S1). The gate above stays OUTSIDE the lock (read-only race guard); the lock is
+        # SEPARATE from _lock (see __init__) so this never stalls toggle/start/stop and never deadlocks.
+        with self._on_final_lock:
+            cleaned = textproc.clean(text, self._cfg.filter)
+            if not cleaned:                    # rejected: blocklist hallucination / below min_chars
+                return
+            payload = cleaned + (" " if self._cfg.output.append_space else "")
+            try:
+                self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
+            except Exception:
+                logger.exception("typing backend failed for final %r", cleaned)
+            t_typed = time.monotonic()             # right after type_text (PRD §4.2 latency logging)
+            self._feedback.record_final(cleaned)   # recognition is final regardless of typing success
+            record = self._latency.finalize_utterance(
+                text=cleaned, t_final_ready=t_final_ready, t_typed=t_typed
+            )
+            # Structured per-utterance latency line — T1 (test_feed_audio) parses this. Stable prefix +
+            # key=value tokens; text=<repr> is LAST (repr may contain spaces). *_ms are 'n/a' when no
+            # on_vad_stop preceded this final (t_speech_end is None). (PRD §6 latency targets.)
+            logger.info(
+                "%s event=%s speech_end_to_final_ms=%s final_to_typed_ms=%s total_ms=%s "
+                "partials=%d ts_epoch=%.3f text=%r",
+                _LATENCY_LOG_PREFIX,
+                record["event"],
+                record["speech_end_to_final_ms"] if record["speech_end_to_final_ms"] is not None else "n/a",
+                record["final_to_typed_ms"],
+                record["total_ms"] if record["total_ms"] is not None else "n/a",
+                record["partials"],
+                record["ts"],
+                cleaned,
+            )
+            logger.debug(
+                "voice-typing latency debug: t_speech_end=%s t_final_ready=%.4f t_typed=%.4f",
+                record["t_speech_end"] if record["t_speech_end"] is not None else "n/a",
+                record["t_final_ready"],
+                record["t_typed"],
+            )
 
     def _arm(self) -> None:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle."""

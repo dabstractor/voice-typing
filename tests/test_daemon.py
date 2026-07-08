@@ -471,6 +471,96 @@ def test_on_final_typing_raises_is_caught_and_record_still_happens():
     assert fb.finals == ["boom"]   # record_final STILL called (recognition is final regardless)
 
 
+# --- on_final serialization (P1.M2.T2.S1 / bugfix Issue 5) ---
+# RealtimeSTT fires on_final in a NEW thread per final without joining, so two finals can overlap.
+# _on_final_lock serializes the clean->type->record->log body. threading + time (as _time) are
+# module-level (lines 334-335); _wait_for is at line 402. No new import needed.
+
+
+def test_on_final_has_dedicated_serialization_lock():
+    """The lock exists, is a SEPARATE object from self._lock, and is a working mutex."""
+    d, _, _, _ = _make_daemon()
+    assert hasattr(d, "_on_final_lock"), "daemon must expose self._on_final_lock"
+    assert d._on_final_lock is not d._lock, "must be a SEPARATE lock from self._lock"
+    # It is a real, working mutex: acquires uncontended; reports locked().
+    assert d._on_final_lock.acquire(blocking=False) is True
+    assert d._on_final_lock.locked() is True
+    d._on_final_lock.release()
+    assert d._on_final_lock.locked() is False
+
+
+def test_on_final_lock_held_across_type_text():
+    """The lock is held for the whole clean->type->record->log body, so a second on_final cannot
+    interleave its type_text. Deterministic: while a worker is blocked INSIDE type_text (holding the
+    lock), the lock is locked(); once on_final returns, it is not. No fixed sleeps."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class _BlockingBackend:
+        def __init__(self):
+            self.typed = []
+
+        def type_text(self, text):
+            started.set()                 # signal: we are inside type_text
+            release.wait(timeout=2.0)     # hold so the probe can observe the lock being held
+            self.typed.append(text)
+
+    probe = _BlockingBackend()
+    d, _, _, _ = _make_daemon(backend=probe)
+    d.start()
+    worker = threading.Thread(target=d.on_final, args=("hello world",))
+    worker.start()
+    assert _wait_for(started.is_set), "type_text never started (worker stalled)"
+    assert d._on_final_lock.locked() is True, "lock must be held while type_text runs"
+    release.set()                        # let the worker finish
+    worker.join(timeout=2.0)
+    assert not worker.is_alive(), "on_final worker did not finish"
+    assert d._on_final_lock.locked() is False, "lock must be released once on_final returns"
+    assert probe.typed == ["hello world "]   # append_space default True
+
+
+def test_on_final_serializes_two_concurrent_callbacks():
+    """Two on_final callbacks fired concurrently run strictly sequentially: type_text calls never
+    overlap (max in-flight == 1) and both texts are typed. In a no-lock (buggy) build the second
+    worker enters type_text during the gate window and max_in_flight becomes 2 -> this asserts fail."""
+    gate = threading.Event()
+
+    class _ConcurrencyBackend:
+        def __init__(self):
+            self.typed = []
+            self.max_in_flight = 0
+            self._in_flight = 0
+            self._guard = threading.Lock()
+
+        def type_text(self, text):
+            with self._guard:
+                self._in_flight += 1
+                if self._in_flight > self.max_in_flight:
+                    self.max_in_flight = self._in_flight
+            gate.wait(timeout=2.0)        # a second call WOULD overlap here if on_final were unserialized
+            with self._guard:
+                self._in_flight -= 1
+            self.typed.append(text)
+
+    probe = _ConcurrencyBackend()
+    d, _, _, _ = _make_daemon(backend=probe)
+    d.start()
+    t1 = threading.Thread(target=d.on_final, args=("alpha",))
+    t2 = threading.Thread(target=d.on_final, args=("bravo",))
+    t1.start()
+    t2.start()
+    # Wait until one worker is blocked inside type_text (holding the lock), then give the second a
+    # clear window to (wrongly) enter. Under the lock the second is blocked on _on_final_lock.
+    assert _wait_for(lambda: probe.max_in_flight >= 1), "no worker reached type_text"
+    _time.sleep(0.2)                      # let the second worker attempt entry
+    assert probe.max_in_flight == 1, "type_text calls overlapped — on_final is not serialized"
+    gate.set()                            # release the blocked worker(s)
+    t1.join(timeout=2.0)
+    t2.join(timeout=2.0)
+    assert not t1.is_alive() and not t2.is_alive(), "workers did not finish"
+    assert sorted(probe.typed) == ["alpha ", "bravo "]   # both typed, in some order
+
+
 # --- start / stop / toggle ---
 
 
