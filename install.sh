@@ -41,6 +41,19 @@ fi
 command -v "$UV" >/dev/null 2>&1 || { echo "install.sh: uv not found at $UV" >&2; exit 1; }
 command -v systemctl >/dev/null 2>&1 || { echo "install.sh: systemctl not found" >&2; exit 1; }
 
+# --- preflight: PyAudio needs the portaudio system library (PRD §5 step 2). On a fresh
+#     clone without it, uv sync installs the wheel but the daemon later fails at PyAudio
+#     dlopen with a confusing "NOT active — check journalctl". Catch it here with an
+#     actionable message. pacman -Q returns non-zero when the package is absent; the
+#     `if !`/`elif !` guards keep its return code from aborting the script under set -e.
+#     Non-Arch hosts (no pacman) get a warn-and-continue. ---
+if ! command -v pacman >/dev/null 2>&1; then
+  echo "install.sh: pacman not found — skipping portaudio check (non-Arch host). Install PyAudio's portaudio dependency manually." >&2
+elif ! pacman -Q portaudio >/dev/null 2>&1; then
+  echo "install.sh: portaudio not installed (PyAudio system dependency). Run: sudo pacman -S --noconfirm portaudio, then re-run ./install.sh" >&2
+  exit 1
+fi
+
 # XDG_CONFIG_HOME, mirroring voice_typing/config.py (unset/empty -> ~/.config).
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 

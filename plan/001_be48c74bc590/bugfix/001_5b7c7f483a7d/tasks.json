@@ -135,7 +135,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Minor Issue Fixes — Quality & Correctness",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Fix the four Minor-severity issues: (4) test isolation failure, (5) incorrect concurrency docstring / missing lock, (6) install.sh portaudio preflight, (7) voicectl exit code overlap.",
           "tasks": [
             {
@@ -220,14 +220,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Add portaudio preflight to install.sh",
-              "status": "Ready",
+              "status": "Complete",
               "description": "install.sh has no portaudio/pacman check. PRD §5 step 2 mandates 'pacman -Q portaudio || sudo pacman -S --noconfirm portaudio'. Without portaudio, uv sync installs the PyAudio wheel but the daemon fails at PyAudio construction with a confusing dlopen error.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Add portaudio preflight check to install.sh",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: install.sh has set -euo pipefail at line 25. Preflight checks are at lines 36-42: XDG_RUNTIME_DIR set (37-40), uv present (41), systemctl present (42). There is NO portaudio check (grep -in portaudio install.sh → no match). On this machine portaudio 1:19.7.0-4 is already installed. PRD §5 step 2 (PRD.md:261) says 'pacman -Q portaudio || sudo pacman -S --noconfirm portaudio'. PRD §2 notes that if sudo is unavailable non-interactively, the user should be asked to run it manually. README.md:18 already documents portaudio as a requirement.\n2. INPUT: install.sh lines 36-42 (the preflight block, after which the check should be inserted). The pacman command availability.\n3. LOGIC: Insert a portaudio preflight check immediately after the systemctl check at install.sh:42. The check should: (a) verify pacman is available (command -v pacman); if not, print a warning about non-Arch hosts and continue (don't hard-fail). (b) If pacman is available, run 'pacman -Q portaudio' to check if the package is installed. (c) If portaudio is NOT installed, print an actionable message to stderr: 'install.sh: portaudio not installed (PyAudio system dependency). Run: sudo pacman -S --noconfirm portaudio, then re-run ./install.sh' and exit 1. (d) Use if ! ... >/dev/null 2>&1; then ... pattern to handle set -e safely (the pacman -Q return code must not abort the script under set -e). Mirror the existing preflight idiom (echo to stderr, exit 1).\n4. OUTPUT: install.sh now checks for portaudio before proceeding to uv sync. A host without portaudio gets an actionable message and exit 1 instead of a confusing PyAudio dlopen failure later.\n5. DOCS: Mode A — README.md:18 already documents the portaudio requirement. If the README's Install section (lines 21-37) mentions preflight checks, note that install.sh now verifies portaudio automatically. The installer's own stdout output is the primary user-facing doc for this.",
@@ -243,14 +243,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "Fix voicectl exit code 2 overlap with argparse usage errors",
-              "status": "Planned",
+              "status": "Researching",
               "description": "argparse exits 2 for usage errors (unknown command, no command), the same code PRD §4.8 reserves for 'daemon not running'. A caller checking $? -eq 2 cannot distinguish. Remap usage errors to exit code 64 (BSD EX_USAGE) so 2 is unambiguous for 'daemon not running'.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "Remap argparse usage errors to exit 64 and reserve 2 for daemon-not-running",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/ctl.py:30 defines _COMMANDS = ('toggle', 'start', 'stop', 'status', 'quit'). _build_parser() at ctl.py:78-94 uses parser.add_argument('cmd', choices=_COMMANDS). argparse calls SystemExit(2) for: no command provided, unknown command (e.g. 'voicectl frobnicate'). main() at ctl.py:98-128 returns 2 for: XDG_RUNTIME_DIR unset (~line 112-114), connect OSError (~line 116-118). format_result() at ctl.py:42-73 returns code 0 or 1. tests/test_voicectl.py has test_main_rejects_unknown_command that asserts SystemExit with code 2 for 'frobnicate'. Three other tests (test_main_exit2_when_socket_absent, test_main_exit2_when_stale_socket_no_listener, test_main_exit2_when_xdg_runtime_dir_unset) assert code 2 for genuine daemon-not-running — these MUST stay 2.\n2. INPUT: voice_typing/ctl.py:78-94 (_build_parser with choices=_COMMANDS). voice_typing/ctl.py:98-128 (main function). tests/test_voicectl.py test_main_rejects_unknown_command.\n3. LOGIC: (a) Remove choices=_COMMANDS from the argparse add_argument call in _build_parser() so argparse does not validate the command. (b) In main(), after parse_args(), manually validate args.cmd: if args.cmd not in _COMMANDS, print a usage error to stderr (e.g. 'voicectl: invalid command {cmd!r}; choose from {commands}') and return 64 (BSD EX_USAGE from sysexits.h). (c) Keep all existing exit-2 paths (XDG_RUNTIME_DIR unset, connect OSError) unchanged — 2 remains exclusively for 'daemon not running'. (d) Update test_main_rejects_unknown_command in tests/test_voicectl.py to assert return value 64 instead of SystemExit(2). Since main() now returns 64 instead of raising SystemExit, the test should call ctl.main(['frobnicate']) directly and assert the return value is 64. Verify the three daemon-not-running tests still assert code 2.\n4. OUTPUT: Usage errors (unknown/missing command) exit 64. Daemon-not-running exits 2. A script can distinguish: $? -eq 2 means daemon is down, $? -eq 64 means the user typed the command wrong.\n5. DOCS: Mode A — If README.md or any doc lists voicectl exit codes, update to document the new 64 code for usage errors and clarify 2 is exclusively for daemon-not-running. Update the PRD §4.8 reference in any inline docstring.",
