@@ -28,6 +28,7 @@ _STATUS_ON = {
     "ok": True, "listening": True, "partial": "hello wor", "last_final": "previous sentence.",
     "uptime_s": 12.345, "device": "cuda", "compute_type": "float16",
     "final_model": "distil-large-v3", "realtime_model": "small.en",
+    "mic_ok": True, "mic_error": "",                       # bugfix Issue 2 / P1.M1.T2.S2
 }
 
 
@@ -62,6 +63,26 @@ def test_format_status_multiline_has_partial_and_models():
     assert "distil-large-v3" in text and "small.en" in text   # models loaded
     assert "cuda" in text and "float16" in text      # device + compute_type
     assert "12.345" in text                          # uptime
+
+
+def test_format_status_shows_mic_ok_when_healthy():
+    text, code = ctl.format_result("status", _STATUS_ON)
+    assert code == 0
+    assert "mic: ok" in text
+
+
+def test_format_status_shows_mic_unavailable_with_error_when_broken():
+    resp = {**_STATUS_ON, "mic_ok": False, "mic_error": "no PyAudio input devices available"}
+    text, code = ctl.format_result("status", resp)
+    assert code == 0
+    assert "mic: unavailable (no PyAudio input devices available)" in text
+
+
+def test_format_status_mic_defaults_healthy_when_key_absent():
+    # A response missing mic_ok (old daemon) must read as healthy, never 'unavailable'.
+    resp = {k: v for k, v in _STATUS_ON.items() if k not in ("mic_ok", "mic_error")}
+    text, code = ctl.format_result("status", resp)
+    assert code == 0 and "mic: ok" in text
 
 
 def test_format_ok_false_unknown_command():

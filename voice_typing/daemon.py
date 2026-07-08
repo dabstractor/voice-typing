@@ -591,7 +591,9 @@ class VoiceTypingDaemon:
         """The status payload for the control socket `status`/`toggle`/`start`/`stop` cmds.
 
         Returns {listening, partial, last_final, uptime_s, device, compute_type, final_model,
-        realtime_model}. partial/last_final come from the LIVE in-memory Feedback state (NOT the
+        realtime_model, mic_ok, mic_error}. mic_ok/mic_error come from S1's PyAudio probe
+        (self._mic_ok/self._mic_error), refreshed in __init__/_arm — lets voicectl status + JSON
+        consumers see a dead mic without journalctl. partial/last_final come from the LIVE in-memory Feedback state (NOT the
         throttled state.json, which lags >=10 Hz); device/models come from _resolve_device_config
         (the SAME resolution build_recorder used -> status matches the actually-loaded models),
         cached on first call. Safe to call from the socket thread; never raises (device probe
@@ -608,6 +610,8 @@ class VoiceTypingDaemon:
             "compute_type": dev.get("compute_type", "unknown"),
             "final_model": dev.get("final_model", "unknown"),
             "realtime_model": dev.get("realtime_model", "unknown"),
+            "mic_ok": self._mic_ok,            # bugfix Issue 2 / P1.M1.T2.S2: surface mic health (S1 detects)
+            "mic_error": self._mic_error or "",  # None -> "" so JSON always carries a string
         }
 
     def _resolved_device(self) -> dict[str, str]:

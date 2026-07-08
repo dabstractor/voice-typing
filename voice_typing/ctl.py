@@ -40,8 +40,8 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
       - ok:false                      -> the daemon's error text ("error: <...>")
       - quit ({"ok":true,"shutting_down":true}) -> "shutting down"  (NO listening key -> branch first)
       - status                        -> multi-line: listening, partial, last_final, uptime, device,
-                                        compute_type, final_model, realtime_model  (PRD §4.8 "incl.
-                                        partial and models loaded")
+                                        compute_type, final_model, realtime_model, mic  (PRD §4.8 "incl.
+                                        partial and models loaded"; mic health per bugfix Issue 2)
       - toggle/start/stop             -> "listening: on" / "listening: off"
 
     Defensive .get(...) everywhere so a missing key never raises (the protocol guarantees the 8-key
@@ -60,13 +60,22 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         compute_type = response.get("compute_type", "unknown")
         final_model = response.get("final_model", "unknown")
         realtime_model = response.get("realtime_model", "unknown")
+        mic_ok = response.get("mic_ok", True)             # bugfix Issue 2 / P1.M1.T2.S2: default True
+        mic_error = response.get("mic_error", "") or ""   #   so a missing key never looks broken
+        if mic_ok:
+            mic_line = "mic: ok"
+        elif mic_error:
+            mic_line = f"mic: unavailable ({mic_error})"
+        else:
+            mic_line = "mic: unavailable"
         text = (
             f"listening: {listening}\n"
             f"partial: {partial}\n"
             f"last: {last_final}\n"
             f"uptime: {uptime}s\n"
             f"device: {device} ({compute_type})\n"
-            f"models: {final_model} + {realtime_model}"
+            f"models: {final_model} + {realtime_model}\n"
+            f"{mic_line}"
         )
         return text, 0
     # toggle / start / stop

@@ -774,10 +774,12 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
     fb.record_final("world")
     s = d.status_snapshot()
     assert set(s) == {"listening", "partial", "last_final", "uptime_s",
-                      "device", "compute_type", "final_model", "realtime_model"}
+                      "device", "compute_type", "final_model", "realtime_model",
+                      "mic_ok", "mic_error"}                      # bugfix Issue 2 / P1.M1.T2.S2
     assert s["listening"] is False and s["partial"] == "hello" and s["last_final"] == "world"
     assert s["device"] == "cuda" and s["compute_type"] == "float16"
     assert s["final_model"] == "distil-large-v3" and s["realtime_model"] == "small.en"
+    assert s["mic_ok"] is True and s["mic_error"] == ""          # S1's _ok_probe via _make_daemon_with_feedback
 
 
 def test_status_snapshot_reflects_listening_toggle(tmp_path, monkeypatch):
@@ -791,6 +793,27 @@ def test_status_snapshot_cpu_fallback_models(tmp_path, monkeypatch):
     d, _fb = _make_daemon_with_feedback(tmp_path, monkeypatch, cuda=False)
     s = d.status_snapshot()
     assert s["device"] == "cpu" and s["final_model"] == "small.en" and s["realtime_model"] == "tiny.en"
+
+
+def test_status_snapshot_reflects_mic_health(tmp_path, monkeypatch):
+    """bugfix Issue 2 / P1.M1.T2.S2: status_snapshot surfaces self._mic_ok/_mic_error (S1's probe).
+
+    Sets the attrs directly (decoupled from S1's probe mechanics) and asserts they appear in the
+    snapshot with the right types (mic_ok bool, mic_error coerced from None -> '').
+    """
+    d, _fb = _make_daemon_with_feedback(tmp_path, monkeypatch)
+    # healthy (default from _ok_probe):
+    assert d.status_snapshot()["mic_ok"] is True
+    assert d.status_snapshot()["mic_error"] == ""
+    # unhealthy — set directly to test the SURFACING (S2's job), not the probe (S1's job):
+    d._mic_ok = False
+    d._mic_error = "no PyAudio input devices available"
+    s = d.status_snapshot()
+    assert s["mic_ok"] is False
+    assert s["mic_error"] == "no PyAudio input devices available"
+    # mic_error None coerces to "" even if a probe ever stores None on a False result:
+    d._mic_error = None
+    assert d.status_snapshot()["mic_error"] == ""
 
 
 def test_resolved_device_caches_resolve_called_once(tmp_path, monkeypatch):

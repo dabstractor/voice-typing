@@ -195,6 +195,12 @@ pactl set-default-source <source_name>
 systemctl --user restart voice-typing
 ```
 
+If speech yields nothing, check the mic health line FIRST — `voicectl status` prints a `mic:`
+line (`mic: ok` when the default source is reachable, `mic: unavailable (<reason>)` when the
+daemon's PyAudio probe found no input device). This surfaces a dead or changed default source
+immediately, without digging into `journalctl`. After fixing the source, arm again with
+`voicectl toggle` (the probe re-runs on each arm).
+
 ### wtype vs ydotool
 
 `wtype` is the default backend (Wayland virtual keyboard, full Unicode). If `wtype`
@@ -231,10 +237,12 @@ last: Previous sentence.
 uptime: 42.3s
 device: cuda (float16)
 models: distil-large-v3 + small.en
+mic: ok
 ```
 
 On CPU fallback, `device` shows `cpu (int8)` and `models` shows
-`small.en + tiny.en`.
+`small.en + tiny.en`. If the mic is unavailable, the last line reads
+`mic: unavailable (<reason>)` instead.
 
 Confirm the models are resident in GPU VRAM:
 
