@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Major Issue Fixes — Operational Robustness",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Fix the three Major-severity issues that would bite a 24/7 systemd deployment or a user whose mic/CUDA environment changes: (1) unbounded realtimesst.log, (2) mic-unavailable silent failure with traceback spam, (3) CUDA construction-failure with no CPU fallback.",
           "tasks": [
             {
@@ -94,14 +94,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Fix CUDA construction-failure → CPU fallback",
-              "status": "Planned",
+              "status": "Researching",
               "description": "cuda_check.resolve_device_and_models() only probes the CUDA driver, not cuDNN. If driver reports GPU but cuDNN init fails at AudioToTextRecorder construction (WhisperModel load), main() catches the Exception, logs 'fatal error', and returns 1 — systemd then crash-loops forever instead of degrading to CPU. Add a construction-failure → CPU retry.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Add force_cpu capability to the device resolution and recorder build path",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: The device resolution chain is: _resolve_device_config(cfg) at daemon.py:116-131 → cuda_check.resolve_device_and_models(defaults) at cuda_check.py:114-132 → cfg_to_kwargs(cfg) at daemon.py:133-156 (calls _resolve_device_config, then updates with _FIXED_KWARGS) → _construct(cfg, feedback, recorder_cls, latency) at daemon.py:209-223 (calls cfg_to_kwargs, adds callbacks, filters to signature, constructs recorder_cls(**filtered)) → build_recorder(cfg, feedback, latency) at daemon.py:226-237 (lazy-imports AudioToTextRecorder, calls _construct). cuda_check.CPU_FALLBACK (cuda_check.py:53-59) = {device: cpu, compute_type: int8, final_model: small.en, realtime_model: tiny.en}. The compute_type field is NOT in config — it is derived in _resolve_device_config from cfg.asr.device. VoiceTypingDaemon.__init__ at daemon.py:300-326 calls build_recorder when recorder is None.\n2. INPUT: _resolve_device_config() at daemon.py:116-131, cfg_to_kwargs() at daemon.py:133-156, _construct() at daemon.py:209-223, build_recorder() at daemon.py:226-237, cuda_check.CPU_FALLBACK at cuda_check.py:53-59.\n3. LOGIC: Add a force_cpu: bool = False parameter to build_recorder() and _construct(). When force_cpu=True, skip the normal _resolve_device_config/cuda_check path and instead build the device kwargs directly from cuda_check.CPU_FALLBACK. This means: in _construct, if force_cpu, replace the resolved dict with dict(cuda_check.CPU_FALLBACK) before building kwargs. This ensures the recorder is constructed with device=cpu, compute_type=int8, final_model=small.en, realtime_model=tiny.en — the exact PRD §4.4 degraded config. Do NOT modify cuda_check.py or _resolve_device_config — the force_cpu override happens in _construct/build_recorder only.\n4. OUTPUT: build_recorder(cfg, feedback, latency, force_cpu=True) constructs an AudioToTextRecorder with CPU config regardless of what cuda_check.resolve_device_and_models() would return. This is consumed by P1.M1.T3.S2 (the main() retry).\n5. DOCS: none — internal API change, no user-facing/config surface change.",
@@ -115,7 +115,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T3.S2",
                   "title": "Implement construction-failure → CPU retry in main()",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S1"

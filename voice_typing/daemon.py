@@ -131,15 +131,24 @@ def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     return cuda_check.resolve_device_and_models(defaults)
 
 
-def cfg_to_kwargs(cfg: VoiceTypingConfig) -> dict[str, Any]:
+def cfg_to_kwargs(
+    cfg: VoiceTypingConfig, *, resolved: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Build the AudioToTextRecorder kwargs from cfg (CPU fallback already applied).
 
     Returns the NON-callback kwargs (model/device/timing/VAD/silero). The on_* callbacks are wired
-    separately in build_recorder() (they need the Feedback instance). The only side effect is
-    cuda_check.resolve_device_and_models() probing CUDA; tests monkeypatch
-    voice_typing.cuda_check.resolve_device_and_models to force a path deterministically.
+    separately in build_recorder() (they need the Feedback instance).
+
+    `resolved` ({device,compute_type,final_model,realtime_model} | None): when given, use it
+    INSTEAD of calling _resolve_device_config(cfg). The force_cpu path (bugfix Issue 3 /
+    P1.M1.T3.S1) passes dict(cuda_check.CPU_FALLBACK) here so the cuda_check driver probe is
+    SKIPPED entirely and kwargs are built straight from the PRD §4.4 CPU config (no ctranslate2
+    import / no driver probe during a CPU retry). Default None resolves via cuda_check (the
+    normal path — the only side effect is cuda_check.resolve_device_and_models() probing CUDA;
+    tests monkeypatch it to force a path deterministically).
     """
-    resolved = _resolve_device_config(cfg)
+    if resolved is None:
+        resolved = _resolve_device_config(cfg)
     kwargs: dict[str, Any] = {
         # model identity — cuda_check-resolved (final_model/realtime_model may be the CPU-fallback
         # small.en/tiny.en when no GPU is visible)
@@ -226,6 +235,7 @@ def _construct(
     feedback: "Feedback",
     recorder_cls: type,
     latency: "LatencyLog | None" = None,
+    force_cpu: bool = False,
 ) -> Any:
     """Build kwargs + callbacks, defensively filter to the signature, construct recorder_cls.
 
@@ -233,15 +243,28 @@ def _construct(
     RealtimeSTT / load models / touch CUDA. build_recorder() is the thin production wrapper that
     supplies the real AudioToTextRecorder via a lazy import. `latency` (optional, default None) is
     threaded into _build_callbacks so on_vad_stop/partial feed the per-utterance latency log.
+
+    force_cpu (bugfix Issue 3 / P1.M1.T3.S1, default False): when True, replace the resolved
+    device dict with dict(cuda_check.CPU_FALLBACK) BEFORE building kwargs — this SKIPS the
+    _resolve_device_config / cuda_check path entirely (no driver probe, no ctranslate2 import)
+    so the CPU retry in main() (P1.M1.T3.S2) never re-touches a GPU whose construction just
+    failed. The recorder is then built with the exact PRD §4.4 degraded config (device=cpu,
+    compute_type=int8, final_model=small.en, realtime_model=tiny.en). The NON-device kwargs
+    (language, timing, _FIXED_KWARGS) still come from cfg as usual; only device/compute_type/
+    models are overridden. Consumed via build_recorder(..., force_cpu=True).
     """
-    kwargs = cfg_to_kwargs(cfg)
+    resolved = dict(cuda_check.CPU_FALLBACK) if force_cpu else None
+    kwargs = cfg_to_kwargs(cfg, resolved=resolved)
     kwargs.update(_build_callbacks(feedback, latency))
     filtered = _filter_kwargs_to_signature(kwargs, recorder_cls)
     return recorder_cls(**filtered)
 
 
 def build_recorder(
-    cfg: VoiceTypingConfig, feedback: "Feedback", latency: "LatencyLog | None" = None
+    cfg: VoiceTypingConfig,
+    feedback: "Feedback",
+    latency: "LatencyLog | None" = None,
+    force_cpu: bool = False,
 ) -> Any:
     """Construct ONE AudioToTextRecorder wired to feedback (+ optional latency) (PRD §4.2, §4.4).
 
@@ -254,10 +277,14 @@ def build_recorder(
     Heavy: imports RealtimeSTT + loads models on first call (seconds). Unit tests call _construct()
     with a fake class instead; this function is exercised by the feed_audio test (P1.M7.T2.S1) and
     the real daemon startup (P1.M4.T1.S2).
+
+    `force_cpu=True` (bugfix Issue 3 / P1.M1.T3.S1) builds a CPU-only recorder from
+    cuda_check.CPU_FALLBACK without probing CUDA — the construction-failure retry hook for
+    main() (P1.M1.T3.S2). Default False (the normal CUDA/CPU-fallback path).
     """
     from RealtimeSTT import AudioToTextRecorder  # lazy: keeps `import voice_typing.daemon` cheap
 
-    return _construct(cfg, feedback, AudioToTextRecorder, latency)
+    return _construct(cfg, feedback, AudioToTextRecorder, latency, force_cpu=force_cpu)
 
 
 # --- Control socket path resolution (P1.M4.T2.S1; PRD §4.2(3)) -------------------------------

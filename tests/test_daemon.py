@@ -1484,3 +1484,105 @@ def test_rate_limit_filter_is_logger_level_chokepoint():
     assert "Microphone connection failed" in captured[0].getMessage()
     assert captured[1].levelno == logging.WARNING                     # the summary
     assert "after 20 retry attempts" in captured[1].getMessage()
+
+
+# ===========================================================================
+# bugfix P1.M1.T3.S1 — force_cpu capability on _construct / build_recorder / cfg_to_kwargs
+# (ADDITIVE: the force_cpu path builds CPU kwargs WITHOUT calling _resolve_device_config/cuda_check.
+#  Uses S1's _FakeRecorder (VAR_KEYWORD → captures kwargs) + _FakeFeedback + _cuda_resolve. ZERO
+#  real CUDA/RealtimeSTT/model-load — force_cpu LOGIC is tested via the _construct seam.)
+# ===========================================================================
+import inspect  # noqa: E402 (kept local to this section to match the file's additive-section style)
+
+
+def test_construct_force_cpu_uses_cpu_fallback(cfg):
+    """force_cpu=True builds the exact PRD §4.4 CPU config regardless of cfg.asr.device."""
+    rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=True)
+    kw = rec.kwargs
+    assert kw["device"] == "cpu"
+    assert kw["compute_type"] == "int8"
+    assert kw["model"] == "small.en"
+    assert kw["realtime_model_type"] == "tiny.en"
+
+
+def test_construct_force_cpu_skips_resolve(cfg, monkeypatch):
+    """force_cpu=True NEVER calls _resolve_device_config (the cuda_check probe is skipped)."""
+    def _boom(_cfg=None):
+        raise AssertionError("_resolve_device_config must NOT be called when force_cpu=True")
+    monkeypatch.setattr(daemon, "_resolve_device_config", _boom)
+    # force_cpu=True: no raise -> the skip works (cfg_to_kwargs used the injected resolved dict)
+    rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=True)
+    assert rec.kwargs["device"] == "cpu"
+    # force_cpu=False (default): _resolve_device_config IS called -> the AssertionError fires
+    with pytest.raises(AssertionError):
+        daemon._construct(cfg, _FakeFeedback(), _FakeRecorder)
+
+
+def test_construct_force_cpu_overrides_cuda_path(cfg, monkeypatch):
+    """force_cpu wins even when cuda_check is monkeypatched to the CUDA path."""
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # force cuda
+    rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=True)
+    assert rec.kwargs["device"] == "cpu"            # force_cpu overrides the cuda verdict
+    assert rec.kwargs["model"] == "small.en"
+    assert rec.kwargs["realtime_model_type"] == "tiny.en"
+
+
+def test_construct_force_cpu_keeps_non_device_kwargs(cfg):
+    """force_cpu overrides ONLY device/models; language/timing/_FIXED_KWARGS still come from cfg."""
+    rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=True)
+    kw = rec.kwargs
+    # non-device tunables from cfg (default cfg):
+    assert kw["language"] == "en"
+    assert kw["realtime_processing_pause"] == 0.15
+    assert kw["post_speech_silence_duration"] == 0.6
+    # _FIXED_KWARGS survive (P1.M1.T1.S1's no_log_file + the silero correction):
+    assert kw["no_log_file"] is True
+    assert kw["silero_backend"] == "auto"
+    assert kw["use_microphone"] is True
+    assert kw["enable_realtime_transcription"] is True
+    # _construct ALSO wires the on_* callbacks (built-in behavior, unaffected by force_cpu):
+    assert "on_realtime_transcription_stabilized" in kw
+    assert "on_vad_detect_start" in kw and "on_vad_start" in kw and "on_vad_stop" in kw
+
+
+def test_construct_force_cpu_false_is_default_behavior(cfg, monkeypatch):
+    """force_cpu=False (explicit) and omitted behave exactly as the pre-change code (cuda path)."""
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    explicit = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=False)
+    omitted = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder)
+    # callbacks are fresh closures each call (never equal by identity), so compare the NON-callback
+    # kwargs that force_cpu controls — device/models/timing/_FIXED_KWARGS must be identical:
+    _cb = {k for k in explicit.kwargs if k.startswith("on_")}
+    assert {k for k in omitted.kwargs if k.startswith("on_")} == _cb
+    non_cb_explicit = {k: v for k, v in explicit.kwargs.items() if not k.startswith("on_")}
+    non_cb_omitted = {k: v for k, v in omitted.kwargs.items() if not k.startswith("on_")}
+    assert non_cb_explicit == non_cb_omitted
+    assert omitted.kwargs["device"] == "cuda"       # the normal cuda path, untouched
+    assert omitted.kwargs["model"] == "distil-large-v3"
+
+
+def test_cfg_to_kwargs_accepts_resolved_override(cfg, monkeypatch):
+    """cfg_to_kwargs(resolved=...) uses the injected dict and skips _resolve_device_config."""
+    def _boom(_cfg=None):
+        raise AssertionError("must not resolve when resolved= is given")
+    monkeypatch.setattr(daemon, "_resolve_device_config", _boom)
+    kw = daemon.cfg_to_kwargs(
+        cfg, resolved={"device": "cpu", "compute_type": "int8",
+                       "final_model": "small.en", "realtime_model": "tiny.en"}
+    )
+    assert kw["device"] == "cpu" and kw["model"] == "small.en"
+    assert kw["realtime_model_type"] == "tiny.en" and kw["compute_type"] == "int8"
+
+
+def test_build_recorder_and_construct_force_cpu_in_signature():
+    """The public surface has force_cpu (default False), last after latency. (Smoke; no heavy call.)"""
+    sb = inspect.signature(daemon.build_recorder).parameters
+    assert "force_cpu" in sb and sb["force_cpu"].default is False
+    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu"], list(sb)
+    sc = inspect.signature(daemon._construct).parameters
+    assert "force_cpu" in sc and sc["force_cpu"].default is False
+    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu"], list(sc)
+    # cfg_to_kwargs got the keyword-only resolved injection point (default None):
+    sk = inspect.signature(daemon.cfg_to_kwargs).parameters
+    assert "resolved" in sk and sk["resolved"].default is None
+    assert sk["resolved"].kind is inspect.Parameter.KEYWORD_ONLY
