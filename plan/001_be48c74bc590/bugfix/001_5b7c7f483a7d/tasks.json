@@ -48,7 +48,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add mic health detection via lazy PyAudio probe",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: VoiceTypingDaemon._arm() at daemon.py:490-494 calls self._recorder.set_microphone(True) which only flips a flag (audio_recorder.py:718-723) — no I/O check, no return value. The audio worker (core/audio_input_worker.py ~100-177) runs as a daemon threading.Thread on Linux (core/runtime.py:17-37) and retries mic connection in an infinite while loop with time.sleep(3) and exc_info=True traceback on every attempt. The daemon has NO reference to this worker's state. PyAudio is imported lazily inside the worker (audio_input_worker.py:35), so importing pyaudio at daemon module level would violate the ctl import purity invariant (Issue 4).\n2. INPUT: VoiceTypingDaemon.__init__ at daemon.py:300-326 (where self._listening, self._recorder etc. are initialized). _arm() at daemon.py:490-494 and _disarm() at daemon.py:496-502. The daemon's _setup_logging at daemon.py:867-886.\n3. LOGIC: Add a _probe_mic() method to VoiceTypingDaemon that: (a) lazily imports pyaudio inside the method body (NOT at module level, to preserve ctl import purity); (b) opens a PyAudio instance, enumerates input devices, checks if at least one valid input device exists; (c) returns (ok: bool, error: str | None). Store the result in self._mic_ok (bool, default True) and self._mic_error (str, default None) initialized in __init__. Call _probe_mic() at the end of __init__ (after recorder construction) and at the end of _arm() (after set_microphone(True)). Wrap _probe_mic in try/except Exception to handle PyAudio not installed, no devices, or any other failure gracefully (set _mic_ok=False, _mic_error=str(exc)). Mock pyaudio in tests.\n4. OUTPUT: VoiceTypingDaemon exposes self._mic_ok (bool) and self._mic_error (str|None) attributes, updated at construction and on each _arm() call. These are consumed by P1.M1.T2.S2 (status_snapshot).\n5. DOCS: none — internal attribute, no user-facing surface change yet. The surfacing happens in S2.",
@@ -62,7 +62,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Surface mic health in status_snapshot() and voicectl status output",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1"

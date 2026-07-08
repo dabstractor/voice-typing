@@ -379,6 +379,7 @@ class VoiceTypingDaemon:
         recorder: Any = None,
         backend: "TypingBackend | None" = None,
         latency: "LatencyLog | None" = None,
+        mic_prober: Callable[[], tuple[bool, str | None]] | None = None,
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
@@ -398,6 +399,14 @@ class VoiceTypingDaemon:
         self._backend = (
             backend if backend is not None else typing_backends.make_backend(cfg.output)
         )
+        # Mic health probe (bugfix Issue 2 / P1.M1.T2.S1): detect a dead/missing mic so status
+        # (P1.M1.T2.S2) can surface it instead of silently reporting "listening: on". Injectable
+        # (mic_prober=) so unit tests stay hermetic — NO real PyAudio/CUDA in the test suite
+        # (production leaves mic_prober=None -> self._probe_mic, which imports pyaudio LAZILY).
+        self._mic_ok: bool = True            # default True: never-probed != broken (PRD §4.4 spirit)
+        self._mic_error: str | None = None
+        self._mic_prober = mic_prober
+        self._refresh_mic_status()
 
     def run(self) -> None:
         """The listen-forever loop (main thread, BLOCKS until shutdown)."""
@@ -493,6 +502,7 @@ class VoiceTypingDaemon:
         self._listening.set()
         self._recorder.set_microphone(True)
         self._feedback.set_listening(True)
+        self._refresh_mic_status()  # bugfix Issue 2 / P1.M1.T2.S1: re-probe mic health on each arm
 
     def _disarm(self) -> None:
         """Private: disarm mic + abort blocked text() + clear listening + notify. Called under lock."""
@@ -500,6 +510,47 @@ class VoiceTypingDaemon:
         self._recorder.set_microphone(False)
         self._recorder.abort()      # breaks any blocked text() so the loop re-checks the cleared gate
         self._feedback.set_listening(False)
+
+    def _refresh_mic_status(self) -> None:
+        """Run the mic probe (real or injected) and store ok/error. NEVER raises.
+
+        Sanctioned caller of the probe (bugfix Issue 2 / P1.M1.T2.S1): both __init__ and _arm()
+        route through here so the try/except + attribute update live in ONE place. A probe failure
+        (pyaudio missing, no devices, any exception) degrades to _mic_ok=False + _mic_error=str(exc)
+        — the daemon stays runnable (degraded mode is acceptable; PRD §4.4 spirit). Tests inject
+        mic_prober to stay hermetic; production leaves it None -> self._probe_mic.
+        """
+        prober = self._probe_mic if self._mic_prober is None else self._mic_prober
+        try:
+            ok, error = prober()
+        except Exception as exc:  # defensive: a probe must never break startup or arm
+            ok, error = False, str(exc)
+        self._mic_ok = bool(ok)
+        self._mic_error = error
+
+    def _probe_mic(self) -> tuple[bool, str | None]:
+        """Lazy PyAudio probe: is at least one input device available? Returns (ok, error|None).
+
+        Mirrors RealtimeSTT's own AudioInputWorker device discovery (core/audio_input_worker.py:
+        enumerate devices, keep those with maxInputChannels > 0). pyaudio is imported INSIDE this
+        method (NOT at module top) so `import voice_typing.daemon` / `voice_typing.ctl` stay pure
+        (bugfix Issue 4 invariant). Opens a SEPARATE, short-lived PyAudio instance only to ENUMERATE
+        (no stream opened) — does not disturb the recorder's own capture stream. May RAISE on
+        pyaudio-not-installed / no audio subsystem; _refresh_mic_status converts that to (False, str).
+        """
+        import pyaudio  # lazy: preserve ctl import purity (bugfix Issue 4)
+
+        pa = pyaudio.PyAudio()
+        try:
+            inputs = [
+                i for i in range(pa.get_device_count())
+                if (pa.get_device_info_by_index(i).get("maxInputChannels") or 0) > 0
+            ]
+        finally:
+            pa.terminate()
+        if not inputs:
+            return False, "no PyAudio input devices available"
+        return True, None
 
     def start(self) -> None:
         with self._lock:

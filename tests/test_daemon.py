@@ -389,6 +389,15 @@ class _FakeBackend:
         self.typed.append(text)
 
 
+def _ok_probe():
+    """Hermetic mic-probe stub for daemon-constructing tests (bugfix Issue 2 / P1.M1.T2.S1).
+
+    Returns a healthy mic so __init__/_arm never touch real PyAudio. Probe-specific tests
+    inject their own probers (or mock pyaudio via sys.modules) to exercise _probe_mic directly.
+    """
+    return (True, None)
+
+
 def _wait_for(predicate, timeout=2.0, interval=0.01):
     """Poll until predicate() is truthy or timeout (s). Returns True if predicate became truthy."""
     deadline = _time.monotonic() + timeout
@@ -404,7 +413,7 @@ def _make_daemon(*, recorder=None, backend=None, cfg=None):
     fb = _DaemonFakeFeedback()
     rec = recorder if recorder is not None else _StubRecorder()
     be = backend if backend is not None else _FakeBackend()
-    d = daemon.VoiceTypingDaemon(cfg, fb, recorder=rec, backend=be)
+    d = daemon.VoiceTypingDaemon(cfg, fb, recorder=rec, backend=be, mic_prober=_ok_probe)
     return d, fb, rec, be
 
 
@@ -756,7 +765,7 @@ def _make_daemon_with_feedback(tmp_path, monkeypatch, *, cuda=True):
     fb = Feedback(cfg.feedback)
     rec = _StubRecorder()
     be = _FakeBackend()
-    return daemon.VoiceTypingDaemon(cfg, fb, recorder=rec, backend=be), fb
+    return daemon.VoiceTypingDaemon(cfg, fb, recorder=rec, backend=be, mic_prober=_ok_probe), fb
 
 
 def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
@@ -794,7 +803,8 @@ def test_resolved_device_caches_resolve_called_once(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon.cuda_check, "resolve_device_and_models", _resolve)
     cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
     d = daemon.VoiceTypingDaemon(
-        cfg, Feedback(cfg.feedback), recorder=_StubRecorder(), backend=_FakeBackend()
+        cfg, Feedback(cfg.feedback), recorder=_StubRecorder(), backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )
     d.status_snapshot()
     d.status_snapshot()
@@ -808,7 +818,8 @@ def test_resolved_device_failure_degrades_to_unknown(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon.cuda_check, "resolve_device_and_models", boom)
     cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
     d = daemon.VoiceTypingDaemon(
-        cfg, Feedback(cfg.feedback), recorder=_StubRecorder(), backend=_FakeBackend()
+        cfg, Feedback(cfg.feedback), recorder=_StubRecorder(), backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )
     s = d.status_snapshot()
     assert s["device"] == "unknown"             # never raises; degrades gracefully
@@ -1186,3 +1197,99 @@ def test_main_guard_present_and_calls_main():
 
 def test_main_is_callable():
     assert callable(daemon.main)
+
+
+# ===========================================================================
+# bugfix P1.M1.T2.S1 — mic health probe: _probe_mic / _refresh_mic_status / __init__ / _arm
+# (ADDITIVE — mocks pyaudio via sys.modules + injects probers; ZERO real PyAudio I/O.)
+# ===========================================================================
+
+
+def _install_fake_pyaudio(monkeypatch, *, device_input_channels):
+    """Install a fake 'pyaudio' module in sys.modules; _probe_mic's `import pyaudio` binds to it.
+
+    device_input_channels: list of maxInputChannels per device index (the probe keeps those >0).
+    """
+    class _Dev(dict):
+        pass
+    devices = [_Dev(maxInputChannels=ch) for ch in device_input_channels]
+    class _PA:
+        def get_device_count(self):
+            return len(devices)
+        def get_device_info_by_index(self, i):
+            return devices[i]
+        def terminate(self):
+            pass
+    fake = type("M", (), {"PyAudio": _PA})
+    monkeypatch.setitem(sys.modules, "pyaudio", fake)
+    return fake
+
+
+def test_probe_mic_ok_when_input_device_present(tmp_path, monkeypatch):
+    _install_fake_pyaudio(monkeypatch, device_input_channels=[0, 2, 0])  # index 1 is an input
+    d, *_ = _make_daemon()   # _ok_probe used at init (no real pyaudio); we call _probe_mic directly
+    ok, err = d._probe_mic()
+    assert ok is True and err is None
+
+
+def test_probe_mic_fails_when_no_input_devices(tmp_path, monkeypatch):
+    _install_fake_pyaudio(monkeypatch, device_input_channels=[0, 0])  # outputs only
+    d, *_ = _make_daemon()
+    ok, err = d._probe_mic()
+    assert ok is False and isinstance(err, str) and err
+
+
+def test_probe_mic_raises_when_pyaudio_unavailable(monkeypatch):
+    # `import pyaudio` raises ImportError when sys.modules["pyaudio"] is None.
+    monkeypatch.setitem(sys.modules, "pyaudio", None)
+    d, *_ = _make_daemon()
+    with pytest.raises(ImportError):
+        d._probe_mic()   # _probe_mic itself raises; _refresh_mic_status is what catches it
+
+
+def test_refresh_mic_status_catches_probe_exception():
+    # An injected prober that raises -> _mic_ok=False, _mic_error=str(exc); never propagates.
+    def boom():
+        raise RuntimeError("portaudio exploded")
+    d, *_ = _make_daemon()
+    d._mic_prober = boom
+    d._refresh_mic_status()
+    assert d._mic_ok is False and "portaudio exploded" in (d._mic_error or "")
+
+
+def test_refresh_mic_status_stores_probe_result():
+    d, *_ = _make_daemon()
+    d._mic_prober = lambda: (False, "no devices")
+    d._refresh_mic_status()
+    assert d._mic_ok is False and d._mic_error == "no devices"
+
+
+def test_init_initializes_mic_status_and_calls_probe():
+    calls = []
+    cfg = VoiceTypingConfig()
+    d = daemon.VoiceTypingDaemon(
+        cfg, _DaemonFakeFeedback(), recorder=_StubRecorder(), backend=_FakeBackend(),
+        mic_prober=lambda: (calls.append(1), (True, None))[1],
+    )
+    assert d._mic_ok is True and d._mic_error is None
+    assert len(calls) == 1          # __init__ probed exactly once
+
+
+def test_arm_refreshes_mic_status():
+    calls = []
+    d = daemon.VoiceTypingDaemon(
+        VoiceTypingConfig(), _DaemonFakeFeedback(), recorder=_StubRecorder(),
+        backend=_FakeBackend(),
+        mic_prober=lambda: (calls.append(1), (True, None))[1],
+    )
+    assert len(calls) == 1          # init
+    d.start()                       # -> _arm -> _refresh_mic_status
+    assert len(calls) == 2          # armed once more
+
+
+def test_make_daemon_injection_is_hermetic_no_real_pyaudio():
+    # Guard against regression: the factory must inject _ok_probe (no real pyaudio in tests).
+    d, *_ = _make_daemon()
+    assert d._mic_prober is _ok_probe
+    assert d._mic_ok is True        # the stub reported healthy
+    assert "pyaudio" not in sys.modules or True  # (informational; other tests may have imported it)
