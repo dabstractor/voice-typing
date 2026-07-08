@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Major Issue Fixes — Operational Robustness",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix the three Major-severity issues that would bite a 24/7 systemd deployment or a user whose mic/CUDA environment changes: (1) unbounded realtimesst.log, (2) mic-unavailable silent failure with traceback spam, (3) CUDA construction-failure with no CPU fallback.",
           "tasks": [
             {
@@ -94,7 +94,7 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Fix CUDA construction-failure → CPU fallback",
-              "status": "Researching",
+              "status": "Complete",
               "description": "cuda_check.resolve_device_and_models() only probes the CUDA driver, not cuDNN. If driver reports GPU but cuDNN init fails at AudioToTextRecorder construction (WhisperModel load), main() catches the Exception, logs 'fatal error', and returns 1 — systemd then crash-loops forever instead of degrading to CPU. Add a construction-failure → CPU retry.",
               "subtasks": [
                 {
@@ -115,7 +115,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T3.S2",
                   "title": "Implement construction-failure → CPU retry in main()",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S1"
@@ -149,7 +149,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Monkeypatch cuda_check.resolve_device_and_models in polluting tests",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Four tests in tests/test_daemon.py call the REAL cuda_check.resolve_device_and_models() without monkeypatching, polluting sys.modules with ctranslate2 and torch: (a) test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set at line 98 (takes only cfg fixture, no monkeypatch); (b) test_run_loop_not_listening_does_not_call_text at line 517; (c) test_run_loop_calls_text_when_listening_then_exits_on_shutdown at line 529; (d) test_run_sets_uptime_after_start at line 543. The run-loop tests (b,c,d) call daemon.run() which calls _log_resolved_device() at daemon.py:430-443, which calls _resolve_device_config() → the real resolver. The _cuda_resolve(monkeypatch, mapping) helper at test_daemon.py:66-91 monkeypatches daemon.cuda_check.resolve_device_and_models to a deterministic closure. The correctly-hermetic variant test_run_logs_resolved_device_at_startup at line 701 already uses monkeypatch. pytest collects files alphabetically (test_daemon.py before test_voicectl.py).\n2. INPUT: tests/test_daemon.py lines 98-111 (test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set), lines 517-557 (the three run-loop tests). The _cuda_resolve helper at test_daemon.py:66-91. The monkeypatch fixture (pytest builtin).\n3. LOGIC: For test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set: add a monkeypatch parameter to the test function signature and call _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS) (or any mapping with the expected keys) at the top of the test body, mirroring its siblings (lines 113-165). For the three run-loop tests (lines 517, 529, 543): add monkeypatch parameter and call _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS) at the top, mirroring test_run_logs_resolved_device_at_startup at line 701. This prevents _log_resolved_device() from calling the real resolver.\n4. OUTPUT: All four tests now use the monkeypatched resolver. Running the full fast suite (pytest tests/ --ignore=tests/test_feed_audio.py) passes 211/211 with no sys.modules pollution from test_daemon.py. The cross-test isolation issue is resolved at the root cause.\n5. DOCS: none — test-only change, no user-facing/config/API surface change.",

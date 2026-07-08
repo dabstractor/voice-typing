@@ -145,7 +145,7 @@ with `TypeError`, so a stray key makes the daemon fail to load and systemd's
 
 ## CPU-only mode
 
-There are two ways the daemon ends up on CPU.
+There are three ways the daemon ends up on CPU.
 
 1. You force it. Set `[asr] device = "cpu"` in `config.toml` and restart. The daemon
    derives `compute_type="int8"`. If a GPU is present, it still uses your configured
@@ -153,6 +153,15 @@ There are two ways the daemon ends up on CPU.
 2. Auto-fallback. When `ctranslate2` sees zero CUDA devices at startup, the daemon
    overrides to `device="cpu"`, `compute_type="int8"`, and the smaller models
    `small.en` (final) and `tiny.en` (realtime), regardless of config.
+3. Construction-failure fallback. The check in #2 only asks whether `ctranslate2` can
+   *see* a GPU; it does not load cuDNN. If a GPU is visible but CUDA/cuDNN init then fails
+   while building the recorder (for example a missing `libcudnn_ops.so.9` after a stale
+   `uv sync`), the daemon retries once on the same CPU config as #2 and keeps running
+   instead of crash-looping. `journalctl --user -u voice-typing` shows
+   `CUDA recorder construction failed (...); falling back to CPU ... — degraded but
+   functional` then `daemon started in degraded CPU mode`, and `voicectl status` reports
+   `device: cpu (int8)`. Fix the library path (see the cuDNN section under Troubleshooting)
+   and restart to return to the GPU.
 
 `voicectl status` reports the resolved device and models (see Logs below), so you
 can tell which path you are on:
@@ -183,6 +192,12 @@ systemctl --user restart voice-typing
 
 After any fix, restart with `systemctl --user restart voice-typing` so the wrapper
 recomputes the library paths.
+
+If cuDNN still cannot be loaded at daemon startup, the daemon now degrades to CPU
+automatically instead of crash-looping under `Restart=on-failure`: the journal shows the
+`falling back to CPU ... degraded but functional` line and `voicectl status` reports
+`device: cpu (int8)`. Transcription keeps working (slower); fix the library path above and
+restart to get back on the GPU.
 
 ### Wrong microphone
 

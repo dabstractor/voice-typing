@@ -467,12 +467,15 @@ class VoiceTypingDaemon:
     def _log_resolved_device(self) -> None:
         """Log the resolved device/models once at startup (CUDA residency proof; PRD acceptance T6).
 
-        Wrapped in try/except so a probe failure (odd env / missing ctranslate2 in a degraded run)
-        NEVER breaks the listen loop. Reuses S1's _resolve_device_config (the same resolution
-        build_recorder applied), so the logged device matches the recorder's actual device.
+        Reads self._resolved_device() — the SAME cached resolution status_snapshot() reports — so
+        the startup log and voicectl status always agree. After a construction-failure CPU fallback
+        (bugfix Issue 3 / P1.M1.T3.S2), main() seeds _resolved_device_cache with
+        cuda_check.CPU_FALLBACK, so this logs the ACTUAL cpu recorder (not the driver probe, which
+        still sees the GPU). _resolved_device() never raises (it degrades to 'unknown' on probe
+        failure); the try/except is retained as a defensive guard.
         """
         try:
-            resolved = _resolve_device_config(self._cfg)
+            resolved = self._resolved_device()
             logger.info(
                 "voice-typing device resolved: device=%s compute_type=%s final_model=%s "
                 "realtime_model=%s",
@@ -1120,7 +1123,42 @@ def main() -> int:
         # (tests patch voice_typing.feedback.Feedback; `from X import Y` resolves the live attr).
         from voice_typing.feedback import Feedback
 
-        daemon = VoiceTypingDaemon(cfg, Feedback(cfg.feedback))
+        feedback = Feedback(cfg.feedback)
+        # One LatencyLog shared by the recorder callbacks (on_vad_stop/partial, wired in build_recorder)
+        # and the daemon's on_final.finalize_utterance. Created here (not left to __init__) so the
+        # construction-failure CPU retry below can build a forced-CPU recorder wired to this SAME
+        # collector before re-constructing the daemon. (bugfix Issue 3 / P1.M1.T3.S2.)
+        latency = LatencyLog()
+
+        # bugfix Issue 3 / P1.M1.T3.S2 (PRD §4.4): the cuda_check driver probe can say "cuda-ok" while
+        # cuDNN/cuBLAS then fails to load INSIDE AudioToTextRecorder.__init__ (e.g. a missing
+        # libcudnn_ops.so.9). Without a retry that is `return 1` -> systemd Restart=on-failure crash-loop.
+        # So: if construction fails AND the originally-resolved device was cuda, retry ONCE on the PRD
+        # §4.4 CPU config via build_recorder(force_cpu=True) (which SKIPS the cuda_check probe entirely
+        # — S1) and inject the recorder through the existing recorder= kwarg (no __init__ change). Any
+        # failure here (probe raises, CPU build raises, re-construction raises) propagates to the outer
+        # `except Exception` -> "fatal error" -> return 1, preserving total-failure semantics.
+        try:
+            daemon = VoiceTypingDaemon(cfg, feedback, latency=latency)
+        except Exception as exc:
+            if _resolve_device_config(cfg).get("device") != "cuda":
+                raise  # first attempt was already CPU (or the probe failed) — nothing to fall back to
+            cpu_fb = cuda_check.CPU_FALLBACK
+            logger.warning(
+                "CUDA recorder construction failed (%s); falling back to CPU "
+                "(device=%s, compute_type=%s, models=%s/%s) — degraded but functional",
+                exc, cpu_fb["device"], cpu_fb["compute_type"],
+                cpu_fb["final_model"], cpu_fb["realtime_model"],
+            )
+            cpu_recorder = build_recorder(cfg, feedback, latency, force_cpu=True)
+            daemon = VoiceTypingDaemon(cfg, feedback, latency=latency, recorder=cpu_recorder)
+            # Make the daemon's self-reported device reflect the ACTUAL cpu recorder, not the driver
+            # probe (which still sees the GPU). _resolved_device() (read by status_snapshot) caches via
+            # this attribute; seeding it here means voicectl status reports device=cpu after the
+            # fallback (PRD §4.4 "say so in status"). _log_resolved_device (refactored in Task 2) also
+            # reads this cache, so the startup log agrees.
+            daemon._resolved_device_cache = dict(cuda_check.CPU_FALLBACK)
+            logger.info("daemon started in degraded CPU mode (construction-failure fallback)")
         # quit path: ControlServer._dispatch("quit") -> request_shutdown() (blocks until text()
         #   returns) -> on_quit=daemon.shutdown() -> recorder.shutdown() (release VRAM).
         server = ControlServer(daemon, on_quit=daemon.shutdown)
