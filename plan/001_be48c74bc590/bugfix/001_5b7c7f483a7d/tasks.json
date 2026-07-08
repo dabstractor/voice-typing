@@ -1,0 +1,242 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Bugfix Release — Operational Robustness & Quality",
+      "status": "Researching",
+      "description": "Fix 7 defects found by creative end-to-end QA of the voice-typing daemon. Three Major issues (unbounded log file, mic-unavailable silent failure, CUDA construction-failure no CPU fallback) affect 24/7 systemd robustness. Four Minor issues (test isolation, concurrency docstring, portaudio preflight, exit code overlap) affect developer experience and correctness. All fixes are grounded in verified codebase research stored in plan/001_be48c74bc590/bugfix/001_5b7c7f483a7d/architecture/.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Major Issue Fixes — Operational Robustness",
+          "status": "Planned",
+          "description": "Fix the three Major-severity issues that would bite a 24/7 systemd deployment or a user whose mic/CUDA environment changes: (1) unbounded realtimesst.log, (2) mic-unavailable silent failure with traceback spam, (3) CUDA construction-failure with no CPU fallback.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Fix unbounded realtimesst.log in production daemon",
+              "status": "Planned",
+              "description": "RealtimeSTT opens a DEBUG-level FileHandler at 'realtimesst.log' (relative to CWD = $HOME under systemd) when no_log_file is not set. The production daemon's _FIXED_KWARGS never passes no_log_file=True, so the file grows unbounded (~53 MB/day). The test suite already passes it. Add the missing kwarg to match.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Add no_log_file=True to _FIXED_KWARGS",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h3.0", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: _FIXED_KWARGS at voice_typing/daemon.py:96-108 has 10 keys but is missing no_log_file. The AudioToTextRecorder.__init__ signature (installed in .venv at RealtimeSTT/audio_recorder.py:180) accepts no_log_file: bool = False. The _filter_kwargs_to_signature() function at daemon.py:191-217 keeps kwargs that are in the real signature, so no_log_file will survive filtering. RealtimeSTT's _configure_logger (core/initialization.py:305-335) opens a FileHandler('realtimesst.log') at DEBUG with no rotation when no_log_file is False. The test suite already sets no_log_file=True at tests/test_feed_audio.py:275.\n2. INPUT: The _FIXED_KWARGS dict at voice_typing/daemon.py:96-108 (currently 10 keys, all device-independent VAD/timing/silero/spinner kwargs).\n3. LOGIC: Add \"no_log_file\": True as a new key in _FIXED_KWARGS. This kwarg flows through cfg_to_kwargs() → _construct() → _filter_kwargs_to_signature() → AudioToTextRecorder(**filtered). No other code changes needed — the daemon's own logging (stderr → journald via _setup_logging at daemon.py:867-886) already covers PRD §4.2, and RealtimeSTT's own console_handler (StreamHandler → stderr) still sends messages to journald.\n4. OUTPUT: cfg_to_kwargs(cfg) now includes no_log_file=True in its returned dict. No realtimesst.log file is created by the production daemon. Verify with a test asserting 'no_log_file' is in daemon.cfg_to_kwargs(cfg) and equals True.\n5. DOCS: none — no user-facing/config/API surface change. This is an internal fix that suppresses a file the user never intentionally interacts with. The PRD §4.2 logging path (stderr → journald) is unchanged."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Fix mic-unavailable silent failure with traceback spam",
+              "status": "Planned",
+              "description": "When the mic is unavailable, RealtimeSTT retries in an infinite loop logging a full traceback every 3 s. The daemon cannot detect this: set_microphone() just flips a flag with no I/O check, and status_snapshot() reports listening:true with no mic-health indication. The user arms, speaks, gets nothing, and must dig into journalctl. Fix: detect mic health via PyAudio probe, surface it in status, and rate-limit the traceback spam.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Add mic health detection via lazy PyAudio probe",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h3.1", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: VoiceTypingDaemon._arm() at daemon.py:490-494 calls self._recorder.set_microphone(True) which only flips a flag (audio_recorder.py:718-723) — no I/O check, no return value. The audio worker (core/audio_input_worker.py ~100-177) runs as a daemon threading.Thread on Linux (core/runtime.py:17-37) and retries mic connection in an infinite while loop with time.sleep(3) and exc_info=True traceback on every attempt. The daemon has NO reference to this worker's state. PyAudio is imported lazily inside the worker (audio_input_worker.py:35), so importing pyaudio at daemon module level would violate the ctl import purity invariant (Issue 4).\n2. INPUT: VoiceTypingDaemon.__init__ at daemon.py:300-326 (where self._listening, self._recorder etc. are initialized). _arm() at daemon.py:490-494 and _disarm() at daemon.py:496-502. The daemon's _setup_logging at daemon.py:867-886.\n3. LOGIC: Add a _probe_mic() method to VoiceTypingDaemon that: (a) lazily imports pyaudio inside the method body (NOT at module level, to preserve ctl import purity); (b) opens a PyAudio instance, enumerates input devices, checks if at least one valid input device exists; (c) returns (ok: bool, error: str | None). Store the result in self._mic_ok (bool, default True) and self._mic_error (str, default None) initialized in __init__. Call _probe_mic() at the end of __init__ (after recorder construction) and at the end of _arm() (after set_microphone(True)). Wrap _probe_mic in try/except Exception to handle PyAudio not installed, no devices, or any other failure gracefully (set _mic_ok=False, _mic_error=str(exc)). Mock pyaudio in tests.\n4. OUTPUT: VoiceTypingDaemon exposes self._mic_ok (bool) and self._mic_error (str|None) attributes, updated at construction and on each _arm() call. These are consumed by P1.M1.T2.S2 (status_snapshot).\n5. DOCS: none — internal attribute, no user-facing surface change yet. The surfacing happens in S2."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "Surface mic health in status_snapshot() and voicectl status output",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.2", "h3.1", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: status_snapshot() at daemon.py:538-559 returns a dict with 8 fields: listening, partial, last_final, uptime_s, device, compute_type, final_model, realtime_model. The control-socket _dispatch() at daemon.py ~770-815 spreads **status_snapshot() into every response for status/toggle/start/stop commands, so new fields appear automatically in JSON responses. ctl.py's format_result() at lines 42-73 renders the status dict into human-readable text; it currently maps ok/listening/partial/device/models.\n2. INPUT: self._mic_ok (bool) and self._mic_error (str|None) from P1.M1.T2.S1. The status_snapshot() method at daemon.py:538-559. The format_result() function at voice_typing/ctl.py:42-73.\n3. LOGIC: (a) Add two fields to the status_snapshot() return dict: \"mic_ok\": self._mic_ok and \"mic_error\": self._mic_error (or empty string). (b) Update ctl.py format_result() to append a mic-status line to the human-readable output when mic_ok is False: e.g. 'mic: unavailable (error message)'. When mic_ok is True, either omit the line or show 'mic: ok'. This gives the user immediate visibility into mic problems via voicectl status without digging into journalctl.\n4. OUTPUT: voicectl status now shows mic health. The JSON control-socket response includes mic_ok and mic_error fields. Scripts parsing the JSON can check mic_ok before relying on listening.\n5. DOCS: Mode A — Update README.md troubleshooting section (the 'mic device' subsection) to note that 'voicectl status' now shows mic_ok/mic_error fields, so the user can check mic health without journalctl. Also update JSDoc/docstring on status_snapshot() and format_result() to document the new fields."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S3",
+                  "title": "Rate-limit RealtimeSTT mic-retry traceback spam in journalctl",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h3.1", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: RealtimeSTT's audio_input_worker.py (~line 161-165) logs 'Microphone connection failed: {e}. Retrying...' at ERROR level with exc_info=True on every 3-second retry attempt, forever. This logger is logging.getLogger('realtimestt'). The daemon's _setup_logging (daemon.py:867-886) configures the root logger via basicConfig(stream=sys.stderr). RealtimeSTT adds its own handlers to the 'realtimestt' logger (core/initialization.py:305-335) but propagation still sends records to the root handler. On the live daemon, this produced 2822+ errors and counting.\n2. INPUT: The _setup_logging function at daemon.py:867-886 (called from main() at line 916). The RealtimeSTT logger named 'realtimestt'.\n3. LOGIC: After _setup_logging runs, attach a logging.Filter (or a dedup wrapper) to the 'realtimestt' logger that detects the recurring 'Microphone connection failed' message pattern. On the first occurrence, let it through with exc_info=True (full traceback). On subsequent occurrences within a time window (e.g. 60 seconds), suppress the record entirely (return False from filter()) OR replace it with a single summarized WARNING without traceback. Every Nth occurrence or after the window, emit one summary line like 'Microphone still unavailable after N retry attempts (last error: ...)'. Implementation approach: a class with __init__(self, dedup_seconds=60), a _last_seen timestamp, and a _count counter, implementing logging.Filter.filter(record). The filter should match on record.getMessage() containing 'Microphone connection failed'. Mock the logger in tests.\n4. OUTPUT: journalctl shows one full traceback on first mic failure, then periodic summary warnings instead of a traceback every 3 seconds. The daemon's log output is clean and actionable.\n5. DOCS: Mode A — If README.md's 'Logs, status, stopping' section mentions mic retry messages, update to note they are now rate-limited to periodic summaries."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T3",
+              "title": "Fix CUDA construction-failure → CPU fallback",
+              "status": "Planned",
+              "description": "cuda_check.resolve_device_and_models() only probes the CUDA driver, not cuDNN. If driver reports GPU but cuDNN init fails at AudioToTextRecorder construction (WhisperModel load), main() catches the Exception, logs 'fatal error', and returns 1 — systemd then crash-loops forever instead of degrading to CPU. Add a construction-failure → CPU retry.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S1",
+                  "title": "Add force_cpu capability to the device resolution and recorder build path",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h3.2", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: The device resolution chain is: _resolve_device_config(cfg) at daemon.py:116-131 → cuda_check.resolve_device_and_models(defaults) at cuda_check.py:114-132 → cfg_to_kwargs(cfg) at daemon.py:133-156 (calls _resolve_device_config, then updates with _FIXED_KWARGS) → _construct(cfg, feedback, recorder_cls, latency) at daemon.py:209-223 (calls cfg_to_kwargs, adds callbacks, filters to signature, constructs recorder_cls(**filtered)) → build_recorder(cfg, feedback, latency) at daemon.py:226-237 (lazy-imports AudioToTextRecorder, calls _construct). cuda_check.CPU_FALLBACK (cuda_check.py:53-59) = {device: cpu, compute_type: int8, final_model: small.en, realtime_model: tiny.en}. The compute_type field is NOT in config — it is derived in _resolve_device_config from cfg.asr.device. VoiceTypingDaemon.__init__ at daemon.py:300-326 calls build_recorder when recorder is None.\n2. INPUT: _resolve_device_config() at daemon.py:116-131, cfg_to_kwargs() at daemon.py:133-156, _construct() at daemon.py:209-223, build_recorder() at daemon.py:226-237, cuda_check.CPU_FALLBACK at cuda_check.py:53-59.\n3. LOGIC: Add a force_cpu: bool = False parameter to build_recorder() and _construct(). When force_cpu=True, skip the normal _resolve_device_config/cuda_check path and instead build the device kwargs directly from cuda_check.CPU_FALLBACK. This means: in _construct, if force_cpu, replace the resolved dict with dict(cuda_check.CPU_FALLBACK) before building kwargs. This ensures the recorder is constructed with device=cpu, compute_type=int8, final_model=small.en, realtime_model=tiny.en — the exact PRD §4.4 degraded config. Do NOT modify cuda_check.py or _resolve_device_config — the force_cpu override happens in _construct/build_recorder only.\n4. OUTPUT: build_recorder(cfg, feedback, latency, force_cpu=True) constructs an AudioToTextRecorder with CPU config regardless of what cuda_check.resolve_device_and_models() would return. This is consumed by P1.M1.T3.S2 (the main() retry).\n5. DOCS: none — internal API change, no user-facing/config surface change."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S2",
+                  "title": "Implement construction-failure → CPU retry in main()",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T3.S1"],
+                  "prd_selectors": ["h2.2", "h3.2", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: main() at daemon.py:887-960 constructs VoiceTypingDaemon(cfg, Feedback(cfg.feedback)) at line 927 inside a try/except Exception at line 936 that logs 'fatal error during daemon lifecycle; exiting' and returns 1. VoiceTypingDaemon.__init__ calls build_recorder(cfg, feedback, self._latency) at ~line 320 when recorder is None. The construction at line 927 is where cuDNN loads — a missing libcudnn_ops.so.9 raises here. The module docstring at daemon.py:25-29 explicitly acknowledges this gap is deferred. systemd/voice-typing.service has Restart=on-failure, RestartSec=2, so return 1 → crash-loop forever. The existing test test_main_returns_one_on_daemon_construction_failure (test_daemon.py) asserts main() returns 1 when __init__ raises — this test must still pass if the CPU retry also fails. The _patch_main_lifecycle helper and BoomDaemon pattern in test_daemon.py are the seams for testing.\n2. INPUT: main() at daemon.py:887-960 (specifically the construction at line 927 and the except block at line 936). The force_cpu parameter from P1.M1.T3.S1 on build_recorder/_construct. cuda_check.CPU_FALLBACK for logging. The resolved device config from _resolve_device_config(cfg) to determine if the first attempt was CUDA.\n3. LOGIC: Restructure the construction in main() so that: (a) The VoiceTypingDaemon construction is wrapped in its own try/except, separate from the server.run() block. (b) On construction Exception, check if the original resolved device was 'cuda' (via _resolve_device_config(cfg)). If yes, log a clear WARNING: 'CUDA recorder construction failed ({exc}); falling back to CPU (device=cpu, compute_type=int8, models=small.en/tiny.en) — degraded but functional'. (c) Retry the construction with force_cpu=True. To do this, either: add a force_cpu parameter to VoiceTypingDaemon.__init__ that passes through to build_recorder, OR construct the recorder with build_recorder(cfg, feedback, latency, force_cpu=True) and inject it into VoiceTypingDaemon via the recorder= parameter. (d) If the CPU retry also fails, fall through to the existing 'fatal error' log + return 1 (preserving test_main_returns_one_on_daemon_construction_failure semantics). (e) If the CPU retry succeeds, log 'daemon started in degraded CPU mode' and continue to server.start() + daemon.run(). Keep the finally block teardown intact.\n4. OUTPUT: main() returns 0 (daemon runs normally) even when CUDA construction fails, having fallen back to CPU mode. journalctl shows the degradation clearly. systemd no longer crash-loops. The existing test for total construction failure (both CUDA and CPU fail → return 1) still passes.\n5. DOCS: Mode A — Update README.md 'CPU-only mode' and/or 'Troubleshooting' sections to document the automatic CUDA → CPU fallback at construction time, so users know the daemon degrades gracefully instead of crash-looping."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Minor Issue Fixes — Quality & Correctness",
+          "status": "Planned",
+          "description": "Fix the four Minor-severity issues: (4) test isolation failure, (5) incorrect concurrency docstring / missing lock, (6) install.sh portaudio preflight, (7) voicectl exit code overlap.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Fix pytest tests/ fast suite test-isolation failure",
+              "status": "Planned",
+              "description": "pytest tests/ --ignore=tests/test_feed_audio.py reports 1 failed, 210 passed. The failure is test_voicectl.py::test_ctl_module_present_and_imports_pure asserting torch/ctranslate2 absent from sys.modules, but it runs AFTER test_daemon.py (alphabetical order) where several tests call the REAL cuda_check.resolve_device_and_models() without monkeypatching, importing ctranslate2 (→ torch) into the process-global sys.modules.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Monkeypatch cuda_check.resolve_device_and_models in polluting tests",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.3", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Four tests in tests/test_daemon.py call the REAL cuda_check.resolve_device_and_models() without monkeypatching, polluting sys.modules with ctranslate2 and torch: (a) test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set at line 98 (takes only cfg fixture, no monkeypatch); (b) test_run_loop_not_listening_does_not_call_text at line 517; (c) test_run_loop_calls_text_when_listening_then_exits_on_shutdown at line 529; (d) test_run_sets_uptime_after_start at line 543. The run-loop tests (b,c,d) call daemon.run() which calls _log_resolved_device() at daemon.py:430-443, which calls _resolve_device_config() → the real resolver. The _cuda_resolve(monkeypatch, mapping) helper at test_daemon.py:66-91 monkeypatches daemon.cuda_check.resolve_device_and_models to a deterministic closure. The correctly-hermetic variant test_run_logs_resolved_device_at_startup at line 701 already uses monkeypatch. pytest collects files alphabetically (test_daemon.py before test_voicectl.py).\n2. INPUT: tests/test_daemon.py lines 98-111 (test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set), lines 517-557 (the three run-loop tests). The _cuda_resolve helper at test_daemon.py:66-91. The monkeypatch fixture (pytest builtin).\n3. LOGIC: For test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set: add a monkeypatch parameter to the test function signature and call _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS) (or any mapping with the expected keys) at the top of the test body, mirroring its siblings (lines 113-165). For the three run-loop tests (lines 517, 529, 543): add monkeypatch parameter and call _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS) at the top, mirroring test_run_logs_resolved_device_at_startup at line 701. This prevents _log_resolved_device() from calling the real resolver.\n4. OUTPUT: All four tests now use the monkeypatched resolver. Running the full fast suite (pytest tests/ --ignore=tests/test_feed_audio.py) passes 211/211 with no sys.modules pollution from test_daemon.py. The cross-test isolation issue is resolved at the root cause.\n5. DOCS: none — test-only change, no user-facing/config/API surface change."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S2",
+                  "title": "Harden test_ctl_module_present_and_imports_pure to be order-independent",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.3", "h3.3", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test_ctl_module_present_and_imports_pure at tests/test_voicectl.py:179-183 asserts that RealtimeSTT/torch/ctranslate2 are absent from the GLOBAL sys.modules. This is a cross-test assertion that depends on no prior test importing heavy deps. Even with S1's fix, future tests could accidentally re-pollute sys.modules. A robust assertion should test voice_typing.ctl's OWN import behavior in isolation.\n2. INPUT: tests/test_voicectl.py:179-183 (the test function). The importlib and sys modules.\n3. LOGIC: Rewrite the assertion to snapshot sys.modules keys BEFORE importing voice_typing.ctl, then assert that importing voice_typing.ctl does NOT ADD any of RealtimeSTT/torch/ctranslate2 to the diff. Implementation: before_block = set(sys.modules.keys()); import voice_typing.ctl (or force re-import); after_block = set(sys.modules.keys()); added = after_block - before_block; assert not any(m in added for m in ('RealtimeSTT', 'torch', 'ctranslate2')). This tests the actual invariant (importing ctl does not pull in heavy deps) rather than global process state. Alternatively, spawn a child process: subprocess.run([sys.executable, '-c', 'import voice_typing.ctl; import sys; assert not any(m in sys.modules for m in (\"RealtimeSTT\", \"torch\", \"ctranslate2\"))']). The child-process approach is the most robust.\n4. OUTPUT: test_ctl_module_present_and_imports_pure passes regardless of test execution order. Even if other tests pollute sys.modules, this test correctly verifies that voice_typing.ctl itself does not import heavy deps.\n5. DOCS: none — test-only change."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "Fix on_final concurrency invariant — add serialization lock and correct docstrings",
+              "status": "Planned",
+              "description": "typing_backends.py:19-23 and feedback.py:31-35 claim 'the daemon serializes on_final calls'. This is false: RealtimeSTT fires on_final via threading.Thread(...).start() (transcription_api.py:40-42), and on_final at daemon.py:450-489 has no lock. Two callbacks can run concurrently, potentially interleaving typed output. Add a serialization lock to make the invariant true, then correct the docstrings.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "Add _on_final_lock to serialize on_final callbacks",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.4", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: VoiceTypingDaemon.on_final() at daemon.py:450-489 runs gate → clean → type → record → log with NO lock around the body. grep 'self._lock' over daemon.py shows self._lock is used only in _arm/_disarm/start/stop/toggle/request_shutdown/shutdown. The run() loop at daemon.py:401-414 calls self._recorder.text(self.on_final) which blocks until one utterance finalizes, then RealtimeSTT fires on_final in a NEW threading.Thread (core/transcription_api.py:40-42) and returns immediately — the loop re-enters text() without joining. Two on_final callbacks can overlap if a slow type_text subprocess is still running when the next audio segment finalizes. The typing backends (typing_backends.py) are stateless and spawn an independent child subprocess per call (reentrant), so concurrent calls won't crash — but typed text could interleave or land out of order.\n2. INPUT: VoiceTypingDaemon.__init__ at daemon.py:300-326 (where instance attributes are initialized). VoiceTypingDaemon.on_final() at daemon.py:450-489 (the callback body: gate → clean → type → record → log).\n3. LOGIC: (a) Add self._on_final_lock = threading.Lock() in VoiceTypingDaemon.__init__ (near the other lock/thread initialization, ~line 310-320). Use a SEPARATE lock from self._lock to avoid coupling on_final latency to toggle/stop latency and to avoid any deadlock risk with _arm/_disarm. (b) In on_final(), wrap the clean → type → record → log body (the part AFTER the early-return gate check at the top) in 'with self._on_final_lock:'. The gate check (if not self._listening.is_set(): return) can stay outside the lock since it's a read-only race guard. The textproc.clean, backend.type_text, feedback.record_final, latency.finalize_utterance, and logger.info calls all go inside the lock. This ensures two concurrent on_final callbacks execute sequentially.\n4. OUTPUT: on_final callbacks are serialized. Two finals cannot interleave their type_text calls. The latent concurrent-typing race is eliminated. Tests: add a test that verifies the lock exists and is held during on_final (e.g., two concurrent on_final calls produce output in order, or mock the backend and assert calls don't overlap).\n5. DOCS: none — internal behavioral change. The docstring correction happens in S2."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S2",
+                  "title": "Correct THREAD SAFETY docstrings to reflect actual serialization",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P1.M2.T2.S1"],
+                  "prd_selectors": ["h2.3", "h3.4", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Two docstrings make false claims: (a) typing_backends.py:19-23 module docstring THREAD SAFETY block states 'The daemon serializes on_final calls, so no locking is needed.' (b) feedback.py:31-35 module docstring THREAD SAFETY block states 'The daemon serializes on_final anyway.' Both are false per the analysis in issue_analysis.md — RealtimeSTT fires on_final in an unserialized thread. After S1 adds the _on_final_lock, the serialization claim becomes TRUE.\n2. INPUT: voice_typing/typing_backends.py lines 19-23 (module docstring THREAD SAFETY block). voice_typing/feedback.py lines 31-35 (module docstring THREAD SAFETY block). voice_typing/feedback.py line 145 (snapshot docstring 'no Lock needed' note). The _on_final_lock from P1.M2.T2.S1.\n3. LOGIC: Update typing_backends.py:19-23 to state: 'on_final is serialized by the daemon's _on_final_lock (VoiceTypingDaemon), so only one type_text call executes at a time. The backends are also individually safe: WtypeBackend/YdotoolBackend are stateless and spawn an independent child subprocess per call; TmuxBackend stores one immutable tmux_target.' Update feedback.py:31-35 to state: 'on_final is serialized by the daemon's _on_final_lock. Additionally, self._state dict updates are individually atomic in CPython, and _write() uses tempfile+os.replace (atomic at OS level) — a torn write is impossible.' Keep the lock-free snapshot design note at feedback.py:145 but update any wording that says 'serializes on_final anyway' to reference the actual _on_final_lock.\n4. OUTPUT: Both module docstrings accurately describe the concurrency model. A maintainer reading them relies on the correct invariant.\n5. DOCS: Mode A — these ARE documentation (module docstrings). The correction rides WITH the lock implementation work in S1 (they are in the same task). No separate docs subtask needed."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T3",
+              "title": "Add portaudio preflight to install.sh",
+              "status": "Planned",
+              "description": "install.sh has no portaudio/pacman check. PRD §5 step 2 mandates 'pacman -Q portaudio || sudo pacman -S --noconfirm portaudio'. Without portaudio, uv sync installs the PyAudio wheel but the daemon fails at PyAudio construction with a confusing dlopen error.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T3.S1",
+                  "title": "Add portaudio preflight check to install.sh",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.5", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: install.sh has set -euo pipefail at line 25. Preflight checks are at lines 36-42: XDG_RUNTIME_DIR set (37-40), uv present (41), systemctl present (42). There is NO portaudio check (grep -in portaudio install.sh → no match). On this machine portaudio 1:19.7.0-4 is already installed. PRD §5 step 2 (PRD.md:261) says 'pacman -Q portaudio || sudo pacman -S --noconfirm portaudio'. PRD §2 notes that if sudo is unavailable non-interactively, the user should be asked to run it manually. README.md:18 already documents portaudio as a requirement.\n2. INPUT: install.sh lines 36-42 (the preflight block, after which the check should be inserted). The pacman command availability.\n3. LOGIC: Insert a portaudio preflight check immediately after the systemctl check at install.sh:42. The check should: (a) verify pacman is available (command -v pacman); if not, print a warning about non-Arch hosts and continue (don't hard-fail). (b) If pacman is available, run 'pacman -Q portaudio' to check if the package is installed. (c) If portaudio is NOT installed, print an actionable message to stderr: 'install.sh: portaudio not installed (PyAudio system dependency). Run: sudo pacman -S --noconfirm portaudio, then re-run ./install.sh' and exit 1. (d) Use if ! ... >/dev/null 2>&1; then ... pattern to handle set -e safely (the pacman -Q return code must not abort the script under set -e). Mirror the existing preflight idiom (echo to stderr, exit 1).\n4. OUTPUT: install.sh now checks for portaudio before proceeding to uv sync. A host without portaudio gets an actionable message and exit 1 instead of a confusing PyAudio dlopen failure later.\n5. DOCS: Mode A — README.md:18 already documents the portaudio requirement. If the README's Install section (lines 21-37) mentions preflight checks, note that install.sh now verifies portaudio automatically. The installer's own stdout output is the primary user-facing doc for this."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T4",
+              "title": "Fix voicectl exit code 2 overlap with argparse usage errors",
+              "status": "Planned",
+              "description": "argparse exits 2 for usage errors (unknown command, no command), the same code PRD §4.8 reserves for 'daemon not running'. A caller checking $? -eq 2 cannot distinguish. Remap usage errors to exit code 64 (BSD EX_USAGE) so 2 is unambiguous for 'daemon not running'.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T4.S1",
+                  "title": "Remap argparse usage errors to exit 64 and reserve 2 for daemon-not-running",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.6", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/ctl.py:30 defines _COMMANDS = ('toggle', 'start', 'stop', 'status', 'quit'). _build_parser() at ctl.py:78-94 uses parser.add_argument('cmd', choices=_COMMANDS). argparse calls SystemExit(2) for: no command provided, unknown command (e.g. 'voicectl frobnicate'). main() at ctl.py:98-128 returns 2 for: XDG_RUNTIME_DIR unset (~line 112-114), connect OSError (~line 116-118). format_result() at ctl.py:42-73 returns code 0 or 1. tests/test_voicectl.py has test_main_rejects_unknown_command that asserts SystemExit with code 2 for 'frobnicate'. Three other tests (test_main_exit2_when_socket_absent, test_main_exit2_when_stale_socket_no_listener, test_main_exit2_when_xdg_runtime_dir_unset) assert code 2 for genuine daemon-not-running — these MUST stay 2.\n2. INPUT: voice_typing/ctl.py:78-94 (_build_parser with choices=_COMMANDS). voice_typing/ctl.py:98-128 (main function). tests/test_voicectl.py test_main_rejects_unknown_command.\n3. LOGIC: (a) Remove choices=_COMMANDS from the argparse add_argument call in _build_parser() so argparse does not validate the command. (b) In main(), after parse_args(), manually validate args.cmd: if args.cmd not in _COMMANDS, print a usage error to stderr (e.g. 'voicectl: invalid command {cmd!r}; choose from {commands}') and return 64 (BSD EX_USAGE from sysexits.h). (c) Keep all existing exit-2 paths (XDG_RUNTIME_DIR unset, connect OSError) unchanged — 2 remains exclusively for 'daemon not running'. (d) Update test_main_rejects_unknown_command in tests/test_voicectl.py to assert return value 64 instead of SystemExit(2). Since main() now returns 64 instead of raising SystemExit, the test should call ctl.main(['frobnicate']) directly and assert the return value is 64. Verify the three daemon-not-running tests still assert code 2.\n4. OUTPUT: Usage errors (unknown/missing command) exit 64. Daemon-not-running exits 2. A script can distinguish: $? -eq 2 means daemon is down, $? -eq 64 means the user typed the command wrong.\n5. DOCS: Mode A — If README.md or any doc lists voicectl exit codes, update to document the new 64 code for usage errors and clarify 2 is exclusively for daemon-not-running. Update the PRD §4.8 reference in any inline docstring."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Changeset-Level Documentation Sync & Final Validation",
+          "status": "Planned",
+          "description": "Sweep README.md and overview documentation to reflect all changes from M1 and M2. This is the Mode B catch-all: per-feature docs already rode with each implementing subtask (Mode A), but cross-cutting overview docs that only make sense once the whole changeset is in place are updated here.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Update README.md and any overview documentation to accurately reflect the full bugfix changeset: mic health in voicectl status, CUDA→CPU automatic fallback, rate-limited mic retry logs, portaudio preflight in install.sh, and voicectl exit code 64 for usage errors.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Update README.md sections spanning the full changeset",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T2.S2", "P1.M1.T2.S3", "P1.M1.T3.S1", "P1.M1.T3.S2", "P1.M2.T1.S1", "P1.M2.T1.S2", "P1.M2.T2.S1", "P1.M2.T2.S2", "P1.M2.T3.S1", "P1.M2.T4.S1"],
+                  "prd_selectors": ["h2.0", "h2.4"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md has these sections: Requirements (lines 8-19, already lists portaudio), Install (lines 21-37), First run, Hotkey, tmux status line, Configuration (lines 99-111), Voice-activity constants note (lines 113-123), CPU-only mode, Troubleshooting (cuDNN, mic, wtype/ydotool), Logs/status/stopping. Per-feature doc updates (Mode A) already happened in implementing subtasks. This subtask sweeps the cross-cutting overview docs.\n2. INPUT: All implementing subtasks from P1.M1 and P1.M2. The current README.md content.\n3. LOGIC: Review README.md holistically and update: (a) Troubleshooting mic section — note that 'voicectl status' now shows mic_ok/mic_error fields (from P1.M1.T2.S2) and that mic retry logs are now rate-limited to periodic summaries (from P1.M1.T2.S3). (b) CPU-only mode / Troubleshooting cuDNN section — note that the daemon now automatically falls back to CPU if CUDA construction fails (from P1.M1.T3.S2), so users see degradation instead of crash-loops. (c) Install section — note that install.sh now checks for portaudio automatically (from P1.M2.T3.S1). (d) Logs/status section — if exit codes are documented, note voicectl usage errors now exit 64 (from P1.M2.T4.S1). (e) Verify all Mode A doc updates from implementing subtasks are consistent and coherent.\n4. OUTPUT: README.md accurately reflects the post-bugfix state of the daemon. No stale claims about crash-loops, silent mic failures, or confusing exit codes.\n5. DOCS: This IS the documentation task. Mode B — changeset-level overview sweep."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

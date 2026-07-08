@@ -1,0 +1,15 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: Production daemon writes an unbounded realtimesst.log to $HOME
+  h3.1 Issue 2: Mic-unavailable → indefinite traceback-spamming retry loop with no user-facing indication and no recovery
+  h3.2 Issue 3: CUDA construction-failure does not fall back to CPU (PRD §4.4 MUST partially unmet)
+ h2.3 Minor Issues (Nice to Fix)
+  h3.3 Issue 4: pytest tests/ fast suite fails due to test-isolation (order-dependent)
+  h3.4 Issue 5: Incorrect "daemon serializes on_final calls" docstring claim (latent concurrent-typing race)
+  h3.5 Issue 6: install.sh skips the PRD-mandated portaudio check
+  h3.6 Issue 7: voicectl exit code 2 overlaps argparse usage errors with "daemon not running"
+ h2.4 Testing Summary
+---
+para:11 list:6
