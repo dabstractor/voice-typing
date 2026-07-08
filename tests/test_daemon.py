@@ -95,7 +95,8 @@ def cfg() -> VoiceTypingConfig:
 # ---------------------------------------------------------------------------
 
 
-def test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set(cfg):
+def test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set(cfg, monkeypatch):
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: avoid the real cuda_check probe
     kw = daemon.cfg_to_kwargs(cfg)
     # No on_* callbacks here (they are wired in build_recorder).
     assert not any(k.startswith("on_") for k in kw), sorted(kw)
@@ -534,7 +535,8 @@ def test_request_shutdown_sets_event_and_aborts_not_shutdown():
 # --- run() loop ---
 
 
-def test_run_loop_not_listening_does_not_call_text():
+def test_run_loop_not_listening_does_not_call_text(monkeypatch):
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
     d, fb, rec, be = _make_daemon()
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
@@ -546,7 +548,8 @@ def test_run_loop_not_listening_does_not_call_text():
     assert not t.is_alive()
 
 
-def test_run_loop_calls_text_when_listening_then_exits_on_shutdown():
+def test_run_loop_calls_text_when_listening_then_exits_on_shutdown(monkeypatch):
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
     d, fb, rec, be = _make_daemon()
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
@@ -560,7 +563,8 @@ def test_run_loop_calls_text_when_listening_then_exits_on_shutdown():
     assert not t.is_alive()
 
 
-def test_run_sets_uptime_after_start():
+def test_run_sets_uptime_after_start(monkeypatch):
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
     d, fb, rec, be = _make_daemon()
     assert d.uptime_s == 0.0   # not started yet
     t = threading.Thread(target=d.run, daemon=True)
