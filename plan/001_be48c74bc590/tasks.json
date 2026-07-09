@@ -4,21 +4,21 @@
       "type": "Phase",
       "id": "P1",
       "title": "MVP — Fully-Local Voice Typing Daemon (RealtimeSTT)",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Deliver the complete voice-typing system per PRD §4: a long-running Python daemon that captures the PipeWire default mic via RealtimeSTT (faster-whisper/CTranslate2 on CUDA), surfaces live partials to a state file + tmux status, and types only finalized text into the focused Wayland window (wtype/ydotool) or a tmux pane. Listening never auto-stops on silence (fixes the WhisperX flaw); it segments utterances only. Controlled via a unix socket + voicectl CLI; runs as a systemd user service starting un-armed. All T1–T4/T6 tests pass.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Project Bootstrap & CUDA Environment",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Initialize the uv project, declare/install dependencies (RealtimeSTT + nvidia CUDA wheels), create the LD_LIBRARY_PATH launcher wrapper, verify ctranslate2 sees CUDA, and prefetch both STT models so first real run is instant.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Initialize uv project and declare dependencies",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Create pyproject.toml (python >=3.12,<3.13), package skeleton voice_typing/, and console-script entry points; declare runtime deps including the CUDA cuDNN 9 wheels.",
               "subtasks": [
                 {
@@ -39,7 +39,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Resolve & install dependencies; verify torch CUDA (best-effort)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
