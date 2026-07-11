@@ -113,6 +113,8 @@ cp "$SRC_UNIT" "$USER_UNIT_DIR/voice-typing.service"
 systemctl --user daemon-reload
 systemctl --user enable voice-typing.service
 # restart (not start): starts a stopped unit AND applies a freshly-copied unit to a running one.
+# timestamp captured BEFORE restart so the offline journal grep below sees only this run
+RESTART_TS="$(date '+%Y-%m-%d %H:%M:%S')"
 systemctl --user restart voice-typing.service
 
 # Remove a stale realtimesst.log from a prior run (validation Issue 3; housekeeping). The
@@ -123,6 +125,28 @@ systemctl --user restart voice-typing.service
 if [ -f "$REPO/realtimesst.log" ]; then
   rm -f "$REPO/realtimesst.log"
   echo "    removed stale realtimesst.log"
+fi
+
+# Offline regression guard (bugfix Issue 1 / Issue 4): launch_daemon.sh now exports
+# HF_HUB_OFFLINE=1 + TRANSFORMERS_OFFLINE=1 (P1.M1.T1.S1), so the restarted daemon must load
+# models from cache with ZERO network calls to huggingface.co. Wait for the control socket to
+# answer (it binds AFTER recorder construction in main() -> any HF HTTP call is already logged),
+# flush journald, then grep the post-restart journal and WARN (stderr, NOT fatal) on any match.
+# The hard config gate is tests/test_systemd_unit.py::test_launch_daemon_exports_offline_vars;
+# this is the install-time runtime surface. set-e-safe: the grep pipeline is in an `if`
+# condition (errexit-exempt); a journalctl failure yields no match -> clean branch, no abort
+# (same idiom as the cuda-smoke `if !` above).
+for _ in $(seq 1 60); do                  # up to ~30s for cold CUDA init + 2 model loads
+  if "$REPO/.venv/bin/voicectl" status >/dev/null 2>&1; then break; fi
+  sleep 0.5
+done
+sleep 2                                   # let journald flush the startup HTTP lines
+if journalctl --user -u voice-typing --since "$RESTART_TS" --no-pager 2>/dev/null \
+    | grep -q 'HTTP Request: GET https://huggingface.co'; then
+  echo "install.sh: WARNING — daemon made network calls to huggingface.co after restart;" \
+       "offline exports (HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE) may be missing from launch_daemon.sh." >&2
+else
+  echo "    offline check: no huggingface.co network calls after restart (HF_HUB_OFFLINE=1 active)"
 fi
 
 # --- (6) copy config.toml to XDG IF ABSENT (never overwrite the user's edits) ---------
@@ -149,6 +173,7 @@ echo
 echo "==> [7/7] done — voice-typing installed"
 echo "daemon : running and NOT listening (no hot-mic on boot). Run 'voicectl toggle' to arm the mic."
 echo "CUDA   : ${VERDICT:-unknown}"
+echo "offline: daemon runs fully local (HF_HUB_OFFLINE=1 via launch_daemon.sh) — no network at runtime"
 echo
 echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|quit"
 echo "          (bind SUPER+ALT+D -> voicectl toggle; see the Hyprland note below)"

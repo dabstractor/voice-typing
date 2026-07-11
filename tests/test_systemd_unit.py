@@ -58,6 +58,11 @@ def _launch_daemon_path() -> Path:
     return Path(__file__).resolve().parent.parent / "voice_typing" / "launch_daemon.sh"
 
 
+def _install_sh_path() -> Path:
+    # install.sh — repo root is the parent of tests/.
+    return Path(__file__).resolve().parent.parent / "install.sh"
+
+
 def test_execstart_points_at_launch_daemon_wrapper():
     """ExecStart must run launch_daemon.sh (the LD_LIBRARY_PATH wrapper), not python directly."""
     exec_lines = [ln for ln in _unit_lines() if ln.startswith("ExecStart=")]
@@ -132,4 +137,22 @@ def test_launch_daemon_exports_offline_vars():
     assert tf_idx < exec_idx, (
         f"`export TRANSFORMERS_OFFLINE=1` (line {tf_idx + 1}) must precede "
         f"`exec \"$PY\" …` (line {exec_idx + 1})."
+    )
+
+
+def test_install_sh_offline_grep_and_summary():
+    """install.sh must (a) grep the post-restart journal for huggingface.co HTTP calls
+    (warn-level runtime regression surface) and (b) print an offline summary line (the Mode A
+    user-facing offline promise). bugfix Issue 1 / Issue 4 (P1.M1.T2.S1).
+
+    The hard config gate is test_launch_daemon_exports_offline_vars; this asserts install.sh
+    carries the runtime surface + the documented promise, so neither can be silently removed.
+    """
+    text = _install_sh_path().read_text()
+    assert "HTTP Request: GET https://huggingface.co" in text, (
+        "install.sh is missing the post-restart journal grep for huggingface.co HTTP calls "
+        "(bugfix Issue 1/Issue 4 runtime regression surface)."
+    )
+    assert "no network at runtime" in text, (
+        "install.sh is missing the offline summary line (Mode A user-facing offline promise)."
     )

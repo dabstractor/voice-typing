@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Critical Offline Guarantee (Issue 1 + Issue 4)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Eliminate all runtime network calls to huggingface.co by exporting HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 in the sanctioned daemon launch wrapper (launch_daemon.sh). Add regression guards (static drift-guard + close the circular-proof gap in test_idle_and_gpu.sh). Confirm via install.sh post-restart assertion. This is the single most important fix: it restores the project's headline '100% local, nothing sent to a cloud' promise.",
           "tasks": [
             {
@@ -74,14 +74,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "install.sh offline confirmation (Issue 4)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add a post-restart journal grep assertion to install.sh that verifies the deployed daemon makes no network calls to huggingface.co, and add a summary line confirming the daemon runs fully offline. This closes the loop on the documented '100% local' promise at install time.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add post-restart journal grep + offline summary line to install.sh",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -110,14 +110,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Fix status.sh exit-code contract (Issue 2)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Add an explicit exit 0 to voice_typing/status.sh after the jq call so the script honors its documented 'must print an empty line with exit 0 (never abort)' contract. Add a regression test that runs status.sh against missing and corrupt state.json, asserting exit 0.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Add exit 0 + soften comment + regression test for status.sh",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_61d807f18dbe/bugfix/001_18d83a3a5991/architecture/scout_launch_status_install.md §1 and §7. voice_typing/status.sh is a POSIX sh script (#!/bin/sh, 39 lines) with NO `set -e` and NO `exit` command. Its exit status is jq's exit status (the last command, lines 34-39). When state.json is missing, jq exits 2; when corrupt, jq exits 5. The header comment (lines 23-25) promises 'exit 0 (never abort)' — that contract is violated. There is NO existing test for status.sh (grep found only a comment reference in test_feedback.py:351). tmux's #(...) substitution ignores exit codes, so the practical impact is negligible for tmux — but the documented contract is broken and a non-tmux caller checking $? would be misled.\n2. INPUT: voice_typing/status.sh — the jq call ends at line 39: `' \"$STATE\" 2>/dev/null`. The script reads STATE from `${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/voice-typing/state.json`. The header comment at lines 23-25 states the 'exit 0 (never abort)' contract and claims 'otherwise tmux would show an error string in status-right' (which is overstated — tmux ignores exit codes in #(...)).\n3. LOGIC: (a) Append `exit 0` as a new line after line 39 (after the jq call). This makes the script always exit 0 regardless of jq's exit code, honoring the documented contract. (b) Optionally soften the comment at line 24: change 'otherwise tmux would show an error string in status-right' to note that tmux's #(...) ignores exit codes, but the explicit exit 0 honors the documented contract for any caller (tmux or non-tmux). (c) Add a new regression test. Since there's no existing status.sh test, create a new pytest file tests/test_status_sh.py (or add to an existing test file). The test should: create a temp XDG_RUNTIME_DIR, run status.sh with NO state file → assert exit code 0 AND empty stdout; write corrupt JSON to state.json → run status.sh → assert exit code 0 AND empty stdout. Use subprocess.run to invoke the script with a controlled XDG_RUNTIME_DIR env var. Assert `result.returncode == 0` and `result.stdout.strip() == ''` in both cases.\n4. OUTPUT: status.sh now always exits 0. A new test proves it for both missing and corrupt state.json. Run: `.venv/bin/python -m pytest tests/test_status_sh.py -v` (all pass). Also verify: `XDG_RUNTIME_DIR=$(mktemp -d) voice_typing/status.sh; echo $?` → prints `0`.\n5. DOCS: [Mode A] The status.sh header comment IS the user-facing doc (it documents the tmux integration and the exit-code contract). The comment softening (step b) updates that doc in-place. No external docs files.",
