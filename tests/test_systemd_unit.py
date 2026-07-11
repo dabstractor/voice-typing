@@ -15,13 +15,26 @@ live systemd session:
     inherit arbitrary variables from the user-manager environment.
   - Restart=on-failure so systemd restarts the daemon after a crash.
 
+Also drift-guards voice_typing/launch_daemon.sh's offline env exports (bugfix
+Issue 1): both HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 must be exported
+before `exec "$PY"`, line-anchored so the WHY comment prose cannot false-pass.
+
 Run:
     cd /home/dustin/projects/voice-typing
     .venv/bin/python -m pytest tests/test_systemd_unit.py -v
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+# Line-anchored regexes for launch_daemon.sh offline-export drift guard (bugfix Issue 1).
+# Anchored on `^export ` so the WHY comment block (which mentions HF_HUB_OFFLINE=1 in
+# prose) cannot cause a false pass. Accept bare `=1` and quoted variants.
+_HF_RE = re.compile(r'^export\s+HF_HUB_OFFLINE=(?:1|"1"|\'1\')\s*$')
+_TF_RE = re.compile(r'^export\s+TRANSFORMERS_OFFLINE=(?:1|"1"|\'1\')\s*$')
+# `exec "$PY" -m voice_typing.daemon` — `$PY` is literal bash (regex needs `\$`).
+_EXEC_RE = re.compile(r'^exec\s+"\$PY"\s+-m\s+voice_typing\.daemon')
 
 
 def _unit_path() -> Path:
@@ -38,6 +51,11 @@ def _unit_lines() -> list[str]:
             continue
         lines.append(stripped)
     return lines
+
+
+def _launch_daemon_path() -> Path:
+    # voice_typing/launch_daemon.sh — repo root is the parent of tests/.
+    return Path(__file__).resolve().parent.parent / "voice_typing" / "launch_daemon.sh"
 
 
 def test_execstart_points_at_launch_daemon_wrapper():
@@ -66,3 +84,52 @@ def test_execstartpre_imports_wayland_and_display_env():
 def test_restart_on_failure():
     """Restart=on-failure keeps the daemon alive across crashes (PRD §4.9 auto-restart)."""
     assert any(ln == "Restart=on-failure" for ln in _unit_lines())
+
+
+def test_launch_daemon_exports_offline_vars():
+    """launch_daemon.sh must export HF_HUB_OFFLINE=1 + TRANSFORMERS_OFFLINE=1 BEFORE exec.
+
+    Static drift guard for bugfix Issue 1 (PRD §1 "100% local" + acceptance §7.8). The
+    production daemon phones home to https://huggingface.co on every startup unless
+    HF_HUB_OFFLINE=1 is in the process environment before python starts (huggingface_hub
+    latches the flag at import time). S1 put both exports in launch_daemon.sh — the
+    sanctioned single source for the daemon env (same place LD_LIBRARY_PATH lives), inherited
+    by both `systemctl` starts and manual launches. This test FAILS if either export is
+    removed or moved after `exec`, so the "100% local" guarantee cannot silently regress.
+
+    This is a STATIC check (read_text + line regex), not a live-systemd or runtime test:
+    it is fast, needs no GPU/models/network, and runs on every commit. It guards the
+    configurational precondition; the runtime no-network proof is test_idle_and_gpu.sh
+    (S3 removes its pre-set masking so it exercises the real production path).
+
+    Accepts bare `=1` and the quoted variants `="1"` / `='1'` so a harmless future reformat
+    does not break the guard. Line-anchored on `^export ` so the WHY comment block (which
+    mentions HF_HUB_OFFLINE=1 in prose) cannot cause a false pass.
+    """
+    lines = _launch_daemon_path().read_text().splitlines()
+
+    hf_idx = next((i for i, ln in enumerate(lines) if _HF_RE.match(ln)), None)
+    tf_idx = next((i for i, ln in enumerate(lines) if _TF_RE.match(ln)), None)
+    assert hf_idx is not None, (
+        "launch_daemon.sh is missing `export HF_HUB_OFFLINE=1` — the offline guarantee "
+        "(bugfix Issue 1; PRD §1/§7.8) must be exported before exec."
+    )
+    assert tf_idx is not None, (
+        "launch_daemon.sh is missing `export TRANSFORMERS_OFFLINE=1` — belt-and-suspenders "
+        "offline var (bugfix Issue 1); both vars are required."
+    )
+
+    exec_idx = next((i for i, ln in enumerate(lines) if _EXEC_RE.match(ln)), None)
+    assert exec_idx is not None, (
+        "launch_daemon.sh has no `exec \"$PY\" -m voice_typing.daemon` line — cannot verify "
+        "export ordering."
+    )
+    # Env vars are read at execve(2); exports MUST precede exec or they never reach python.
+    assert hf_idx < exec_idx, (
+        f"`export HF_HUB_OFFLINE=1` (line {hf_idx + 1}) must precede "
+        f"`exec \"$PY\" …` (line {exec_idx + 1})."
+    )
+    assert tf_idx < exec_idx, (
+        f"`export TRANSFORMERS_OFFLINE=1` (line {tf_idx + 1}) must precede "
+        f"`exec \"$PY\" …` (line {exec_idx + 1})."
+    )

@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Add offline env exports + regression guards to launch wrapper",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Export HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 in voice_typing/launch_daemon.sh before the exec. Add a static drift-guard test (pytest) asserting the wrapper contains the exports. Close the circular-proof gap in tests/test_idle_and_gpu.sh by removing the test's own pre-set of these vars and adding a journal grep assertion that no HTTP requests appear after startup.",
               "subtasks": [
                 {
@@ -40,7 +40,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Add static drift-guard test asserting launch_daemon.sh exports offline vars",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -56,7 +56,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "Close the circular-proof gap in test_idle_and_gpu.sh",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
