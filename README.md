@@ -4,6 +4,9 @@ Fully-local voice typing for Linux. Speak into your mic and the recognized text 
 typed into whatever window or tmux pane has focus. Built on RealtimeSTT
 (faster-whisper / CTranslate2 on CUDA). Intended for an Arch + Wayland / Hyprland +
 tmux desktop. The recognizer runs 100% on your machine; nothing is sent to a cloud.
+Offline mode is enforced: the launch wrapper (`launch_daemon.sh`) sets `HF_HUB_OFFLINE=1`,
+so models load from the local cache with zero runtime network calls (the install prefetches
+them).
 
 This README is for two readers: dustin, six months from now, and anyone who clones
 the repo. It assumes a Linux power user who wants exact commands, not hand-holding.
@@ -224,7 +227,8 @@ If speech yields nothing, check the mic health line FIRST — `voicectl status` 
 line (`mic: ok` when the default source is reachable, `mic: unavailable (<reason>)` when the
 daemon's PyAudio probe found no input device). This surfaces a dead or changed default source
 immediately, without digging into `journalctl`. After fixing the source, arm again with
-`voicectl toggle` (the probe re-runs on each arm).
+`voicectl toggle`. The mic-health probe is cached for ~30 s to keep arming instant, so for an
+immediate re-probe restart the daemon (`systemctl --user restart voice-typing`).
 
 ### wtype vs ydotool
 

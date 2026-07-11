@@ -32,7 +32,7 @@ and spuriously fail the "no finals" assertion).
 | 5 | Daemon survives ≥2 min of silence with no hallucinated output and trivial CPU use | **PASS (this task — direct evidence)** | `./tests/test_idle_and_gpu.sh` — 120 s armed silence, no finals typed, `last_final` unchanged, avg **2.56 %** of one core. (Block below.) |
 | 6 | `voicectl toggle/start/stop/status/quit` all work; systemd user service; starts un-armed; auto-restarts on failure | **PASS (this task — direct evidence)** | `./tests/test_idle_and_gpu.sh` — every subcommand returned `ok`; `listening: off` right after ready; unit `ExecStart → launch_daemon.sh` + `Restart=on-failure`. (Block below.) |
 | 7 | Everything committed to git; README documents install / hotkey / tmux / config / troubleshooting / CPU-only mode | partial | `git status` — implementation committed on `main`; the README is task **P2.M1.T2.S1** (pending), which will document install, the hotkey snippet, the tmux status snippet, the config tuning table, troubleshooting (cuDNN libs, PyAudio device, wtype vs ydotool), and CPU-only mode. |
-| 8 | No network access needed at runtime (models cached by install) | **PASS (this task — direct evidence)** | `./tests/test_idle_and_gpu.sh` — the daemon ran the entire test under `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` and loaded the cached models (went ready + survived 120 s armed idle). (Block below.) |
+| 8 | No network access needed at runtime (models cached by install) | **PASS (this task — direct evidence)** | `./tests/test_idle_and_gpu.sh` — the test launches the daemon via the **production path** (`launch_daemon.sh`, no pre-set env) and asserts the daemon log has ZERO `HTTP Request: GET https://huggingface.co` lines, a non-circular proof that the deployed unit is offline (the offline vars come from the wrapper, not from the test). (Block below.) |
 
 ### Evidence block — criteria 5, 6, 8 (verbatim from a passing `./tests/test_idle_and_gpu.sh`)
 
@@ -55,7 +55,7 @@ voicectl_status:
 systemd_unit:
   ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh
   Restart=on-failure
-offline_env: HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+offline_env: via launch_daemon.sh exports (HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1); daemon.log HF-request grep: CLEAN
 === END ACCEPTANCE EVIDENCE ===
 ```
 
@@ -70,7 +70,7 @@ Per-criterion PASS lines printed by the same run:
 [PASS] criterion 6/T6 (GPU residency): matched=[(2499875, 2804)] total_MiB=2804 (range 1024-5120 MiB)
 [PASS] criterion 6 (unit ExecStart): ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh
 [PASS] criterion 6 (unit Restart): Restart=on-failure
-[PASS] criterion 8 (no network): daemon ran under HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 and loaded cached models
+[PASS] criterion 8 (no-network guard): daemon.log has ZERO 'HTTP Request: GET https://huggingface.co' lines (production path offline)
 ```
 
 ## Notes on the method
@@ -84,9 +84,13 @@ Per-criterion PASS lines printed by the same run:
   is deliberately omitted because it can contain commas). The GPU routinely hosts unrelated compute
   apps (e.g. a browser GPU process, or a parallel test daemon), so only rows whose PID is in the
   daemon tree are summed.
-- **Criterion 8** is proven by the run itself: the daemon was launched with `HF_HUB_OFFLINE=1
-  TRANSFORMERS_OFFLINE=1`, which is a hard offline switch. That it went ready and survived 120 s of
-  armed idle is empirical proof the models load from the local cache with zero network access.
+- **Criterion 8** is a **non-circular** proof (bugfix Issue 1): the test does NOT pre-set the offline
+  env vars. It launches the daemon via `launch_daemon.sh` (the production path — the wrapper exports
+  `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`), then greps the daemon log for
+  `HTTP Request: GET https://huggingface.co` and fails if any are found. Because the test itself does
+  not supply the variable, a regression that removes the wrapper exports surfaces here. (The earlier
+  "ran under HF_HUB_OFFLINE=1" framing was circular — it passed only because the test set the variable
+  production omitted.)
 - **Cleanup** (`tests/test_idle_and_gpu.sh` trap) guarantees the daemon process is gone, the
   `vtidle` tmux session is gone, and the temp dir is removed on every exit path — PASS, error, and
   Ctrl-C (`SIGINT`). The default audio source is never touched (this test listens to ambient room

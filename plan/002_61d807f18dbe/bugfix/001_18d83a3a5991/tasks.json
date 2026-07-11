@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Production Bug Fixes — Offline Guarantee + Polish",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Fix the 1 Critical defect (runtime network calls violating PRD §1 + §7.8 '100% local') and 3 Minor defects (status.sh exit code, mic probe TTL, install.sh offline confirmation) identified by end-to-end creative QA. All fixes are small, surgical, and grounded in the existing codebase patterns.",
       "milestones": [
         {
@@ -157,21 +157,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Sync changeset-level documentation",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Final sweep of changeset-level documentation: README.md, tests/ACCEPTANCE.md, and any overview docs that summarize the whole delta. Per SOW §5 Mode B, this catches cross-cutting doc changes that only make sense once the whole changeset is in place.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Update README.md, tests/ACCEPTANCE.md, and any other overview docs to reflect the offline guarantee fix, the status.sh contract fix, and the mic probe TTL optimization. Verify the README's 'Fully-local voice typing' / 'nothing is sent to a cloud' claims are now accurate post-fix.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md + ACCEPTANCE.md for the full changeset",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
