@@ -1,0 +1,12 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+  h3.0 Issue 1: Production daemon makes network calls at runtime (violates "100% local", PRD §1 + acceptance criterion §7.8)
+ h2.2 Major Issues (Should Fix)
+ h2.3 Minor Issues (Nice to Fix)
+  h3.1 Issue 2: status.sh exits non-zero on missing/corrupt state.json, contradicting its own documented contract
+  h3.2 Issue 3: Synchronous PyAudio mic probe runs on every arm while holding the daemon lock (~40 ms)
+  h3.3 Issue 4: install.sh does not reflect the no-network requirement / does not set offline env for the installed unit
+ h2.4 Testing Summary
+---
+code:4 para:30 list:3
