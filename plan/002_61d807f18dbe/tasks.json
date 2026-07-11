@@ -40,14 +40,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Verify T4 idle-test interaction with auto-stop and run full regression suite",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Two verification objectives: (1) Confirm that test_idle_and_gpu.sh (T4) does not assert listening==true at the end of the 120s idle window — if it did, the auto_stop_idle_seconds=30 default would cause a false failure since the daemon auto-disarms ~30s into the window. (2) Run the complete pytest fast suite to confirm all 197 tests remain green after the comment fix (regression check that no accidental edit broke anything).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Verify test_idle_and_gpu.sh (T4) does not break with auto_stop_idle_seconds=30 default",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -63,7 +63,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Run full pytest fast suite regression (confirm 197 tests still green)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
