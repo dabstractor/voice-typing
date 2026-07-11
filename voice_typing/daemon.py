@@ -113,6 +113,11 @@ _FIXED_KWARGS: dict[str, Any] = {
 # (faster, rougher) — single source so the swap is a one-line change (PRD §4.2; item contract).
 _PARTIAL_CALLBACK_ATTR = "on_realtime_transcription_stabilized"
 
+# Mic-health probe TTL (bugfix Issue 3 / P1.M2.T2.S1): re-probe at most once every 30s so _arm()
+# does NOT pay the ~40ms PyAudio init on every keystroke. _refresh_mic_status() skips the probe
+# when the last probe is within this window; __init__ (force=True) and explicit force=True bypass it.
+_MIC_PROBE_TTL_S: float = 30.0
+
 
 def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     """Build cuda_check defaults from cfg, then resolve (applies PRD §4.4 CPU fallback).
@@ -453,7 +458,11 @@ class VoiceTypingDaemon:
         self._mic_ok: bool = True            # default True: never-probed != broken (PRD §4.4 spirit)
         self._mic_error: str | None = None
         self._mic_prober = mic_prober
-        self._refresh_mic_status()
+        # TTL cache stamp for _refresh_mic_status (bugfix Issue 3 / P1.M2.T2.S1): time.monotonic()
+        # of the last probe; 0.0 == never (sentinel matching MicRetryRateLimitFilter._last_seen).
+        # Read/written ONLY under self._lock (via _arm) or here in single-threaded __init__.
+        self._mic_probe_at: float = 0.0
+        self._refresh_mic_status(force=True)   # construction always probes (sets the initial stamp)
 
     def run(self) -> None:
         """The listen-forever loop (main thread, BLOCKS until shutdown)."""
@@ -578,7 +587,7 @@ class VoiceTypingDaemon:
         self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
         self._recorder.set_microphone(True)
         self._feedback.set_listening(True)
-        self._refresh_mic_status()  # bugfix Issue 2 / P1.M1.T2.S1: re-probe mic health on each arm
+        self._refresh_mic_status()  # TTL-cached (Issue 3 / P1.M2.T2.S1): re-probes at most once / 30s
 
     def _disarm(self) -> None:
         """Private: disarm mic + abort blocked text() + clear listening + notify. Called under lock."""
@@ -630,15 +639,31 @@ class VoiceTypingDaemon:
             except Exception:
                 logger.exception("idle auto-stop check raised; continuing")
 
-    def _refresh_mic_status(self) -> None:
+    def _refresh_mic_status(self, *, force: bool = False) -> None:
         """Run the mic probe (real or injected) and store ok/error. NEVER raises.
+
+        TTL-cached (bugfix Issue 3 / P1.M2.T2.S1): the probe (~40ms PyAudio init in production) runs
+        at most once every _MIC_PROBE_TTL_S (30s). When the last probe is within the TTL window this
+        method returns early and the cached _mic_ok/_mic_error stay valid. force=True bypasses the
+        gate (used by __init__ so construction always probes and sets the initial stamp; tests that
+        swap mic_prober also use force=True to bypass the cache). _mic_probe_at is the
+        time.monotonic() stamp of the last probe; 0.0 == never (sentinel matching
+        MicRetryRateLimitFilter._last_seen) — in production monotonic is never 0.0, so the sentinel
+        is unambiguous.
 
         Sanctioned caller of the probe (bugfix Issue 2 / P1.M1.T2.S1): both __init__ and _arm()
         route through here so the try/except + attribute update live in ONE place. A probe failure
         (pyaudio missing, no devices, any exception) degrades to _mic_ok=False + _mic_error=str(exc)
         — the daemon stays runnable (degraded mode is acceptable; PRD §4.4 spirit). Tests inject
         mic_prober to stay hermetic; production leaves it None -> self._probe_mic.
+
+        Thread safety: called only under self._lock (via _arm) or in single-threaded __init__, so
+        _mic_probe_at/_mic_ok/_mic_error need NO extra locking.
         """
+        if not force and self._mic_probe_at != 0.0 and (
+            time.monotonic() - self._mic_probe_at
+        ) < _MIC_PROBE_TTL_S:
+            return  # cached: last probe is within the TTL window -> keep _mic_ok/_mic_error
         prober = self._probe_mic if self._mic_prober is None else self._mic_prober
         try:
             ok, error = prober()
@@ -646,6 +671,7 @@ class VoiceTypingDaemon:
             ok, error = False, str(exc)
         self._mic_ok = bool(ok)
         self._mic_error = error
+        self._mic_probe_at = time.monotonic()  # stamp AFTER storing the result
 
     def _probe_mic(self) -> tuple[bool, str | None]:
         """Lazy PyAudio probe: is at least one input device available? Returns (ok, error|None).

@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Production Bug Fixes — Offline Guarantee + Polish",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Fix the 1 Critical defect (runtime network calls violating PRD §1 + §7.8 '100% local') and 3 Minor defects (status.sh exit code, mic probe TTL, install.sh offline confirmation) identified by end-to-end creative QA. All fixes are small, surgical, and grounded in the existing codebase patterns.",
       "milestones": [
         {
@@ -103,7 +103,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Minor Polish — status.sh Exit Code + Mic Probe TTL (Issues 2 + 3)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix two independent minor defects: (1) status.sh exits non-zero on missing/corrupt state.json, violating its own documented 'exit 0 (never abort)' contract; (2) the PyAudio mic probe runs on every arm while holding the daemon lock (~40 ms per arm), causing perceptible latency and lock contention under concurrent load. Both fixes are small and surgical.",
           "tasks": [
             {
@@ -132,14 +132,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Cache PyAudio mic probe with TTL (Issue 3)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add a TTL cache to _refresh_mic_status() in voice_typing/daemon.py so the expensive PyAudio probe (import pyaudio; PyAudio(); enumerate; terminate — ~40 ms) does not run on every arm while holding the daemon lock. Re-probe at most once every 30 seconds. This preserves the mic-health surface in voicectl status while eliminating the per-arm cost.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Implement TTL cache in _refresh_mic_status + update mic probe tests",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/002_61d807f18dbe/bugfix/001_18d83a3a5991/architecture/scout_mic_probe.md and issue_analysis.md §Issue 3. The full probe path: _arm() (daemon.py:575-581) → _refresh_mic_status() (daemon.py:633-648) → prober (production: _probe_mic at 650-672). _arm() is called under self._lock by start()/toggle(). The probe does `import pyaudio; pa = pyaudio.PyAudio(); <enumerate all devices>; pa.terminate()` — ~39-43 ms, every arm. ALL _arm/_disarm/_refresh_mic_status calls happen under self._lock (or in __init__, single-threaded), so the TTL cache fields are lock-protected for free — NO extra locking needed. The existing MicRetryRateLimitFilter (daemon.py:1106-1123) is the structural analog: it uses a `time.monotonic()` window with a `0.0 == never` sentinel. `import time` is already at daemon.py:76. Tests use `_fixed_clock(monkeypatch, t)` (test_daemon.py:1551-1553) to freeze `daemon.time.monotonic` deterministically. The `_make_daemon()` factory (test_daemon.py:424-430) injects `mic_prober=_ok_probe`. Counting probers are the existing idiom (test_daemon.py:1500, 1511).\n2. INPUT: (a) daemon.py __init__ (lines 450-456) sets up `self._mic_ok`, `self._mic_error`, `self._mic_prober`, then calls `self._refresh_mic_status()`. (b) _refresh_mic_status() (lines 633-648) is the SINGLE writer of _mic_ok/_mic_error and the SINGLE sanctioned caller of the probe. (c) _arm() (line 581) calls `self._refresh_mic_status()` unconditionally. (d) The existing test `test_arm_refreshes_mic_status` (test_daemon.py:1506) asserts `len(calls) == 2` after init + start — this WILL break with TTL (2nd call is cached within window). (e) `test_init_initializes_mic_status_and_calls_probe` (line 1495) asserts `len(calls) == 1` after init — still passes if init uses force=True.\n3. LOGIC: (a) Add a module-level constant near the top of daemon.py (after imports, before class defs): `_MIC_PROBE_TTL_S: float = 30.0  # re-probe mic health at most once every 30s (Issue 3: avoid ~40ms PyAudio init on every arm)`. (b) In __init__ (lines 453-455 area), add: `self._mic_probe_at: float = 0.0  # time.monotonic() of last probe; 0.0 == never (sentinel, matching MicRetryRateLimitFilter._last_seen)`. (c) Modify `_refresh_mic_status(self)` → `_refresh_mic_status(self, *, force: bool = False)`. Add a TTL gate at the TOP of the method body: `if not force and self._mic_probe_at != 0.0 and (time.monotonic() - self._mic_probe_at) < _MIC_PROBE_TTL_S: return`. This returns early (cached result stays valid) if the last probe was within the TTL window. After storing the probe result (after lines 646-647), stamp: `self._mic_probe_at = time.monotonic()`. (d) In __init__ (line 456), change `self._refresh_mic_status()` → `self._refresh_mic_status(force=True)` so construction always probes (sets the initial _mic_probe_at stamp). (e) _arm()'s call (line 581) stays `self._refresh_mic_status()` (no force) — it respects the TTL. (f) Update test_arm_refreshes_mic_status: within the TTL window (realtime monotonic, both calls happen within < 1s), assert `len(calls) == 1` (2nd arm is cached). OR if the test needs to prove re-probe after TTL expiry, use `_fixed_clock(monkeypatch, 0.0)` for construction, `_fixed_clock(monkeypatch, _MIC_PROBE_TTL_S + 1.0)` for the arm, and assert `len(calls) == 2`. Add a new test `test_mic_probe_cached_within_ttl`: construct with a counting prober (1 call, stamped at t=0), call d.start() at t=5.0 (within TTL) → assert still 1 call. Then call d.start() at t=35.0 (past TTL) → assert 2 calls. Use `_fixed_clock` for deterministic timestamps. IMPORTANT: _arm/_disarm are called under self._lock; the TTL fields are only accessed under the lock — do NOT add any locking.\n4. OUTPUT: _arm() no longer re-probes PyAudio within the 30s TTL window. Single-user arm goes from ~40 ms to ~0 ms (cached). The mic-health surface (_mic_ok/_mic_error in voicectl status) stays current within 30s. Run: `.venv/bin/python -m pytest tests/test_daemon.py -v` (all 269+ tests pass, including updated + new TTL tests).\n5. DOCS: [Mode A] Update the docstring of _refresh_mic_status() to document the TTL caching behavior (force param, _MIC_PROBE_TTL_S, the 0.0 sentinel convention). The _arm() docstring may need a note that mic probe is now TTL-cached. No external docs files — this is an internal performance optimization with no user-facing API change.",
@@ -157,21 +157,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Sync changeset-level documentation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Final sweep of changeset-level documentation: README.md, tests/ACCEPTANCE.md, and any overview docs that summarize the whole delta. Per SOW §5 Mode B, this catches cross-cutting doc changes that only make sense once the whole changeset is in place.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Update README.md, tests/ACCEPTANCE.md, and any other overview docs to reflect the offline guarantee fix, the status.sh contract fix, and the mic probe TTL optimization. Verify the README's 'Fully-local voice typing' / 'nothing is sent to a cloud' claims are now accurate post-fix.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md + ACCEPTANCE.md for the full changeset",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

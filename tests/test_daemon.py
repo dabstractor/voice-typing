@@ -1481,14 +1481,14 @@ def test_refresh_mic_status_catches_probe_exception():
         raise RuntimeError("portaudio exploded")
     d, *_ = _make_daemon()
     d._mic_prober = boom
-    d._refresh_mic_status()
+    d._refresh_mic_status(force=True)  # force: bypass TTL cache so the swapped prober actually runs
     assert d._mic_ok is False and "portaudio exploded" in (d._mic_error or "")
 
 
 def test_refresh_mic_status_stores_probe_result():
     d, *_ = _make_daemon()
     d._mic_prober = lambda: (False, "no devices")
-    d._refresh_mic_status()
+    d._refresh_mic_status(force=True)  # force: bypass TTL cache so the swapped prober actually runs
     assert d._mic_ok is False and d._mic_error == "no devices"
 
 
@@ -1510,9 +1510,39 @@ def test_arm_refreshes_mic_status():
         backend=_FakeBackend(),
         mic_prober=lambda: (calls.append(1), (True, None))[1],
     )
-    assert len(calls) == 1          # init
-    d.start()                       # -> _arm -> _refresh_mic_status
-    assert len(calls) == 2          # armed once more
+    assert len(calls) == 1          # init (force=True)
+    d.start()                       # -> _arm -> _refresh_mic_status (TTL-cached within 30s)
+    assert len(calls) == 1          # arm within TTL -> probe CACHED, not re-run (bugfix Issue 3)
+
+
+def test_mic_probe_cached_within_ttl(monkeypatch):
+    """P1.M2.T2.S1 / bugfix Issue 3: _arm's mic probe is TTL-cached.
+
+    _refresh_mic_status skips the probe within _MIC_PROBE_TTL_S and re-runs it after the window.
+    Deterministic via _fixed_clock. NOTE: the base clock MUST be non-zero — _mic_probe_at uses 0.0
+    as the 'never' sentinel, so freezing the clock to exactly 0.0 would stamp _mic_probe_at=0.0 and
+    collide with the sentinel (the within-TTL cache would never hit). Use a clearly-non-zero base.
+    """
+    calls = []
+
+    def counting_probe():
+        calls.append(1)
+        return (True, None)
+
+    _fixed_clock(monkeypatch, 1000.0)   # non-zero base: avoid the 0.0 'never' sentinel collision
+    d = daemon.VoiceTypingDaemon(
+        VoiceTypingConfig(), _DaemonFakeFeedback(), recorder=_StubRecorder(),
+        backend=_FakeBackend(), mic_prober=counting_probe,
+    )
+    assert len(calls) == 1              # __init__ force-probed; _mic_probe_at == 1000.0
+
+    _fixed_clock(monkeypatch, 1005.0)   # within TTL (5s < 30s)
+    d.start()                           # _arm -> _refresh_mic_status -> CACHED
+    assert len(calls) == 1, "arm within TTL must NOT re-probe"
+
+    _fixed_clock(monkeypatch, 1000.0 + daemon._MIC_PROBE_TTL_S + 5.0)  # past TTL (35s)
+    d.start()                           # _arm -> _refresh_mic_status -> re-probe
+    assert len(calls) == 2, "arm past TTL MUST re-probe"
 
 
 def test_make_daemon_injection_is_hermetic_no_real_pyaudio():
