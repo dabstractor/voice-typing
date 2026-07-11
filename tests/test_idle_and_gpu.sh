@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # tests/test_idle_and_gpu.sh — idle stability (PRD §6 T4) + GPU residency (T6) + offline (criterion 8).
 #
-# Stands up the REAL daemon (launch_daemon.sh, launched OFFLINE with HF_HUB_OFFLINE=1
-# TRANSFORMERS_OFFLINE=1 so the run itself PROVES PRD §7 criterion 8 — no network at runtime),
+# Stands up the REAL daemon via the PRODUCTION path (launch_daemon.sh — no pre-set env, so the
+# test exercises the real systemd -> wrapper flow). launch_daemon.sh exports HF_HUB_OFFLINE=1 +
+# TRANSFORMERS_OFFLINE=1 (bugfix Issue 1 fix); this test asserts ZERO 'HTTP Request: GET
+# https://huggingface.co' lines in the daemon log as the criterion-8 proof (no circular pre-set).
 # arms it with `voicectl start`, holds 120 s of silence on the REAL default mic (no null-sink — it
 # listens to ambient room silence), and asserts the three T4 properties:
 #   (a) NO hallucinated finals typed — the P1.M2.T2.S1 blocklist + VAD gating suppress Whisper's
@@ -48,8 +50,10 @@
 # swaps it).
 #
 # GOTCHAS encoded here (see PRP G-* invariants):
-#   G-OFFLINE:           launch with HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 — the run itself is the
-#                        criterion-8 proof (models load from cache, zero network).
+#   G-OFFLINE:           do NOT pre-set HF_HUB_OFFLINE (that masked Issue 1). Rely on
+#                        launch_daemon.sh's exports (production path); grep daemon.log for ZERO
+#                        'HTTP Request: GET https://huggingface.co' lines as the NON-CIRCULAR
+#                        criterion-8 proof.
 #   G-CPU-SAMPLING:      /proc-based CPU averaging (pidstat/sysstat NOT installed). CLK_TCK=100;
 #                        utime=field(14)=rest[11], stime=field(15)=rest[12] after the last-`)` split.
 #   G-CPU-TREE:          measure the PROCESS TREE, not just the daemon PID (SafePipe may spawn a
@@ -203,10 +207,11 @@ rm -f "$CAPFILE"
 # daemon STARTS, goes ready, and survives 120 s armed idle, that is empirical proof the models
 # load from cache with ZERO network. Do NOT also set HF_DATASETS_OFFLINE etc. — HF_HUB_OFFLINE
 # covers faster-whisper's resolution. launch_daemon.sh execs python -> $! IS the python PID.
-export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+# offline vars come from launch_daemon.sh (bugfix Issue 1 fix) — do NOT pre-set here (that
+# masked Issue 1; the post-ready grep guard below is the non-circular criterion-8 proof).
 XDG_CONFIG_HOME="$WORK/config" "$LAUNCH" > "$WORK/daemon.log" 2>&1 &
 DAEMON_PID=$!
-echo "daemon launched OFFLINE (HF_HUB_OFFLINE=1) pid=$DAEMON_PID; waiting for ready (up to 180s)..."
+echo "daemon launched via launch_daemon.sh (production path; offline vars via wrapper) pid=$DAEMON_PID; waiting for ready (up to 180s)..."
 
 # --- wait for ready (G-TIMEOUTS) ---
 ready=0
@@ -216,6 +221,17 @@ for _ in $(seq 1 360); do            # 360 x 0.5s = 180s
   sleep 0.5
 done
 [ "$ready" = 1 ] || die "daemon not ready in 180s; see $WORK/daemon.log"
+
+# --- criterion 8 (no-network): NON-CIRCULAR regression guard (bugfix Issue 1) ---
+# The test did NOT pre-set HF_HUB_OFFLINE (that masked Issue 1). launch_daemon.sh exports it
+# (S1); this grep proves the PRODUCTION path is offline by asserting the daemon log contains
+# ZERO online huggingface.co requests. httpx logs 'HTTP Request: GET https://huggingface.co'
+# to stderr (root StreamHandler from daemon._setup_logging) -> folded into daemon.log by the
+# 2>&1 redirect at launch. Missing exports => online freshness check => match => FAIL.
+if grep -q 'HTTP Request: GET https://huggingface.co' "$WORK/daemon.log"; then
+  die "FAIL: daemon made network calls to huggingface.co (offline exports missing from launch_daemon.sh?); see $WORK/daemon.log"
+fi
+echo "[PASS] criterion 8 (no-network guard): daemon.log has ZERO 'HTTP Request: GET https://huggingface.co' lines (production path offline)"
 
 # --- criterion 6: un-armed boot — capture BEFORE start (G-UNARMED) ---
 STATUS_READY="$("$VOICECTL" status)" || die "voicectl status failed after ready"
@@ -383,9 +399,11 @@ if systemctl --user cat voice-typing >/dev/null 2>&1; then
   systemctl --user cat voice-typing | sed 's/^/  /' || true
 fi
 
-# --- criterion 8 (no-network): restate — the WHOLE run was under HF_HUB_OFFLINE=1 ---
-# (ready=1 + survived the 120s window = empirical proof models loaded from cache with zero network.)
-echo "[PASS] criterion 8 (no network): daemon ran under HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 and loaded cached models"
+# --- criterion 8 (no-network): NON-CIRCULAR proof — the daemon.log grep (post-ready guard) found
+# ZERO 'HTTP Request: GET https://huggingface.co' lines. The test never pre-set the offline
+# vars; launch_daemon.sh exports them (production path), so this proves the DEPLOYED path is
+# offline (not just that the daemon CAN run offline).
+echo "[PASS] criterion 8 (no network): daemon.log has ZERO 'HTTP Request: GET https://huggingface.co' lines (offline via launch_daemon.sh, not a test pre-set)"
 
 # --- evidence block for tests/ACCEPTANCE.md (G-EVIDENCE-BLOCK) ---
 echo
@@ -401,7 +419,7 @@ EOF
 echo "systemd_unit:"
 echo "  $EXEC_LINE"
 echo "  $RESTART_LINE"
-echo "offline_env: HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1"
+echo "offline_env: via launch_daemon.sh exports (HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1); daemon.log HF-request grep: CLEAN"
 echo "=== END ACCEPTANCE EVIDENCE ==="
 
 # --- result ---

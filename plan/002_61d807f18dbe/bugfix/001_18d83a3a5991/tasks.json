@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Critical Offline Guarantee (Issue 1 + Issue 4)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Eliminate all runtime network calls to huggingface.co by exporting HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 in the sanctioned daemon launch wrapper (launch_daemon.sh). Add regression guards (static drift-guard + close the circular-proof gap in test_idle_and_gpu.sh). Confirm via install.sh post-restart assertion. This is the single most important fix: it restores the project's headline '100% local, nothing sent to a cloud' promise.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Add offline env exports + regression guards to launch wrapper",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Export HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 in voice_typing/launch_daemon.sh before the exec. Add a static drift-guard test (pytest) asserting the wrapper contains the exports. Close the circular-proof gap in tests/test_idle_and_gpu.sh by removing the test's own pre-set of these vars and adding a journal grep assertion that no HTTP requests appear after startup.",
               "subtasks": [
                 {
@@ -56,7 +56,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "Close the circular-proof gap in test_idle_and_gpu.sh",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -74,14 +74,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "install.sh offline confirmation (Issue 4)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add a post-restart journal grep assertion to install.sh that verifies the deployed daemon makes no network calls to huggingface.co, and add a summary line confirming the daemon runs fully offline. This closes the loop on the documented '100% local' promise at install time.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add post-restart journal grep + offline summary line to install.sh",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
