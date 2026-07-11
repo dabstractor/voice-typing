@@ -46,7 +46,7 @@ append_space = true     # append one trailing space after each final so consecut
 [feedback]   # runtime state file + Hyprland notifications
 
 state_file  = ""        # "" (empty) -> resolved at runtime to $XDG_RUNTIME_DIR/voice-typing/state.json (set by systemd user sessions). Set an absolute path to override. If empty AND XDG_RUNTIME_DIR is unset, the daemon raises at write time (no silent fallback). Leave empty for normal use.
-hypr_notify = true      # show a hyprctl notify one-liner for start/partial/final/stop. Requires Hyprland; harmless elsewhere (the notify call is skipped when false).
+hypr_notify = true      # show a hyprctl notify one-liner for start/final/stop. Requires Hyprland; harmless elsewhere (the notify call is skipped when false).
 notify_ms   = 2500      # how long the hyprctl notification stays on screen, in milliseconds.
 notify_on_final = true  # also pop a hyprctl popup for each FINALIZED utterance ("✔ <text>")? The text is already typed into the focused window + shown live in the tmux status line, so this is redundant for most setups — set false to keep only the brief ● start / ■ stop popups. hypr_notify=false still suppresses EVERYTHING.
 

@@ -182,6 +182,7 @@ language = "en"
 device = "cuda"                       # "cuda" | "cpu"
 post_speech_silence_duration = 0.6
 realtime_processing_pause = 0.15
+auto_stop_idle_seconds = 30.0          # auto-disarm after this many seconds of no speech; 0 disables
 
 [output]
 backend = "wtype"                     # "wtype" | "ydotool" | "tmux"
@@ -200,6 +201,8 @@ blocklist = ["thank you.", "thanks for watching.", "you", "bye.", "thank you for
 ```
 
 Config file search order: `$XDG_CONFIG_HOME/voice-typing/config.toml`, then repo `config.toml`, then built-in defaults. `install.sh` copies the repo default to XDG if absent.
+
+**Idle auto-stop** (`asr.auto_stop_idle_seconds`, default `30.0`): while listening, if no recognized speech (a realtime partial) arrives for this many seconds, the daemon auto-disarms via the same path as a manual stop — it fires the `■ stopped` popup and writes a journal `INFO` line (`voice-typing auto-stop: 30.0s of no recognized speech; disarming`). Partials reset the clock while you talk, so it only triggers when you genuinely go silent (a forgotten hot-mic guard, NOT a mid-thought cut — that is governed by `post_speech_silence_duration`). A background `_idle_watchdog` thread ticks ~1s and re-checks the deadline under the listen lock so a late partial cancels the stop. `0` disables.
 
 ### 4.6 Feedback (`feedback.py`)
 

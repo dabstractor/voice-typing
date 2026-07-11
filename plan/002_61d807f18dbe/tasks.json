@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Spec-Sync Delta: idle auto-stop / notify_on_final / partial-sync verification + stale comment fix",
-      "status": "Researching",
+      "status": "Planned",
       "description": "The PRD was updated to document three already-shipped features (D1: idle auto-stop via asr.auto_stop_idle_seconds, D2: feedback.notify_on_final config gate, D3: record_final writes finalized text into partial field). All three are implemented, committed (git HEAD 367b774), and tested (197 fast tests green). This delta plan is primarily a SPEC-SYNC VERIFICATION: confirm the shipped code matches the updated PRD, fix ONE residual stale comment in config.toml, verify the T4 idle test interaction with the new auto-stop default, and run full regression. No functional code changes are expected or permitted (delta PRD §3.2, §6.3).",
       "milestones": [
         {
@@ -18,18 +18,21 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Fix stale hypr_notify comment in config.toml (remove 'partial')",
-              "status": "Planned",
+              "status": "Complete",
               "description": "The comment on config.toml line 49 for the hypr_notify key says 'show a hyprctl notify one-liner for start/partial/final/stop' — the word 'partial' is WRONG. Per PRD §4.5 and §4.6, hyprctl popups fire EXCLUSIVELY on start/final/stop events; partials go to the state file ONLY (the core anti-spam discipline). This is a one-word deletion in a comment — no runtime behavior change. This is Mode A doc-with-work (the comment rides with the config file it documents).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S1",
                   "title": "Remove 'partial/' from the hypr_notify comment in config.toml line 49",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
-                  "prd_selectors": ["h3.4", "h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified during research phase — config.toml:49 currently reads: `hypr_notify = true      # show a hyprctl notify one-liner for start/partial/final/stop. Requires Hyprland; harmless elsewhere (the notify call is skipped when false).` The delta PRD §2 identifies this as the ONLY actionable gap: the word 'partial' must be removed because partials NEVER fire hyprctl (PRD §4.6: 'partials go to the state file only'). README.md already states this correctly ('hypr_notify is the master on/off switch'); config.py docstrings are also correct. ONLY config.toml lags.\n2. INPUT: The existing config.toml file at /home/dustin/projects/voice-typing/config.toml. The exact line to edit is line 49, the `hypr_notify = true` line with its inline comment.\n3. LOGIC: Edit config.toml line 49 ONLY. Change the comment from 'start/partial/final/stop' to 'start/final/stop'. Do NOT change the value (true), do NOT change any other line, do NOT touch config.py or README.md (both already correct per delta PRD §2 verification). The edit is: `start/partial/final/stop` → `start/final/stop`. After the edit, verify with `grep -n 'partial' config.toml` that line 49 no longer contains 'partial' in the hypr_notify comment (the other 'partial' hits on lines 31 and 35 are for realtime_model and realtime_processing_pause — those are CORRECT and must NOT be touched).\n4. OUTPUT: config.toml with the corrected comment. No code, no test, no behavior change — comment-only.\n5. DOCS: [Mode A] This IS the doc fix — config.toml is the doc being updated. The comment change rides with this subtask. No separate docs subtask needed for this edit."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified during research phase — config.toml:49 currently reads: `hypr_notify = true      # show a hyprctl notify one-liner for start/partial/final/stop. Requires Hyprland; harmless elsewhere (the notify call is skipped when false).` The delta PRD §2 identifies this as the ONLY actionable gap: the word 'partial' must be removed because partials NEVER fire hyprctl (PRD §4.6: 'partials go to the state file only'). README.md already states this correctly ('hypr_notify is the master on/off switch'); config.py docstrings are also correct. ONLY config.toml lags.\n2. INPUT: The existing config.toml file at /home/dustin/projects/voice-typing/config.toml. The exact line to edit is line 49, the `hypr_notify = true` line with its inline comment.\n3. LOGIC: Edit config.toml line 49 ONLY. Change the comment from 'start/partial/final/stop' to 'start/final/stop'. Do NOT change the value (true), do NOT change any other line, do NOT touch config.py or README.md (both already correct per delta PRD §2 verification). The edit is: `start/partial/final/stop` → `start/final/stop`. After the edit, verify with `grep -n 'partial' config.toml` that line 49 no longer contains 'partial' in the hypr_notify comment (the other 'partial' hits on lines 31 and 35 are for realtime_model and realtime_processing_pause — those are CORRECT and must NOT be touched).\n4. OUTPUT: config.toml with the corrected comment. No code, no test, no behavior change — comment-only.\n5. DOCS: [Mode A] This IS the doc fix — config.toml is the doc being updated. The comment change rides with this subtask. No separate docs subtask needed for this edit.",
+                  "prd_selectors": [
+                    "h3.4",
+                    "h3.5"
+                  ]
                 }
               ]
             },
@@ -44,11 +47,17 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Verify test_idle_and_gpu.sh (T4) does not break with auto_stop_idle_seconds=30 default",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.5", "h3.4", "h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified during research phase — test_idle_and_gpu.sh arms the daemon with `voicectl start`, holds 120s of silence, then checks: (a) capture-pane unchanged (no finals typed), (b) state.json last_final unchanged (no hallucination), (c) `kill -0 $DAEMON_PID` (daemon alive), (d) CPU < 25% of one core. The test does NOT assert `listening==true` at the end of the idle window. With auto_stop_idle_seconds=30.0 (inherited default — the test's temp config only overrides [output] and [feedback]), the daemon auto-disarms ~30s in. Auto-disarm types nothing, doesn't set last_final, doesn't crash, uses negligible CPU → all four T4 assertions still hold. The `voicectl stop` call after the window is idempotent (returns ok:true even if already stopped). VERDICT: T4 passes without modification.\n2. INPUT: The file tests/test_idle_and_gpu.sh at /home/dustin/projects/voice-typing/tests/test_idle_and_gpu.sh.\n3. LOGIC: Re-read test_idle_and_gpu.sh and confirm the findings above: (a) the test's temp config override does NOT set auto_stop_idle_seconds (so it inherits 30.0); (b) the test does NOT assert listening==true at the end of the 120s window; (c) the voicectl stop after the window is not expected to fail if already stopped. If ALL THREE confirm, document the verdict ('T4 passes, no modification needed') in the acceptance evidence — no code change. If the test DOES assert listening==true (contradicting research), relax that single assertion and note it explicitly (this is the ONLY permitted non-comment edit per delta PRD §6.3).\n4. OUTPUT: A documented verdict (text/passed check) confirming T4's interaction with auto-stop is sound. If an assertion relaxation was needed, the modified test_idle_and_gpu.sh. Otherwise no file changes.\n5. DOCS: none — no user-facing/config/API surface change. If an assertion was relaxed, add a comment on the modified line explaining the auto-stop interaction."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified during research phase — test_idle_and_gpu.sh arms the daemon with `voicectl start`, holds 120s of silence, then checks: (a) capture-pane unchanged (no finals typed), (b) state.json last_final unchanged (no hallucination), (c) `kill -0 $DAEMON_PID` (daemon alive), (d) CPU < 25% of one core. The test does NOT assert `listening==true` at the end of the idle window. With auto_stop_idle_seconds=30.0 (inherited default — the test's temp config only overrides [output] and [feedback]), the daemon auto-disarms ~30s in. Auto-disarm types nothing, doesn't set last_final, doesn't crash, uses negligible CPU → all four T4 assertions still hold. The `voicectl stop` call after the window is idempotent (returns ok:true even if already stopped). VERDICT: T4 passes without modification.\n2. INPUT: The file tests/test_idle_and_gpu.sh at /home/dustin/projects/voice-typing/tests/test_idle_and_gpu.sh.\n3. LOGIC: Re-read test_idle_and_gpu.sh and confirm the findings above: (a) the test's temp config override does NOT set auto_stop_idle_seconds (so it inherits 30.0); (b) the test does NOT assert listening==true at the end of the 120s window; (c) the voicectl stop after the window is not expected to fail if already stopped. If ALL THREE confirm, document the verdict ('T4 passes, no modification needed') in the acceptance evidence — no code change. If the test DOES assert listening==true (contradicting research), relax that single assertion and note it explicitly (this is the ONLY permitted non-comment edit per delta PRD §6.3).\n4. OUTPUT: A documented verdict (text/passed check) confirming T4's interaction with auto-stop is sound. If an assertion relaxation was needed, the modified test_idle_and_gpu.sh. Otherwise no file changes.\n5. DOCS: none — no user-facing/config/API surface change. If an assertion was relaxed, add a comment on the modified line explaining the auto-stop interaction.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h3.4",
+                    "h3.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -56,9 +65,14 @@
                   "title": "Run full pytest fast suite regression (confirm 197 tests still green)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.5", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified during research phase — the fast pytest suite currently has 197 tests across test_config.py (config defaults + TOML loading), test_config_repo_default.py (config.toml exposes all keys), test_feedback.py (record_final, notify_on_final, partial sync, throttle, atomic write), test_textproc.py (blocklist, whitespace, min-length), test_daemon.py (idle watchdog, toggle gate, CPU fallback, mic probe, logging), test_typing_backends.py, test_voicectl.py, test_control_socket.py. All 197 passed in 1.59s total. Run command: `.venv/bin/python -m pytest tests/ -v --tb=short` (NOT the shell scripts — those are heavy GPU tests run separately).\n2. INPUT: The complete tests/ directory after the P1.M1.T1.S1 comment fix.\n3. LOGIC: Run `.venv/bin/python -m pytest tests/ --ignore=tests/test_feed_audio.py --ignore=tests/e2e_virtual_mic.sh --ignore=tests/test_idle_and_gpu.sh -v --tb=short` (the fast suite; the heavy shell-based tests require GPU cold init and are run explicitly). Confirm ALL tests pass. If any fail (which should not happen since the only change was a comment), investigate and report — a comment-only change cannot break a test unless the test parses config.toml comments (test_config_repo_default.py checks KEY VALUES, not comments, so it is safe).\n4. OUTPUT: The pytest summary line (e.g., '197 passed in 1.59s') as regression evidence. No code changes expected.\n5. DOCS: none — no user-facing/config/API surface change."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified during research phase — the fast pytest suite currently has 197 tests across test_config.py (config defaults + TOML loading), test_config_repo_default.py (config.toml exposes all keys), test_feedback.py (record_final, notify_on_final, partial sync, throttle, atomic write), test_textproc.py (blocklist, whitespace, min-length), test_daemon.py (idle watchdog, toggle gate, CPU fallback, mic probe, logging), test_typing_backends.py, test_voicectl.py, test_control_socket.py. All 197 passed in 1.59s total. Run command: `.venv/bin/python -m pytest tests/ -v --tb=short` (NOT the shell scripts — those are heavy GPU tests run separately).\n2. INPUT: The complete tests/ directory after the P1.M1.T1.S1 comment fix.\n3. LOGIC: Run `.venv/bin/python -m pytest tests/ --ignore=tests/test_feed_audio.py --ignore=tests/e2e_virtual_mic.sh --ignore=tests/test_idle_and_gpu.sh -v --tb=short` (the fast suite; the heavy shell-based tests require GPU cold init and are run explicitly). Confirm ALL tests pass. If any fail (which should not happen since the only change was a comment), investigate and report — a comment-only change cannot break a test unless the test parses config.toml comments (test_config_repo_default.py checks KEY VALUES, not comments, so it is safe).\n4. OUTPUT: The pytest summary line (e.g., '197 passed in 1.59s') as regression evidence. No code changes expected.\n5. DOCS: none — no user-facing/config/API surface change.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.6"
+                  ]
                 }
               ]
             },
@@ -75,9 +89,17 @@
                   "title": "Verify README.md documents all delta knobs and notification discipline correctly",
                   "status": "Planned",
                   "story_points": 0.5,
-                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T2.S2"],
-                  "prd_selectors": ["h2.6", "h3.4", "h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified during research phase — README.md (12,969 bytes) already documents: (a) asr.auto_stop_idle_seconds in its config tuning table with the 'forgotten hot-mic' framing, (b) feedback.notify_on_final in its config table, (c) the notification discipline (hypr_notify as master switch, ● listening / ✔ <text> / ■ stopped, partials go to state file only). The delta PRD §5 confirms: 'README.md already documents both new knobs... No cross-cutting README/overview sweep is warranted.' This subtask is a CONFIRMATION pass, not a rewrite.\n2. INPUT: README.md at /home/dustin/projects/voice-typing/README.md, plus the completed P1.M1.T1.S1 (config.toml comment fix) and P1.M1.T2 (regression green).\n3. LOGIC: Read README.md and grep for: 'auto_stop_idle_seconds', 'notify_on_final', 'hypr_notify', 'partial' (in the context of notification discipline). Confirm each delta knob is documented and the notification discipline matches the corrected config.toml comment (start/final/stop — NOT start/partial/final/stop). If README has any stale wording that contradicts the corrected config.toml, fix it (this is the catch-all). If README is already correct (expected per delta PRD §5), document that verdict — no edit needed.\n4. OUTPUT: A documented verdict ('README.md verified correct, no edits needed' OR the specific edit made). If no edit, no file change.\n5. DOCS: [Mode B] This IS the changeset-level docs sweep. If README needed an edit, it rides with this subtask."
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M1.T2.S1",
+                    "P1.M1.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Verified during research phase — README.md (12,969 bytes) already documents: (a) asr.auto_stop_idle_seconds in its config tuning table with the 'forgotten hot-mic' framing, (b) feedback.notify_on_final in its config table, (c) the notification discipline (hypr_notify as master switch, ● listening / ✔ <text> / ■ stopped, partials go to state file only). The delta PRD §5 confirms: 'README.md already documents both new knobs... No cross-cutting README/overview sweep is warranted.' This subtask is a CONFIRMATION pass, not a rewrite.\n2. INPUT: README.md at /home/dustin/projects/voice-typing/README.md, plus the completed P1.M1.T1.S1 (config.toml comment fix) and P1.M1.T2 (regression green).\n3. LOGIC: Read README.md and grep for: 'auto_stop_idle_seconds', 'notify_on_final', 'hypr_notify', 'partial' (in the context of notification discipline). Confirm each delta knob is documented and the notification discipline matches the corrected config.toml comment (start/final/stop — NOT start/partial/final/stop). If README has any stale wording that contradicts the corrected config.toml, fix it (this is the catch-all). If README is already correct (expected per delta PRD §5), document that verdict — no edit needed.\n4. OUTPUT: A documented verdict ('README.md verified correct, no edits needed' OR the specific edit made). If no edit, no file change.\n5. DOCS: [Mode B] This IS the changeset-level docs sweep. If README needed an edit, it rides with this subtask.",
+                  "prd_selectors": [
+                    "h2.6",
+                    "h3.4",
+                    "h3.5"
+                  ]
                 }
               ]
             }
