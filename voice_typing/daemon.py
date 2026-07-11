@@ -590,12 +590,27 @@ class VoiceTypingDaemon:
         self._refresh_mic_status()  # TTL-cached (Issue 3 / P1.M2.T2.S1): re-probes at most once / 30s
 
     def _disarm(self) -> None:
-        """Private: disarm mic + abort blocked text() + clear listening + notify. Called under lock."""
+        """Private: disarm mic + clear listening + notify. Called under lock.
+
+        NOTE: recorder.abort() is deliberately NOT called here (see start/stop/toggle, which call
+        it AFTER releasing _lock). Calling abort() under _lock was the root cause of the transient
+        control-lock wedge under rapid automated toggling (validation NEW-2): if RealtimeSTT's
+        abort() blocks briefly on the recorder's internal state during a fast re-arm, the handler
+        thread holds _lock and serializes every later start/stop/toggle (voicectl start/stop/toggle
+        then hit `timeout` → exit 124; only the lock-free `status` stays responsive). Moving abort()
+        out from under _lock is safe because (a) the listening Event gate in on_final + the run()
+        loop already guarantee correctness the instant _listening is cleared (no finals typed, no
+        new text() calls), (b) set_microphone(False) already halts audio queueing, and (c) abort()
+        is merely a nudge to unblock a sleeping text(); called right after lock release it still
+        wakes the same sleeping text(), and the loop re-checks _listening (already cleared). A fast
+        re-arm races the delayed abort() harmlessly: abort() is a no-op when no text() is blocked,
+        and any straggler final is dropped by the on_final gate. (bugfix validation NEW-2)
+        """
         self._listening.clear()
         self._last_speech_monotonic = None  # not listening → idle clock is inactive
         self._recorder.set_microphone(False)
-        self._recorder.abort()      # breaks any blocked text() so the loop re-checks the cleared gate
         self._feedback.set_listening(False)
+        # NOTE: caller MUST call self._recorder.abort() AFTER releasing _lock (see start/stop/toggle).
 
     def _touch_speech(self) -> None:
         """Mark 'recognized speech happened now' — resets the idle auto-stop clock.
@@ -616,6 +631,7 @@ class VoiceTypingDaemon:
         threshold = self._cfg.asr.auto_stop_idle_seconds
         if threshold <= 0:
             return
+        disarmed = False
         with self._lock:
             if not self._listening.is_set() or self._last_speech_monotonic is None:
                 return
@@ -626,6 +642,10 @@ class VoiceTypingDaemon:
                 "(set [asr] auto_stop_idle_seconds=0 to disable)", threshold,
             )
             self._disarm()
+            disarmed = True
+        # abort() moved OUT of _lock (validation NEW-2; see _disarm docstring).
+        if disarmed:
+            self._recorder.abort()
 
     def _idle_watchdog(self) -> None:
         """Background thread: periodically call _maybe_auto_stop(). Started by run(); daemon thread.
@@ -704,19 +724,32 @@ class VoiceTypingDaemon:
     def stop(self) -> None:
         with self._lock:
             self._disarm()
+        # abort() moved OUT of _lock to avoid the control-lock wedge (validation NEW-2; see
+        # _disarm docstring). Only disarm needs to wake a blocked text(); start/_arm does not.
+        self._recorder.abort()
 
     def toggle(self) -> None:
         with self._lock:
-            if self._listening.is_set():
+            disarmed = self._listening.is_set()
+            if disarmed:
                 self._disarm()
             else:
                 self._arm()
+        # abort() moved OUT of _lock (validation NEW-2). Only call it when we disarmed — arming
+        # must not abort a sibling text() that's about to start transcribing.
+        if disarmed:
+            self._recorder.abort()
 
     def request_shutdown(self) -> None:
-        """Signal run() to exit. Sets the event + aborts (breaks a blocked text()). NO shutdown()."""
+        """Signal run() to exit. Sets the event + aborts (breaks a blocked text()). NO shutdown().
+
+        abort() is called OUTSIDE _lock (validation NEW-2; see _disarm docstring) so a slow abort
+        can't wedge the shutdown signal or block concurrent start/stop/toggle. _shutdown.set() is
+        the real signal the run() loop checks; abort() merely speeds up unblocking a sleeping
+        text() so the loop re-checks _shutdown promptly.
+        """
         self._shutdown.set()
-        with self._lock:
-            self._recorder.abort()    # break any blocked text() so run() can return
+        self._recorder.abort()    # break any blocked text() so run() can return (NOT under _lock)
         # recorder.shutdown() (full teardown) is wired by the quit handler in P1.M4.T2.S2, NOT here.
 
     def is_listening(self) -> bool:

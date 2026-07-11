@@ -18,7 +18,6 @@ from voice_typing.config import (
     AsrConfig,
     FeedbackConfig,
     FilterConfig,
-    OutputConfig,
     VoiceTypingConfig,
 )
 
