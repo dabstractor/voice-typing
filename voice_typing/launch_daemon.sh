@@ -57,4 +57,18 @@ else
          "Expect CUDA init to fail; the daemon should fall back to device=cpu." >&2
 fi
 
+# HF offline guarantee (PRD §1 "100% local" + acceptance §7.8; bugfix Issue 1). Models are
+# prefetched at install time (install.sh -> prefetch.py -> ~/.cache/huggingface/hub), so the
+# daemon loads them from cache with ZERO network. HF_HUB_OFFLINE=1 makes huggingface_hub
+# (hence faster-whisper / RealtimeSTT) cache-only — it skips the freshness GET to
+# https://huggingface.co that online mode fires every startup (journal proved 2 GETs/startup,
+# one per model). huggingface_hub reads this flag at IMPORT TIME (constants.py), so it MUST be
+# in the env BEFORE python starts; exporting here is strictly more correct than os.environ in
+# daemon.py (same reason LD_LIBRARY_PATH lives here). Uncached model -> fail-fast
+# LocalEntryNotFoundError by design (no lazy download). TRANSFORMERS_OFFLINE=1 is harmless
+# belt-and-suspenders (faster-whisper has no transformers dep). Keep in the wrapper, NOT the
+# systemd unit Environment= (unit line 29 forbids it; wrapper is the single env source).
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 exec "$PY" -m voice_typing.daemon "$@"
