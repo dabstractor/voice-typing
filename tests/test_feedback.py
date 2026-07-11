@@ -258,6 +258,38 @@ def test_record_final_notifies_with_check_glyph(feedback):
     assert rec.argvs[-1][-1] == "✔ Hello there."
 
 
+def test_record_final_updates_partial_so_status_matches_screen(feedback, tmp_path):
+    """record_final must write the FINAL text into partial, not leave the stale realtime partial.
+
+    Regression: the tmux status-right used to keep showing the last realtime partial, which
+    trails the final by a word or two (final '...here today?' vs partial '...here?'). The
+    status must match what was typed, so record_final overwrites partial with the final text.
+    """
+    fb, _rec, _clock = feedback
+    fb.set_listening(True)
+    fb.update_partial("okay what are we typing here")          # trailing realtime partial
+    fb.record_final("Okay, what are we typing here today?")    # final has the last word
+    state = _read_state(tmp_path)
+    assert state["partial"] == "Okay, what are we typing here today?"
+    assert state["last_final"] == "Okay, what are we typing here today?"
+
+
+def test_record_final_silent_when_notify_on_final_false(monkeypatch, tmp_path):
+    """notify_on_final=False suppresses ONLY the final popup; start/stop still fire; state still written."""
+    rec = _Recorder(); rec.install(monkeypatch)
+    monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
+    cfg = FeedbackConfig(state_file=str(tmp_path / "state.json"), hypr_notify=True,
+                         notify_ms=2500, notify_on_final=False)
+    fb = Feedback(cfg)
+    fb.set_listening(True)        # start popup STILL fires (gated by hypr_notify, not notify_on_final)
+    fb.record_final("a final")   # final popup SUPPRESSED; state still written; partial = final
+    state = _read_state(tmp_path)
+    assert state["last_final"] == "a final" and state["partial"] == "a final"
+    fb.set_listening(False)       # stop popup STILL fires
+    msgs = [a[-1] for a in rec.argvs if a[0] == "hyprctl"]
+    assert msgs == ["● listening", "■ stopped"]   # NO "✔ a final" in the list
+
+
 def test_set_listening_stop_notifies_stopped(feedback):
     fb, rec, _clock = feedback
     fb.set_listening(True)   # start
@@ -311,6 +343,44 @@ def test_notify_ms_from_config_in_argv(monkeypatch, tmp_path):
     cfg = FeedbackConfig(state_file=str(tmp_path / "state.json"), hypr_notify=True, notify_ms=9999)
     Feedback(cfg).set_listening(True)
     assert rec.argvs[0][3] == "9999"  # str(notify_ms) in the argv
+
+
+def test_start_clears_stale_partial_so_status_does_not_flash_old_words(feedback, tmp_path):
+    """Arming (False->True) must clear any leftover partial from the previous session.
+
+    Regression: status.sh renders '🎤 <partial>' the moment listening flips true, so a stale
+    partial made the OLD utterance flash in the tmux status-right on every re-arm until new
+    speech arrived. The partial must be blank on arm and repopulate only from the next
+    realtime callback.
+    """
+    fb, _rec, _clock = feedback
+    fb.set_listening(True)
+    fb.update_partial("leftover from last session")
+    assert _read_state(tmp_path)["partial"] == "leftover from last session"
+    fb.set_listening(False)  # disarm: partial persists on disk (invisible — listening is False)
+    assert _read_state(tmp_path)["partial"] == "leftover from last session"
+    fb.set_listening(True)   # re-arm: partial MUST be cleared
+    state = _read_state(tmp_path)
+    assert state["partial"] == ""
+    assert state["listening"] is True
+
+
+def test_stop_does_not_clear_partial(feedback, tmp_path):
+    """Only arming clears; disarming leaves the partial in place (it's just invisible)."""
+    fb, _rec, _clock = feedback
+    fb.set_listening(True)
+    fb.update_partial("said something")
+    fb.set_listening(False)
+    assert _read_state(tmp_path)["partial"] == "said something"
+
+
+def test_noop_set_listening_does_not_clear_partial(feedback, tmp_path):
+    """A no-op set_listening (same value, no transition) must not wipe the partial."""
+    fb, _rec, _clock = feedback
+    fb.set_listening(True)
+    fb.update_partial("keep me")
+    fb.set_listening(True)  # already True -> no transition -> no clear
+    assert _read_state(tmp_path)["partial"] == "keep me"
 
 
 # ---------------------------------------------------------------------------

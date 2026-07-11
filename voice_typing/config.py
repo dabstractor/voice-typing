@@ -73,6 +73,11 @@ class FeedbackConfig:
     state_file: str = ""       # "" → resolved lazily to $XDG_RUNTIME_DIR/voice-typing/state.json
     hypr_notify: bool = True   # hyprctl notify one-liner for start/final/stop
     notify_ms: int = 2500      # hyprctl notify duration (ms)
+    notify_on_final: bool = True  # also pop a hyprctl popup per final ("✔ <text>")? The text is
+                                  # already typed into the focused window + shown live in the tmux
+                                  # status line, so this is redundant for most setups — set False to
+                                  # keep only the brief ●/■ start/stop popups. hypr_notify=False
+                                  # still wins (suppresses ALL popups).
 
     def resolved_state_file(self) -> str:
         """Return the effective state-file path (lazy XDG_RUNTIME_DIR resolution).

@@ -190,7 +190,8 @@ append_space = true
 
 [feedback]
 state_file = ""                       # empty → $XDG_RUNTIME_DIR/voice-typing/state.json
-hypr_notify = true                    # hyprctl notify one-liner for partials/finals
+hypr_notify = true                    # master switch for hyprctl popups (start/final/stop)
+notify_on_final = true                # also pop “✔ <text>” per final? (redundant: text is typed + in tmux)
 notify_ms = 2500
 
 [filter]
@@ -207,7 +208,7 @@ Config file search order: `$XDG_CONFIG_HOME/voice-typing/config.toml`, then repo
   {"listening": true, "phase": "speaking", "partial": "this is what i am say", "last_final": "Previous sentence.", "ts": 1783718400.123}
   ```
   Written on every partial update (throttle to ≥10 Hz max), phase change, and final.
-- **hyprctl notify**: `hyprctl notify -1 <notify_ms> "rgb(88c0d0)" "  <partial>"` — fire-and-forget, swallow errors. Hyprland notifications are not replaceable by ID; to avoid stacking spam, only notify on: listening-start ("● listening"), each *final* ("✔ <text>"), listening-stop. Partials go to the state file only (that's what the tmux status consumes). This keeps the phone-like live feed in the tmux status line, which is where the user lives.
+- **hyprctl notify**: `hyprctl notify -1 <notify_ms> "rgb(88c0d0)" "<msg>"` — fire-and-forget, swallow errors. Hyprland notifications are not replaceable by ID; to avoid stacking spam, only notify on: listening-start ("● listening"), each *final* ("✔ <text>" — gated by `notify_on_final`, since the text is already typed and shown in the tmux status line), listening-stop ("■ stopped"). Partials go to the state file only (that's what the tmux status consumes). `record_final` ALSO writes the finalized text back into the `partial` field so the tmux status line matches the screen (otherwise it would keep showing the last trailing realtime partial, which usually drops the final word or two).
 - **tmux status integration** (document in README, and `install.sh` prints the snippet; do NOT edit the user's tmux.conf):
   ```tmux
   set -g status-interval 1

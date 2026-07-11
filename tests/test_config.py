@@ -54,6 +54,7 @@ def test_defaults_match_prd_4_5():
     assert cfg.feedback.state_file == ""
     assert cfg.feedback.hypr_notify is True
     assert cfg.feedback.notify_ms == 2500
+    assert cfg.feedback.notify_on_final is True
     # [filter]
     assert cfg.filter.min_chars == 2
     assert cfg.filter.blocklist == _PRD_BLOCKLIST

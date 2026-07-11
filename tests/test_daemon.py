@@ -870,7 +870,7 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
     assert set(s) == {"listening", "partial", "last_final", "uptime_s",
                       "device", "compute_type", "final_model", "realtime_model",
                       "mic_ok", "mic_error"}                      # bugfix Issue 2 / P1.M1.T2.S2
-    assert s["listening"] is False and s["partial"] == "hello" and s["last_final"] == "world"
+    assert s["listening"] is False and s["partial"] == "world" and s["last_final"] == "world"   # record_final writes the final into partial so the status matches the screen
     assert s["device"] == "cuda" and s["compute_type"] == "float16"
     assert s["final_model"] == "distil-large-v3" and s["realtime_model"] == "small.en"
     assert s["mic_ok"] is True and s["mic_error"] == ""          # S1's _ok_probe via _make_daemon_with_feedback

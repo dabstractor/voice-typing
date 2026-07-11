@@ -15,7 +15,8 @@ Hyprland notifications are NOT replaceable by ID, so per-partial popups would st
 unreadable spam. Partials go to the state file ONLY (tmux shows them live). hyprctl popups
 fire EXCLUSIVELY on:
   - listening-start  -> "● listening"   (set_listening False->True transition)
-  - each final       -> "✔ <text>"      (record_final)
+  - each final       -> "✔ <text>"      (record_final; GATED by notify_on_final — the text is
+                                          already typed + shown in tmux, so this popup is optional)
   - listening-stop   -> "■ stopped"      (set_listening True->False transition)
 NEVER on update_partial. NEVER on set_phase (VAD phase flips are not start/final/stop events).
 
@@ -35,7 +36,7 @@ individually atomic in CPython, and _write() uses tempfile + os.replace (atomic 
 level) — a torn write is impossible. Feedback itself needs no Lock (it relies on these
 atomic primitives; a lock here would risk deadlock if a future caller recurses).
 
-CONSUMES: voice_typing.config.FeedbackConfig (P1.M2.T1.S1): state_file, hypr_notify, notify_ms.
+CONSUMES: voice_typing.config.FeedbackConfig (P1.M2.T1.S1): state_file, hypr_notify, notify_ms, notify_on_final.
   resolved_state_file() is the SINGLE source of truth for the path — called lazily inside
   _write() (NOT __init__) because XDG_RUNTIME_DIR is unset outside real sessions.
 CONSUMED BY: daemon partial/state callbacks (P1.M4.T1.S1) and on_final (P1.M4.T1.S2) as:
@@ -115,24 +116,39 @@ class Feedback:
         self._write()
 
     def record_final(self, text: str) -> None:
-        """Record a finalized utterance; set last_final; always write; notify '✔ <text>'.
+        """Record a finalized utterance; set last_final AND partial; always write; maybe notify.
 
-        Notifications fire only when cfg.hypr_notify is True.
+        partial is overwritten with the FINAL text so the tmux status-right matches what was
+        actually typed — without this, the status line keeps showing the last realtime partial,
+        which usually trails the final by a word or two (final "...typing here today?" vs partial
+        "...typing here?"). The next update_partial (new utterance) overwrites it again.
+
+        The '✔ <text>' notification fires only when BOTH cfg.hypr_notify AND cfg.notify_on_final
+        are True — the popup is redundant once the text is typed and shown live in tmux, so
+        notify_on_final lets users keep just the brief ●/■ start/stop indicators.
         """
         self._state["last_final"] = text
+        self._state["partial"] = text  # status line shows the final, not the stale last partial
         self._write()
-        if self._cfg.hypr_notify:
+        if self._cfg.hypr_notify and self._cfg.notify_on_final:
             self._notify("✔ " + text)
 
     def set_listening(self, listening: bool) -> None:
         """Set the master listening gate; always write; notify start/stop ON TRANSITION ONLY.
 
-        start (False->True): '● listening'. stop (True->False): '■ stopped'. A no-op call
-        (same value) writes but does NOT notify (avoids startup spam — daemon starts
-        not-listening per PRD §4.9). Notifications fire only when cfg.hypr_notify is True.
+        start (False->True): '● listening', AND clears any stale partial left over from the
+        previous session — otherwise the tmux status-right flashes the old words the instant
+        the mic arms (status.sh renders '🎤 <partial>' as soon as listening flips true). The
+        partial repopulates from the next on_realtime_transcription_stabilized callback once
+        speech is actually detected. stop (True->False): '■ stopped'. A no-op call (same
+        value) writes but does NOT notify (avoids startup spam — daemon starts not-listening
+        per PRD §4.9) and does NOT clear (no transition). Notifications fire only when
+        cfg.hypr_notify is True.
         """
         prev = self._state["listening"]
         self._state["listening"] = listening
+        if listening and not prev:
+            self._state["partial"] = ""  # fresh session: don't flash last session's words
         self._write()
         if self._cfg.hypr_notify and listening != prev:
             self._notify("● listening" if listening else "■ stopped")

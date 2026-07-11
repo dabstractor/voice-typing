@@ -52,7 +52,8 @@ aliases `tmux`, `python3`, and `pip`.
 systemctl --user start voice-typing
 /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle   # arms the mic
 # speak. Watch the tmux status line for live partials, or the hyprctl popups:
-#   a dot means listening, a check mark means a final was typed.
+#   a dot means listening, a check mark means a final was typed
+#   (the ✔ final popup is optional — see feedback.notify_on_final).
 /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle   # disarms
 ```
 
@@ -103,8 +104,10 @@ set -g status-interval 1
 set -g status-right "#(/home/dustin/projects/voice-typing/voice_typing/status.sh)"
 ```
 
-Result: while listening, `status-right` shows the live partial words preceded by a
-microphone emoji, truncated to 60 characters. When idle it is blank. The partial
+Result: while listening, `status-right` shows the current text (live partials while you
+speak, then the finalized text once it's typed) preceded by a microphone emoji,
+truncated to 60 characters with a trailing `…` on overflow (widen it with
+`tmux set-environment VOICE_TYPING_STATUS_MAX 80`). When idle it is blank. The text
 comes from the daemon's atomic writes to a state file at
 `$XDG_RUNTIME_DIR/voice-typing/state.json`, which `status.sh` reads each second.
 
@@ -130,6 +133,8 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"tmux"`. `wtype` auto-falls-back to `ydotool`. |
 | `output.tmux_target` | `""` | pane target, used only when `backend="tmux"`, e.g. `"voicetest:0.0"`. |
 | `output.append_space` | `true` | append one trailing space after each final. |
+| `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each final's text (`✔ <text>`). Set `false` to keep only the brief `●`/`■` start/stop popups — the text is already typed into the focused window and shown in the tmux status line, so the final popup is redundant. |
+| `feedback.notify_ms` | `2500` | how long hyprctl popups stay on screen (ms). Lower for a brief start/stop flash. `hypr_notify` is the master on/off switch. |
 | `filter.min_chars` | `2` | finals shorter than this are dropped. |
 | `filter.blocklist` | list | exact, case-insensitive phrases dropped (classic Whisper silence hallucinations). |
 | `log.level` | `"INFO"` | `"INFO"` (per-utterance latency line) or `"DEBUG"` (raw timestamps). |
