@@ -115,6 +115,16 @@ systemctl --user enable voice-typing.service
 # restart (not start): starts a stopped unit AND applies a freshly-copied unit to a running one.
 systemctl --user restart voice-typing.service
 
+# Remove a stale realtimesst.log from a prior run (validation Issue 3; housekeeping). The
+# no_log_file=True kwarg (PRD §4.2) makes the CURRENT daemon write only to stderr→journald, but
+# runs before that fix (or without it) could leave a multi-MiB realtimesst.log in the repo. It is
+# gitignored (*.log) so it is never committed; this just clears the disk clutter. The current
+# daemon never appends to it, so removing it is always safe.
+if [ -f "$REPO/realtimesst.log" ]; then
+  rm -f "$REPO/realtimesst.log"
+  echo "    removed stale realtimesst.log"
+fi
+
 # --- (6) copy config.toml to XDG IF ABSENT (never overwrite the user's edits) ---------
 echo "==> [5/7] config"
 CFG_DIR="$XDG_CONFIG_HOME/voice-typing"

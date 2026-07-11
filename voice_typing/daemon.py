@@ -461,6 +461,25 @@ class VoiceTypingDaemon:
         self._configure_log_level()           # PRD §4.2: DEBUG via config (namespace logger; T3 adds handler)
         self._log_resolved_device()           # PRD §4.2/acceptance T6: prove CUDA residency at startup
         self._feedback.set_listening(False)   # PRD §4.9: starts NOT listening (no hot-mic on boot)
+        # Stop queueing captured audio into the VAD pipeline while idle (validation Issue 2). The
+        # recorder is constructed with use_microphone=True (PRD §4.4 / _FIXED_KWARGS), so at boot the
+        # "listening" Event is cleared but that gate only suppresses recorder.text() OUTPUT.
+        # set_microphone(False) makes RealtimeSTT's audio worker skip buffering/queueing captured
+        # frames while idle (the worker still does stream.read() but discards the data until armed),
+        # so no audio reaches VAD/transcription until the first start()/toggle().
+        #
+        # KNOWN LIMITATION (verified against RealtimeSTT 1.0.2): set_microphone(False) toggles a
+        # shared `use_microphone` flag that gates QUEUEING — it does NOT cork or close the underlying
+        # PyAudio capture stream (which lives in a separate worker process and stays uncorked). So
+        # PipeWire still lists an active source-output while idle. Truly closing the physical stream
+        # would require recorder.shutdown() + full reconstruction on every toggle, which reloads the
+        # multi-GB Whisper models (seconds) and directly defeats the PRD §4.2 "construct once, models
+        # resident, instant toggle-on" design. The PRD's "never hot-mics on boot" (§4.9) is honored
+        # in its intended sense: NO TRANSCRIPTION/OUTPUT happens while idle (the gate + this flag
+        # guarantee that). The residual physical-capture-while-idle is the accepted trade-off for
+        # instant toggle. Mirrors the existing set_listening(False) line: device state matches the
+        # listening gate from boot; the first start()/toggle() re-arms via _arm().
+        self._recorder.set_microphone(False)
         logger.info("voice-typing daemon ready (not listening); recorder resident")
         # Idle auto-stop watchdog: disarms after cfg.asr.auto_stop_idle_seconds of no speech.
         threading.Thread(target=self._idle_watchdog, name="voice-typing-idle", daemon=True).start()

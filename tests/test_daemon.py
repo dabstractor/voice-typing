@@ -718,6 +718,27 @@ def test_run_loop_not_listening_does_not_call_text(monkeypatch):
     assert not t.is_alive()
 
 
+def test_run_closes_capture_stream_at_boot_while_not_listening(monkeypatch):
+    # Regression: validation Issue 2. The recorder is constructed with use_microphone=True so
+    # RealtimeSTT opens the PyAudio capture stream in __init__. The "listening" Event is cleared
+    # at boot but that gate only suppresses recorder.text() OUTPUT — it does NOT close the physical
+    # capture stream, so without an explicit set_microphone(False) in run() the mic stays
+    # hot-capturing (PipeWire: an uncorked source-output) while voicectl status reports listening:
+    # off. run() must match the device capture state to the listening gate from boot.
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
+    d, fb, rec, be = _make_daemon()
+    assert rec.mic == []                       # pre-run: no set_microphone calls yet
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        # wait for the boot-time set_microphone(False) (the recorder is resident before the loop)
+        assert _wait_for(lambda: False in rec.mic, timeout=1.0), rec.mic
+    finally:
+        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)
+    assert not t.is_alive()
+    assert rec.mic[-1] is False                # boot left the capture stream closed (not listening)
+    assert rec.text_calls == 0                 # and text() was never entered (not listening)
+
 def test_run_loop_calls_text_when_listening_then_exits_on_shutdown(monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
     d, fb, rec, be = _make_daemon()

@@ -3,6 +3,20 @@ Description=Local voice typing daemon (RealtimeSTT)
 After=pipewire.service ydotool.service
 
 [Service]
+# Import the Wayland/X display variables from the systemd USER manager environment into THIS
+# service's process environment. systemd user services do NOT automatically inherit arbitrary
+# variables from `systemctl --user show-environment`; only a curated set is passed through.
+# `wtype` (the default typing backend, PRD §4.3) is a Wayland `virtual-keyboard-v1` CLIENT and
+# cannot connect to the compositor without WAYLAND_DISPLAY — so without this import every
+# finalized utterance silently fails wtype and falls back to ydotool (~1.2s extra latency + the
+# PRD-flagged non-ASCII/layout quirks). DISPLAY covers XWayland-focused windows.
+#
+# The user manager's environment is populated at graphical-session launch (Hyprland exports
+# WAYLAND_DISPLAY/DISPLAY via the session; `systemctl --user import-environment` is the standard
+# way a compositor seeds it). import-environment here is idempotent and a no-op if the vars are
+# already set in the unit's environment. Runs as ExecStartPre so a failure (var not set yet) is
+# surfaced in the journal before the daemon starts rather than as per-utterance wtype failures.
+ExecStartPre=/usr/bin/systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
 # ExecStart points at the LD_LIBRARY_PATH wrapper (voice_typing/launch_daemon.sh), NOT python
 # directly. faster-whisper / ctranslate2 load cuBLAS + cuDNN 9 shared objects from the nvidia-*-cu12
 # wheels; cuDNN 9's split sub-libs (libcudnn_ops.so.9, libcudnn_cnn.so.9, ...) are resolved by the
