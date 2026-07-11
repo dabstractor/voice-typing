@@ -21,8 +21,11 @@
 #      tmux set-environment VOICE_TYPING_STATUS_MAX 80
 #
 # POSIX sh + jq only. NO `set -e`: a missing or malformed state.json must print an empty
-# line with exit 0 (never abort) — otherwise tmux would show an error string in status-right.
-# The `2>/dev/null` + the jq `// ""` defaults already guarantee empty-on-failure.
+# line with exit 0 (never abort). tmux's #(...) substitution captures stdout and IGNORES the
+# exit code (so the empty line alone keeps status-right blank) — but a non-tmux caller that
+# checks $? would see jq's non-zero exit (2 = missing file, 5 = corrupt JSON); the explicit
+# `exit 0` at the end honors the documented zero-exit contract for every caller. The
+# `2>/dev/null` + the jq `// ""` defaults guarantee empty-on-failure stdout.
 
 STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/voice-typing/state.json"
 
@@ -37,3 +40,8 @@ jq -r --arg max "$MAX" '
     then $line[:(($max | tonumber) - 1)] + "…"
     else $line end
 ' "$STATE" 2>/dev/null
+
+# Issue 2 fix: always exit 0. jq exits non-zero on a missing (2) or corrupt (5) state.json; without this
+# the script's exit code would be jq's, violating the "exit 0 (never abort)" contract documented above.
+# stdout is already empty-on-failure (2>/dev/null + the jq // "" defaults); this zeroes the exit code only.
+exit 0
