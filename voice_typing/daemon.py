@@ -166,7 +166,8 @@ def cfg_to_kwargs(
 
 
 def _build_callbacks(
-    feedback: "Feedback", latency: "LatencyLog | None" = None
+    feedback: "Feedback", latency: "LatencyLog | None" = None,
+    on_speech: "Callable[[], None] | None" = None,
 ) -> dict[str, Callable[..., None]]:
     """Wire RealtimeSTT callbacks -> Feedback (+ optional LatencyLog; PRD §4.2; P1.M4.T1.S3).
 
@@ -184,6 +185,8 @@ def _build_callbacks(
         feedback.update_partial(text)
         if latency is not None:
             latency.note_partial(text)
+        if on_speech is not None:
+            on_speech()  # idle auto-stop: recognized words reset the clock
 
     def _vad_stop() -> None:
         feedback.set_phase("listening")
@@ -236,6 +239,7 @@ def _construct(
     recorder_cls: type,
     latency: "LatencyLog | None" = None,
     force_cpu: bool = False,
+    on_speech: "Callable[[], None] | None" = None,
 ) -> Any:
     """Build kwargs + callbacks, defensively filter to the signature, construct recorder_cls.
 
@@ -255,7 +259,7 @@ def _construct(
     """
     resolved = dict(cuda_check.CPU_FALLBACK) if force_cpu else None
     kwargs = cfg_to_kwargs(cfg, resolved=resolved)
-    kwargs.update(_build_callbacks(feedback, latency))
+    kwargs.update(_build_callbacks(feedback, latency, on_speech=on_speech))
     filtered = _filter_kwargs_to_signature(kwargs, recorder_cls)
     return recorder_cls(**filtered)
 
@@ -265,6 +269,7 @@ def build_recorder(
     feedback: "Feedback",
     latency: "LatencyLog | None" = None,
     force_cpu: bool = False,
+    on_speech: "Callable[[], None] | None" = None,
 ) -> Any:
     """Construct ONE AudioToTextRecorder wired to feedback (+ optional latency) (PRD §4.2, §4.4).
 
@@ -284,7 +289,8 @@ def build_recorder(
     """
     from RealtimeSTT import AudioToTextRecorder  # lazy: keeps `import voice_typing.daemon` cheap
 
-    return _construct(cfg, feedback, AudioToTextRecorder, latency, force_cpu=force_cpu)
+    return _construct(cfg, feedback, AudioToTextRecorder, latency, force_cpu=force_cpu,
+                      on_speech=on_speech)
 
 
 # --- Control socket path resolution (P1.M4.T2.S1; PRD §4.2(3)) -------------------------------
@@ -421,6 +427,12 @@ class VoiceTypingDaemon:
         self._listening = threading.Event()   # cleared → NOT listening at boot (PRD §4.9)
         self._shutdown = threading.Event()    # cleared → keep looping
         self._start_monotonic: float | None = None
+        # Idle auto-stop: timestamp of the last recognized speech; the _idle_watchdog thread disarms
+        # when now - this exceeds cfg.asr.auto_stop_idle_seconds. None while NOT listening. Set on
+        # _arm, cleared on _disarm, refreshed by the realtime partial callback (on_speech hook).
+        # Float store is atomic in CPython (read by the watchdog, written by RealtimeSTT worker +
+        # control-socket threads); the disarm re-checks the deadline under _lock (no false stop).
+        self._last_speech_monotonic: float | None = None
         # Per-utterance latency collector (P1.M4.T1.S3): fed by on_vad_stop/partial (via
         # build_recorder→_build_callbacks) + on_final. Injectable for tests; a real one otherwise.
         self._latency = latency if latency is not None else LatencyLog()
@@ -428,7 +440,8 @@ class VoiceTypingDaemon:
         # can arm the mic immediately. Injectable for unit tests (fakes → cheap, no RealtimeSTT).
         # Pass self._latency so on_vad_stop/partial feed the latency log (PRD §4.2; P1.M4.T1.S3).
         self._recorder = (
-            recorder if recorder is not None else build_recorder(cfg, feedback, self._latency)
+            recorder if recorder is not None
+            else build_recorder(cfg, feedback, self._latency, on_speech=self._touch_speech)
         )
         self._backend = (
             backend if backend is not None else typing_backends.make_backend(cfg.output)
@@ -449,6 +462,8 @@ class VoiceTypingDaemon:
         self._log_resolved_device()           # PRD §4.2/acceptance T6: prove CUDA residency at startup
         self._feedback.set_listening(False)   # PRD §4.9: starts NOT listening (no hot-mic on boot)
         logger.info("voice-typing daemon ready (not listening); recorder resident")
+        # Idle auto-stop watchdog: disarms after cfg.asr.auto_stop_idle_seconds of no speech.
+        threading.Thread(target=self._idle_watchdog, name="voice-typing-idle", daemon=True).start()
         while not self._shutdown.is_set():
             if self._listening.is_set():
                 # blocks until ONE utterance finalizes → on_final in a NEW thread → returns → re-listen.
@@ -541,6 +556,7 @@ class VoiceTypingDaemon:
     def _arm(self) -> None:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle."""
         self._listening.set()
+        self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
         self._recorder.set_microphone(True)
         self._feedback.set_listening(True)
         self._refresh_mic_status()  # bugfix Issue 2 / P1.M1.T2.S1: re-probe mic health on each arm
@@ -548,9 +564,52 @@ class VoiceTypingDaemon:
     def _disarm(self) -> None:
         """Private: disarm mic + abort blocked text() + clear listening + notify. Called under lock."""
         self._listening.clear()
+        self._last_speech_monotonic = None  # not listening → idle clock is inactive
         self._recorder.set_microphone(False)
         self._recorder.abort()      # breaks any blocked text() so the loop re-checks the cleared gate
         self._feedback.set_listening(False)
+
+    def _touch_speech(self) -> None:
+        """Mark 'recognized speech happened now' — resets the idle auto-stop clock.
+
+        Wired into the realtime partial callback via build_recorder(on_speech=). Called from a
+        RealtimeSTT worker thread; the float store is atomic in CPython. Finals are always
+        preceded by partials, so this single hook covers all active speech.
+        """
+        self._last_speech_monotonic = time.monotonic()
+
+    def _maybe_auto_stop(self) -> None:
+        """Disarm if listening AND idle beyond cfg.asr.auto_stop_idle_seconds. Thread-safe (_lock).
+
+        Re-checks the idle deadline UNDER the lock so a partial arriving between the watchdog's
+        1s tick and here cancels the stop (no false disarm). threshold<=0 disables (no-op). Called
+        by _idle_watchdog ~once/second; also safe to call directly (unit tests do).
+        """
+        threshold = self._cfg.asr.auto_stop_idle_seconds
+        if threshold <= 0:
+            return
+        with self._lock:
+            if not self._listening.is_set() or self._last_speech_monotonic is None:
+                return
+            if time.monotonic() - self._last_speech_monotonic < threshold:
+                return
+            logger.info(
+                "voice-typing auto-stop: %.1fs of no recognized speech; disarming "
+                "(set [asr] auto_stop_idle_seconds=0 to disable)", threshold,
+            )
+            self._disarm()
+
+    def _idle_watchdog(self) -> None:
+        """Background thread: periodically call _maybe_auto_stop(). Started by run(); daemon thread.
+
+        Ticks via _shutdown.wait(1.0) so it both sleeps ~1s AND exits promptly on shutdown. The
+        check swallows its own exceptions so a transient error never kills the watchdog.
+        """
+        while not self._shutdown.wait(1.0):
+            try:
+                self._maybe_auto_stop()
+            except Exception:
+                logger.exception("idle auto-stop check raised; continuing")
 
     def _refresh_mic_status(self) -> None:
         """Run the mic probe (real or injected) and store ok/error. NEVER raises.

@@ -46,6 +46,7 @@ def test_defaults_match_prd_4_5():
     assert cfg.asr.device == "cuda"
     assert cfg.asr.post_speech_silence_duration == 0.6
     assert cfg.asr.realtime_processing_pause == 0.15
+    assert cfg.asr.auto_stop_idle_seconds == 30.0
     # [output]
     assert cfg.output.backend == "wtype"
     assert cfg.output.tmux_target == ""

@@ -25,7 +25,7 @@ def test_repo_config_toml_equals_defaults():
 
 
 def test_repo_config_toml_has_no_extra_keys():
-    """The repo default must carry only the 15 schema keys (no compute_type etc.)."""
+    """The repo default must carry only the 16 schema keys (no compute_type etc.)."""
     import tomllib
 
     with open(_repo_config_path(), "rb") as fh:
@@ -38,6 +38,7 @@ def test_repo_config_toml_has_no_extra_keys():
             "device",
             "post_speech_silence_duration",
             "realtime_processing_pause",
+            "auto_stop_idle_seconds",
         },
         "output": {"backend", "tmux_target", "append_space"},
         "feedback": {"state_file", "hypr_notify", "notify_ms", "notify_on_final"},

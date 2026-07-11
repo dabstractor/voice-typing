@@ -55,6 +55,8 @@ class AsrConfig:
     device: str = "cuda"  # "cuda" | "cpu" (daemon may override via cuda_check at startup)
     post_speech_silence_duration: float = 0.6  # VAD: finalize after this much silence (seconds)
     realtime_processing_pause: float = 0.15    # partials cadence (seconds)
+    auto_stop_idle_seconds: float = 30.0       # auto-disarm after this many seconds of no recognized
+                                               # speech (partials reset the clock); 0 disables
 
 
 @dataclass

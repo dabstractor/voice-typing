@@ -126,6 +126,7 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | --- | --- | --- |
 | `asr.post_speech_silence_duration` | `0.6` | seconds of silence before a final is emitted. Lower is snappier but can cut deliberate pauses. |
 | `asr.realtime_processing_pause` | `0.15` | cadence of the live partial previews. Lower is more responsive; higher uses less CPU. |
+| `asr.auto_stop_idle_seconds` | `30.0` | auto-disarm (stop listening) after this many seconds with no recognized speech — partials reset the clock while you talk, so it only fires when you truly go silent (a forgotten hot-mic guard, not a mid-thought cut). `0` disables. Fires the normal `■` stop popup + a journal line. |
 | `asr.device` | `"cuda"` | `"cuda"` or `"cpu"`. Auto-falls-back to `cpu` if no CUDA device is visible. |
 | `asr.final_model` | `"distil-large-v3"` | the model whose output gets typed. |
 | `asr.realtime_model` | `"small.en"` | the fast model that produces live partials. |

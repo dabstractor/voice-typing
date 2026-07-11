@@ -315,6 +315,18 @@ def test_construct_drops_kwargs_not_in_strict_recorder(cfg, monkeypatch, caplog)
     assert any("dropping" in r.getMessage() for r in caplog.records)
 
 
+def test_construct_wires_on_speech_into_partial_callback(cfg, monkeypatch):
+    """on_speech (idle auto-stop reset hook) fires on a realtime partial, and ONLY then."""
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    fired = []
+    rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder,
+                            on_speech=lambda: fired.append(1))
+    rec.kwargs["on_realtime_transcription_stabilized"]("a partial")   # partial -> fires
+    assert fired == [1]
+    rec.kwargs["on_vad_start"]()                                      # VAD-only -> does NOT fire
+    assert fired == [1]
+
+
 # ---------------------------------------------------------------------------
 # build_recorder — the production entry is a thin lazy-import wrapper (smoke only)
 # ---------------------------------------------------------------------------
@@ -469,6 +481,74 @@ def test_on_final_typing_raises_is_caught_and_record_still_happens():
     d.on_final("boom")   # payload "boom " matches raise_on → type_text raises
     assert be.typed == []          # nothing typed (it raised)
     assert fb.finals == ["boom"]   # record_final STILL called (recognition is final regardless)
+
+
+# --- idle auto-stop (asr.auto_stop_idle_seconds) ---
+# _idle_watchdog ticks ~1s and calls _maybe_auto_stop(); here we call it directly for deterministic
+# logic tests (no real timing). _touch_speech (wired into the partial callback via on_speech) and
+# _arm refresh _last_speech_monotonic; _disarm clears it. Default threshold 30.0; 0 disables.
+
+
+def test_auto_stop_disarms_when_idle_beyond_threshold():
+    d, _fb, _rec, _be = _make_daemon()
+    d.start()                                              # arm -> _last_speech_monotonic = now
+    assert d.is_listening() is True
+    d._last_speech_monotonic = _time.monotonic() - 31.0    # 31s silent (> 30.0 default)
+    d._maybe_auto_stop()
+    assert d.is_listening() is False                       # disarmed by the idle timeout
+
+
+def test_auto_stop_keeps_alive_with_recent_speech():
+    d, _fb, _rec, _be = _make_daemon()
+    d.start()
+    d._last_speech_monotonic = _time.monotonic() - 5.0     # only 5s silent
+    d._maybe_auto_stop()
+    assert d.is_listening() is True
+
+
+def test_touch_speech_resets_the_idle_clock():
+    d, _fb, _rec, _be = _make_daemon()
+    d.start()
+    d._last_speech_monotonic = _time.monotonic() - 60.0    # would be idle
+    d._touch_speech()                                      # a partial arrived -> clock reset
+    d._maybe_auto_stop()
+    assert d.is_listening() is True
+
+
+def test_auto_stop_disabled_when_threshold_zero():
+    cfg = VoiceTypingConfig()
+    cfg.asr.auto_stop_idle_seconds = 0.0
+    d, _fb, _rec, _be = _make_daemon(cfg=cfg)
+    d.start()
+    d._last_speech_monotonic = _time.monotonic() - 9999.0  # absurdly idle
+    d._maybe_auto_stop()
+    assert d.is_listening() is True                        # 0 disables -> never auto-stops
+
+
+def test_auto_stop_noop_when_not_listening():
+    d, _fb, _rec, _be = _make_daemon()
+    assert d._last_speech_monotonic is None                 # boot state
+    d._maybe_auto_stop()                                    # must be a clean no-op (no error)
+    assert d.is_listening() is False
+
+
+def test_disarm_clears_the_idle_clock():
+    d, _fb, _rec, _be = _make_daemon()
+    d.start()
+    assert d._last_speech_monotonic is not None
+    d.stop()
+    assert d._last_speech_monotonic is None                 # cleared -> stale watchdog tick is a no-op
+
+
+def test_idle_watchdog_actually_disarms_in_background():
+    """The real watchdog thread (started as run() does) disarms after the threshold elapses."""
+    cfg = VoiceTypingConfig()
+    cfg.asr.auto_stop_idle_seconds = 1.0                    # 1s for a fast test
+    d, _fb, _rec, _be = _make_daemon(cfg=cfg)
+    d.start()
+    threading.Thread(target=d._idle_watchdog, name="test-idle", daemon=True).start()
+    assert _wait_for(lambda: not d.is_listening(), timeout=4.0, interval=0.1), \
+        "watchdog did not disarm within 4s of a 1.0s idle threshold"
 
 
 # --- on_final serialization (P1.M2.T2.S1 / bugfix Issue 5) ---
@@ -1679,13 +1759,15 @@ def test_cfg_to_kwargs_accepts_resolved_override(cfg, monkeypatch):
 
 
 def test_build_recorder_and_construct_force_cpu_in_signature():
-    """The public surface has force_cpu (default False), last after latency. (Smoke; no heavy call.)"""
+    """force_cpu (default False) + on_speech (default None) are on the public surface. (Smoke.)"""
     sb = inspect.signature(daemon.build_recorder).parameters
     assert "force_cpu" in sb and sb["force_cpu"].default is False
-    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu"], list(sb)
+    assert "on_speech" in sb and sb["on_speech"].default is None
+    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu", "on_speech"], list(sb)
     sc = inspect.signature(daemon._construct).parameters
     assert "force_cpu" in sc and sc["force_cpu"].default is False
-    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu"], list(sc)
+    assert "on_speech" in sc and sc["on_speech"].default is None
+    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu", "on_speech"], list(sc)
     # cfg_to_kwargs got the keyword-only resolved injection point (default None):
     sk = inspect.signature(daemon.cfg_to_kwargs).parameters
     assert "resolved" in sk and sk["resolved"].default is None
