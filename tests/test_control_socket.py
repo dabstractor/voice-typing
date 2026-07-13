@@ -34,13 +34,14 @@ class _StubDaemon:
             "uptime_s": 0.0, "device": "cuda", "compute_type": "float16",
             "final_model": "distil-large-v3", "realtime_model": "small.en",
         }
-    def toggle(self): self.calls.append("toggle"); self._listening = not self._listening
-    def start(self): self.calls.append("start"); self._listening = True
-    def stop(self): self.calls.append("stop"); self._listening = False
+    def toggle(self):
+        self.calls.append("toggle"); self._listening = not self._listening  # noqa: E702
+    def start(self): self.calls.append("start"); self._listening = True  # noqa: E702
+    def stop(self): self.calls.append("stop"); self._listening = False  # noqa: E702
     def request_shutdown(self): self.calls.append("quit")
     def is_listening(self): return self._listening
     def status_snapshot(self):
-        s = dict(self._snapshot); s["listening"] = self._listening; return s
+        s = dict(self._snapshot); s["listening"] = self._listening; return s  # noqa: E702
 
 
 def _wait_for(predicate, timeout=2.0, interval=0.01):

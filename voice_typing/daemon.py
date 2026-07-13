@@ -434,6 +434,15 @@ class VoiceTypingDaemon:
         self._on_final_lock = threading.Lock()
         self._listening = threading.Event()   # cleared → NOT listening at boot (PRD §4.9)
         self._shutdown = threading.Event()    # cleared → keep looping
+        # In-flight text() tracking (validation Issue 1 / abort() deadlock fix): SET while the
+        # run() loop is blocked INSIDE recorder.text(), CLEAR otherwise. RealtimeSTT's abort()
+        # blocks on was_interrupted.wait(), an event set ONLY inside text() (transcription_api.py
+        # L37/L102). When the loop is disarmed/idle (in time.sleep(0.05)) nothing sets that event,
+        # so an unconditional abort() blocks FOREVER (the voicectl stop/toggle/quit hang). _safe_abort()
+        # gates abort() on this flag so it can NEVER block the control-socket response. Set/cleared
+        # ONLY by run() on the single main thread; read by _safe_abort() on control/worker threads
+        # (a stale True during the brief teardown window is harmless — abort() is then a valid nudge).
+        self._text_in_flight = threading.Event()   # cleared → no thread in text() at boot
         self._start_monotonic: float | None = None
         # Idle auto-stop: timestamp of the last recognized speech; the _idle_watchdog thread disarms
         # when now - this exceeds cfg.asr.auto_stop_idle_seconds. None while NOT listening. Set on
@@ -611,7 +620,17 @@ class VoiceTypingDaemon:
             if self._listening.is_set():
                 # blocks until ONE utterance finalizes → on_final in a NEW thread → returns → re-listen.
                 # Returning is NORMAL SEGMENTATION, never session end (the WhisperX-flaw fix, PRD §1 #1).
-                self._recorder.text(self.on_final)
+                #
+                # Track in-flight text() (validation Issue 1): abort() can only safely wake a thread
+                # that is blocked HERE. The flag is SET just before entering text() and CLEARED the
+                # instant it returns, so _safe_abort() (called by stop/toggle/quit) never invokes
+                # abort() when the loop is idle in time.sleep(0.05) — which would block forever on
+                # was_interrupted.wait() (set only inside text()). See _safe_abort().
+                self._text_in_flight.set()
+                try:
+                    self._recorder.text(self.on_final)
+                finally:
+                    self._text_in_flight.clear()
             else:
                 time.sleep(0.05)
         logger.info("shutdown requested; run() loop exiting")
@@ -729,7 +748,7 @@ class VoiceTypingDaemon:
         if self._recorder is not None:
             self._recorder.set_microphone(False)
         self._feedback.set_listening(False)
-        # NOTE: caller MUST call self._recorder.abort() AFTER releasing _lock (see start/stop/toggle).
+        # NOTE: caller MUST call self._safe_abort() AFTER releasing _lock (see start/stop/toggle).
 
     def _touch_speech(self) -> None:
         """Mark 'recognized speech happened now' — resets the idle auto-stop clock.
@@ -762,9 +781,10 @@ class VoiceTypingDaemon:
             )
             self._disarm()
             disarmed = True
-        # abort() moved OUT of _lock (validation NEW-2; see _disarm docstring).
+        # abort() moved OUT of _lock (validation NEW-2; see _disarm docstring) + gated on
+        # _text_in_flight (validation Issue 1; see _safe_abort).
         if disarmed and self._recorder is not None:
-            self._recorder.abort()
+            self._safe_abort()
 
     def _idle_watchdog(self) -> None:
         """Background thread: periodically call _maybe_auto_stop(). Started by run(); daemon thread.
@@ -909,6 +929,36 @@ class VoiceTypingDaemon:
             return False, "no PyAudio input devices available"
         return True, None
 
+    def _safe_abort(self) -> None:
+        """Abort the recorder ONLY when a thread is blocked inside text() (validation Issue 1).
+
+        RealtimeSTT's AudioToTextRecorder.abort() blocks on was_interrupted.wait(), an event that
+        is set ONLY inside text() (transcription_api.py L37/L102). When the run() loop is NOT inside
+        text() — i.e. it is disarmed/idle in time.sleep(0.05) — there is nothing to set that event,
+        so an unconditional abort() blocks FOREVER. That deadlocked voicectl stop / toggle(off) /
+        quit intermittently (a race between disarm clearing _listening and the subsequent abort()):
+        if abort() fired while the loop was still in text() it returned fine; once the loop had
+        returned to sleep() it hung indefinitely.
+
+        Fix: gate abort() on the _text_in_flight flag (set by run() around recorder.text()). When no
+        thread is in text() abort() is SKIPPED — it would be a no-op anyway (there is nothing to
+        wake), so skipping it is correct, not just safe. Correctness does NOT depend on abort(): the
+        listening Event gate in on_final + the run() loop + set_microphone(False) already guarantee
+        the instant disarm takes effect (no finals typed, no new text() calls); abort() is merely a
+        best-effort nudge to unblock a sleeping text() so the loop re-checks _listening/_shutdown
+        promptly.
+
+        Never re-raises (a wedged abort() under the rare overlap window must not stall the
+        control-socket response). Called by stop()/toggle(off)/_maybe_auto_stop()/request_shutdown()
+        AFTER releasing _lock (unchanged from validation NEW-2: abort() stays out of _lock).
+        """
+        if not self._text_in_flight.is_set():
+            return  # no thread blocked in text() -> abort() would hang forever; skip it (no-op anyway)
+        try:
+            self._recorder.abort()
+        except Exception:
+            logger.exception("recorder.abort() raised (best-effort; ignored)")
+
     def start(self) -> None:
         # Lazy load (PRD §4.2bis): build the recorder on the first arm. _load_recorder() is a single-flight no-op
         # once resident. Called OUTSIDE _lock (it acquire-release-reacquires that lock; under _lock it would deadlock).
@@ -921,9 +971,10 @@ class VoiceTypingDaemon:
         with self._lock:
             self._disarm()
         # abort() moved OUT of _lock to avoid the control-lock wedge (validation NEW-2; see
-        # _disarm docstring). Only disarm needs to wake a blocked text(); start/_arm does not.
+        # _disarm docstring) AND gated on _text_in_flight to avoid the abort()-deadlocks-forever
+        # bug when no thread is in text() (validation Issue 1; see _safe_abort).
         if self._recorder is not None:
-            self._recorder.abort()
+            self._safe_abort()
 
     def toggle(self) -> None:
         # Decide arm vs disarm, then act. Disarm is fast; the ARM path lazy-loads FIRST (outside _lock —
@@ -935,10 +986,11 @@ class VoiceTypingDaemon:
         if disarmed:
             with self._lock:
                 self._disarm()
-            # abort() moved OUT of _lock (validation NEW-2). Only on disarm — arming must not abort a sibling
-            # text() that's about to start transcribing.
+            # abort() moved OUT of _lock (validation NEW-2) + gated on _text_in_flight (validation
+            # Issue 1). Only on disarm — arming must not abort a sibling text() that's about to
+            # start transcribing.
             if self._recorder is not None:
-                self._recorder.abort()
+                self._safe_abort()
         else:
             if not self._load_recorder():
                 return  # load failed → stay unarmed
@@ -954,8 +1006,11 @@ class VoiceTypingDaemon:
         text() so the loop re-checks _shutdown promptly.
         """
         self._shutdown.set()
+        # abort() gated on _text_in_flight (validation Issue 1; see _safe_abort): when no thread is
+        # blocked in text() there is nothing to wake — abort() would hang forever, and _shutdown.set()
+        # is already the real signal the run() loop re-checks on its next 0.05s tick anyway.
         if self._recorder is not None:
-            self._recorder.abort()    # break any blocked text() so run() can return (NOT under _lock)
+            self._safe_abort()    # break any blocked text() so run() can return promptly (NOT under _lock)
         # recorder.shutdown() (full teardown) is wired by the quit handler in P1.M4.T2.S2, NOT here.
 
     def is_listening(self) -> bool:

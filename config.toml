@@ -40,7 +40,7 @@ auto_unload_idle_seconds     = 1800.0              # after this many seconds DIS
 [output]   # how typed text leaves the daemon
 
 backend     = "wtype"   # "wtype" (Wayland virtual keyboard, default) | "ydotool" (kernel uinput, TTY/X fallback) | "tmux" (send-keys to a pane; used for tests and SSH). The daemon auto-falls-back from wtype to ydotool on failure.
-tmux_target = ""        # used ONLY when backend = "tmux", e.g. "voicetest:0.0" (session:window.pane). Ignored for wtype/ydotool.
+tmux_target = ""        # used ONLY when backend = "tmux". "" = the active pane. A bare session name (e.g. "voicetest") targets that session's active pane and is portable across tmux base-index settings; a full target like "session:window.pane" works too but window numbers depend on base-index (default 0; tmux's common base-index=1 makes window 0 invalid). Ignored for wtype/ydotool.
 append_space = true     # append one trailing space after each final so consecutive utterations flow as words. false = type text verbatim.
 
 

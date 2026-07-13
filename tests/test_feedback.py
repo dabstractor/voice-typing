@@ -170,7 +170,7 @@ def test_state_file_mode_0600(feedback, tmp_path):
 
 def test_state_dir_mode_0700(tmp_path, monkeypatch):
     # Nested target dir must be created 0o700.
-    rec = _Recorder(); rec.install(monkeypatch)
+    rec = _Recorder(); rec.install(monkeypatch)  # noqa: E702
     monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
     nested = tmp_path / "voice-typing" / "state.json"
     Feedback(FeedbackConfig(state_file=str(nested))).update_partial("x")
@@ -276,7 +276,7 @@ def test_record_final_updates_partial_so_status_matches_screen(feedback, tmp_pat
 
 def test_record_final_silent_when_notify_on_final_false(monkeypatch, tmp_path):
     """notify_on_final=False suppresses ONLY the final popup; start/stop still fire; state still written."""
-    rec = _Recorder(); rec.install(monkeypatch)
+    rec = _Recorder(); rec.install(monkeypatch)  # noqa: E702
     monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
     cfg = FeedbackConfig(state_file=str(tmp_path / "state.json"), hypr_notify=True,
                          notify_ms=2500, notify_on_final=False)
@@ -307,7 +307,7 @@ def test_update_partial_never_invokes_hyprctl(feedback):
 
 def test_set_phase_never_invokes_hyprctl(feedback):
     fb, rec, _clock = feedback
-    fb.set_phase("speaking"); fb.set_phase("listening"); fb.set_phase("idle")
+    fb.set_phase("speaking"); fb.set_phase("listening"); fb.set_phase("idle")  # noqa: E702
     assert rec.argvs == []
 
 
@@ -327,7 +327,7 @@ def test_no_double_notify_when_set_true_twice(feedback):
 
 
 def test_no_notify_when_hypr_notify_false(monkeypatch, tmp_path):
-    rec = _Recorder(); rec.install(monkeypatch)
+    rec = _Recorder(); rec.install(monkeypatch)  # noqa: E702
     monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
     cfg = FeedbackConfig(state_file=str(tmp_path / "state.json"), hypr_notify=False, notify_ms=2500)
     fb = Feedback(cfg)
@@ -338,7 +338,7 @@ def test_no_notify_when_hypr_notify_false(monkeypatch, tmp_path):
 
 
 def test_notify_ms_from_config_in_argv(monkeypatch, tmp_path):
-    rec = _Recorder(); rec.install(monkeypatch)
+    rec = _Recorder(); rec.install(monkeypatch)  # noqa: E702
     monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
     cfg = FeedbackConfig(state_file=str(tmp_path / "state.json"), hypr_notify=True, notify_ms=9999)
     Feedback(cfg).set_listening(True)
@@ -389,7 +389,7 @@ def test_noop_set_listening_does_not_clear_partial(feedback, tmp_path):
 
 
 def test_notify_swallows_missing_binary(monkeypatch, tmp_path):
-    rec = _Recorder(); rec.install(monkeypatch)
+    rec = _Recorder(); rec.install(monkeypatch)  # noqa: E702
     rec.raise_on("hyprctl", FileNotFoundError(2, "No such file", "hyprctl"))
     monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
     cfg = FeedbackConfig(state_file=str(tmp_path / "state.json"))
@@ -399,7 +399,7 @@ def test_notify_swallows_missing_binary(monkeypatch, tmp_path):
 
 
 def test_notify_swallows_subprocess_error(monkeypatch, tmp_path):
-    rec = _Recorder(); rec.install(monkeypatch)
+    rec = _Recorder(); rec.install(monkeypatch)  # noqa: E702
     rec.raise_on("hyprctl", subprocess.SubprocessError("hyprctl exploded"))
     monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
     cfg = FeedbackConfig(state_file=str(tmp_path / "state.json"))
@@ -412,10 +412,10 @@ def test_notify_swallows_subprocess_error(monkeypatch, tmp_path):
 
 
 def test_no_real_subprocess_run_during_tests(monkeypatch, tmp_path):
-    rec = _Recorder(); rec.install(monkeypatch)
+    rec = _Recorder(); rec.install(monkeypatch)  # noqa: E702
     monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
     fb = Feedback(FeedbackConfig(state_file=str(tmp_path / "state.json")))
-    fb.set_listening(True); fb.update_partial("p"); fb.record_final("f")
+    fb.set_listening(True); fb.update_partial("p"); fb.record_final("f")  # noqa: E702
     # every hyprctl call was captured, none reached the OS
     assert all(a[0] == "hyprctl" for a in rec.argvs) or rec.argvs == []
 

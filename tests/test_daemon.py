@@ -346,8 +346,8 @@ def test_build_recorder_is_callable_and_documented():
 # P1.M4.T1.S2 — VoiceTypingDaemon: listen-forever loop + on_final + gate + toggle
 # (ADDITIVE — everything above is S1; do not change it.)
 # ===========================================================================
-import threading
-import time as _time
+import threading  # noqa: E402 (mid-file: S2 section imports; module top is S1 above)
+import time as _time  # noqa: E402
 
 
 class _DaemonFakeFeedback(_FakeFeedback):
@@ -655,14 +655,28 @@ def test_start_arms():
     assert fb.listening_states == [True]
 
 
-def test_stop_disarms_and_aborts():
+def test_stop_disarms_and_aborts_when_text_in_flight():
     d, fb, rec, be = _make_daemon()
     d.start()
+    d._text_in_flight.set()   # simulate the run() loop blocked inside recorder.text()
     d.stop()
     assert d.is_listening() is False
     assert rec.mic == [True, False]
-    assert rec.aborts >= 1
+    assert rec.aborts >= 1     # text() was in flight -> abort() is the correct nudge
     assert fb.listening_states == [True, False]
+
+
+def test_stop_skips_abort_when_no_text_in_flight():
+    # validation Issue 1: abort() blocks forever on was_interrupted.wait() when no thread is in
+    # text() (set ONLY inside text()). stop() must NOT call abort() in that case — the listening
+    # Event gate + set_microphone(False) already guarantee the instant disarm; abort() is a no-op
+    # here and skipping it eliminates the voicectl stop/toggle/quit hang.
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    assert not d._text_in_flight.is_set()   # boot: no thread in text()
+    d.stop()
+    assert d.is_listening() is False
+    assert rec.aborts == 0                   # no thread in text() -> abort() correctly skipped
 
 
 def test_toggle_off_to_on_arms():
@@ -676,6 +690,7 @@ def test_toggle_off_to_on_arms():
 def test_toggle_on_to_off_disarms():
     d, fb, rec, be = _make_daemon()
     d.start()
+    d._text_in_flight.set()   # run() loop blocked inside recorder.text() -> abort() is valid
     d.toggle()
     assert d.is_listening() is False
     assert rec.mic == [True, False]
@@ -685,13 +700,13 @@ def test_toggle_on_to_off_disarms():
 def test_toggle_is_an_invololution():
     d, _, _, _ = _make_daemon()
     before = d.is_listening()
-    d.toggle(); d.toggle()
+    d.toggle(); d.toggle()  # noqa: E702 (involution: two toggles == identity)
     assert d.is_listening() is before
 
 
 def test_stop_never_calls_recorder_shutdown():
     d, fb, rec, be = _make_daemon()
-    d.start(); d.stop()
+    d.start(); d.stop()  # noqa: E702 (compact arm-then-disarm setup)
     assert rec.shutdowns == 0   # Critical #3: shutdown() is ONLY for quit (P1.M4.T2.S2)
 
 
@@ -700,9 +715,136 @@ def test_stop_never_calls_recorder_shutdown():
 
 def test_request_shutdown_sets_event_and_aborts_not_shutdown():
     d, fb, rec, be = _make_daemon()
+    d._text_in_flight.set()   # run() loop blocked inside recorder.text() -> abort() wakes it
     d.request_shutdown()
     assert rec.aborts >= 1
     assert rec.shutdowns == 0   # NO full teardown here (P1.M4.T2.S2 owns it)
+
+
+def test_request_shutdown_skips_abort_when_no_text_in_flight():
+    # validation Issue 1: when no thread is blocked in text(), abort() would hang forever on
+    # was_interrupted.wait() (set only inside text()). _shutdown.set() is the real signal the
+    # run() loop re-checks on its next 0.05s tick; abort() is correctly skipped when idle.
+    d, fb, rec, be = _make_daemon()
+    assert not d._text_in_flight.is_set()
+    d.request_shutdown()
+    assert d._shutdown.is_set() is True
+    assert rec.aborts == 0       # no thread in text() -> abort() skipped (would deadlock)
+    assert rec.shutdowns == 0
+
+
+# --- validation Issue 1: abort()-deadlock regression (run-loop integration) ---
+# RealtimeSTT's abort() blocks on was_interrupted.wait(), set ONLY inside text(). When the run()
+# loop is disarmed/idle (in time.sleep(0.05)) nothing sets that event, so an unconditional abort()
+# blocks FOREVER — that hung voicectl stop/toggle(off)/quit intermittently. _safe_abort() gates
+# abort() on _text_in_flight (set by run() around recorder.text()), so a stop while the loop is
+# IDLE returns instantly (no abort) instead of hanging. These pin both halves of that fix.
+
+
+def test_stop_while_run_loop_idle_does_not_abort_and_does_not_hang(monkeypatch):
+    """voicectl stop while the loop is disarmed/idle must return instantly (validation Issue 1).
+
+    The run() loop is NOT in text() (not listening), so abort() would block forever. _safe_abort()
+    skips it; stop() returns. A bounded wait proves it doesn't hang.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    d, fb, rec, be = _make_daemon()
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)  # run() booted
+        assert not d.is_listening()                      # disarmed at boot
+        assert not d._text_in_flight.is_set()            # loop idle in time.sleep(0.05)
+        done = threading.Event()
+
+        def _stop():
+            d.stop()
+            done.set()
+
+        threading.Thread(target=_stop, daemon=True).start()
+        assert done.wait(timeout=3.0), "stop() hung >3s (abort() deadlock regression)"
+        assert rec.aborts == 0                            # idle -> abort() correctly skipped
+    finally:
+        d.request_shutdown()
+    assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
+    t.join(timeout=2.0)
+
+
+def test_quit_while_run_loop_idle_returns_promptly(monkeypatch):
+    """voicectl quit while the loop is disarmed/idle must not hang (validation Issue 1).
+
+    Mirrors the stop() regression: request_shutdown() skips abort() when no thread is in text();
+    _shutdown.set() is the real signal the loop re-checks on its 0.05s tick. A bounded wait proves
+    the quit path (the one that intermittently dropped the reply -> exit 1) returns promptly.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    d, fb, rec, be = _make_daemon()
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)
+        assert not d._text_in_flight.is_set()            # idle
+        done = threading.Event()
+
+        def _quit():
+            d.request_shutdown()
+            done.set()
+
+        threading.Thread(target=_quit, daemon=True).start()
+        assert done.wait(timeout=3.0), "request_shutdown() hung >3s (abort() deadlock regression)"
+        assert rec.aborts == 0                            # idle -> abort() skipped
+    finally:
+        d.request_shutdown()
+    assert _wait_for(lambda: not t.is_alive(), timeout=2.0)
+    t.join(timeout=2.0)
+
+
+def test_stop_while_text_in_flight_aborts_and_unblocks_loop(monkeypatch):
+    """The happy half of the fix: when the loop IS blocked in text(), stop() must still abort().
+
+    _safe_abort() only skips abort() when _text_in_flight is clear; when it is set (the loop is
+    inside recorder.text()) abort() is the correct nudge that unblocks text() so the loop can
+    re-check _listening and exit. A stub recorder whose text() blocks until aborted proves the
+    loop unblocks.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+
+    class _BlockingRecorder(_StubRecorder):
+        """text() blocks until abort() is called, then returns (mimics RealtimeSTT)."""
+        def __init__(self):
+            super().__init__()
+            self._abort_event = threading.Event()
+
+        def text(self, on_transcription_finished=None):
+            self.text_calls += 1
+            self.last_callback = on_transcription_finished
+            self._abort_event.wait(timeout=5.0)   # block until abort() (or 5s safety)
+            return ""
+
+        def abort(self):
+            self.aborts += 1
+            self._abort_event.set()                # unblock the in-flight text()
+
+    rec = _BlockingRecorder()
+    d, fb, _rec, be = _make_daemon(recorder=rec)
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        d.start()
+        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), "loop did not enter text()"
+        done = threading.Event()
+
+        def _stop():
+            d.stop()
+            done.set()
+
+        threading.Thread(target=_stop, daemon=True).start()
+        assert done.wait(timeout=3.0), "stop() hung >3s"
+        assert rec.aborts >= 1                      # text() was in flight -> abort() fired
+    finally:
+        d.request_shutdown()
+    assert _wait_for(lambda: not t.is_alive(), timeout=2.0)
+    t.join(timeout=2.0)
 
 
 # --- run() loop ---
@@ -717,7 +859,7 @@ def test_run_loop_not_listening_does_not_call_text(monkeypatch):
         _wait_for(lambda: True, timeout=0.2)   # let it sleep-loop a moment
         assert rec.text_calls == 0             # not listening → never calls text()
     finally:
-        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)
+        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)  # noqa: E702
     assert not t.is_alive()
 
 
@@ -737,7 +879,7 @@ def test_run_closes_capture_stream_at_boot_while_not_listening(monkeypatch):
         # wait for the boot-time set_microphone(False) (the recorder is resident before the loop)
         assert _wait_for(lambda: False in rec.mic, timeout=1.0), rec.mic
     finally:
-        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)
+        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)  # noqa: E702
     assert not t.is_alive()
     assert rec.mic[-1] is False                # boot left the capture stream closed (not listening)
     assert rec.text_calls == 0                 # and text() was never entered (not listening)
@@ -767,7 +909,7 @@ def test_run_sets_uptime_after_start(monkeypatch):
         _wait_for(lambda: d.uptime_s >= 0.0 and d._start_monotonic is not None, timeout=1.0)
         assert d.uptime_s >= 0.0
     finally:
-        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)
+        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)  # noqa: E702
 
 
 # ===========================================================================
@@ -947,8 +1089,8 @@ def test_run_logs_resolved_device_at_startup(monkeypatch, caplog):
 #  Uses a REAL Feedback so .snapshot() exists; reuses S2's _StubRecorder/_FakeBackend for the
 #  daemon's recorder/backend slots, and S1's _cuda_resolve to force the device path hermetically.)
 # ===========================================================================
-from voice_typing.config import FeedbackConfig
-from voice_typing.feedback import Feedback
+from voice_typing.config import FeedbackConfig  # noqa: E402 (mid-file: T2.S1 section import)
+from voice_typing.feedback import Feedback  # noqa: E402
 
 
 def _make_daemon_with_feedback(tmp_path, monkeypatch, *, cuda=True):
@@ -1053,7 +1195,7 @@ def test_resolved_device_failure_degrades_to_unknown(tmp_path, monkeypatch):
 # ===========================================================================
 # Reuses _make_daemon() / _StubRecorder / _wait_for from earlier in this file.
 # `daemon` and `logging` are already imported at module top.
-import signal as _signal
+import signal as _signal  # noqa: E402 (mid-file: T2.S2 section import)
 
 
 # --- Layer A: VoiceTypingDaemon.shutdown() ------------------------------------------------
@@ -1187,6 +1329,7 @@ def test_install_registers_handler_for_sigterm_and_sigint():
 
 def test_handler_invocation_requests_shutdown_via_spawned_thread():
     d, _, rec, _ = _make_daemon()
+    d._text_in_flight.set()   # simulate run() blocked in text() -> request_shutdown's abort() is valid
     prev = _signal.getsignal(_signal.SIGUSR1)
     try:
         daemon.install_shutdown_signal_handlers(d, signals=(_signal.SIGUSR1,))
@@ -1237,9 +1380,9 @@ def test_install_custom_signals_set_honored():
 # main() lifecycle + the if __name__ == "__main__" guard.
 # (ADDITIVE — everything above is S1/S2/S3/(S1-of-T2)/(T2.S2); do not change it.)
 # ===========================================================================
-import ast
-import sys
-from pathlib import Path
+import ast  # noqa: E402 (mid-file: T3 section imports)
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 
 # --- Layer A: _resolve_log_level ---------------------------------------------------------
@@ -1727,9 +1870,9 @@ def test_mic_retry_filter_count_is_cumulative(monkeypatch):
     f = daemon.MicRetryRateLimitFilter(dedup_seconds=0.0, summary_every=10_000)
     _fixed_clock(monkeypatch, 0.0)
     assert f.filter(_mic_retry_record()) is True                    # 1: first
-    _fixed_clock(monkeypatch, 1.0); s = _mic_retry_record()
+    _fixed_clock(monkeypatch, 1.0); s = _mic_retry_record()  # noqa: E702 (clock-set + record-build)
     assert f.filter(s) is True and "after 2 retry attempts" in s.getMessage()
-    _fixed_clock(monkeypatch, 2.0); s = _mic_retry_record()
+    _fixed_clock(monkeypatch, 2.0); s = _mic_retry_record()  # noqa: E702
     assert f.filter(s) is True and "after 3 retry attempts" in s.getMessage()
 
 
