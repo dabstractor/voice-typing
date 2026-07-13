@@ -2279,3 +2279,165 @@ def test_armed_state_aborts_unload_via_listening_recheck():
 
     assert d._models_loaded is True, "unload must abort when an arm raced in (listening is on)"
     assert d._recorder is not None, "the recorder must stay resident (unload aborted)"
+
+
+# ===========================================================================
+# P1.M3.T2.S1 — idle-unload lifecycle + start-level single-flight (PRD §4.2bis)
+# Unit tests using the existing _StubRecorder fake — NO CUDA, NO RealtimeSTT.
+#
+# Pins _maybe_idle_unload()'s fire/disable/reset behavior (P1.M3.T1.S1):
+#   (e) FIRES after auto_unload_idle_seconds DISARMED -> recorder torn down, phase 'unloaded';
+#   (f) threshold<=0 DISABLES (no-op even when absurdly past);
+#   (g) any _arm() RESETS the idle-unload clock (_disarmed_monotonic -> None).
+# Plus two lifecycle gap-fills the P1.M2.T1.S1 section left:
+#   (a) lazy boot drives phase='unloaded' (existing boot test checks attrs, not phase);
+#   (c) two concurrent start() calls build the recorder exactly ONCE (existing is _load_recorder-level).
+# Mirrors the auto-stop section (~480-560): inline setup, direct _maybe_idle_unload() call, pushed
+# _disarmed_monotonic timestamp. Asserts via fb.phases[-1] / d._recorder / d._models_loaded /
+# rec.shutdowns (the fakes have NO snapshot() — do NOT call d.status_snapshot() here).
+# ===========================================================================
+
+
+def test_lazy_boot_records_unloaded_phase():
+    """Clause (a) gap: a lazy boot (recorder=None) drives the lifecycle phase to 'unloaded'.
+    The existing test_lazy_daemon_boots_unloaded_with_no_recorder checks _recorder/_models_loaded/
+    _loading/_load_error but NOT the phase — this pins it (the §4.2bis boot state)."""
+    d, fb = _make_lazy_daemon()
+    assert d._recorder is None
+    assert d._models_loaded is False
+    assert fb.phases[-1] == "unloaded"   # __init__ -> feedback.set_phase("unloaded") for a lazy boot
+
+
+def test_concurrent_start_calls_build_recorder_once(monkeypatch):
+    """Clause (c) gap: two concurrent start() calls build the recorder EXACTLY ONCE (single-flight
+    through the start() entry point). The existing test_load_recorder_single_flight_one_build_under_
+    concurrency proves it at the _load_recorder level; this proves start()'s load-then-arm does not
+    undermine it (and both calls arm)."""
+    d, _fb = _make_lazy_daemon()
+    built = {"n": 0}
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_build(cfg, feedback, latency=None, force_cpu=False, on_speech=None):
+        built["n"] += 1
+        started.set()
+        release.wait(2.0)            # slow the build so the 2nd start() arrives while _loading
+        return _StubRecorder()
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    errors = []
+
+    def starter():
+        try:
+            d.start()
+        except Exception as exc:        # never swallow silently — surface to the test
+            errors.append(exc)
+
+    t1 = threading.Thread(target=starter, name="test-start-a", daemon=True)
+    t2 = threading.Thread(target=starter, name="test-start-b", daemon=True)
+    t1.start()
+    assert started.wait(2.0), "first start() never entered build_recorder"
+    t2.start()
+    release.set()                      # let the in-flight load finish
+    t1.join(2.0)
+    t2.join(2.0)
+    assert not errors, errors
+    assert built["n"] == 1, f"single-flight violated: {built['n']} builds under two concurrent start()s"
+    assert d._models_loaded is True
+    assert d.is_listening() is True    # armed (both starts armed; the load is shared)
+
+
+# --- idle-unload lifecycle: _maybe_idle_unload() fire / disable / reset (PRD §4.2bis) ---
+# Mirrors the auto-stop section: inline _make_daemon() -> start() -> stop() -> push
+# _disarmed_monotonic into the past -> _maybe_idle_unload(). Default auto_unload_idle_seconds=1800.0.
+
+
+def test_idle_unload_fires_when_disarmed_beyond_threshold():
+    """Clause (e): after auto_unload_idle_seconds (default 1800) DISARMED, _maybe_idle_unload() tears
+    the recorder down -> _recorder None, _models_loaded False, phase 'unloaded' (PRD §4.2bis)."""
+    d, fb, rec, _be = _make_daemon()                       # injected _StubRecorder -> loaded
+    d.start()                                              # arm  -> _disarmed_monotonic = None
+    d.stop()                                               # disarm -> _disarmed_monotonic = now
+    d._disarmed_monotonic = _time.monotonic() - 1801.0     # past the 1800s default threshold
+    d._maybe_idle_unload()
+    assert d._recorder is None                             # torn down
+    assert d._models_loaded is False
+    assert fb.phases[-1] == "unloaded"                     # _unload_recorder drove phase to 'unloaded'
+    assert rec.shutdowns == 1                              # the recorder was shut down via _bounded_shutdown
+
+
+def test_idle_unload_keeps_resident_within_threshold():
+    """Clause (e) negative: well WITHIN the threshold -> _maybe_idle_unload() is a no-op (resident)."""
+    d, _fb, rec, _be = _make_daemon()
+    d.start()
+    d.stop()
+    d._disarmed_monotonic = _time.monotonic() - 100.0      # 100s << 1800s default
+    d._maybe_idle_unload()
+    assert d._recorder is rec
+    assert d._models_loaded is True
+    assert rec.shutdowns == 0
+
+
+def test_idle_unload_disabled_when_threshold_zero():
+    """Clause (f): auto_unload_idle_seconds=0 DISABLES idle-unload -> no-op even when absurdly past
+    (PRD §4.2bis '0 disables'). The recorder MUST stay resident."""
+    cfg = VoiceTypingConfig()
+    cfg.asr.auto_unload_idle_seconds = 0.0
+    d, _fb, rec, _be = _make_daemon(cfg=cfg)
+    d.start()
+    d.stop()
+    d._disarmed_monotonic = _time.monotonic() - 9999.0     # would fire, but 0 disables
+    d._maybe_idle_unload()
+    assert d._recorder is rec                              # stayed resident
+    assert d._models_loaded is True
+    assert rec.shutdowns == 0
+
+
+def test_idle_unload_noop_when_listening():
+    """Guard: _maybe_idle_unload() MUST NOT fire while LISTENING (armed) — firing then would tear the
+    recorder down mid-dictation (the §4.2bis / §8 half-torn-down hazard). The _listening.is_set() guard
+    in the lock-free pre-check aborts it."""
+    d, _fb, rec, _be = _make_daemon()
+    d.start()                                              # armed -> listening ON
+    d._disarmed_monotonic = _time.monotonic() - 9999.0     # would fire by time alone...
+    d._maybe_idle_unload()
+    assert d._recorder is rec                              # ...but listening aborts the unload
+    assert d._models_loaded is True
+    assert d.is_listening() is True
+
+
+def test_idle_unload_noop_when_never_disarmed():
+    """Guard: at boot _disarmed_monotonic is None (never disarmed) -> _maybe_idle_unload() is a clean
+    no-op (no error, recorder resident)."""
+    d, _fb, rec, _be = _make_daemon()                      # boot: _disarmed_monotonic is None
+    assert d._disarmed_monotonic is None
+    d._maybe_idle_unload()
+    assert d._recorder is rec
+    assert d._models_loaded is True
+
+
+def test_idle_unload_noop_when_not_loaded():
+    """Guard: a LAZY daemon (no recorder resident) -> _maybe_idle_unload() is a no-op (nothing to
+    unload; the not-_models_loaded guard short-circuits)."""
+    d, _fb = _make_lazy_daemon()                           # lazy: _models_loaded False, _recorder None
+    d._disarmed_monotonic = _time.monotonic() - 9999.0
+    d._maybe_idle_unload()
+    assert d._recorder is None                             # still nothing resident
+    assert d._models_loaded is False
+
+
+def test_arm_resets_idle_unload_clock():
+    """Clause (g): any _arm() RESETS the idle-unload clock (_disarmed_monotonic -> None), so a re-arm
+    CANCELS a pending idle-unload that would otherwise fire (PRD §4.2bis 'resets on any arm')."""
+    d, _fb, rec, _be = _make_daemon()
+    d.start()                                              # arm -> _disarmed_monotonic = None
+    assert d._disarmed_monotonic is None
+    d.stop()                                               # disarm -> stamps _disarmed_monotonic
+    assert d._disarmed_monotonic is not None
+    d._disarmed_monotonic = _time.monotonic() - 9999.0     # would fire...
+    d.start()                                              # ...but a re-arm RESETS the clock
+    assert d._disarmed_monotonic is None                   # armed -> idle-unload clock inactive
+    # The reset cancels the pending unload: _maybe_idle_unload is now a no-op.
+    d._maybe_idle_unload()
+    assert d._recorder is rec                              # stayed resident (arm reset cancelled it)
+    assert d._models_loaded is True

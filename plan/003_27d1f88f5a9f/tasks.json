@@ -217,14 +217,14 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Rewrite T6 as GPU-lifecycle (lazy load) + fast pytest regression",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Convert tests/test_idle_and_gpu.sh T6 from residency assertion to the 4-part lifecycle assertion: (a) idle/never-armed → daemon PID absent from nvidia-smi; (b) armed → PID + ~1-5 GB; (c) disarmed → still resident; (d) disarmed + idle ≥ auto_unload_idle_seconds → PID gone, reload reappears. Add fast pytest unit tests for the lifecycle state machine + single-flight.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "Fast pytest: lifecycle transitions, single-flight load, load-failure, idle-unload fire/reset/disable",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S2"
@@ -240,7 +240,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Rewrite tests/test_idle_and_gpu.sh T6 section to 4-part lazy-load lifecycle assertions + confirm T4 still holds",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S1"
