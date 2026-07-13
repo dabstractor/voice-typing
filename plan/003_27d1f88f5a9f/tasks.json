@@ -100,7 +100,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Extract _load_recorder() single-flight method + guard all recorder call sites + migrate CPU fallback",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2"

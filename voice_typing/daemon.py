@@ -12,10 +12,12 @@ SCOPE (P1.M4.T1.S1 + P1.M4.T1.S2):
     processes) — see _bounded_shutdown(). LATER: precise per-utterance latency timestamps
     (P1.M4.T1.S3). These are NOT in this module yet.
 
-CONSTRUCT ONCE (PRD §4.2 "construct once"): AudioToTextRecorder.__init__ loads BOTH whisper
-models (final + realtime) into resident memory (GPU VRAM on cuda, RAM on cpu) — seconds of
-work. build_recorder() constructs exactly ONE recorder; VoiceTypingDaemon reuses it for the
-daemon's lifetime so a later voicectl toggle arms the mic instantly and VRAM stays resident.
+LAZY LOAD (PRD §4.2bis): AudioToTextRecorder.__init__ loads BOTH whisper models (final + realtime) into
+resident memory (GPU VRAM on cuda, RAM on cpu) — seconds of work + ~1.5-3 GB VRAM. To avoid taxing the GPU on
+boots where voice typing is never used, the recorder is NOT built at daemon boot — it is built lazily on the
+FIRST arm (start/toggle) via VoiceTypingDaemon._load_recorder() (single-flight). A session that never arms
+stays at ~0 VRAM; after the first arm the recorder stays resident so re-arms are instant. _load_recorder() also
+owns the construction-failure CPU fallback (migrated from main(), bugfix Issue 3).
 
 CPU FALLBACK (PRD §4.4): cfg_to_kwargs() resolves device/compute_type/models via
 voice_typing.cuda_check.resolve_device_and_models(), which returns the cuda config when
@@ -49,7 +51,7 @@ CONSUMES:
   - voice_typing.textproc (P1.M2.T2.S1): clean(text, cfg.filter) — the gate inside on_final.
   - voice_typing.typing_backends (P1.M3.T1.S1): make_backend(cfg.output).type_text(text).
 CONSUMED BY:
-  - the daemon main loop (P1.M4.T1.S2): build_recorder(cfg, feedback) once in VoiceTypingDaemon.__init__.
+  - the daemon main loop (P1.M4.T1.S2 + P1.M2.T1.S1): VoiceTypingDaemon builds the recorder LAZILY on first arm via _load_recorder() (§4.2bis), not in __init__.
   - the control socket (P1.M4.T2.S1): VoiceTypingDaemon.toggle/start/stop/is_listening/
     uptime_s/request_shutdown.
   - the daemon entry point (P1.M4.T3.S1): VoiceTypingDaemon.run() under `if __name__ == "__main__":`.
@@ -405,8 +407,9 @@ class VoiceTypingDaemon:
 
     PRD §4.2 items 1+2. run() is the main-thread loop that fixes the WhisperX flaw: recorder.text()
     returning is normal SEGMENTATION, never session end (PRD §1 #1). on_final gates→cleans→types→records.
-    start/stop/toggle arm/disarm the mic via set_microphone+abort (models stay resident → instant
-    toggle-on). NEVER recorder.shutdown() on toggle/stop — only on quit (bounded teardown).
+    start/stop/toggle arm/disarm the mic via set_microphone+abort; the FIRST arm lazily loads the models
+    via _load_recorder() (§4.2bis) — subsequent arms are instant (resident). NEVER recorder.shutdown() on
+    toggle/stop — only on quit (bounded teardown).
     """
 
     def __init__(
@@ -441,13 +444,23 @@ class VoiceTypingDaemon:
         # Per-utterance latency collector (P1.M4.T1.S3): fed by on_vad_stop/partial (via
         # build_recorder→_build_callbacks) + on_final. Injectable for tests; a real one otherwise.
         self._latency = latency if latency is not None else LatencyLog()
-        # construct-once (PRD §4.2): build recorder ONCE so models stay resident + toggle/start/stop
-        # can arm the mic immediately. Injectable for unit tests (fakes → cheap, no RealtimeSTT).
-        # Pass self._latency so on_vad_stop/partial feed the latency log (PRD §4.2; P1.M4.T1.S3).
-        self._recorder = (
-            recorder if recorder is not None
-            else build_recorder(cfg, feedback, self._latency, on_speech=self._touch_speech)
-        )
+        # Lazy load (PRD §4.2bis / delta D1,D2): the recorder is NOT built at boot — it is built on the FIRST arm
+        # (start/toggle) via _load_recorder(), so a session that never arms stays at ~0 VRAM. recorder= injected
+        # (unit tests / a pre-built recorder) → already loaded; None → lazy (self._recorder is None until the first
+        # successful _load_recorder()). self._latency is threaded into build_recorder by _load_recorder().
+        self._recorder = recorder
+        self._models_loaded = recorder is not None
+        self._loading = False
+        self._load_error: str | None = None
+        # Single-flight load wait (PRD §4.2bis "waits on the in-flight one"): a Condition over the SAME _lock so a
+        # second arm while _loading blocks on the in-flight load, then sees its result. Condition(_lock) shares the
+        # existing lock; existing `with self._lock:` code is unaffected.
+        self._load_cond = threading.Condition(self._lock)
+        # Boot lifecycle phase (delta D2/D3): 'idle' if a recorder was injected (loaded), else 'unloaded' (the lazy
+        # boot state). _load_recorder() drives loading->idle; a failed load returns to 'unloaded'. (The feedback
+        # models_loaded FIELD + status_snapshot/ctl exposure is P1.M2.T2.S1; T1 tracks the daemon-side
+        # self._models_loaded + drives phase via the existing set_phase — no feedback.py edit.)
+        self._feedback.set_phase("idle" if recorder is not None else "unloaded")
         self._backend = (
             backend if backend is not None else typing_backends.make_backend(cfg.output)
         )
@@ -464,11 +477,94 @@ class VoiceTypingDaemon:
         self._mic_probe_at: float = 0.0
         self._refresh_mic_status(force=True)   # construction always probes (sets the initial stamp)
 
+    def _load_recorder(self) -> bool:
+        """Single-flight lazy load of the recorder on first arm (PRD §4.2bis). True iff a recorder is ready.
+
+        Called by start()/toggle() BEFORE arming — NOT inside _arm() (which holds self._lock; this method
+        acquire-release-reacquires that same lock, so nesting would deadlock). Idempotent once loaded: a
+        resident recorder → immediate True. Single-flight via _load_cond (Condition over self._lock): a second
+        caller while _loading WAITS for the in-flight load and returns ITS result (never starts a 2nd load). The
+        heavy build_recorder() runs OUTSIDE _lock so concurrent status/stop stay responsive during the ~1–3 s load
+        (mirrors the abort()-out-of-_lock discipline, validation NEW-2).
+
+        CPU fallback (migrated from main() / bugfix Issue 3, P1.M1.T3.S2): if the first (cuda) build raises,
+        retry ONCE with force_cpu=True (build_recorder force_cpu skips the cuda_check probe). On success: install
+        self._recorder, _models_loaded=True, phase='idle', seed _resolved_device_cache with cuda_check.CPU_FALLBACK
+        on the fallback path (so status reports device=cpu), log the resolved device, return True. On total
+        failure: _load_error set, self._recorder stays None (NO half-built recorder — §4.2bis), phase='unloaded',
+        return False.
+        """
+        with self._lock:
+            if self._models_loaded:
+                return True                       # resident → instant (second+ arm)
+            if self._loading:
+                while self._loading:               # wait for the in-flight load (spurious-wake safe)
+                    self._load_cond.wait()
+                return self._models_loaded         # its result (True=loaded, False=failed)
+            self._loading = True                   # we are the loader
+            self._load_error = None
+            self._feedback.set_phase("loading")
+        # --- heavy build OUTSIDE _lock (status/stop stay responsive during the ~1–3 s load) ---
+        recorder = None
+        fell_back_to_cpu = False
+        load_error: str | None = None
+        try:
+            recorder = build_recorder(
+                self._cfg, self._feedback, self._latency, on_speech=self._touch_speech
+            )
+        except Exception as exc:
+            # Migrated CPU fallback (was main()): cuda_check can say "cuda-ok" while cuDNN/cuBLAS fails inside
+            # AudioToTextRecorder.__init__. Retry ONCE on the PRD §4.4 CPU config (force_cpu skips cuda_check).
+            logger.warning(
+                "CUDA recorder construction failed (%s); falling back to CPU "
+                "(device=cpu, compute_type=int8, models=small.en/tiny.en) — degraded but functional",
+                exc,
+            )
+            try:
+                recorder = build_recorder(
+                    self._cfg, self._feedback, self._latency, force_cpu=True, on_speech=self._touch_speech,
+                )
+                fell_back_to_cpu = True
+            except Exception as exc2:
+                load_error = f"CUDA load failed: {exc!r}; CPU fallback also failed: {exc2!r}"
+                recorder = None
+        # --- re-acquire _lock to publish the result + wake any waiters ---
+        with self._lock:
+            self._loading = False
+            if recorder is not None:
+                self._recorder = recorder
+                self._models_loaded = True
+                self._load_error = None
+                if fell_back_to_cpu:
+                    # Status must report the ACTUAL cpu device, not the driver probe (still sees the GPU).
+                    # Migrated from main()'s `daemon._resolved_device_cache = dict(CPU_FALLBACK)` seed.
+                    self._resolved_device_cache = dict(cuda_check.CPU_FALLBACK)
+                self._feedback.set_phase("idle")
+                self._load_cond.notify_all()
+                success = True
+            else:
+                self._load_error = load_error or "unknown load error"   # NO half-built recorder (§4.2bis)
+                self._models_loaded = False
+                self._recorder = None
+                self._feedback.set_phase("unloaded")
+                self._load_cond.notify_all()
+                success = False
+        # Log OUTSIDE _lock (_log_resolved_device's cuda_check probe is ~ms; don't hold the lock for it).
+        if success:
+            self._log_resolved_device()   # log the ACTUAL loaded device (moved here from boot — CRITICAL #8)
+            if fell_back_to_cpu:
+                logger.info("models loaded in degraded CPU mode (construction-failure fallback)")
+            logger.info("voice-typing models loaded (lazy load complete); recorder resident")
+        else:
+            logger.error("voice-typing model load failed (%s); staying unloaded", self._load_error)
+        return success
+
     def run(self) -> None:
         """The listen-forever loop (main thread, BLOCKS until shutdown)."""
         self._start_monotonic = time.monotonic()
         self._configure_log_level()           # PRD §4.2: DEBUG via config (namespace logger; T3 adds handler)
-        self._log_resolved_device()           # PRD §4.2/acceptance T6: prove CUDA residency at startup
+        if self._recorder is not None:        # lazy load (§4.2bis): no device to log at boot; _load_recorder logs it
+            self._log_resolved_device()           # PRD §4.2/acceptance T6: prove CUDA residency (at LOAD time now)
         self._feedback.set_listening(False)   # PRD §4.9: starts NOT listening (no hot-mic on boot)
         # Stop queueing captured audio into the VAD pipeline while idle (validation Issue 2). The
         # recorder is constructed with use_microphone=True (PRD §4.4 / _FIXED_KWARGS), so at boot the
@@ -488,11 +584,18 @@ class VoiceTypingDaemon:
         # guarantee that). The residual physical-capture-while-idle is the accepted trade-off for
         # instant toggle. Mirrors the existing set_listening(False) line: device state matches the
         # listening gate from boot; the first start()/toggle() re-arms via _arm().
-        self._recorder.set_microphone(False)
-        logger.info("voice-typing daemon ready (not listening); recorder resident")
+        if self._recorder is not None:
+            self._recorder.set_microphone(False)
+        logger.info(
+            "voice-typing daemon ready (not listening); %s",
+            "recorder resident" if self._recorder is not None else "models lazy (not yet loaded)",
+        )
         # Idle auto-stop watchdog: disarms after cfg.asr.auto_stop_idle_seconds of no speech.
         threading.Thread(target=self._idle_watchdog, name="voice-typing-idle", daemon=True).start()
         while not self._shutdown.is_set():
+            if self._recorder is None:
+                time.sleep(0.05)   # no models loaded yet → idle, ~0 VRAM (PRD §4.2(1)/§4.2bis)
+                continue
             if self._listening.is_set():
                 # blocks until ONE utterance finalizes → on_final in a NEW thread → returns → re-listen.
                 # Returning is NORMAL SEGMENTATION, never session end (the WhisperX-flaw fix, PRD §1 #1).
@@ -585,7 +688,8 @@ class VoiceTypingDaemon:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle."""
         self._listening.set()
         self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
-        self._recorder.set_microphone(True)
+        if self._recorder is not None:
+            self._recorder.set_microphone(True)
         self._feedback.set_listening(True)
         self._refresh_mic_status()  # TTL-cached (Issue 3 / P1.M2.T2.S1): re-probes at most once / 30s
 
@@ -608,7 +712,8 @@ class VoiceTypingDaemon:
         """
         self._listening.clear()
         self._last_speech_monotonic = None  # not listening → idle clock is inactive
-        self._recorder.set_microphone(False)
+        if self._recorder is not None:
+            self._recorder.set_microphone(False)
         self._feedback.set_listening(False)
         # NOTE: caller MUST call self._recorder.abort() AFTER releasing _lock (see start/stop/toggle).
 
@@ -644,7 +749,7 @@ class VoiceTypingDaemon:
             self._disarm()
             disarmed = True
         # abort() moved OUT of _lock (validation NEW-2; see _disarm docstring).
-        if disarmed:
+        if disarmed and self._recorder is not None:
             self._recorder.abort()
 
     def _idle_watchdog(self) -> None:
@@ -718,6 +823,10 @@ class VoiceTypingDaemon:
         return True, None
 
     def start(self) -> None:
+        # Lazy load (PRD §4.2bis): build the recorder on the first arm. _load_recorder() is a single-flight no-op
+        # once resident. Called OUTSIDE _lock (it acquire-release-reacquires that lock; under _lock it would deadlock).
+        if not self._load_recorder():
+            return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
         with self._lock:
             self._arm()
 
@@ -726,19 +835,28 @@ class VoiceTypingDaemon:
             self._disarm()
         # abort() moved OUT of _lock to avoid the control-lock wedge (validation NEW-2; see
         # _disarm docstring). Only disarm needs to wake a blocked text(); start/_arm does not.
-        self._recorder.abort()
+        if self._recorder is not None:
+            self._recorder.abort()
 
     def toggle(self) -> None:
+        # Decide arm vs disarm, then act. Disarm is fast; the ARM path lazy-loads FIRST (outside _lock —
+        # _load_recorder acquire-release-reacquires that lock; calling it under _lock deadlocks). The read/act split
+        # is race-tolerant exactly like the abort()-outside-_lock design (the listening Event + on_final gate are
+        # the source of truth; toggle is user-paced).
         with self._lock:
             disarmed = self._listening.is_set()
-            if disarmed:
-                self._disarm()
-            else:
-                self._arm()
-        # abort() moved OUT of _lock (validation NEW-2). Only call it when we disarmed — arming
-        # must not abort a sibling text() that's about to start transcribing.
         if disarmed:
-            self._recorder.abort()
+            with self._lock:
+                self._disarm()
+            # abort() moved OUT of _lock (validation NEW-2). Only on disarm — arming must not abort a sibling
+            # text() that's about to start transcribing.
+            if self._recorder is not None:
+                self._recorder.abort()
+        else:
+            if not self._load_recorder():
+                return  # load failed → stay unarmed
+            with self._lock:
+                self._arm()
 
     def request_shutdown(self) -> None:
         """Signal run() to exit. Sets the event + aborts (breaks a blocked text()). NO shutdown().
@@ -749,7 +867,8 @@ class VoiceTypingDaemon:
         text() so the loop re-checks _shutdown promptly.
         """
         self._shutdown.set()
-        self._recorder.abort()    # break any blocked text() so run() can return (NOT under _lock)
+        if self._recorder is not None:
+            self._recorder.abort()    # break any blocked text() so run() can return (NOT under _lock)
         # recorder.shutdown() (full teardown) is wired by the quit handler in P1.M4.T2.S2, NOT here.
 
     def is_listening(self) -> bool:
@@ -1342,41 +1461,11 @@ def main() -> int:
         from voice_typing.feedback import Feedback
 
         feedback = Feedback(cfg.feedback)
-        # One LatencyLog shared by the recorder callbacks (on_vad_stop/partial, wired in build_recorder)
-        # and the daemon's on_final.finalize_utterance. Created here (not left to __init__) so the
-        # construction-failure CPU retry below can build a forced-CPU recorder wired to this SAME
-        # collector before re-constructing the daemon. (bugfix Issue 3 / P1.M1.T3.S2.)
+        # One LatencyLog shared by _load_recorder()'s build_recorder (recorder on_vad_stop/partial callbacks) and the
+        # daemon's on_final.finalize_utterance. (bugfix Issue 3 CPU-fallback now lives in _load_recorder — P1.M2.T1.S1
+        # lazy load — so main() no longer retries here; construction is fast and model-free.)
         latency = LatencyLog()
-
-        # bugfix Issue 3 / P1.M1.T3.S2 (PRD §4.4): the cuda_check driver probe can say "cuda-ok" while
-        # cuDNN/cuBLAS then fails to load INSIDE AudioToTextRecorder.__init__ (e.g. a missing
-        # libcudnn_ops.so.9). Without a retry that is `return 1` -> systemd Restart=on-failure crash-loop.
-        # So: if construction fails AND the originally-resolved device was cuda, retry ONCE on the PRD
-        # §4.4 CPU config via build_recorder(force_cpu=True) (which SKIPS the cuda_check probe entirely
-        # — S1) and inject the recorder through the existing recorder= kwarg (no __init__ change). Any
-        # failure here (probe raises, CPU build raises, re-construction raises) propagates to the outer
-        # `except Exception` -> "fatal error" -> return 1, preserving total-failure semantics.
-        try:
-            daemon = VoiceTypingDaemon(cfg, feedback, latency=latency)
-        except Exception as exc:
-            if _resolve_device_config(cfg).get("device") != "cuda":
-                raise  # first attempt was already CPU (or the probe failed) — nothing to fall back to
-            cpu_fb = cuda_check.CPU_FALLBACK
-            logger.warning(
-                "CUDA recorder construction failed (%s); falling back to CPU "
-                "(device=%s, compute_type=%s, models=%s/%s) — degraded but functional",
-                exc, cpu_fb["device"], cpu_fb["compute_type"],
-                cpu_fb["final_model"], cpu_fb["realtime_model"],
-            )
-            cpu_recorder = build_recorder(cfg, feedback, latency, force_cpu=True)
-            daemon = VoiceTypingDaemon(cfg, feedback, latency=latency, recorder=cpu_recorder)
-            # Make the daemon's self-reported device reflect the ACTUAL cpu recorder, not the driver
-            # probe (which still sees the GPU). _resolved_device() (read by status_snapshot) caches via
-            # this attribute; seeding it here means voicectl status reports device=cpu after the
-            # fallback (PRD §4.4 "say so in status"). _log_resolved_device (refactored in Task 2) also
-            # reads this cache, so the startup log agrees.
-            daemon._resolved_device_cache = dict(cuda_check.CPU_FALLBACK)
-            logger.info("daemon started in degraded CPU mode (construction-failure fallback)")
+        daemon = VoiceTypingDaemon(cfg, feedback, latency=latency)   # FAST — no models loaded (lazy, §4.2bis)
         # quit path: ControlServer._dispatch("quit") -> request_shutdown() (blocks until text()
         #   returns) -> on_quit=daemon.shutdown() -> recorder.shutdown() (release VRAM).
         server = ControlServer(daemon, on_quit=daemon.shutdown)

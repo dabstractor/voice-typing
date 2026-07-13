@@ -1425,17 +1425,10 @@ def test_main_returns_one_on_daemon_construction_failure(monkeypatch):
         def shutdown(self):
             pass
 
-    # bugfix P1.M1.T3.S2: main() now RETRIES on cuda. Without these hermeticity patches, a GPU
-    # host would hit the REAL build_recorder(force_cpu=True) (loads CPU models) inside the retry.
-    # Force the resolved device to cuda (so the retry branch is entered deterministically) and
-    # stub build_recorder (so no RealtimeSTT/model load). BoomDaemon still raises on BOTH
-    # constructions -> "both CUDA and CPU fail" -> return 1 (the assertion is unchanged).
+    # P1.M2.T1.S1: main() no longer retries construction (lazy load — the CPU fallback moved to _load_recorder).
+    # BoomDaemon raises in __init__ -> main()'s outer except -> return 1. (No GPU/build_recorder hermeticity needed:
+    # construction is model-free now.) The == 1 assertion is unchanged.
     _patch_main_lifecycle(monkeypatch, daemon_cls=BoomDaemon)
-    monkeypatch.setattr(
-        daemon, "_resolve_device_config",
-        lambda _cfg: dict(daemon.cuda_check.CUDA_DEFAULTS),
-    )
-    monkeypatch.setattr(daemon, "build_recorder", lambda *a, **k: _StubRecorder())
     assert daemon.main() == 1  # caught, logged, returns 1 (systemd Restart)
 
 
@@ -1890,119 +1883,6 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
     assert sk["resolved"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
-# ===========================================================================
-# bugfix P1.M1.T3.S2 — construction-failure → CPU retry in main() (PRD §4.4)
-# (ADDITIVE: main() retries once with build_recorder(force_cpu=True) when the first attempt was
-#  cuda and construction failed. Uses _patch_main_lifecycle + a stateful _RaiseOnceDaemon + a
-#  build_recorder capture. ZERO real CUDA/RealtimeSTT/model-load — build_recorder is stubbed.)
-# ===========================================================================
-
-
-def _raise_once_daemon_factory():
-    """A VoiceTypingDaemon stand-in that raises on the FIRST construction, succeeds on the SECOND.
-
-    Captures the constructor kwargs of each attempt so the fallback test can assert the 2nd
-    attempt got the injected recorder= and the shared latency=. State is per-factory (no
-    class-level leakage across tests).
-    """
-    attempts = {"n": 0, "kwargs": []}
-
-    class _RaiseOnceDaemon:
-        def __init__(self, cfg, fb, **kw):
-            attempts["n"] += 1
-            attempts["kwargs"].append(dict(kw))
-            if attempts["n"] == 1:
-                raise RuntimeError("cuda recorder construction failed")
-            self.cfg, self.fb = cfg, fb
-            self.recorder = kw.get("recorder")
-            self.run_called = False
-            self.shutdown_calls = 0
-
-        def run(self):
-            self.run_called = True
-
-        def shutdown(self):
-            self.shutdown_calls += 1
-
-    return _RaiseOnceDaemon, attempts
-
-
-def test_main_falls_back_to_cpu_on_cuda_construction_failure(monkeypatch, caplog):
-    """cuda construction fails -> retry with force_cpu=True -> daemon runs (return 0)."""
-    daemon_cls, attempts = _raise_once_daemon_factory()
-    built = {"force_cpu": None, "n": 0}
-
-    def fake_build_recorder(cfg, feedback, latency=None, force_cpu=False):
-        built["force_cpu"] = force_cpu
-        built["n"] += 1
-        return _StubRecorder()
-
-    _patch_main_lifecycle(monkeypatch, daemon_cls=daemon_cls)
-    # _patch_main_lifecycle set VoiceTypingDaemon; re-assert our overrides (it does not touch
-    # _resolve_device_config or build_recorder, so order is safe):
-    monkeypatch.setattr(daemon, "_resolve_device_config",
-                        lambda _cfg: dict(daemon.cuda_check.CUDA_DEFAULTS))
-    monkeypatch.setattr(daemon, "build_recorder", fake_build_recorder)
-
-    with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
-        code = daemon.main()
-
-    assert code == 0                                  # daemon ran in degraded CPU mode
-    assert built["n"] == 1 and built["force_cpu"] is True   # retried exactly once, forced CPU
-    assert attempts["n"] == 2                         # two VoiceTypingDaemon constructions
-    # 2nd attempt got the injected recorder + the shared latency (NOT None):
-    assert attempts["kwargs"][1].get("recorder") is not None
-    assert attempts["kwargs"][1].get("latency") is attempts["kwargs"][0].get("latency")
-    # the degradation was logged clearly:
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any("falling back to CPU" in m and "degraded but functional" in m for m in msgs), msgs
-    assert any("degraded CPU mode" in m for m in msgs), msgs
-
-
-def test_main_skips_cpu_retry_when_resolved_device_not_cuda(monkeypatch):
-    """A cpu (or failed) first attempt has nothing to fall back to -> no retry -> return 1."""
-    built = {"n": 0}
-
-    def fake_build_recorder(*a, **k):
-        built["n"] += 1
-        return _StubRecorder()
-
-    class _AlwaysBoom:
-        def __init__(self, *a, **k):
-            raise RuntimeError("construction failed")
-
-        def run(self):
-            pass
-
-        def shutdown(self):
-            pass
-
-    _patch_main_lifecycle(monkeypatch, daemon_cls=_AlwaysBoom)
-    monkeypatch.setattr(daemon, "_resolve_device_config",
-                        lambda _cfg: dict(daemon.cuda_check.CPU_FALLBACK))  # resolved == cpu
-    monkeypatch.setattr(daemon, "build_recorder", fake_build_recorder)
-
-    assert daemon.main() == 1
-    assert built["n"] == 0                            # NO retry (first attempt was not cuda)
-
-
-def test_main_returns_one_when_cpu_build_also_fails(monkeypatch):
-    """cuda construction fails AND the CPU recorder build fails -> return 1 (total failure)."""
-
-    def fake_build_recorder(*a, **k):
-        raise RuntimeError("cpu recorder build also failed")
-
-    daemon_cls, attempts = _raise_once_daemon_factory()
-    _patch_main_lifecycle(monkeypatch, daemon_cls=daemon_cls)
-    monkeypatch.setattr(daemon, "_resolve_device_config",
-                        lambda _cfg: dict(daemon.cuda_check.CUDA_DEFAULTS))
-    monkeypatch.setattr(daemon, "build_recorder", fake_build_recorder)
-
-    assert daemon.main() == 1
-    assert attempts["n"] == 1                         # only the (failed) cuda attempt ran
-    # the cpu build raised inside the retry -> propagated to the outer "fatal error" -> return 1
-
-
 def test_log_resolved_device_reads_cache_after_cpu_fallback(caplog):
     """_log_resolved_device reports the SEEDED cpu cache, not a fresh driver probe (CRITICAL #4)."""
     d, *_ = _make_daemon()                            # _ok_probe; no cache set
@@ -2017,19 +1897,160 @@ def test_log_resolved_device_reads_cache_after_cpu_fallback(caplog):
     assert "final_model=small.en" in line and "realtime_model=tiny.en" in line
 
 
-def test_main_fallback_warning_message_matches_prd_44(monkeypatch, caplog):
-    """The WARNING names the exact PRD §4.4 CPU config (device/compute_type/models)."""
-    daemon_cls, _attempts = _raise_once_daemon_factory()
-    _patch_main_lifecycle(monkeypatch, daemon_cls=daemon_cls)
-    monkeypatch.setattr(daemon, "_resolve_device_config",
-                        lambda _cfg: dict(daemon.cuda_check.CUDA_DEFAULTS))
-    monkeypatch.setattr(daemon, "build_recorder",
-                        lambda *a, **k: _StubRecorder())
-    with caplog.at_level(logging.WARNING, logger="voice_typing.daemon"):
-        daemon.main()
-    warn = next((r for r in caplog.records if r.levelno == logging.WARNING
-                 and "falling back to CPU" in r.getMessage()), None)
-    assert warn is not None
-    msg = warn.getMessage()
-    assert "device=cpu" in msg and "compute_type=int8" in msg
-    assert "models=small.en/tiny.en" in msg
+# ===========================================================================
+# P1.M2.T1.S1 — lazy load: _load_recorder() single-flight + CPU-fallback migration
+# (The CPU fallback MOVED here from main(); main() no longer retries on construction. These tests
+#  build a recorder=None daemon + monkeypatch daemon.build_recorder — ZERO real CUDA/models.)
+# ===========================================================================
+
+
+def _make_lazy_daemon(cfg=None):
+    """A daemon with NO injected recorder: self._recorder is None, _models_loaded False (the lazy boot state).
+
+    Mirrors production lazy boot. Tests that exercise _load_recorder monkeypatch daemon.build_recorder
+    themselves (so construction stays hermetic)."""
+    cfg = cfg or VoiceTypingConfig()
+    fb = _DaemonFakeFeedback()
+    return daemon.VoiceTypingDaemon(cfg, fb, recorder=None, backend=_FakeBackend(), mic_prober=_ok_probe), fb
+
+
+def test_lazy_daemon_boots_unloaded_with_no_recorder():
+    """A recorder-less daemon boots lazy: _recorder None, _models_loaded False (§4.2bis)."""
+    d, _fb = _make_lazy_daemon()
+    assert d._recorder is None
+    assert d._models_loaded is False
+    assert d._loading is False
+    assert d._load_error is None
+
+
+def test_load_recorder_success_loads_and_marks_loaded(monkeypatch):
+    """_load_recorder() builds via build_recorder + flips _models_loaded; returns True."""
+    d, fb = _make_lazy_daemon()
+    built = {"n": 0, "force_cpu": None}
+
+    def fake_build(cfg, feedback, latency=None, force_cpu=False, on_speech=None):
+        built["n"] += 1
+        built["force_cpu"] = force_cpu
+        return _StubRecorder()
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    assert d._load_recorder() is True
+    assert built["n"] == 1 and built["force_cpu"] is False
+    assert d._recorder is not None and d._models_loaded is True
+    assert d._load_error is None
+    assert fb.phases[-1] == "idle"          # phase driven to 'idle' on success
+
+
+def test_load_recorder_is_noop_once_loaded(monkeypatch):
+    """A second _load_recorder() after success does NOT call build_recorder again (resident)."""
+    d, _fb = _make_lazy_daemon()
+    built = {"n": 0}
+
+    def fake_build(*a, **k):
+        built["n"] += 1
+        return _StubRecorder()
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    assert d._load_recorder() is True
+    assert d._load_recorder() is True       # resident -> no-op
+    assert built["n"] == 1                  # build_recorder called exactly ONCE
+
+
+def test_load_recorder_cpu_fallback_on_cuda_failure(monkeypatch, caplog):
+    """First (cuda) build fails -> retry with force_cpu=True -> loaded (migrated from main())."""
+    d, _fb = _make_lazy_daemon()
+    attempts = {"n": 0, "force_cpu": []}
+
+    def fake_build(cfg, feedback, latency=None, force_cpu=False, on_speech=None):
+        attempts["n"] += 1
+        attempts["force_cpu"].append(force_cpu)
+        if not force_cpu:
+            raise RuntimeError("cuda construction failed")
+        return _StubRecorder()
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
+        assert d._load_recorder() is True
+    assert attempts["n"] == 2                           # cuda attempt + cpu retry
+    assert attempts["force_cpu"] == [False, True]
+    assert d._recorder is not None and d._models_loaded is True
+    assert d._resolved_device()["device"] == "cpu"      # cache seeded -> status reports the ACTUAL cpu device
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("falling back to CPU" in m and "degraded but functional" in m for m in msgs), msgs
+
+
+def test_load_recorder_total_failure_stays_unloaded(monkeypatch):
+    """Both cuda + cpu builds fail -> False, NO half-built recorder, _load_error set (§4.2bis)."""
+    d, _fb = _make_lazy_daemon()
+
+    def fake_build(*a, **k):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    assert d._load_recorder() is False
+    assert d._recorder is None                           # NO half-built recorder
+    assert d._models_loaded is False
+    assert d._load_error is not None and "CPU fallback" in d._load_error
+
+
+def test_start_on_lazy_daemon_triggers_load_then_arms(monkeypatch):
+    """start() on an unloaded daemon loads the recorder, then arms (set_microphone True)."""
+    d, _fb = _make_lazy_daemon()
+    rec = _StubRecorder()
+    monkeypatch.setattr(daemon, "build_recorder", lambda *a, **k: rec)
+    d.start()
+    assert d._models_loaded is True
+    assert d.is_listening() is True
+    assert rec.mic == [True]                             # armed
+
+
+def test_start_suppressed_when_load_fails(monkeypatch):
+    """A failed load -> start() returns without arming (stays not-listening, §4.2bis)."""
+    d, _fb = _make_lazy_daemon()
+
+    def fake_build(*a, **k):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    d.start()
+    assert d._models_loaded is False
+    assert d.is_listening() is False                     # stayed unarmed
+
+
+def test_injected_recorder_is_loaded_at_construction():
+    """A pre-injected recorder (the _make_daemon pattern) -> _models_loaded True at boot (no lazy)."""
+    d, _fb, _rec, _be = _make_daemon()
+    assert d._recorder is not None
+    assert d._models_loaded is True                      # tests that inject get a loaded daemon immediately
+
+
+def test_load_recorder_single_flight_one_build_under_concurrency(monkeypatch):
+    """Two concurrent _load_recorder() calls -> exactly ONE build_recorder (the 2nd waits, §4.2bis)."""
+    import threading as _t
+    d, _fb = _make_lazy_daemon()
+    built = {"n": 0}
+    started = _t.Event()
+    release = _t.Event()
+
+    def fake_build(cfg, feedback, latency=None, force_cpu=False, on_speech=None):
+        built["n"] += 1
+        started.set()
+        release.wait(2.0)            # make the load slow so the 2nd caller arrives while _loading
+        return _StubRecorder()
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    results = []
+
+    def caller():
+        results.append(d._load_recorder())
+
+    t1 = _t.Thread(target=caller)
+    t2 = _t.Thread(target=caller)
+    t1.start()
+    assert started.wait(2.0)         # ensure the loader is mid-build before the 2nd starts
+    t2.start()
+    release.set()                    # let the load finish
+    t1.join(2.0)
+    t2.join(2.0)
+    assert built["n"] == 1           # exactly ONE build (single-flight)
+    assert results == [True, True]   # both callers see success (2nd waited for the 1st)
