@@ -8,9 +8,9 @@ SCOPE (P1.M4.T1.S1 + P1.M4.T1.S2):
     returning is normal SEGMENTATION, never session end), on_final→gate→clean→type→record, the
     listening gate (threading.Event cleared at boot → no hot-mic, PRD §4.9), and start/stop/toggle
     that arm/disarm the mic via set_microphone+abort (models stay resident → instant toggle-on).
-  - LATER: control socket (P1.M4.T2.S1), full clean shutdown (P1.M4.T2.S2 — recorder.shutdown()),
-    precise per-utterance latency timestamps (P1.M4.T1.S3), and the main()/__main__ entry point +
-    signal handlers (P1.M4.T3.S1). These are NOT in this module yet.
+  - DONE: control socket, bounded recorder teardown (hard timeout + force-cleanup of worker
+    processes) — see _bounded_shutdown(). LATER: precise per-utterance latency timestamps
+    (P1.M4.T1.S3). These are NOT in this module yet.
 
 CONSTRUCT ONCE (PRD §4.2 "construct once"): AudioToTextRecorder.__init__ loads BOTH whisper
 models (final + realtime) into resident memory (GPU VRAM on cuda, RAM on cpu) — seconds of
@@ -406,7 +406,7 @@ class VoiceTypingDaemon:
     PRD §4.2 items 1+2. run() is the main-thread loop that fixes the WhisperX flaw: recorder.text()
     returning is normal SEGMENTATION, never session end (PRD §1 #1). on_final gates→cleans→types→records.
     start/stop/toggle arm/disarm the mic via set_microphone+abort (models stay resident → instant
-    toggle-on). NEVER recorder.shutdown() on toggle/stop — only on quit (P1.M4.T2.S2).
+    toggle-on). NEVER recorder.shutdown() on toggle/stop — only on quit (bounded teardown).
     """
 
     def __init__(
@@ -815,16 +815,80 @@ class VoiceTypingDaemon:
             self._resolved_device_cache = resolved
         return resolved
 
-    def shutdown(self) -> None:
-        """Full recorder teardown (PRD §4.2; P1.M4.T2.S2). Idempotent + defensive.
+    def _bounded_shutdown(self, timeout: float = 10.0) -> None:
+        """Tear down the recorder with a hard timeout + force-cleanup of spawn processes.
 
-        Calls self._recorder.shutdown(), which terminates the spawn-started transcript_process +
-        reader_process (releases GPU VRAM + the mic device — the "no orphaned model worker
-        processes" guarantee). IDEMPOTENT: a getattr-guarded flag (no __init__ edit) plus
-        RealtimeSTT's own is_shut_down guard make a double call (quit on_quit + main() finally) a
-        no-op the second time. DEFENSIVE: a recorder.shutdown() failure is logged, NOT re-raised —
-        the daemon is exiting and teardown is best-effort (a broken teardown must not mask the
-        original shutdown reason).
+        recorder.shutdown() (RealtimeSTT v1.0.2 shutdown_recorder()) can wedge indefinitely at an
+        unbounded threading.Thread.join() (recording_thread/realtime_thread — confirmed root cause
+        of the ~90s quit hang; see architecture/realtimestt_shutdown_analysis_confirmed.md). This
+        wraps the whole call in a daemon thread + a threading.Event wait. If it completes within
+        `timeout`, great. If not, we force-terminate the spawn-started transcript_process +
+        reader_process (the CUDA-context/VRAM holders — terminating them releases VRAM
+        immediately), mark is_shut_down (idempotency), drop the realtime model reference, and log
+        a WARNING. The daemon threads (recording_thread/realtime_thread) are daemon=True and die
+        with the process — we cannot and need not kill them.
+
+        Defensive: every step is best-effort; this method never re-raises.
+        """
+        done = threading.Event()
+
+        def _do_shutdown() -> None:
+            try:
+                self._recorder.shutdown()
+                logger.info("recorder shutdown complete (GPU workers released)")
+            except Exception:
+                # NOT a silent pass — preserves the "recorder.shutdown() failed" log the tests +
+                # operators rely on (test_shutdown_swallows_recorder_failure). caplog is thread-safe.
+                logger.exception(
+                    "recorder.shutdown() failed during teardown (best-effort; ignored)"
+                )
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_do_shutdown, name="vt-recorder-shutdown", daemon=True)
+        t.start()
+
+        if done.wait(timeout=timeout):
+            return  # completed within budget (success or handled-failure already logged)
+
+        # Timed out — force-clean the spawn processes (VRAM holders) + mark shut down for idempotency.
+        logger.warning(
+            "recorder.shutdown() exceeded %.1fs budget; force-terminating worker processes "
+            "(transcript_process, reader_process) to release VRAM",
+            timeout,
+        )
+        for attr in ("transcript_process", "reader_process"):
+            proc = getattr(self._recorder, attr, None)  # defensive: stubs may lack the attr
+            try:
+                if proc is not None and proc.is_alive():
+                    proc.terminate()
+            except Exception:
+                logger.debug("force-terminate of %s failed (best-effort)", attr, exc_info=True)
+        try:
+            self._recorder.is_shut_down = True  # makes a future .shutdown() a no-op
+        except Exception:
+            pass
+        try:
+            self._recorder.realtime_transcription_model = None  # release host-side model ref
+        except Exception:
+            pass
+
+    def shutdown(self) -> None:
+        """Full recorder teardown — BOUNDED (PRD §4.2; §4.2bis idle-unload prerequisite; §8 risk row).
+
+        Idempotent + defensive. Delegates to _bounded_shutdown(): runs recorder.shutdown() in a
+        daemon thread under a hard timeout (default 10s); on timeout it force-terminates the
+        spawn-started transcript_process + reader_process (the CUDA/VRAM holders) so VRAM is
+        released and a racing re-arm under the single-flight lock is never blocked for the ~90s
+        RealtimeSTT wedge (root cause: an unbounded threading.Thread.join() inside
+        shutdown_recorder() — confirmed). Keeps the idempotency + defensive guarantees; never
+        re-raises.
+
+        IDEMPOTENT: a getattr-guarded flag (no __init__ edit) plus RealtimeSTT's own is_shut_down
+        guard make a double call (quit on_quit + main() finally) a no-op the second time.
+        DEFENSIVE: a recorder.shutdown() failure is logged inside the bounded thread via
+        logger.exception, NOT re-raised — the daemon is exiting and teardown is best-effort (a
+        broken teardown must not mask the original shutdown reason).
 
         NEVER call this on toggle/stop (models must stay resident — those use set_microphone+
         abort). The sanctioned callers are the quit on_quit hook (after request_shutdown() broke
@@ -836,11 +900,17 @@ class VoiceTypingDaemon:
             if getattr(self, "_shutdown_done", False):
                 return
             self._shutdown_done = True
+        if self._recorder is None:
+            # M2 lazy-load prep: the recorder is built on first arm, so it may never exist (e.g. a
+            # session that never armed). Nothing to tear down.
+            return
         try:
-            self._recorder.shutdown()
-            logger.info("recorder shutdown complete (GPU workers released)")
+            self._bounded_shutdown()
         except Exception:
-            logger.exception("recorder.shutdown() failed during teardown (best-effort; ignored)")
+            # Defensive belt-and-suspenders: _bounded_shutdown is already best-effort, but
+            # shutdown() itself must NEVER re-raise (a teardown failure must not mask the original
+            # shutdown reason).
+            logger.exception("bounded teardown failed (best-effort; ignored)")
 
 
 # --- ControlServer (P1.M4.T2.S1; PRD §4.2(3), §4.8) -----------------------------------------

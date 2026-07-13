@@ -1097,6 +1097,71 @@ def test_stop_and_request_shutdown_still_never_shutdown():
     assert rec.shutdowns == 0
 
 
+# P1.M1.T1.S2 — bounded teardown: _bounded_shutdown force-cleans on timeout (ADDITIVE).
+# Reuses _make_daemon / _StubRecorder / threading / time-as-_time from earlier in this file.
+
+
+class _FakeProcess:
+    """Stand-in for an mp.Process: .is_alive() True, .terminate() records the call."""
+
+    def __init__(self) -> None:
+        self.terminated = False
+
+    def is_alive(self) -> bool:
+        return True
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+class _FakeSlowRecorder(_StubRecorder):
+    """shutdown() blocks forever — simulates the RealtimeSTT ~90s wedge.
+
+    Adds the force-cleanup attrs the real recorder has (transcript_process, reader_process,
+    is_shut_down, realtime_transcription_model) so the timeout branch can act on them.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.transcript_process = _FakeProcess()
+        self.reader_process = _FakeProcess()
+        self.is_shut_down = False
+        self.realtime_transcription_model = object()  # non-None sentinel
+
+    def shutdown(self):  # type: ignore[override]
+        # Blocks forever; never returns, never increments .shutdowns. Runs in a daemon thread
+        # inside _bounded_shutdown, so it dies with the test process (no hang).
+        threading.Event().wait()
+
+
+def test_bounded_shutdown_force_cleans_on_timeout():
+    d, _fb, rec, _be = _make_daemon(recorder=_FakeSlowRecorder())
+    start = _time.monotonic()
+    d._bounded_shutdown(timeout=0.3)  # MUST return despite shutdown() blocking forever
+    elapsed = _time.monotonic() - start
+    assert elapsed < 2.0, f"bounded teardown took {elapsed:.2f}s (expected < ~0.3s + slack)"
+    assert rec.transcript_process.terminated, "transcript_process not force-terminated (VRAM leak)"
+    assert rec.reader_process.terminated, "reader_process not force-terminated (VRAM leak)"
+    assert rec.is_shut_down is True, "is_shut_down not set (idempotency marker)"
+    assert rec.realtime_transcription_model is None, "realtime model ref not released"
+
+
+def test_shutdown_delegates_to_bounded_shutdown():
+    # Proves shutdown() routes through _bounded_shutdown (not a leftover direct recorder.shutdown()).
+    d, _fb, _rec, _be = _make_daemon()
+    calls: list[float] = []
+    d._bounded_shutdown = lambda timeout=10.0: calls.append(timeout)
+    d.shutdown()
+    assert calls == [10.0], f"shutdown() did not delegate to _bounded_shutdown(): {calls}"
+
+
+def test_shutdown_is_noop_when_recorder_is_none():
+    # M2 lazy-load prep: if the recorder was never built, shutdown() must not raise / not touch it.
+    d, _fb, _rec, _be = _make_daemon()
+    d._recorder = None
+    d.shutdown()  # must NOT raise
+
+
 # --- Layer B: install_shutdown_signal_handlers() -------------------------------------------
 
 

@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Bounded Teardown (PREREQUISITE — unblocks M3 idle-unload; also fixes the existing quit hang)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The recorder.shutdown() call must complete in seconds, not ~90 s. Root cause (verified from RealtimeSTT v1.0.2 source): shutdown_recorder() in core/shutdown.py calls .join() WITHOUT timeouts on recording_thread and realtime_thread (daemon threads). If either thread is blocked in a non-cancellable operation (queue.get, GPU inference, C extension), the join hangs indefinitely. The two mp.Process spawns (transcript_process, reader_process) DO have 10s timeouts + terminate. Fix: wrap recorder.shutdown() in a hard timeout thread + force-clean the spawn processes to release VRAM. Also add TimeoutStopSec=15 to the systemd unit. This milestone MUST complete before M3 (idle-unload would trigger the 90s hang every 30 min otherwise).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Make VoiceTypingDaemon.shutdown() bounded — hard timeout + force-cleanup",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Replace the current unbounded self._recorder.shutdown() call in VoiceTypingDaemon.shutdown() (daemon.py:817-840) with a bounded teardown: run shutdown in a background thread with a hard timeout (~10s); if it exceeds the budget, force-terminate transcript_process and reader_process (the mp.Process spawns that hold CUDA contexts / VRAM) so VRAM is released and the call returns. Keep idempotent + best-effort (don't re-raise). Also guard shutdown() for self._recorder is None (lazy-load readiness, M2).",
               "subtasks": [
                 {
@@ -41,7 +41,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Implement bounded teardown: hard timeout + force-cleanup of worker processes",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -60,14 +60,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Bound systemd stop — add TimeoutStopSec + verify bounded quit",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add TimeoutStopSec=15 to systemd/voice-typing.service so systemd never waits the full default 90s. The daemon's own bounded teardown (M1.T1) makes this safe. Currently the unit has neither TimeoutStopSec nor ExecStop.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add TimeoutStopSec=15 to systemd unit and verify no 90s SIGKILL",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
