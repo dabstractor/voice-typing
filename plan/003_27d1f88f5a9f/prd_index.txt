@@ -1,0 +1,23 @@
+h1.0 PRD: Fully-Local Voice Typing for Linux Terminal (tmux) — "voice-typing"
+ h2.0 1. Problem statement (user's own framing)
+ h2.1 2. Verified machine facts (already checked on this exact machine — do not re-derive, but trust these over stale docs)
+ h2.2 3. Research summary and engine decision (completed July 6, 2026 — a light verification pass is fine, a full re-research is not needed)
+ h2.3 4. Architecture
+  h3.0 4.1 Repository layout
+  h3.1 4.2 The daemon (daemon.py)
+  h3.2 4.2bis Model lifecycle — lazy load on first arm
+  h3.3 4.3 Typing backends (typing_backends.py)
+  h3.4 4.4 RealtimeSTT recorder configuration (exact starting values — tune only if tests fail)
+  h3.5 4.5 Config (config.toml, parsed with stdlib tomllib into dataclasses)
+  h3.6 4.6 Feedback (feedback.py)
+  h3.7 4.7 Text processing (textproc.py)
+  h3.8 4.8 voicectl (ctl.py)
+  h3.9 4.9 systemd user service (systemd/voice-typing.service)
+  h3.10 4.10 Phase 2 (implement after all tests pass — small, do it in the same run)
+ h2.4 5. Installation steps (for the implementing agent)
+ h2.5 6. Test plan — ALL must pass before declaring success
+ h2.6 7. Acceptance criteria (definition of done)
+ h2.7 8. Known risks & prescribed mitigations
+ h2.8 9. Future work (explicitly out of scope now)
+---
+code:6 para:35 list:16 table:2
