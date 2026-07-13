@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Bounded Teardown (PREREQUISITE — unblocks M3 idle-unload; also fixes the existing quit hang)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "The recorder.shutdown() call must complete in seconds, not ~90 s. Root cause (verified from RealtimeSTT v1.0.2 source): shutdown_recorder() in core/shutdown.py calls .join() WITHOUT timeouts on recording_thread and realtime_thread (daemon threads). If either thread is blocked in a non-cancellable operation (queue.get, GPU inference, C extension), the join hangs indefinitely. The two mp.Process spawns (transcript_process, reader_process) DO have 10s timeouts + terminate. Fix: wrap recorder.shutdown() in a hard timeout thread + force-clean the spawn processes to release VRAM. Also add TimeoutStopSec=15 to the systemd unit. This milestone MUST complete before M3 (idle-unload would trigger the 90s hang every 30 min otherwise).",
           "tasks": [
             {
@@ -60,14 +60,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Bound systemd stop — add TimeoutStopSec + verify bounded quit",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Add TimeoutStopSec=15 to systemd/voice-typing.service so systemd never waits the full default 90s. The daemon's own bounded teardown (M1.T1) makes this safe. Currently the unit has neither TimeoutStopSec nor ExecStop.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add TimeoutStopSec=15 to systemd unit and verify no 90s SIGKILL",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -93,14 +93,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Defer recorder construction to first arm with single-flight load + CPU-fallback migration",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Extract a _load_recorder() single-flight method (lock-guarded, no double-load, no half-built recorder on failure). Wire start/toggle to await it before arming. The main loop idles while _recorder is None. Migrate the construction-failure CPU fallback from main() into the lazy loader. Guard all 8 self._recorder.* call sites for None.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Extract _load_recorder() single-flight method + guard all recorder call sites + migrate CPU fallback",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -120,7 +120,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Thread the 'loading models…' hint through ctl.py + status during first arm",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
