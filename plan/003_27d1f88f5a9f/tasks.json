@@ -86,7 +86,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Lazy-Load Lifecycle (D1, D2, D3) — defer construction to first arm, surface lifecycle state",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Remove the boot-time build_recorder() from VoiceTypingDaemon.__init__ (daemon.py:447); start with self._recorder = None. The start/toggle control-socket handlers acquire a single-flight load. The main loop idles while _recorder is None (matches PRD §4.2(1) pseudocode). Add the lifecycle state machine (unloaded/loading/loaded) and surface it in feedback (models_loaded) + status (phase/models_loaded). The arm command blocks during load and voicectl prints a 'loading models…' hint. Construction-failure CPU fallback migrates from main() into the lazy loader.",
           "tasks": [
             {
@@ -139,14 +139,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Lifecycle state machine + feedback wiring — phase/models_loaded in state.json and status",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add models_loaded:bool and unloaded/loading phases to the Feedback state (feedback.py:85-88). Update the boot phase to 'unloaded' (not 'idle'). Wire daemon lifecycle transitions to feedback state writes. Surface phase + models_loaded in status_snapshot() and ctl.py status rendering.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Expose phase + models_loaded from feedback, status_snapshot(), and ctl status rendering",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"

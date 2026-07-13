@@ -28,7 +28,8 @@ from voice_typing import ctl, daemon
 # canned daemon status_snapshot (matches daemon.ControlServer._dispatch output)
 # ---------------------------------------------------------------------------
 _STATUS_ON = {
-    "ok": True, "listening": True, "partial": "hello wor", "last_final": "previous sentence.",
+    "ok": True, "listening": True, "phase": "listening", "models_loaded": True, "load_error": "",
+    "partial": "hello wor", "last_final": "previous sentence.",
     "uptime_s": 12.345, "device": "cuda", "compute_type": "float16",
     "final_model": "distil-large-v3", "realtime_model": "small.en",
     "mic_ok": True, "mic_error": "",                       # bugfix Issue 2 / P1.M1.T2.S2
@@ -62,10 +63,24 @@ def test_format_status_multiline_has_partial_and_models():
     text, code = ctl.format_result("status", _STATUS_ON)
     assert code == 0
     assert "listening: on" in text
+    assert "phase: listening" in text                # P1.M2.T2.S1: lifecycle phase rendered
     assert "hello wor" in text                      # partial
     assert "distil-large-v3" in text and "small.en" in text   # models loaded
+    assert "(loaded)" in text                        # P1.M2.T2.S1: models_loaded marker
     assert "cuda" in text and "float16" in text      # device + compute_type
     assert "12.345" in text                          # uptime
+
+
+def test_format_status_shows_unloaded_state_and_load_error():
+    # P1.M2.T2.S1: an unloaded daemon (failed/never-loaded) renders phase + (not loaded) + the load error.
+    resp = {**_STATUS_ON, "phase": "unloaded", "models_loaded": False,
+            "load_error": "CUDA load failed: RuntimeError('no cudnn')"}
+    text, code = ctl.format_result("status", resp)
+    assert code == 0
+    assert "phase: unloaded" in text
+    assert "(not loaded)" in text
+    assert "load error: CUDA load failed" in text
+    assert "(loaded)" not in text                    # marker flips, not appended
 
 
 def test_format_status_shows_mic_ok_when_healthy():

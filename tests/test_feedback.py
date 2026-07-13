@@ -126,7 +126,7 @@ def test_state_shape_has_exactly_the_five_fields(feedback, tmp_path):
     fb, _rec, _clock = feedback
     fb.update_partial("x")
     state = _read_state(tmp_path)
-    assert set(state.keys()) == {"listening", "phase", "partial", "last_final", "ts"}
+    assert set(state.keys()) == {"listening", "phase", "models_loaded", "partial", "last_final", "ts"}
 
 
 def test_set_phase_round_trip(feedback, tmp_path):
@@ -430,7 +430,7 @@ def test_snapshot_returns_a_copy_with_the_five_state_keys(tmp_path, monkeypatch)
     fb.set_listening(True)
     fb.update_partial("hello")
     snap = fb.snapshot()
-    assert set(snap.keys()) == {"listening", "phase", "partial", "last_final", "ts"}
+    assert set(snap.keys()) == {"listening", "phase", "models_loaded", "partial", "last_final", "ts"}
     assert snap["listening"] is True and snap["partial"] == "hello"
 
 

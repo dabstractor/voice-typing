@@ -63,6 +63,7 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         return "shutting down", 0
     if cmd == "status":
         listening = "on" if response.get("listening") else "off"
+        phase = response.get("phase", "") or ""                       # P1.M2.T2.S1: lifecycle phase (§4.2bis)
         partial = response.get("partial", "") or ""
         last_final = response.get("last_final", "") or ""
         uptime = response.get("uptime_s", 0.0)
@@ -70,6 +71,8 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         compute_type = response.get("compute_type", "unknown")
         final_model = response.get("final_model", "unknown")
         realtime_model = response.get("realtime_model", "unknown")
+        models_loaded = response.get("models_loaded", False)          # P1.M2.T2.S1: models resident?
+        load_error = response.get("load_error", "") or ""            # P1.M2.T2.S1: last load failure
         mic_ok = response.get("mic_ok", True)             # bugfix Issue 2 / P1.M1.T2.S2: default True
         mic_error = response.get("mic_error", "") or ""   #   so a missing key never looks broken
         if mic_ok:
@@ -78,15 +81,19 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
             mic_line = f"mic: unavailable ({mic_error})"
         else:
             mic_line = "mic: unavailable"
+        loaded_marker = "loaded" if models_loaded else "not loaded"   # distinguishes loaded from loading/unloaded
         text = (
             f"listening: {listening}\n"
+            f"phase: {phase}\n"
             f"partial: {partial}\n"
             f"last: {last_final}\n"
             f"uptime: {uptime}s\n"
             f"device: {device} ({compute_type})\n"
-            f"models: {final_model} + {realtime_model}\n"
+            f"models: {final_model} + {realtime_model} ({loaded_marker})\n"
             f"{mic_line}"
         )
+        if load_error:                                     # surface §4.2bis load failures (absent on the happy path)
+            text += f"\nload error: {load_error}"
         return text, 0
     # toggle / start / stop
     return f"listening: {'on' if response.get('listening') else 'off'}", 0

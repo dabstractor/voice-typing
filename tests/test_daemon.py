@@ -42,6 +42,9 @@ class _FakeFeedback:
     def set_phase(self, phase: str) -> None:
         self.phases.append(phase)
 
+    def set_models_loaded(self, loaded: bool) -> None:  # P1.M2.T2.S1: mirror Feedback contract (no-op stub)
+        pass
+
 
 class _FakeRecorder:
     """Accepts ANY kwargs (VAR_KEYWORD) and captures them. Filter returns all verbatim."""
@@ -968,10 +971,11 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
     fb.update_partial("hello")
     fb.record_final("world")
     s = d.status_snapshot()
-    assert set(s) == {"listening", "partial", "last_final", "uptime_s",
-                      "device", "compute_type", "final_model", "realtime_model",
-                      "mic_ok", "mic_error"}                      # bugfix Issue 2 / P1.M1.T2.S2
+    assert set(s) == {"listening", "phase", "models_loaded", "load_error", "partial", "last_final",
+                      "uptime_s", "device", "compute_type", "final_model", "realtime_model",
+                      "mic_ok", "mic_error"}                     # P1.M2.T2.S1: +phase/models_loaded/load_error
     assert s["listening"] is False and s["partial"] == "world" and s["last_final"] == "world"   # record_final writes the final into partial so the status matches the screen
+    assert s["phase"] == "idle" and s["models_loaded"] is True and s["load_error"] == ""  # P1.M2.T2.S1: injected recorder -> loaded
     assert s["device"] == "cuda" and s["compute_type"] == "float16"
     assert s["final_model"] == "distil-large-v3" and s["realtime_model"] == "small.en"
     assert s["mic_ok"] is True and s["mic_error"] == ""          # S1's _ok_probe via _make_daemon_with_feedback

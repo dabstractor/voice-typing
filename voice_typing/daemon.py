@@ -461,6 +461,7 @@ class VoiceTypingDaemon:
         # models_loaded FIELD + status_snapshot/ctl exposure is P1.M2.T2.S1; T1 tracks the daemon-side
         # self._models_loaded + drives phase via the existing set_phase — no feedback.py edit.)
         self._feedback.set_phase("idle" if recorder is not None else "unloaded")
+        self._feedback.set_models_loaded(recorder is not None)  # P1.M2.T2.S1: mirror phase at boot
         self._backend = (
             backend if backend is not None else typing_backends.make_backend(cfg.output)
         )
@@ -504,6 +505,7 @@ class VoiceTypingDaemon:
             self._loading = True                   # we are the loader
             self._load_error = None
             self._feedback.set_phase("loading")
+            self._feedback.set_models_loaded(False)  # P1.M2.T2.S1: models not resident while loading
         # --- heavy build OUTSIDE _lock (status/stop stay responsive during the ~1–3 s load) ---
         recorder = None
         fell_back_to_cpu = False
@@ -540,6 +542,7 @@ class VoiceTypingDaemon:
                     # Migrated from main()'s `daemon._resolved_device_cache = dict(CPU_FALLBACK)` seed.
                     self._resolved_device_cache = dict(cuda_check.CPU_FALLBACK)
                 self._feedback.set_phase("idle")
+                self._feedback.set_models_loaded(True)  # P1.M2.T2.S1: models now resident
                 self._load_cond.notify_all()
                 success = True
             else:
@@ -547,6 +550,7 @@ class VoiceTypingDaemon:
                 self._models_loaded = False
                 self._recorder = None
                 self._feedback.set_phase("unloaded")
+                self._feedback.set_models_loaded(False)  # P1.M2.T2.S1: models not resident
                 self._load_cond.notify_all()
                 success = False
         # Log OUTSIDE _lock (_log_resolved_device's cuda_check probe is ~ms; don't hold the lock for it).
@@ -887,8 +891,11 @@ class VoiceTypingDaemon:
     def status_snapshot(self) -> dict:
         """The status payload for the control socket `status`/`toggle`/`start`/`stop` cmds.
 
-        Returns {listening, partial, last_final, uptime_s, device, compute_type, final_model,
-        realtime_model, mic_ok, mic_error}. mic_ok/mic_error come from S1's PyAudio probe
+        Returns {listening, phase, models_loaded, load_error, partial, last_final, uptime_s, device,
+        compute_type, final_model, realtime_model, mic_ok, mic_error}. phase/models_loaded come from
+        the LIVE in-memory Feedback state (the lazy-load lifecycle, §4.2bis — unloaded/loading/idle/
+        listening/speaking + models resident bool); load_error is the daemon attr _load_recorder sets
+        on failure. mic_ok/mic_error come from S1's PyAudio probe
         (self._mic_ok/self._mic_error), refreshed in __init__/_arm — lets voicectl status + JSON
         consumers see a dead mic without journalctl. partial/last_final come from the LIVE in-memory Feedback state (NOT the
         throttled state.json, which lags >=10 Hz); device/models come from _resolve_device_config
@@ -900,6 +907,9 @@ class VoiceTypingDaemon:
         dev = self._resolved_device()
         return {
             "listening": self.is_listening(),
+            "phase": snap.get("phase", "unloaded"),          # P1.M2.T2.S1: lifecycle phase (§4.2bis)
+            "models_loaded": snap.get("models_loaded", False),  # P1.M2.T2.S1: models resident?
+            "load_error": self._load_error or "",            # P1.M2.T2.S1: last load failure (None -> "")
             "partial": snap.get("partial", ""),
             "last_final": snap.get("last_final", ""),
             "uptime_s": round(self.uptime_s, 3),

@@ -7,7 +7,9 @@ on the three events that are NOT spammy: listening-start, each final, listening-
 
 STATE FILE (PRD §4.6), written atomically (tempfile + os.replace) to
 $XDG_RUNTIME_DIR/voice-typing/state.json (overridable via feedback.state_file):
-    {"listening": true, "phase": "speaking", "partial": "...", "last_final": "...", "ts": 1783718400.123}
+    {"listening": true, "phase": "speaking", "models_loaded": true, "partial": "...", "last_final": "...", "ts": 1783718400.123}
+While models are not yet loaded (boot) or mid-load, phase is 'unloaded' or 'loading' and
+models_loaded is false (§4.2bis); once loaded, phase cycles idle/listening/speaking.
 Consumed by voice_typing/status.sh (the tmux status-right helper) and by voicectl status.
 
 NOTIFICATION DISCIPLINE (the #1 contract — PRD §4.6 inline example is SUPERSEDED):
@@ -81,9 +83,13 @@ class Feedback:
     def __init__(self, cfg: FeedbackConfig) -> None:
         self._cfg = cfg
         # In-memory state mirrors the on-disk JSON shape EXACTLY (PRD §4.6 / item contract).
+        # Boot state (P1.M2.T2.S1 / §4.2bis): phase 'unloaded' + models_loaded False — models are NOT resident
+        # until the first arm's _load_recorder() succeeds. The daemon overrides both at construction + each
+        # lifecycle transition (set_phase + set_models_loaded); these are just the safe pre-daemon defaults.
         self._state: dict[str, object] = {
             "listening": False,
-            "phase": "idle",
+            "phase": "unloaded",      # P1.M2.T2.S1: boot phase (models not yet loaded, §4.2bis)
+            "models_loaded": False,   # P1.M2.T2.S1: True once _load_recorder succeeds (driven by the daemon)
             "partial": "",
             "last_final": "",
             "ts": 0.0,
@@ -110,9 +116,23 @@ class Feedback:
         """Record a VAD/recording phase (idle/listening/speaking); always write; never notify.
 
         Phase flips are NOT start/final/stop events, so they never fire hyprctl (the
-        anti-spam rule — see module docstring).
+        anti-spam rule — see module docstring). The lazy-load lifecycle (§4.2bis) also uses
+        'unloaded' (boot / failed load) and 'loading' (first arm in progress); the daemon's
+        _load_recorder() drives those. This method accepts any string (no validation).
         """
         self._state["phase"] = phase
+        self._write()
+
+    def set_models_loaded(self, loaded: bool) -> None:
+        """Record whether the ASR models are resident on the GPU (PRD §4.2bis / §4.6).
+
+        Driven by the daemon's _load_recorder() at each lifecycle transition (->False while
+        loading / on failure; ->True on success) and at construction. Always writes —
+        model-lifecycle transitions are infrequent, so the state file stays current for
+        voicectl status + status.sh. Never notifies (not a start/final/stop event — same
+        anti-spam rule as set_phase).
+        """
+        self._state["models_loaded"] = bool(loaded)
         self._write()
 
     def record_final(self, text: str) -> None:
@@ -154,7 +174,7 @@ class Feedback:
             self._notify("● listening" if listening else "■ stopped")
 
     def snapshot(self) -> dict:
-        """A shallow copy of the live in-memory state {listening,phase,partial,last_final,ts}.
+        """A shallow copy of the live in-memory state {listening,phase,models_loaded,partial,last_final,ts}.
 
         For low-latency status reads (the control socket `status` cmd) WITHOUT hitting the
         throttled state.json on disk (which lags >=10 Hz). Returns a COPY (dict(self._state)) so

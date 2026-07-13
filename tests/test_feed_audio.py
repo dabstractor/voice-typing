@@ -533,6 +533,9 @@ class _StubFeedback:
     def set_phase(self, phase: str) -> None:
         self.phases.append(phase)
 
+    def set_models_loaded(self, loaded: bool) -> None:  # P1.M2.T2.S1: mirror Feedback contract (no-op stub)
+        pass
+
     def record_final(self, text: str) -> None:
         self.finals.append(text)
 
