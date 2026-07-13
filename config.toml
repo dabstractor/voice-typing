@@ -34,6 +34,7 @@ device                       = "cuda"              # "cuda" | "cpu". The daemon 
 post_speech_silence_duration = 0.6                 # seconds of silence after speech before a final is emitted. Lower = snappier but can cut off pauses; higher = fewer false finals but slower.
 realtime_processing_pause    = 0.15                # seconds between live partial updates. Lower = more responsive status; higher = less CPU.
 auto_stop_idle_seconds       = 30.0                # auto-disarm (stop listening) after this many seconds with NO recognized speech. Partials reset the clock while you talk, so it only fires when you truly go silent — prevents a forgotten hot-mic. Fires the normal stop popup + a journal line. 0 disables.
+auto_unload_idle_seconds     = 1800.0              # after this many seconds DISARMED (models loaded, NOT listening), tear down the recorder to free VRAM (~0). The clock starts on disarm (manual stop, toggle-off, or the auto-stop above) and resets on any arm; time listening does NOT count. 0 disables (models stay resident until quit). (PRD 4.2bis Idle unload)
 
 
 [output]   # how typed text leaves the daemon

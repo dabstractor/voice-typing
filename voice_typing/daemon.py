@@ -441,6 +441,11 @@ class VoiceTypingDaemon:
         # Float store is atomic in CPython (read by the watchdog, written by RealtimeSTT worker +
         # control-socket threads); the disarm re-checks the deadline under _lock (no false stop).
         self._last_speech_monotonic: float | None = None
+        # Idle UNLOAD clock (P1.M3.T1.S1 / PRD §4.2bis): time.monotonic() of when the mic was last
+        # DISARMED; the _idle_unload_watchdog tears the recorder down after cfg.asr.auto_unload_idle_seconds
+        # in this state to reclaim VRAM. None while armed/listening (clock inactive). Set in _disarm,
+        # cleared in _arm. Float store is atomic in CPython; _unload_recorder re-checks under _lock.
+        self._disarmed_monotonic: float | None = None
         # Per-utterance latency collector (P1.M4.T1.S3): fed by on_vad_stop/partial (via
         # build_recorder→_build_callbacks) + on_final. Injectable for tests; a real one otherwise.
         self._latency = latency if latency is not None else LatencyLog()
@@ -596,6 +601,9 @@ class VoiceTypingDaemon:
         )
         # Idle auto-stop watchdog: disarms after cfg.asr.auto_stop_idle_seconds of no speech.
         threading.Thread(target=self._idle_watchdog, name="voice-typing-idle", daemon=True).start()
+        # Idle UNLOAD watchdog (P1.M3.T1.S1 / PRD §4.2bis): reclaims VRAM after cfg.asr.auto_unload_idle_seconds
+        # DISARMED. Mirrors the idle-watchdog start above; same _shutdown.wait(1.0) tick + daemon thread.
+        threading.Thread(target=self._idle_unload_watchdog, name="voice-typing-idle-unload", daemon=True).start()
         while not self._shutdown.is_set():
             if self._recorder is None:
                 time.sleep(0.05)   # no models loaded yet → idle, ~0 VRAM (PRD §4.2(1)/§4.2bis)
@@ -692,6 +700,7 @@ class VoiceTypingDaemon:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle."""
         self._listening.set()
         self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
+        self._disarmed_monotonic = None                  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
         if self._recorder is not None:
             self._recorder.set_microphone(True)
         self._feedback.set_listening(True)
@@ -716,6 +725,7 @@ class VoiceTypingDaemon:
         """
         self._listening.clear()
         self._last_speech_monotonic = None  # not listening → idle clock is inactive
+        self._disarmed_monotonic = time.monotonic()  # start the idle-UNLOAD clock (P1.M3.T1.S1)
         if self._recorder is not None:
             self._recorder.set_microphone(False)
         self._feedback.set_listening(False)
@@ -767,6 +777,79 @@ class VoiceTypingDaemon:
                 self._maybe_auto_stop()
             except Exception:
                 logger.exception("idle auto-stop check raised; continuing")
+
+    def _idle_unload_watchdog(self) -> None:
+        """Background thread: periodically call _maybe_idle_unload(). Started by run(); daemon thread.
+
+        P1.M3.T1.S1 / PRD §4.2bis Idle unload. Mirrors _idle_watchdog: ticks via _shutdown.wait(1.0)
+        (sleeps ~1s AND exits promptly on shutdown) and swallows its own exceptions.
+        """
+        while not self._shutdown.wait(1.0):
+            try:
+                self._maybe_idle_unload()
+            except Exception:
+                logger.exception("idle unload check raised; continuing")
+
+    def _maybe_idle_unload(self) -> None:
+        """If the mic has been DISARMED long enough, tear down the recorder to reclaim VRAM.
+
+        P1.M3.T1.S1 / PRD §4.2bis. Lock-free pre-check (atomic bool/float/Event reads are safe in
+        CPython) so the common path (not time yet) does NOT acquire _lock every tick. When the
+        pre-check passes, delegate to _unload_recorder(), which does the authoritative re-check +
+        bounded teardown UNDER _lock (single-flight: a racing arm waits, then loads fresh).
+
+        threshold<=0 disables (short-circuit, never calls _unload_recorder). Composes with idle
+        auto-stop: _maybe_auto_stop's _disarm() is what stamps _disarmed_monotonic, so the 30s
+        auto-stop starts this 30-min clock for free.
+        """
+        threshold = self._cfg.asr.auto_unload_idle_seconds
+        if threshold <= 0:
+            return
+        # Lock-free pre-check (avoid hammering _lock every 1s). _unload_recorder re-checks under _lock.
+        if (
+            not self._models_loaded
+            or self._listening.is_set()
+            or self._disarmed_monotonic is None
+            or time.monotonic() - self._disarmed_monotonic < threshold
+        ):
+            return
+        self._unload_recorder()
+
+    def _unload_recorder(self) -> None:
+        """Tear down the resident recorder to reclaim VRAM (PRD §4.2bis Idle unload). Single-flight.
+
+        Acquires _lock (the SAME lock _load_recorder uses) and re-checks the FULL unload condition
+        UNDER the lock — including self._listening.is_set() — so an arm that raced this call (between
+        the watchdog's lock-free pre-check and here) ABORTS the unload. The bounded teardown
+        (_bounded_shutdown) runs UNDER _lock so a concurrent arm's _load_recorder() blocks on this
+        lock, waits for teardown, then loads fresh (an arm never sees a half-torn-down recorder).
+        _bounded_shutdown is bounded (~<=10s) + best-effort + never touches _lock, so holding _lock
+        across it is safe (no deadlock). threshold<=0 is handled by _maybe_idle_unload; this method
+        also guards for safety if called directly.
+
+        After teardown: _recorder=None, _models_loaded=False, phase 'unloaded', models_loaded False
+        (so voicectl status reports it via P1.M2.T2.S1's surface). The run() loop then sees
+        _recorder is None -> idle (~0 VRAM); the next arm reloads via _load_recorder().
+        """
+        threshold = self._cfg.asr.auto_unload_idle_seconds
+        with self._lock:
+            if (
+                not self._models_loaded                     # nothing resident (or a load/unload beat us)
+                or self._listening.is_set()                 # user armed — abort the unload (race guard)
+                or self._disarmed_monotonic is None         # never disarmed (shouldn't happen here)
+                or threshold <= 0                           # disabled
+                or time.monotonic() - self._disarmed_monotonic < threshold  # not yet
+            ):
+                return
+            logger.info(
+                "voice-typing idle-unload: %.1fs disarmed; unloading models", threshold,
+            )
+            # _bounded_shutdown reads self._recorder (still set) + never touches _lock -> safe under _lock.
+            self._bounded_shutdown()
+            self._recorder = None
+            self._models_loaded = False
+            self._feedback.set_phase("unloaded")          # P1.M2.T2.S1 surface (CONSUME, don't re-add)
+            self._feedback.set_models_loaded(False)       # P1.M2.T2.S1 surface
 
     def _refresh_mic_status(self, *, force: bool = False) -> None:
         """Run the mic probe (real or injected) and store ok/error. NEVER raises.

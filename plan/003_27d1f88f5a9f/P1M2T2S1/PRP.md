@@ -57,7 +57,7 @@ _Pass._ A developer who has never seen this repo can implement it from this PRP 
 ### Documentation & References
 
 ```yaml
-# MUST READ — the T1.S1-already-landed fact, exact edit sites, the 4 breaking tests, rendering design
+# MUST READ — the T1.S1-already-landed fact, exact edit sites, the 5 breaking tests (incl. the _FakeFeedback stub), rendering design
 - docfile: plan/003_27d1f88f5a9f/P1M2T2S1/research/expose_phase_models_loaded.md
   why: "§1 DECISIVE: T1.S1 already shipped the 4 set_phase transitions (table w/ line numbers) + daemon
         _models_loaded/_load_error attrs; THIS task is a clean delta (add set_models_loaded alongside,
@@ -114,7 +114,7 @@ _Pass._ A developer who has never seen this repo can implement it from this PRP 
   critical: "Keep 'listening:' FIRST (existing substring tests). Use .get(..., default) for every new field so
              an old/minimal response never KeyErrors. The models line keeps the model-name substrings."
 
-# THE TEST FILES — the 4 breaking assertions + fixtures
+# THE TEST FILES — the 5 breaking sites (4 assertions + the _FakeFeedback stub) + fixtures
 - file: tests/test_feedback.py
   why: "Line 129 test_state_shape_has_exactly_the_five_fields + line 433 test_snapshot_returns_a_copy_with_the_
         five_state_keys assert the EXACT key set (no models_loaded). Both must add models_loaded."
@@ -644,7 +644,7 @@ def test_format_status_shows_unloaded_state_and_load_error():
     assert "(loaded)" not in text                    # marker flips, not appended
 ```
 
-> **Why these edits:** F1-F4 add the feedback field + method + docs. D1-D4 add `set_models_loaded` alongside T1.S1's existing `set_phase` (the clean delta — never duplicating phase logic). D5 + C1 expose the 3 fields through status_snapshot + ctl. T1-T4 fix the 4 breaking key-set assertions + add coverage for the unloaded/load-error path. The design keeps every existing substring assertion true (test_voicectl uses `in text`, not exact equality).
+> **Why these edits:** F1-F4 add the feedback field + method + docs. D1-D4 add `set_models_loaded` alongside T1.S1's existing `set_phase` (the clean delta — never duplicating phase logic). D5 + C1 expose the 3 fields through status_snapshot + ctl. T1-T5 fix the 5 breaking sites (4 key-set assertions + the _FakeFeedback stub) + add coverage for the unloaded/load-error path. The design keeps every existing substring assertion true (test_voicectl uses `in text`, not exact equality).
 
 ### Implementation Patterns & Key Details
 

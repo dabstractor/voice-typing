@@ -46,6 +46,7 @@ def test_defaults_match_prd_4_5():
     assert cfg.asr.post_speech_silence_duration == 0.6
     assert cfg.asr.realtime_processing_pause == 0.15
     assert cfg.asr.auto_stop_idle_seconds == 30.0
+    assert cfg.asr.auto_unload_idle_seconds == 1800.0  # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)
     # [output]
     assert cfg.output.backend == "wtype"
     assert cfg.output.tmux_target == ""

@@ -57,6 +57,10 @@ class AsrConfig:
     realtime_processing_pause: float = 0.15    # partials cadence (seconds)
     auto_stop_idle_seconds: float = 30.0       # auto-disarm after this many seconds of no recognized
                                                # speech (partials reset the clock); 0 disables
+    auto_unload_idle_seconds: float = 1800.0   # PRD §4.2bis: after this many seconds DISARMED with
+                                               # models loaded, tear down the recorder to free VRAM
+                                               # (~0); the clock starts on disarm and resets on arm.
+                                               # 0 disables (models stay resident until quit)
 
 
 @dataclass
