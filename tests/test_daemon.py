@@ -2058,3 +2058,224 @@ def test_load_recorder_single_flight_one_build_under_concurrency(monkeypatch):
     t2.join(2.0)
     assert built["n"] == 1           # exactly ONE build (single-flight)
     assert results == [True, True]   # both callers see success (2nd waited for the 1st)
+
+
+# P1.M3.T1.S2 — teardown-vs-load race safety (PRD §4.2bis). Unit tests using fakes; NO CUDA.
+#
+# Verifies: an arm (start) racing an in-flight idle-unload teardown BLOCKS on the SAME single-flight
+# self._lock the teardown holds, waits, then loads a FRESH recorder (it can never see a half-torn-down
+# recorder); the wait is bounded (the teardown routes through _bounded_shutdown). Reuses _StubRecorder
+# / _make_daemon / _wait_for / module-level threading + _time defined earlier in this file.
+
+
+class _ControllableShutdownRecorder(_StubRecorder):
+    """shutdown() blocks until `release` is set, signalling `started` on entry.
+
+    Lets a test hold _unload_recorder() inside the REAL _bounded_shutdown() (and thus holding
+    self._lock) for a controlled window, then release it. release.wait(5.0) is a belt-and-suspenders
+    safety so a test bug never hangs the suite (the real _bounded_shutdown also caps at 10s and its
+    worker thread is daemon=True -> dies with the process).
+    """
+
+    def __init__(self, started, release):
+        super().__init__()
+        self._started = started
+        self._release = release
+
+    def shutdown(self):  # type: ignore[override]
+        self._started.set()           # signal: _bounded_shutdown is now running under _lock
+        self._release.wait(5.0)       # bounded: never hang the suite on a forgotten release.set()
+        self.shutdowns += 1
+
+
+def _idle_unloaded_loaded_daemon(*, recorder=None, threshold=0.001):
+    """A LOADED daemon, DISARMED, with _disarmed_monotonic far in the past + a tiny threshold.
+
+    So _unload_recorder()'s re-check passes when called DIRECTLY (the idle-unload fire condition,
+    PRD §4.2bis) WITHOUT sleeping: time.monotonic() - 0.0 is huge vs any tiny positive threshold.
+    threshold must be > 0 (0 disables idle-unload -> _unload_recorder aborts).
+    """
+    cfg = VoiceTypingConfig()
+    cfg.asr.auto_unload_idle_seconds = threshold
+    d, _fb, _rec, _be = _make_daemon(recorder=recorder, cfg=cfg)
+    with d._lock:
+        d._disarm()                       # clears _listening; stamps _disarmed_monotonic (P1.M3.T1.S1)
+        d._disarmed_monotonic = 0.0       # push the stamp far into the past -> time re-check passes NOW
+    assert d._models_loaded is True
+    assert d.is_listening() is False
+    return d
+
+
+def test_arm_racing_unload_waits_then_loads_fresh(monkeypatch):
+    """Clause (a)+(b): an arm (start) racing an in-flight idle-unload teardown BLOCKS on self._lock
+    until _unload_recorder releases it, then _load_recorder() builds FRESH and arms. PRD §4.2bis."""
+    started = threading.Event()
+    release = threading.Event()
+    original = _ControllableShutdownRecorder(started, release)
+    d = _idle_unloaded_loaded_daemon(recorder=original)
+    assert d._recorder is original
+
+    built = []
+
+    def fake_build(*a, **k):
+        rec = _StubRecorder()
+        built.append(rec)
+        return rec
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+
+    # U: the idle-unload teardown. Acquires _lock, runs the REAL _bounded_shutdown (whose
+    # done.wait blocks because recorder.shutdown() blocks on `release`) -> HOLDS _lock.
+    def unload():
+        d._unload_recorder()
+
+    t_u = threading.Thread(target=unload, name="test-unload", daemon=True)
+    t_u.start()
+    assert started.wait(2.0), "unload never entered _bounded_shutdown (lock not held yet)"
+
+    # S: a racing arm. start() -> _load_recorder() -> `with self._lock:` BLOCKS (U holds it).
+    armed = threading.Event()
+
+    def arm():
+        d.start()
+        armed.set()
+
+    t_s = threading.Thread(target=arm, name="test-arm", daemon=True)
+    t_s.start()
+    _time.sleep(0.15)  # clear window: an unblocked arm would have armed by now
+    assert not armed.is_set(), "arm proceeded while teardown still held the lock (race not serialized)"
+    assert t_s.is_alive(), "arm thread should still be blocked on the single-flight lock"
+    assert d._lock.locked(), "the single-flight lock must be held by the teardown"
+
+    # Release the teardown -> U nulls the recorder + frees the lock -> S loads FRESH + arms.
+    release.set()
+    assert armed.wait(3.0), "arm did not complete after teardown released the lock"
+    t_u.join(2.0)
+    t_s.join(2.0)
+    assert not t_u.is_alive() and not t_s.is_alive(), "threads did not finish"
+
+    # Clause (b): a FRESH recorder is resident, models loaded, listening on.
+    assert len(built) == 1, "exactly one fresh build after the unload"
+    assert d._recorder is built[0], "resident recorder must be the FRESH build, not the torn-down one"
+    assert d._recorder is not original, "the torn-down recorder must NOT be resident"
+    assert d._models_loaded is True
+    assert d.is_listening() is True
+
+
+def test_recorder_never_half_torn_down_during_race(monkeypatch):
+    """Clause (c): throughout the unload->reload race, self._recorder is ALWAYS either None or a
+    fully-built recorder — never a partial/garbage value. CPython attribute reads are atomic; only
+    None + complete build_recorder results are ever assigned."""
+    started = threading.Event()
+    release = threading.Event()
+    d = _idle_unloaded_loaded_daemon(recorder=_ControllableShutdownRecorder(started, release))
+
+    def fake_build(*a, **k):
+        # A tiny delay WIDENS the None window (between U's _recorder=None and S's fresh assignment)
+        # so the 1ms sampler reliably observes it.
+        _time.sleep(0.05)
+        return _StubRecorder()
+
+    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+
+    samples = []
+    stop = threading.Event()
+
+    def sampler():
+        while not stop.is_set():
+            samples.append(d._recorder)   # atomic attribute read
+            _time.sleep(0.001)
+
+    t_poll = threading.Thread(target=sampler, name="test-sampler", daemon=True)
+    t_poll.start()
+
+    def unload():
+        d._unload_recorder()
+
+    threading.Thread(target=unload, name="test-unload2", daemon=True).start()
+    assert started.wait(2.0)
+    d.start()  # racing arm (loads fresh after the unload)
+    assert _wait_for(lambda: any(r is None for r in samples), timeout=3.0), \
+        "sampler never observed the torn-down None state"
+    _time.sleep(0.1)  # let the reload land + the sampler observe the fresh resident recorder
+    stop.set()
+    t_poll.join(1.0)
+
+    assert samples, "sampler never observed the recorder"
+    for rec in samples:
+        assert rec is None or (
+            callable(getattr(rec, "text", None))
+            and callable(getattr(rec, "set_microphone", None))
+            and callable(getattr(rec, "abort", None))
+            and callable(getattr(rec, "shutdown", None))
+        ), f"observed a non-None, non-complete recorder: {rec!r}"
+    assert any(r is None for r in samples), "never saw the torn-down None state"
+    assert any(r is not None for r in samples), "never saw a resident recorder"
+
+
+def test_load_and_unload_serialize_on_the_same_single_flight_lock():
+    """Clause (a) mechanism: _load_recorder()'s FIRST action is `with self._lock:` — the SAME lock
+    _unload_recorder() holds during teardown. So while the lock is held, a load physically CANNOT
+    proceed. Proven directly, without timing."""
+    d, _fb, _rec, _be = _make_daemon()  # loaded, not listening (injected _StubRecorder)
+    assert d._models_loaded is True
+
+    # Hold the single-flight lock from the test (simulating an in-flight teardown holding it).
+    assert d._lock.acquire(blocking=False) is True
+
+    proceeded = threading.Event()
+
+    def load():
+        d._load_recorder()  # first line is `with self._lock:` -> blocks here
+        proceeded.set()
+
+    t = threading.Thread(target=load, name="test-load-blocked", daemon=True)
+    t.start()
+    _time.sleep(0.15)
+    assert not proceeded.is_set(), "_load_recorder proceeded without the single-flight lock"
+    assert t.is_alive(), "load must be blocked on the lock the teardown holds"
+
+    d._lock.release()  # teardown releases -> load proceeds (resident -> immediate True)
+    assert proceeded.wait(2.0), "load did not proceed after the lock was released"
+    t.join(2.0)
+    assert d._models_loaded is True  # resident -> load is a no-op True
+
+
+def test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded(monkeypatch):
+    """Clause (d): _unload_recorder() tears down via _bounded_shutdown() (bounded <=10s; proven in
+    test_bounded_shutdown_force_cleans_on_timeout). So a racing arm's wait is bounded by THAT
+    teardown, never the legacy ~90s recorder.shutdown() wedge (PRD §8). Asserts routing + a bounded
+    completion window."""
+    d = _idle_unloaded_loaded_daemon()
+    real = d._bounded_shutdown
+    calls = []
+
+    def recording_bounded(timeout=10.0):
+        calls.append(timeout)
+        return real(timeout)  # delegate so the recorder is actually shut down (stays hermetic)
+
+    monkeypatch.setattr(d, "_bounded_shutdown", recording_bounded)
+
+    start = _time.monotonic()
+    d._unload_recorder()
+    elapsed = _time.monotonic() - start
+
+    assert calls == [10.0], f"_unload_recorder did not route through _bounded_shutdown(10.0): {calls}"
+    assert elapsed < 2.0, f"unload took {elapsed:.2f}s (a racing arm would wait this long)"
+    assert d._models_loaded is False and d._recorder is None, "unload did not complete"
+
+
+def test_armed_state_aborts_unload_via_listening_recheck():
+    """Reverse race (PRD §4.2bis + S1 Critical #2): if an arm wins the race to the lock, _unload_recorder's
+    `_listening.is_set()` re-check (under the lock) ABORTS the unload — the armed state wins and the
+    recorder stays resident. The other half of 'an arm can never see a half-torn-down recorder'."""
+    d = _idle_unloaded_loaded_daemon()
+    # An arm wins the race JUST BEFORE the unload acquires the lock -> listening is now ON.
+    with d._lock:
+        d._arm()
+    assert d.is_listening() is True
+
+    d._unload_recorder()  # re-check sees _listening.is_set() -> abort
+
+    assert d._models_loaded is True, "unload must abort when an arm raced in (listening is on)"
+    assert d._recorder is not None, "the recorder must stay resident (unload aborted)"

@@ -175,7 +175,7 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Idle-unload watchdog + auto_unload_idle_seconds config knob",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add the config knob + a watchdog thread that tears down the recorder after auto_unload_idle_seconds of disarmed idle. The clock starts when the mic disarms, resets on any arm. Teardown uses the M1 bounded shutdown under the same single-flight lock as load.",
               "subtasks": [
                 {
@@ -200,7 +200,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Verify teardown-vs-load race safety — arm racing idle-unload teardown waits then loads fresh",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -224,7 +224,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "Fast pytest: lifecycle transitions, single-flight load, load-failure, idle-unload fire/reset/disable",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S2"
