@@ -43,13 +43,19 @@ The script is idempotent and re-runnable. It does, in order:
 7. Prints the usage line, the tmux snippet, the Hyprland source line, and the logs
    command.
 
-When install.sh finishes, the daemon is **running and NOT listening**. It never
-hot-mics on boot. Run `voicectl toggle` (or the hotkey) to arm the mic.
+When install.sh finishes, the daemon is **running, NOT listening, and NOT loaded**
+(~0 VRAM). It never hot-mics on boot and loads no models until the first
+`voicectl toggle` (~1-3s). Run `voicectl toggle` (or the hotkey) to arm the mic.
 
 ## First run
 
 A real-microphone smoke you run by hand. Full paths are used because the desktop zsh
 aliases `tmux`, `python3`, and `pip`.
+
+The first `voicectl toggle` (or `start`) each session takes ~1-3s to load the
+models — `voicectl` prints `loading models… (first arm, ~1–3 s)` to stderr while
+it loads. Subsequent arms are instant (models stay resident until `quit` or 30 min
+disarmed; see [Model lifecycle & VRAM](#model-lifecycle--vram)).
 
 ```
 systemctl --user start voice-typing
@@ -130,6 +136,7 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `asr.post_speech_silence_duration` | `0.6` | seconds of silence before a final is emitted. Lower is snappier but can cut deliberate pauses. |
 | `asr.realtime_processing_pause` | `0.15` | cadence of the live partial previews. Lower is more responsive; higher uses less CPU. |
 | `asr.auto_stop_idle_seconds` | `30.0` | auto-disarm (stop listening) after this many seconds with no recognized speech — partials reset the clock while you talk, so it only fires when you truly go silent (a forgotten hot-mic guard, not a mid-thought cut). `0` disables. Fires the normal `■` stop popup + a journal line. |
+| `asr.auto_unload_idle_seconds` | `1800.0` | after this many seconds DISARMED (models loaded, not listening), tear down the recorder to free VRAM (~0). The clock starts on disarm (manual stop, toggle-off, or the 30s auto-stop) and resets on any arm; time listening doesn't count. `0` disables (models then stay resident until `quit`). The next arm reloads (~1-3s). See Model lifecycle. |
 | `asr.device` | `"cuda"` | `"cuda"` or `"cpu"`. Auto-falls-back to `cpu` if no CUDA device is visible. |
 | `asr.final_model` | `"distil-large-v3"` | the model whose output gets typed. |
 | `asr.realtime_model` | `"small.en"` | the fast model that produces live partials. |
@@ -268,23 +275,50 @@ Typical CUDA output:
 
 ```
 listening: on
+phase: listening
 partial: this is what i am say
 last: Previous sentence.
 uptime: 42.3s
 device: cuda (float16)
-models: distil-large-v3 + small.en
+models: distil-large-v3 + small.en (loaded)
 mic: ok
 ```
 
-On CPU fallback, `device` shows `cpu (int8)` and `models` shows
-`small.en + tiny.en`. If the mic is unavailable, the last line reads
-`mic: unavailable (<reason>)` instead.
+`phase:` is `unloaded` at boot (no models), `loading` on the first arm, then
+`idle`/`listening`; the `(loaded)`/`(not loaded)` marker on the `models:` line
+tells you whether models are resident. On CPU fallback, `device` shows `cpu (int8)`
+and `models` shows `small.en + tiny.en (loaded)` once the CPU recorder is built.
+If the mic is unavailable, the last line reads `mic: unavailable (<reason>)`
+instead.
 
-Confirm the models are resident in GPU VRAM:
+### Model lifecycle & VRAM
+
+At boot the daemon is **unloaded**: no recorder, no CUDA context, **~0 VRAM** —
+models do NOT load at boot. The first `voicectl start`/`toggle` (or hotkey) each
+session loads `small.en` + `distil-large-v3` onto the GPU (~1-3s); `voicectl`
+prints `loading models… (first arm, ~1–3 s)` to stderr while it loads. After that
+first arm the recorder stays **resident** (~1.5-3 GB VRAM) so later arms are
+instant. It is torn down on `quit`/shutdown AND after
+`asr.auto_unload_idle_seconds` (default 1800s = 30 min) DISARMED — so the load cost
+is paid once per ~30 min of actual use, not once per boot. The clock starts on
+disarm (manual stop, toggle-off, or the 30s auto-stop) and resets on any arm; time
+listening doesn't count. The next arm then reloads (~1-3s) like a session's first
+arm.
+
+`voicectl status` surfaces the lifecycle: `phase:` is `unloaded` (boot /
+idle-unloaded), `loading` (first arm), `idle` (loaded, disarmed), or `listening`
+(armed); the `models:` line ends in `(loaded)` or `(not loaded)`. The journal logs
+`voice-typing models loaded (lazy load complete); recorder resident` on load and
+`voice-typing idle-unload: 1800.0s disarmed; unloading models` on idle teardown.
+
+Check VRAM by state:
 
 ```
 nvidia-smi --query-compute-apps=pid,used_memory --format=csv
 ```
+
+At boot / after idle-unload this lists nothing (~0 VRAM); while loaded it shows
+the daemon's process tree (~1.5-3 GB).
 
 Stop or disable the daemon:
 
@@ -292,3 +326,8 @@ Stop or disable the daemon:
 systemctl --user stop voice-typing
 systemctl --user disable voice-typing
 ```
+
+`voicectl quit` and `systemctl --user stop` complete in seconds. Teardown is
+bounded at ≤10s — if `recorder.shutdown()` wedges, the recorder's worker processes
+are force-terminated so VRAM is actually released. The old ~90s systemd stop
+timeout (`Failed with result 'timeout'` / SIGKILL) is gone.

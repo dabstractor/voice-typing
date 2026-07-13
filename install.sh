@@ -171,7 +171,7 @@ fi
 
 echo
 echo "==> [7/7] done — voice-typing installed"
-echo "daemon : running and NOT listening (no hot-mic on boot). Run 'voicectl toggle' to arm the mic."
+echo "daemon : running and NOT listening (~0 VRAM; first 'voicectl toggle' loads models, ~1-3s). Run 'voicectl toggle' to arm the mic."
 echo "CUDA   : ${VERDICT:-unknown}"
 echo "offline: daemon runs fully local (HF_HUB_OFFLINE=1 via launch_daemon.sh) — no network at runtime"
 echo
