@@ -1195,6 +1195,23 @@ class ControlServer:
             except OSError:
                 pass
 
+    def _arm_response(self) -> dict:
+        """Build the response after a start/toggle ARM attempt (PRD §4.2bis / P1.M2.T1.S2).
+
+        After P1.M2.T1.S1, start()/toggle() call _load_recorder() BEFORE arming; on a load failure the arm is
+        suppressed (daemon stays not-listening) and self._load_error is set. Per §4.2bis the arm command MUST
+        then return {"ok":false,"error":...} (NOT ok:true with listening:false, which voicectl would render as a
+        silent 'listening: off'). _load_error is reset by _load_recorder on each fresh attempt and set only on a
+        fresh failure, so a set value read on an arm attempt is always THIS attempt's failure (never stale — see
+        P1.M2.T1.S2 research §4.1). getattr(..., None) keeps the duck-typed test _StubDaemon (no _load_error) on
+        the ok:true path. The 'loading models…' hint itself is printed CLIENT-SIDE by ctl.py during the block;
+        this method only shapes the (eventual) post-load response.
+        """
+        load_error = getattr(self._daemon, "_load_error", None)
+        if load_error and not self._daemon.is_listening():
+            return {"ok": False, "error": f"model load failed: {load_error}"}
+        return {"ok": True, **self._daemon.status_snapshot()}
+
     def _dispatch(self, line: str) -> dict:
         """Parse one request line -> dispatch cmd -> response dict. Never raises (robustness)."""
         try:
@@ -1205,11 +1222,14 @@ class ControlServer:
             return {"ok": False, "error": "request must be a JSON object"}
         cmd = msg.get("cmd")
         if cmd == "toggle":
+            was_listening = self._daemon.is_listening()
             self._daemon.toggle()
+            if not was_listening:            # this toggle attempted to arm -> a load may have failed (§4.2bis)
+                return self._arm_response()
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "start":
             self._daemon.start()
-            return {"ok": True, **self._daemon.status_snapshot()}
+            return self._arm_response()      # ok:false+error if the first arm's model load failed (§4.2bis)
         if cmd == "stop":
             self._daemon.stop()
             return {"ok": True, **self._daemon.status_snapshot()}

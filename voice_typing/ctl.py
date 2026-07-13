@@ -28,6 +28,7 @@ import argparse
 import json
 import socket
 import sys
+import threading
 
 from voice_typing.daemon import _default_control_socket_path  # canonical resolver (P1.M4.T2.S1); reuse, do not duplicate
 
@@ -35,6 +36,11 @@ _COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit")
 # BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
 # so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
 _EX_USAGE: int = 64
+# Seconds an arm command (start/toggle) may block before voicectl prints a 'loading models…' hint to stderr.
+# The FIRST arm blocks ~1–3 s while the daemon lazy-loads models (PRD §4.2bis); a resident arm replies in ms,
+# so this fires ONLY on a real load (no flicker on instant arms). Tuned well below the ~1 s minimum load and
+# well above local socket round-trip latency. (P1.M2.T1.S2.)
+_LOADING_HINT_DELAY: float = 0.3
 
 
 def format_result(cmd: str, response: dict) -> tuple[str, int]:
@@ -105,6 +111,28 @@ def send_command(socket_path: str, cmd: str) -> dict:
     return json.loads(line)         # json.JSONDecodeError is a ValueError subclass
 
 
+def _send_command_with_loading_hint(socket_path: str, cmd: str) -> dict:
+    """send_command for start/toggle: print a 'loading models…' hint to stderr if the daemon doesn't reply
+    within _LOADING_HINT_DELAY (PRD §4.2bis — "voicectl prints a loading models… hint" while the first arm blocks).
+
+    Why CLIENT-SIDE: start()/toggle() block inside the daemon's _load_recorder() (~1–3 s), so the JSON response
+    is produced only AFTER the load completes — an in-band 'loading' signal is impossible under the one-line-
+    request/one-line-response protocol. Why a Timer (not socket timeout): send_command uses makefile('r'),
+    which is incompatible with settimeout. The hint goes to STDERR so stdout (the structured result) stays
+    clean for scripts; the Timer is cancelled in `finally`, so a fast (resident) arm never prints it.
+    """
+    timer = threading.Timer(
+        _LOADING_HINT_DELAY,
+        lambda: print("loading models… (first arm, ~1–3 s)", file=sys.stderr, flush=True),
+    )
+    timer.daemon = True
+    timer.start()
+    try:
+        return send_command(socket_path, cmd)
+    finally:
+        timer.cancel()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """argparse with one optional positional `cmd`. choices validation is intentionally NOT done
     here — main() validates against _COMMANDS so usage errors map to exit 64 (EX_USAGE), not
@@ -152,8 +180,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # 2. Talk to the daemon. Connect OSError -> exit 2; protocol ValueError -> exit 1.
+    #    start/toggle may block ~1–3 s on the first arm while the daemon lazy-loads models (PRD §4.2bis); route
+    #    them through _send_command_with_loading_hint so voicectl prints a 'loading models…' hint if the reply is
+    #    slow (resident arms reply in ms → no hint). stop/status/quit use plain send_command.
     try:
-        response = send_command(socket_path, cmd)
+        if cmd in ("start", "toggle"):
+            response = _send_command_with_loading_hint(socket_path, cmd)
+        else:
+            response = send_command(socket_path, cmd)
     except OSError as exc:                       # FileNotFoundError / ConnectionRefusedError / PermissionError
         print(f"voicectl: daemon not running ({exc.strerror or exc})", file=sys.stderr)
         return 2

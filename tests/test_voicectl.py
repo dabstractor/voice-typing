@@ -14,8 +14,10 @@ NO RealtimeSTT / NO CUDA / NO real VoiceTypingDaemon. Run:
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -234,3 +236,122 @@ def test_main_returns_int(monkeypatch, tmp_path):
     # main()'s return type is the exit-code contract — it must be an int in every branch.
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))   # socket absent -> exit 2 path
     assert isinstance(ctl.main(["status"]), int)
+# ===========================================================================
+# P1.M2.T1.S2 — 'loading models…' hint (client-side, during the blocking first arm)
+# + _dispatch ok:false on model-load failure (PRD §4.2bis). Stubs simulate T1.S1's
+# contract (start() blocks on _load_recorder; _load_error set on failure) so these
+# tests are hermetic — NO GPU / NO RealtimeSTT.
+# ===========================================================================
+
+
+class _SlowStartStubDaemon(_StubDaemon):
+    """A _StubDaemon whose start() blocks briefly to simulate the ~1–3 s lazy model load."""
+    def __init__(self, delay: float = 0.4):
+        super().__init__()
+        self._delay = delay
+
+    def start(self):
+        time.sleep(self._delay)   # simulate _load_recorder() blocking the arm (PRD §4.2bis)
+        super().start()
+
+
+class _FailingLoadStubDaemon(_StubDaemon):
+    """Simulates T1.S1's failed-load state: start()/toggle()-arm do NOT arm + _load_error is set (§4.2bis).
+
+    Mirrors the REAL T1.S1 contract (voice_typing/daemon.py): on an arm attempt both start() and the
+    arm-branch of toggle() call _load_recorder() FIRST and, on failure, return early WITHOUT arming (the
+    daemon stays not-listening, _load_error set). _StubDaemon.toggle() unconditionally flips _listening,
+    which would NOT model a failed arm — so override it to suppress the arm on the not-listening branch
+    (the only branch this stub is used on; it starts not-listening and never arms).
+    """
+    def __init__(self, error: str = "cuda init failed: no device"):
+        super().__init__()
+        self._load_error = error   # the attr P1.M2.T1.S1 adds on a failed _load_recorder()
+
+    def start(self):
+        self.calls.append("start")
+        # load failed → arm suppressed → stays not-listening (mirrors T1.S1 start() when _load_recorder() is False)
+
+    def toggle(self):
+        # Mirror T1.S1 toggle(): a disarm (was listening) still disarms; an ARM attempt (was not listening)
+        # would load → fail → stay not-listening. This stub is never armed, so any toggle is an arm attempt
+        # that fails → do NOT flip _listening (the real _arm() is never reached).
+        self.calls.append("toggle")
+        if self._listening:
+            self._listening = False   # disarm path (defensive; not used by the failing-load tests)
+        # else: arm attempt with a failed load → stays not-listening (mirrors T1.S1 toggle() early-return)
+
+
+def _server_for(stub, monkeypatch, tmp_path):
+    """A ControlServer on a tmp socket backed by `stub` (mirrors the running_server fixture)."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    socket_path = str(tmp_path / "voice-typing" / "control.sock")
+    srv = daemon.ControlServer(stub, socket_path=socket_path)
+    srv.start()
+    return srv, socket_path
+
+
+def test_start_prints_loading_hint_when_arm_is_slow(monkeypatch, tmp_path, capsys):
+    """voicectl start prints 'loading models…' to stderr when the arm blocks (PRD §4.2bis)."""
+    monkeypatch.setattr(ctl, "_LOADING_HINT_DELAY", 0.02)   # fire well under the stub's 0.4 s
+    srv, _socket_path = _server_for(_SlowStartStubDaemon(0.4), monkeypatch, tmp_path)
+    try:
+        code = ctl.main(["start"])
+    finally:
+        srv.stop()
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "listening: on" in out
+    assert "loading models" in err
+
+
+def test_start_does_not_print_loading_hint_for_fast_arm(capsys, running_server):
+    """A resident (instant) arm replies before the threshold → no hint (no flicker)."""
+    code = ctl.main(["start"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "listening: on" in out
+    assert "loading models" not in err
+
+
+def test_status_and_stop_do_not_print_loading_hint(capsys, running_server):
+    """status/stop use plain send_command → never the loading-hint wrapper."""
+    assert ctl.main(["status"]) == 0
+    assert ctl.main(["stop"]) == 0
+    _out, err = capsys.readouterr()
+    assert "loading models" not in err
+
+
+def test_start_load_failure_returns_ok_false_and_exit_one(monkeypatch, tmp_path, capsys):
+    """A failed model load → _dispatch ok:false → voicectl 'error:' + exit 1 (PRD §4.2bis)."""
+    srv, _socket_path = _server_for(_FailingLoadStubDaemon(), monkeypatch, tmp_path)
+    try:
+        code = ctl.main(["start"])
+    finally:
+        srv.stop()
+    out, _err = capsys.readouterr()
+    assert code == 1
+    assert "error" in out and "model load failed" in out
+
+
+def test_dispatch_start_returns_ok_false_with_load_error():
+    """Unit: _dispatch('start') on a failed-load daemon → {'ok':False,'error':...} (the §4.2bis contract)."""
+    srv = daemon.ControlServer(_FailingLoadStubDaemon(), socket_path="/tmp/unused-p1m2t1s2")
+    resp = srv._dispatch(json.dumps({"cmd": "start"}))
+    assert resp["ok"] is False
+    assert "model load failed" in resp["error"]
+
+
+def test_dispatch_toggle_arm_failure_returns_ok_false():
+    """A toggle that attempts to arm + load fails → ok:false (was_listening=False path)."""
+    srv = daemon.ControlServer(_FailingLoadStubDaemon(), socket_path="/tmp/unused-p1m2t1s2")
+    resp = srv._dispatch(json.dumps({"cmd": "toggle"}))
+    assert resp["ok"] is False and "model load failed" in resp["error"]
+
+
+def test_dispatch_start_ok_true_when_no_load_error_attr():
+    """The duck-typed _StubDaemon (no _load_error) → ok:true (existing-behavior guard)."""
+    srv = daemon.ControlServer(_StubDaemon(), socket_path="/tmp/unused-p1m2t1s2")
+    resp = srv._dispatch(json.dumps({"cmd": "start"}))
+    assert resp["ok"] is True
+    assert resp["listening"] is True   # _StubDaemon.start() arms
