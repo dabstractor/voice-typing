@@ -8,7 +8,7 @@
 1. `feedback.py` — `_state` default: `phase` `idle`→`unloaded` + add `models_loaded: False`; NEW `set_models_loaded(bool)` method; docstring updates ([Mode A]).
 2. `daemon.py` — 4 `set_models_loaded(...)` calls alongside the existing `set_phase` calls (construction @463, load-start @506, success @542, failure @549); `status_snapshot()` adds `phase`/`models_loaded`/`load_error` (+ docstring).
 3. `ctl.py` — `format_result` status branch: `phase:` line + `(loaded)`/`(not loaded)` marker on the models line + conditional `load error:` line.
-4. tests — `test_feedback.py` (2 key-set assertions), `test_daemon.py` (`test_status_snapshot_keys_and_cuda_values`), `test_voicectl.py` (`_STATUS_ON` + augmented test + 1 new test).
+4. tests — `test_feedback.py` (2 key-set assertions), `test_daemon.py` (`test_status_snapshot_keys_and_cuda_values` **+ add `set_models_loaded` to the `_FakeFeedback` stub** — without it every `_make_daemon` construction fails AttributeError), `test_voicectl.py` (`_STATUS_ON` + augmented test + 1 new test).
 
 **Success Definition**:
 - (a) `Feedback._state` has `models_loaded` (default False) and boot `phase` `unloaded`; `set_models_loaded(bool)` writes + never notifies.
@@ -45,8 +45,8 @@ Add a `models_loaded` field + `set_models_loaded()` to `feedback.py` (boot phase
 - [ ] `_load_recorder()` calls `set_models_loaded(False)` at load-start, `set_models_loaded(True)` at success, `set_models_loaded(False)` at failure (each alongside the existing `set_phase`).
 - [ ] `status_snapshot()` returns `phase`, `models_loaded`, `load_error` (13 keys total).
 - [ ] ctl `format_result("status", ...)` renders a `phase:` line, a `(loaded)`/`(not loaded)` marker, and a conditional `load error:` line.
-- [ ] The 4 updated tests + 1 new test pass; all other tests pass unchanged.
-- [ ] `.venv/bin/python -m pytest tests/ --ignore=tests/test_feed_audio.py -q` → 0 failed.
+- [ ] The 5 test edits (incl. `_FakeFeedback.set_models_loaded` stub — Edit T5) + 1 new test pass; all other tests pass unchanged.
+- [ ] `.venv/bin/python -m pytest tests/ --ignore=tests/test_feed_audio.py -q` → 0 failed (baseline 292 → 293 with the new test).
 
 ## All Needed Context
 
@@ -162,9 +162,12 @@ _Pass._ A developer who has never seen this repo can implement it from this PRP 
 #   T1.S2's _arm_response spreads **status_snapshot() so the 3 new keys auto-flow to start/toggle responses.
 #   (Research §2.)
 
-# CRITICAL #4 — FOUR tests break, not one. The item flagged only test_status_snapshot_keys_and_cuda_values, but
-#   THREE more assert exact key sets: test_feedback.py:129 (state.keys), :433 (snap.keys), and test_daemon.py:971
-#   (status_snapshot set). ALL must add the new field(s). (Research §4.)
+# CRITICAL #4 — FIVE test edits required, not one. The item flagged only test_status_snapshot_keys_and_cuda_values,
+#   but FOUR more break: (a) test_feedback.py:129 (state.keys) and :433 (snap.keys) assert exact key sets
+#   (add models_loaded); (b) test_daemon.py:971 status_snapshot set (add phase/models_loaded/load_error);
+#   AND (c) VERIFIED IN QA: test_daemon.py's _FakeFeedback STUB lacks set_models_loaded, so EVERY _make_daemon
+#   construction fails AttributeError at daemon.py:464 (construction calls set_models_loaded). You MUST add a
+#   set_models_loaded method to _FakeFeedback (Edit T5) or ~60 daemon tests fail. (Research §4; QA-proven.)
 
 # CRITICAL #5 — test_voicectl status tests use SUBSTRING checks (in text), NOT exact equality. Adding a 'phase:'
 #   line + '(loaded)' marker keeps every existing substring true (listening: on, distil-large-v3, small.en, cuda,
@@ -213,13 +216,16 @@ Task 4: EDIT voice_typing/ctl.py — format_result status branch (Edit C1)
   - C1: +phase/models_loaded/load_error parses; +phase: line; +(loaded)/(not loaded) marker; conditional load error.
   - Keep listening: first; .get(...) for every new field. EXACT oldText→newText: see Edit C1 below.
 
-Task 5: EDIT the 4 test assertions + 1 new test (Edits T1-T4)
+Task 5: EDIT the 5 test sites + 1 new test (Edits T1-T5)
   - T1 (test_feedback.py:129): state.keys +models_loaded.
   - T2 (test_feedback.py:433): snap.keys +models_loaded.
   - T3 (test_daemon.py:971): set(s) +phase/models_loaded/load_error + value asserts.
   - T4 (test_voicectl.py): _STATUS_ON +3 fields; augment test_format_status_multiline; +test_format_status_shows_
     unloaded_state_and_load_error.
-  - EXACT oldText→newText: see Edits T1-T4 below.
+  - T5 (test_daemon.py _FakeFeedback stub): +models_loaded recording list + set_models_loaded method. REQUIRED —
+    without it every _make_daemon construction fails (daemon.py:464 calls set_models_loaded; _DaemonFakeFeedback
+    inherits _FakeFeedback which lacks it). QA-proven (60+ failures without it).
+  - EXACT oldText→newText: see Edits T1-T5 below.
 ```
 
 ### Edits — verbatim oldText → newText
@@ -504,6 +510,39 @@ Consumed by voice_typing/status.sh (the tmux status-right helper) and by voicect
         return text, 0
 ```
 
+#### Edit T5 — `tests/test_daemon.py` `_FakeFeedback` stub (REQUIRED — QA-proven)
+
+The daemon calls `self._feedback.set_models_loaded(...)` at construction (Edit D1). `_make_daemon` constructs with `_DaemonFakeFeedback`, which inherits from `_FakeFeedback` (and calls `super().__init__()`). `_FakeFeedback` has `set_phase` but NOT `set_models_loaded` → **every `_make_daemon`-based test fails AttributeError** without this edit. Add the method + a recording list (mirroring `phases`).
+
+`oldText`:
+```
+    def __init__(self) -> None:
+        self.partials: list[str] = []
+        self.phases: list[str] = []
+
+    def update_partial(self, text: str) -> None:
+        self.partials.append(text)
+
+    def set_phase(self, phase: str) -> None:
+        self.phases.append(phase)
+```
+`newText`:
+```
+    def __init__(self) -> None:
+        self.partials: list[str] = []
+        self.phases: list[str] = []
+        self.models_loaded: list[bool] = []   # P1.M2.T2.S1: records set_models_loaded calls
+
+    def update_partial(self, text: str) -> None:
+        self.partials.append(text)
+
+    def set_phase(self, phase: str) -> None:
+        self.phases.append(phase)
+
+    def set_models_loaded(self, loaded: bool) -> None:   # P1.M2.T2.S1: mirror the real Feedback method
+        self.models_loaded.append(loaded)
+```
+
 #### Edit T1 — `tests/test_feedback.py:129` (state keys)
 
 `oldText`:
@@ -735,7 +774,7 @@ PY
 
 - ❌ Don't re-add/move/duplicate T1.S1's `set_phase` transitions — they're already landed (Critical #1). Only ADD `set_models_loaded` alongside.
 - ❌ Don't touch `_load_recorder`'s build/lock/Condition/CPU-fallback logic (Critical #2) or T1.S2's `_arm_response`/`_dispatch`/loading-hint (Critical #3).
-- ❌ Don't forget the **4** breaking tests (the item flagged 1; there are 4 — Critical #4): test_feedback:129, test_feedback:433, test_daemon:971, + _STATUS_ON.
+- ❌ Don't forget the **5** test edits (the item flagged 1; QA found 5 — Critical #4): test_feedback:129, test_feedback:433, test_daemon:971, test_voicectl _STATUS_ON, AND the `_FakeFeedback.set_models_loaded` stub (Edit T5 — without it ~60 daemon tests fail AttributeError at construction).
 - ❌ Don't change test_voicectl's existing substring assertions to exact equality — they're `in text` by design (Critical #5); just keep the model-name substrings present.
 - ❌ Don't make `set_models_loaded` notify — model-lifecycle is not a start/final/stop event (Critical #7).
 - ❌ Don't add phase-value validation — `set_phase` accepts any string; `loading`/`unloaded` just work (Critical #7).
