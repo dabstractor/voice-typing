@@ -20,7 +20,7 @@ Decisions already made with the user (do not revisit):
 - **Activation:** toggle (start/stop via a control command; hotkey binding is Phase 2). Never auto-stops on silence.
 - **Feedback:** live partials go to a status display (state file + `hyprctl notify`; tmux status integration provided). Only finalized text is typed. Do NOT backspace-correct inside the target window.
 - **Output scope:** type into whatever window has focus (uinput/virtual-keyboard), with an alternative explicit `tmux send-keys` backend.
-- **GPU:** keep models resident on the GPU in a long-running daemon (~2–4 GB VRAM is acceptable on the 12 GB card).
+- **GPU:** models load **lazily on first arm** (`voicectl toggle`/`start`), NOT at daemon boot. A boot where voice typing is never armed consumes ~0 VRAM; after the first arm the models stay resident so re-arms are instant — until 30 min of disarmed idle, when they unload to reclaim VRAM (§4.2bis Idle unload); so the load cost is paid once per ~30 min of actual use, not once per boot. Trade-off accepted: the first arm each session blocks ~1–3 s while faster-whisper loads `distil-large-v3` + `small.en` into VRAM. Rationale: the daemon autostarts on every login but is used rarely — loading at boot parked ~2.8 GB on the GPU 24/7 for nothing. Full lifecycle in §4.2bis.
 
 ---
 
@@ -102,20 +102,23 @@ A full survey of the 2026 ecosystem was done (RealtimeSTT, nerd-dictation, whisp
 
 Single process, three concerns:
 
-1. **Recorder loop (main thread).**
+1. **Recorder loop (main thread).** The `AudioToTextRecorder` is constructed **lazily on first arm** (§4.2bis), not at daemon boot; until then `recorder is None` and the loop has nothing to transcribe.
    ```python
-   recorder = AudioToTextRecorder(**cfg_to_kwargs(cfg))   # see §4.4 for exact kwargs
+   recorder = None                      # built on first arm — see §4.2bis (lazy load)
    while not shutdown_requested:
+       if recorder is None:
+           time.sleep(0.05); continue   # no models loaded yet → idle, ~0 VRAM
        if listening.is_set():
            recorder.text(on_final)      # blocks until one utterance finalizes, then returns → loop continues listening
        else:
            time.sleep(0.05)
-   recorder.shutdown()
+   if recorder is not None:
+       recorder.shutdown()
    ```
    `on_final(text)` → `textproc.clean()` → if non-empty: typing backend types `text + " "`; feedback shows the final; log with timestamps.
    CRITICAL: the loop never exits on silence. `recorder.text()` returning is *normal segmentation*, not session end. Verify RealtimeSTT v1.x API against its README before coding — method names above are from v1.0.x.
 
-2. **Listening gate.** A `threading.Event` (`listening`). Toggle/start/stop flips it. When stopped, also call `recorder.abort()` / set `recorder.listen_start = 0` — check the RealtimeSTT API for the sanctioned way to discard in-flight audio; at minimum, suppress `on_final` output while not listening (gate check inside `on_final` too, since one utterance may complete right after stop). Prefer constructing the recorder once at daemon start (models stay resident = instant toggle-on). If RealtimeSTT offers `set_microphone(False)`/`use_microphone` toggling or `recorder.stop()`+`recorder.listen()`, use that; otherwise gate in callbacks.
+2. **Listening gate.** A `threading.Event` (`listening`). Toggle/start/stop flips it. When stopped, also call `recorder.abort()` / set `recorder.listen_start = 0` — check the RealtimeSTT API for the sanctioned way to discard in-flight audio; at minimum, suppress `on_final` output while not listening (gate check inside `on_final` too, since one utterance may complete right after stop). Prefer constructing the recorder once (on first arm, per §4.2bis) and keeping it resident afterward = instant re-toggle. If RealtimeSTT offers `set_microphone(False)`/`use_microphone` toggling or `recorder.stop()`+`recorder.listen()`, use that; otherwise gate in callbacks.
 
 3. **Control socket (background thread).** `SOCK_STREAM` unix socket at `$XDG_RUNTIME_DIR/voice-typing/control.sock` (mkdir 0700). Protocol: one JSON object per line in, one per line out.
    - `{"cmd":"toggle"}` → `{"ok":true,"listening":true}`
@@ -126,6 +129,25 @@ Single process, three concerns:
 Partial callbacks: wire `on_realtime_transcription_stabilized` (preferred; falls back to `on_realtime_transcription_update` if stabilized proves too laggy) → `feedback.update_partial(text)`. Also wire `on_recording_start`/`on_vad_detect_start` etc. to feedback state transitions (`idle`/`listening`/`speaking`) if available.
 
 Logging: python `logging` to stderr (journald picks it up under systemd) at INFO; DEBUG via config. Log per-utterance: t_speech_end (when VAD closed), t_final_ready, t_typed, and the text. These timestamps are what the latency test reads.
+
+### 4.2bis Model lifecycle — lazy load on first arm
+
+Models MUST NOT load at daemon boot. The daemon starts with no recorder, no CUDA context, and ~0 VRAM. Construction of the `AudioToTextRecorder` — which loads `small.en` + `distil-large-v3` onto the GPU (§4.4 kwargs; ~1–3 s, ~1.5–3 GB VRAM in float16) — is deferred to the **first** `start`/`toggle` that arms the mic. After that first arm the recorder stays resident so the *second* and later arms are instant. It is torn down on `quit` / daemon shutdown, AND after `auto_unload_idle_seconds` (default 30 min) of sitting disarmed (see **Idle unload** below) — so the load cost is paid once per ~30 min of *actual use*, not once per boot. The goal: stop taxing the GPU both on boots where the feature is never used AND after a one-off use.
+
+Lifecycle states (surfaced via `voicectl status` and the state file, §4.6/§4.8):
+- `unloaded` — daemon up, no recorder, ~0 VRAM. This is the boot state.
+- `loading` — first arm in progress; constructing recorder + loading models. The arm command blocks here; `voicectl` prints a `loading models…` hint.
+- `loaded` / not listening — recorder resident, mic disarmed. Instant arm from here. After `auto_unload_idle_seconds` in this state with no arm, the watchdog tears the recorder down → back to `unloaded` (see **Idle unload**).
+- `loaded` / listening — armed, transcribing.
+
+Concurrency & failure rules:
+- A second arm while `loading` MUST NOT start a second load — it waits on the in-flight one (the load is single-flight under a lock).
+- If the load fails (CUDA init error, missing model, cuDNN load failure), the daemon returns to `unloaded`, the arm command returns `{"ok":false,"error":"..."}`, and `status` reports the error + the CPU-fallback hint (§4.4). It MUST NOT leave a half-constructed recorder behind.
+- The control-socket handlers for `start`/`toggle` (§4.2 #3) acquire/await the single-flight load, then proceed to the existing arm path. `status` reports `models_loaded: bool` so callers/UI can tell `loading` from `armed`.
+- The idle auto-stop (§4.5) disarms the mic but does NOT itself unload — it hands off to the slower idle-unload timer (below), which is what eventually frees VRAM.
+- Teardown (idle-unload and `quit`) runs under the SAME single-flight lock as load, so an arm that races an in-flight teardown waits for it, then loads fresh — an arm can never see a half-torn-down recorder.
+
+**Idle unload.** A background watchdog reclaims VRAM after a one-off use: when the recorder has sat in `loaded / not listening` for `asr.auto_unload_idle_seconds` (default `1800.0` = 30 min; `0` disables), it tears the recorder down, logs `voice-typing idle-unload: 1800.0s disarmed; unloading models`, transitions to `unloaded`, and frees the ~1.5–3 GB VRAM. The clock starts when the mic disarms (manual stop, toggle-off, or the §4.5 idle auto-stop) and resets on any arm; time spent listening does not count. The next arm then pays the ~1–3 s reload, same as a session's first arm. **Hard requirement — bounded teardown:** the `recorder.shutdown()` call invoked here MUST be non-blocking and complete in well under the arm-latency budget. It MUST NOT reproduce the ~90 s teardown hang currently seen on every `quit` (journal: `run() loop exiting` → 90 s → systemd `SIGKILL` / `Failed with result 'timeout'`), because idle-unload would trigger that hang every 30 min AND block any re-arm that races it under the single-flight lock. If `recorder.shutdown()` cannot be made to complete promptly, guard it with a hard timeout plus force-cleanup of the recorder's worker threads / `transcript_process` so VRAM is actually released. Making teardown bounded is therefore a **prerequisite** for this feature (risk row, §8).
 
 ### 4.3 Typing backends (`typing_backends.py`)
 
@@ -162,7 +184,7 @@ AudioToTextRecorder(
 ```
 Notes:
 - Verify each kwarg name against the installed RealtimeSTT version's `audio_recorder.py` signature; drop unknown kwargs rather than crash.
-- First construction downloads models to `~/.cache/huggingface`. `install.sh` MUST prefetch (construct recorder once, or `huggingface_hub.snapshot_download` of `Systran/faster-distil-whisper-large-v3` and `Systran/faster-whisper-small.en`) so first real run is instant.
+- First construction downloads models to `~/.cache/huggingface`. `install.sh` MUST prefetch (construct recorder once, or `huggingface_hub.snapshot_download` of `Systran/faster-distil-whisper-large-v3` and `Systran/faster-whisper-small.en`) so the first arm never does a network download. ("Instant" applies to arms after the first in a session; the first arm still pays the ~1–3 s load-from-cache-into-VRAM cost per §4.2bis.)
 - **cuDNN/cuBLAS:** ship `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` as deps and, in `daemon.py` before importing anything CUDA, prepend their lib dirs to the process's dynamic loader path — standard trick:
   ```python
   import os, pathlib, nvidia.cublas.lib, nvidia.cudnn.lib
@@ -183,6 +205,7 @@ device = "cuda"                       # "cuda" | "cpu"
 post_speech_silence_duration = 0.6
 realtime_processing_pause = 0.15
 auto_stop_idle_seconds = 30.0          # auto-disarm after this many seconds of no speech; 0 disables
+auto_unload_idle_seconds = 1800.0     # after this many seconds disarmed (loaded, not listening), tear down models to free VRAM; 0 disables (§4.2bis Idle unload)
 
 [output]
 backend = "wtype"                     # "wtype" | "ydotool" | "tmux"
@@ -202,15 +225,17 @@ blocklist = ["thank you.", "thanks for watching.", "you", "bye.", "thank you for
 
 Config file search order: `$XDG_CONFIG_HOME/voice-typing/config.toml`, then repo `config.toml`, then built-in defaults. `install.sh` copies the repo default to XDG if absent.
 
-**Idle auto-stop** (`asr.auto_stop_idle_seconds`, default `30.0`): while listening, if no recognized speech (a realtime partial) arrives for this many seconds, the daemon auto-disarms via the same path as a manual stop — it fires the `■ stopped` popup and writes a journal `INFO` line (`voice-typing auto-stop: 30.0s of no recognized speech; disarming`). Partials reset the clock while you talk, so it only triggers when you genuinely go silent (a forgotten hot-mic guard, NOT a mid-thought cut — that is governed by `post_speech_silence_duration`). A background `_idle_watchdog` thread ticks ~1s and re-checks the deadline under the listen lock so a late partial cancels the stop. `0` disables.
+**Idle auto-stop** (`asr.auto_stop_idle_seconds`, default `30.0`): while listening, if no recognized speech (a realtime partial) arrives for this many seconds, the daemon auto-disarms via the same path as a manual stop — it fires the `■ stopped` popup and writes a journal `INFO` line (`voice-typing auto-stop: 30.0s of no recognized speech; disarming`). Partials reset the clock while you talk, so it only triggers when you genuinely go silent (a forgotten hot-mic guard, NOT a mid-thought cut — that is governed by `post_speech_silence_duration`). A background `_idle_watchdog` thread ticks ~1s and re-checks the deadline under the listen lock so a late partial cancels the stop. `0` disables. Auto-stop disarms the mic but does NOT unload models by itself — it starts the slower idle-unload clock (below).
+
+**Idle unload** (`asr.auto_unload_idle_seconds`, default `1800.0` = 30 min): a separate, slower watchdog that tears down the resident recorder to reclaim VRAM once the mic has been disarmed this long with no re-arm. It composes with idle auto-stop — the 30 s auto-stop disarms first, then the 30 min idle-unload frees the models. Full rule + the bounded-teardown requirement in §4.2bis (Idle unload). `0` disables (models then stay resident until `quit`).
 
 ### 4.6 Feedback (`feedback.py`)
 
 - **State file** (atomic write via tempfile+rename) at `$XDG_RUNTIME_DIR/voice-typing/state.json`:
   ```json
-  {"listening": true, "phase": "speaking", "partial": "this is what i am say", "last_final": "Previous sentence.", "ts": 1783718400.123}
+  {"listening": true, "phase": "speaking", "models_loaded": true, "partial": "this is what i am say", "last_final": "Previous sentence.", "ts": 1783718400.123}
   ```
-  Written on every partial update (throttle to ≥10 Hz max), phase change, and final.
+  Written on every partial update (throttle to ≥10 Hz max), phase change, final, and model-lifecycle transition. While models are not yet loaded (boot) or mid-load, `phase` is `unloaded` or `loading` and `models_loaded` is false (§4.2bis); once loaded, `phase` cycles `idle`/`listening`/`speaking`.
 - **hyprctl notify**: `hyprctl notify -1 <notify_ms> "rgb(88c0d0)" "<msg>"` — fire-and-forget, swallow errors. Hyprland notifications are not replaceable by ID; to avoid stacking spam, only notify on: listening-start ("● listening"), each *final* ("✔ <text>" — gated by `notify_on_final`, since the text is already typed and shown in the tmux status line), listening-stop ("■ stopped"). Partials go to the state file only (that's what the tmux status consumes). `record_final` ALSO writes the finalized text back into the `partial` field so the tmux status line matches the screen (otherwise it would keep showing the last trailing realtime partial, which usually drops the final word or two).
 - **tmux status integration** (document in README, and `install.sh` prints the snippet; do NOT edit the user's tmux.conf):
   ```tmux
@@ -231,7 +256,7 @@ Unit-test this module (pure python, fast).
 
 ### 4.8 `voicectl` (`ctl.py`)
 
-`uv run voicectl <toggle|start|stop|status|quit>` and an installed console-script entry point (`[project.scripts] voicectl = "voice_typing.ctl:main"`, plus `voice-typing-daemon = "voice_typing.daemon:main"`). Connects to the socket, sends one JSON line, prints human-readable result (`listening: on`), exit code 0/1. `status` pretty-prints the state incl. partial and models loaded. If daemon not running: clear message + exit 2.
+`uv run voicectl <toggle|start|stop|status|quit>` and an installed console-script entry point (`[project.scripts] voicectl = "voice_typing.ctl:main"`, plus `voice-typing-daemon = "voice_typing.daemon:main"`). Connects to the socket, sends one JSON line, prints human-readable result (`listening: on`), exit code 0/1. `status` pretty-prints the state incl. partial, `phase` (`unloaded`/`loading`/`idle`/`listening`/`speaking`), and `models_loaded` (§4.2bis). If daemon not running: clear message + exit 2.
 
 ### 4.9 systemd user service (`systemd/voice-typing.service`)
 
@@ -247,7 +272,7 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 ```
-`install.sh`: `uv sync`, prefetch models, run a 5-second CUDA smoke test, install+`daemon-reload`+enable+start the unit, print tmux snippet and usage. Idempotent. The daemon starts in **not-listening** state — it must never hot-mic on boot; `voicectl start`/`toggle` arms it.
+`install.sh`: `uv sync`, prefetch models, run a 5-second CUDA smoke test, install+`daemon-reload`+enable+start the unit, print tmux snippet and usage. Idempotent. The daemon starts **not-listening** and **not-loaded** — it must never hot-mic on boot and loads no models until the first arm (§4.2bis, ~0 VRAM at idle); `voicectl start`/`toggle` arms it (the first arm each session also loads the models, ~1–3 s).
 
 ### 4.10 Phase 2 (implement after all tests pass — small, do it in the same run)
 
@@ -300,9 +325,9 @@ Assert: (a) partials start arriving < 1.5 s after speech onset and update at lea
 
 **T5 — Real-hardware smoke (cannot be automated — leave to user):** README's "First run" section tells the user exactly: `systemctl --user start voice-typing`, `voicectl toggle`, speak, watch tmux status, `voicectl toggle`. List expected behavior and the two tunables that matter (`post_speech_silence_duration`, `silero_sensitivity`).
 
-**T6 — GPU residency:** while daemon runs, `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` shows the daemon PID; used_memory between ~1 and ~5 GB.
+**T6 — GPU lifecycle (lazy load):** (a) **idle, never armed:** right after daemon boot with no arm, `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` MUST NOT list the daemon PID at all (~0 VRAM — the lazy-load guarantee of §4.2bis). (b) **armed:** after `voicectl start`, the daemon PID appears with used_memory ~1–5 GB. (c) **disarmed (not quit):** after `voicectl stop`, the PID + memory REMAIN resident (instant re-arm). (d) **disarmed then idle ≥ `auto_unload_idle_seconds`:** the PID disappears from `nvidia-smi` again (~0 VRAM reclaimed); a later `voicectl start` reloads (~1–3 s) and the PID reappears.
 
-Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while speaking; final-typed ≤ 1.5 s after end-of-utterance (0.6 s of that is the deliberate segmentation pause). If finals exceed target on GPU, first check that both models are actually on CUDA (log it), then try `large-v3-turbo`.
+Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while speaking; final-typed ≤ 1.5 s after end-of-utterance (0.6 s of that is the deliberate segmentation pause). If finals exceed target on GPU, first check that both models are actually on CUDA (log it), then try `large-v3-turbo`. The ~1–3 s model load on the first arm of a session (§4.2bis) is a one-time startup cost and does NOT count against utterance latency.
 
 ---
 
@@ -313,9 +338,10 @@ Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while spea
 3. Live partials observable in `state.json` while audio plays (T3) and surfaced in the documented tmux status snippet.
 4. Only finalized text reaches the target; nothing typed while toggled off.
 5. Daemon survives ≥2 min of silence with no hallucinated output and trivial CPU use.
-6. `voicectl toggle/start/stop/status/quit` all work; daemon runs as a systemd user service, starts un-armed (not listening), auto-restarts on failure.
+6. `voicectl toggle/start/stop/status/quit` all work; daemon runs as a systemd user service, starts un-armed (not listening) and **un-loaded** (~0 VRAM until first arm, §4.2bis), auto-restarts on failure.
 7. Everything committed to git; README documents: install, hotkey snippet, tmux status snippet, config tuning table, troubleshooting (cuDNN libs, PyAudio device, wtype vs ydotool), and how to switch to CPU-only mode.
 8. No network access needed at runtime (models cached by install).
+9. After `auto_unload_idle_seconds` of disarmed idle, the recorder unloads (~0 VRAM, verified via `nvidia-smi`) and a later arm reloads it; the teardown is bounded (completes in seconds, no 90 s hang).
 
 ## 8. Known risks & prescribed mitigations
 
@@ -329,6 +355,9 @@ Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while spea
 | Toggle-off race types one last utterance | gate inside `on_final` too (§4.2) |
 | espeak audio too robotic → flaky asserts | fuzzy ≥80% token overlap, not exact match |
 | First-run model download stalls tests | install.sh prefetches before any test runs |
+| First arm is slow (~1–3 s model load) | Accepted trade-off of lazy load (§4.2bis); `voicectl` prints `loading models…`; only the first arm after a load (or after an idle-unload) pays it |
+| Model load fails on first arm (CUDA/cuDNN) | daemon returns to `unloaded`, arm returns `ok:false` with error + CPU-fallback hint; no half-built recorder left behind (§4.2bis) |
+| `recorder.shutdown()` hangs ~90 s (seen on every `quit`: `SIGKILL` after systemd `TimeoutStopSec`) | **Prerequisite for idle-unload.** The teardown MUST be bounded/non-blocking (§4.2bis Idle unload): hard timeout + force-cleanup of the recorder's worker threads / `transcript_process` so VRAM is released and a racing arm isn't blocked for 90 s. Root-cause the wedge (likely the `transcript_process` join or the mic stream close) and fix it; until then idle-unload would hang every 30 min. |
 
 ## 9. Future work (explicitly out of scope now)
 
