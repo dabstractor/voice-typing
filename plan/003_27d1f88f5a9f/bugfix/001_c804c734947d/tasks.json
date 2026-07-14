@@ -121,14 +121,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Reset phase to idle on disarm (Issue 2)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "_disarm() never calls feedback.set_phase('idle'), so phase stays stuck at the last VAD value after any stop/toggle-off/auto-stop. Add the call after set_listening(False).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Add set_phase('idle') to _disarm() to reflect 'loaded / not listening' lifecycle state",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/bug_analysis.md §Issue 2 Root Cause. _disarm() (daemon.py ~line 970) clears _listening, sets _disarmed_monotonic, calls host.set_microphone(False), calls feedback.set_listening(False). It NEVER calls feedback.set_phase('idle'). Phase is only set by VAD callbacks (on_vad_detect_start→'listening', on_vad_start→'speaking', on_vad_stop→'listening'). PRD §4.2bis: 'loaded / not listening ⇒ phase idle'. The PRD also suggests optionally gating the child's ('vad',...) relay to ignore phases while not listening (prevents a stray late VAD event from re-flipping phase after disarm).\n2. INPUT: VoiceTypingDaemon._disarm() method in voice_typing/daemon.py (~line 970). Runs under self._lock (called by stop/toggle/_maybe_auto_stop). self._feedback is a Feedback instance with set_phase(str).\n3. LOGIC: In _disarm(), after `self._feedback.set_listening(False)`, add `self._feedback.set_phase('idle')`. This is a one-line addition. The 'idle' phase correctly represents the 'loaded / not listening' state per PRD §4.2bis. Optional hardening: in recorder_host.py _dispatch() (~line 260), when handling kind=='vad', check if the daemon is listening before calling self._feedback.set_phase(phase) — but this requires the host to know the listening state (it does not currently). The simpler approach: accept that a stray late VAD event could transiently re-flip phase; the next disarm resets it. Only add the gate if observed in practice (PRD says 'if that is observed').\n4. OUTPUT: After any disarm (stop, toggle-off, 30s auto-stop), state.json and voicectl status show phase: idle instead of the stale last VAD value.\n5. DOCS: none — behavior fix, no new config/API surface.",
@@ -142,7 +142,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Test phase returns to idle after disarm (stop, toggle-off, auto-stop)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"

@@ -872,6 +872,7 @@ class VoiceTypingDaemon:
         if self._host is not None:
             self._host.set_microphone(False)
         self._feedback.set_listening(False)
+        self._feedback.set_phase("idle")  # Issue 2 / P1.M2.T1.S1: 'loaded / not listening' ⇒ phase idle (PRD §4.2bis, §4.6)
         # NOTE: caller MUST call self._safe_abort() AFTER releasing _lock (see start/stop/toggle).
 
     def _touch_speech(self) -> None:
