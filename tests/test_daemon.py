@@ -1469,9 +1469,9 @@ def test_shutdown_delegates_to_bounded_shutdown():
     # Proves shutdown() routes through _bounded_shutdown (not a leftover direct recorder.shutdown()).
     d, _fb, _rec, _be = _make_daemon()
     calls: list[float] = []
-    d._bounded_shutdown = lambda timeout=10.0: calls.append(timeout)
+    d._bounded_shutdown = lambda timeout=5.0: calls.append(timeout)
     d.shutdown()
-    assert calls == [10.0], f"shutdown() did not delegate to _bounded_shutdown(): {calls}"
+    assert calls == [5.0], f"shutdown() did not delegate to _bounded_shutdown(): {calls}"
 
 
 def test_shutdown_is_noop_when_recorder_is_none():

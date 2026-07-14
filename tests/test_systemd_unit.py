@@ -94,8 +94,9 @@ def test_restart_on_failure():
 def test_timeout_stop_sec_bounds_shutdown():
     """TimeoutStopSec=15 bounds systemd's stop so the daemon is never SIGKILLed at the 90s default.
 
-    The daemon's own _bounded_shutdown(timeout=10) (P1.M1.T1.S2) returns within ~10s; the 15s
-    unit budget = 10s bound + 5s grace for the SIGTERM → handler → run-loop → finally latency.
+    The daemon's own _bounded_shutdown(timeout=5) (P1.M1.T1.S2 + P1.M1.T2.S2) returns within
+    ~7s; the 15s unit budget = 5s bounded teardown + 5s coordination + 5s headroom for the
+    SIGTERM → handler → run-loop → finally latency.
     Without this directive systemd applies its 90s default, which produced
     'Failed with result timeout' / SIGKILL on every quit (PRD §8 risk row; root-caused in
     P1.M1.T1.S1). Companion to the daemon-side bound; both are required.

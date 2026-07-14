@@ -37,7 +37,7 @@
 #       even after stop 120s << 1800s, so no unload corrupts T6(c).)
 #   RUN 2 (auto_unload_idle_seconds=5 override): boot → absent → start → present → stop →
 #       T6(d-gone) POLL until tree ABSENT (ceiling ~25s; the contract's literal "7s" is under-
-#       budgeted: 1s watchdog tick + 5s threshold + ≤10s _bounded_shutdown teardown + sub-second
+#       budgeted: 1s watchdog tick + 5s threshold + ≤7s _bounded_shutdown teardown + sub-second
 #       nvidia-smi driver-accounting lag) → start again → T6(d-reload) POLL until tree PRESENT.
 #       The 5s threshold is ONLY on run 2 so T4's 120s window on run 1 is unaffected.
 #
@@ -272,8 +272,8 @@ assert_vram_present() {  # $1 = root pid  $2 = label  -> total in [VRAM_MIN, VRA
 }
 # Poll helpers (G-TIMEOUTS): nvidia-smi is a LIVE driver query (no caching), but the unload fire +
 # teardown + driver-accounting have variance -> POLL every 0.5s, NEVER a fixed sleep. The contract's
-# literal "7s" is under-budgeted (1s tick + threshold + <=10s teardown + driver lag); the ceiling
-# absorbs the variance. wait_vram_absent ceiling ~25s (5s threshold + 1s tick + <=10s teardown +
+# literal "7s" is under-budgeted (1s tick + threshold + <=7s teardown + driver lag); the ceiling
+# absorbs the variance. wait_vram_absent ceiling ~25s (5s threshold + 1s tick + <=7s teardown +
 # lag); wait_vram_present ceiling ~15s (reload ~1-3s + tick).
 wait_vram_absent() {  # $1 = root pid  $2 = ceiling_secs (default 25)
   local deadline=$(( $(date +%s) + ${2:-25} ))

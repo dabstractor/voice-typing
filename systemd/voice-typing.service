@@ -42,10 +42,11 @@ RestartSec=2
 # Bound systemd's stop so the daemon is never SIGKILLed at the 90s DEFAULT (PRD §8 risk row:
 # "recorder.shutdown() hangs ~90s … SIGKILL after systemd TimeoutStopSec"; journal:
 # 'Failed with result timeout'). With no TimeoutStopSec, systemd applies its 90s default.
-# The daemon's own _bounded_shutdown(timeout=10) (P1.M1.T1.S2) makes VoiceTypingDaemon.shutdown()
-# return within ~10s even when RealtimeSTT's shutdown_recorder() wedges at an unbounded
-# threading.Thread.join() (root-caused in P1.M1.T1.S1). The 15s budget = 10s bound + 5s grace
-# for the SIGTERM → signal-handler → request_shutdown → run() exits → main() finally latency.
+# The daemon's own _bounded_shutdown(timeout=5) (P1.M1.T1.S2 + P1.M1.T2.S2) makes
+# VoiceTypingDaemon.shutdown() return within ~7s even when RealtimeSTT's shutdown_recorder()
+# wedges at an unbounded threading.Thread.join() (root-caused in P1.M1.T1.S1). With daemon
+# single-flight (P1.M1.T2.S1: exactly ONE teardown on the SIGTERM path) the 15s budget =
+# 5s bounded teardown + 5s signal/shutdown coordination + 5s headroom.
 # Normal stop exits in ~seconds; SIGKILL@15s is the outer safety net for a regression wedge
 # (it skips the daemon's clean VRAM/process release, so bounded teardown remains the primary path).
 TimeoutStopSec=15

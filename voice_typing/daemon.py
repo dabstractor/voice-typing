@@ -1291,7 +1291,7 @@ class VoiceTypingDaemon:
             self._resolved_device_cache = resolved
         return resolved
 
-    def _bounded_shutdown(self, timeout: float = 10.0) -> None:
+    def _bounded_shutdown(self, timeout: float = 5.0) -> None:
         """Tear down the recorder-host child with a hard timeout (PRD §4.2; §8 risk row).
 
         P1.M3.T2.S2 (re-plan): this now routes through self._host.stop() — for a REAL RecorderHost
@@ -1300,6 +1300,13 @@ class VoiceTypingDaemon:
         For the LEGACY _LegacyRecorderHostAdapter (tests), stop() does the in-process force-cleanup
         (bounded shutdown() + force-terminate transcript_process/reader_process + drop the realtime
         model ref). Both paths are bounded + best-effort + never re-raise.
+
+        Budget (bugfix Issue 1 / Fix 1C, P1.M1.T2.S2): host.stop(timeout=5) -> proc.join(5) +
+        _terminate_group() (killpg) + join(2) = ~7s max per call (only if the child wedges the full
+        join; normally far less); plus ControlServer.stop() join(2) = ~2s. With daemon single-flight
+        (P1.M1.T2.S1: exactly ONE _bounded_shutdown runs on the SIGTERM path) the total is <= ~9s —
+        comfortable headroom under systemd TimeoutStopSec=15. The default was 10.0 (-> ~12s/call,
+        ~14s total, no margin); 5.0 makes the clean single-teardown path fit.
 
         Does NOT null self._host (the caller — _unload_host / shutdown — does that after this
         returns). Idempotent-vs-missing-host: a None host is a no-op (a session that never armed).
@@ -1315,7 +1322,7 @@ class VoiceTypingDaemon:
         """Full recorder teardown — BOUNDED (PRD §4.2; §4.2bis idle-unload prerequisite; §8 risk row).
 
         Idempotent + defensive. Delegates to _bounded_shutdown(): runs recorder.shutdown() in a
-        daemon thread under a hard timeout (default 10s); on timeout it force-terminates the
+        daemon thread under a hard timeout (default 5s); on timeout it force-terminates the
         spawn-started transcript_process + reader_process (the CUDA/VRAM holders) so VRAM is
         released and a racing re-arm under the single-flight lock is never blocked for the ~90s
         RealtimeSTT wedge (root cause: an unbounded threading.Thread.join() inside
