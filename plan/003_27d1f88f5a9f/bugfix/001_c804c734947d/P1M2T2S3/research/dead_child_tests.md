@@ -25,13 +25,20 @@ The plan status lists S2 as "Implementing", but the grep + git status prove S2's
 
 ## 1. The test seams (exact helpers in tests/test_daemon.py)
 
-- **`_make_daemon(*, recorder=None, recorder_host=None, host_factory=None, backend=None, cfg=None)`**
-  (line 512) → returns `(d, fb, rec, be)`. Uses `_DaemonFakeFeedback` + `_StubRecorder` +
-  `_FakeBackend` + `_ok_probe`. With **`host_factory=factory`** (NO recorder) the daemon boots
-  **lazy** (`_host=None`, `_models_loaded=False`) — the run loop idles until `d.start()` loads.
-  THIS is the seam the item names ("`_make_daemon()` with `host_factory=`").
-- **`_make_lazy_daemon(cfg=None, host_factory=None)`** (line 2498) → `(d, fb)`. Same idea,
-  explicit `recorder=None`. Either works; `_make_daemon(host_factory=...)` matches the item verbatim.
+- ★ **`_make_lazy_daemon(cfg=None, host_factory=None)`** (line 2498) → `(d, fb)`. This is the CORRECT
+  seam for tests (a)/(b). It passes `recorder=None` explicitly → lazy boot (`_host=None`,
+  `_models_loaded=False`) → the run loop idles until `d.start()` → `_load_host()` uses the factory.
+  Uses `_DaemonFakeFeedback` (records `fb.phases` / `fb.listening_states` lists).
+- ⚠ **DO NOT use `_make_daemon(host_factory=...)` for these tests.** `_make_daemon` (line 512) ALWAYS
+  injects `recorder=_StubRecorder()` (its body: `rec = recorder if recorder is not None else
+  _StubRecorder()`), so even `_make_daemon(host_factory=factory)` passes BOTH `recorder=_StubRecorder()`
+  AND `host_factory=factory`. In `VoiceTypingDaemon.__init__` the `elif recorder is not None:` branch
+  wins → `_host = _LegacyRecorderHostAdapter(_StubRecorder())` (whose `is_alive` is **True always**) →
+  the factory is NEVER consulted and the daemon boots LOADED. So `d._host._alive = False` would flip a
+  non-existent attr on the adapter and the dead host would NEVER be detected. The item's phrase
+  "`_make_daemon()` with `host_factory=`" is imprecise — the actual correct helper is `_make_lazy_daemon`.
+  (VERIFIED empirically: `_make_daemon(host_factory=)` fails to detect the dead host; `_make_lazy_daemon`
+  works — see §11.)
 - **`_fake_host_factory(spawn_result=True, device=None)`** (line 501) → a `_factory(cfg, feedback,
   latency, on_final, on_partial, on_speech)` returning a fresh `_FakeHost`. Each call builds a NEW
   `_FakeHost` instance (important for the re-spawn assertion).
@@ -89,12 +96,12 @@ real Feedback field, so (c) MUST use real Feedback.)
 
 ## 3. The two constructions (verified against in-tree helpers)
 
-### 3.1 Tests (a) + (b): `_make_daemon(host_factory=factory)` + `_DaemonFakeFeedback`
+### 3.1 Tests (a) + (b): `_make_lazy_daemon(host_factory=factory)` + `_DaemonFakeFeedback`
 ```python
 def test_...(monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)   # defensive (line 845 precedent)
     factory = _fake_host_factory(spawn_result=True)
-    d, fb, _rec, _be = _make_daemon(host_factory=factory)
+    d, fb = _make_lazy_daemon(host_factory=factory)               # recorder=None -> LAZY boot
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     try:
@@ -102,7 +109,11 @@ def test_...(monkeypatch):
         d.start()                                  # _load_host spawns _FakeHost (_alive=True) + _arm
         _wait_for(lambda: d._models_loaded, timeout=2.0)                # loaded + armed
         assert d.is_listening() and d._host is not None
-        # ... kill + assert ...
+        # ... kill (d._host._alive=False) ...
+        # ROBUST cleanup wait: poll _load_error (set LAST in _handle_dead_host — see §11), NOT _host/
+        #   _models_loaded (set earlier; racy under real-Feedback disk writes):
+        _wait_for(lambda: d._load_error == "recorder-host child died unexpectedly", timeout=2.0)
+        # ... assert ...
     finally:
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
@@ -143,13 +154,15 @@ next iteration → WARNING(pid) + `_handle_dead_host()` + `continue`. Under `_lo
 `set_listening(False)`, `_load_error="recorder-host child died unexpectedly"`.
 
 **Test (a)** `test_run_loop_detects_dead_host_and_transitions_to_unloaded`:
-wait `_wait_for(lambda: d._models_loaded is False, timeout=2.0)`; assert:
+wait `_wait_for(lambda: d._load_error == "recorder-host child died unexpectedly", timeout=2.0)` (ROBUST —
+polls the LAST assignment in `_handle_dead_host`, so it guarantees full completion; see §11); assert:
 - `d._host is None` ✓  `d._models_loaded is False` ✓  `d.is_listening() is False` ✓
 - `"died" in (d._load_error or "")` ✓
 - (bonus, proves the phase transition) `fb.phases[-1] == "unloaded"` and `fb.listening_states[-1] is False`
 
 **Test (b)** `test_load_host_respawns_after_dead_child`: capture `old = d._host`; kill; wait
-`_wait_for(lambda: d._host is None, timeout=2.0)` (cleanup done); **`d.start()` again** →
+`_wait_for(lambda: d._load_error == "recorder-host child died unexpectedly", timeout=2.0)` (cleanup
+done — ROBUST predicate per §11); **`d.start()` again** →
 `_load_host()`: guard `if self._models_loaded and ...` is False (recovery cleared it; this EXERCISES
 the S2 guard) → spawn path → `factory(...)` builds a FRESH `_FakeHost` → `spawn()` (`spawn_calls=1`,
 `_alive=True`) → `_models_loaded=True` → `_arm()`. Assert:
@@ -161,7 +174,8 @@ the S2 guard) → spawn path → `factory(...)` builds a FRESH `_FakeHost` → `
 `creations["n"] == 2`. Object-identity + `spawn_calls` is simpler and matches the S2 probe; the PRP
 lists the counter as an optional hardening.)
 
-**Test (c)** `test_status_reports_unloaded_after_child_death`: arm; kill; wait for cleanup;
+**Test (c)** `test_status_reports_unloaded_after_child_death`: arm; kill; wait for cleanup
+(`_wait_for(lambda: "died" in (d._load_error or ""), timeout=2.0)` — ROBUST per §11);
 `snap = d.status_snapshot()`; assert:
 - `snap["listening"] is False` (reads `is_listening()`) ✓
 - `snap["phase"] == "unloaded"` (reads real Feedback snapshot — REQUIRES real Feedback) ✓
@@ -220,7 +234,45 @@ lists the counter as an optional hardening.)
 - **mypy is NOT installed** — do NOT list it; pytest is the authoritative gate.
 - Use FULL paths: `.venv/bin/python -m pytest ...` (zsh aliases `python`/`pytest`).
 
-## 10. Scope (do / don't)
+## 11. ★ TWO EMPIRICALLY-VERIFIED CORRECTIONS (read before writing the tests) ★
+
+Both were found by throwaway probes against the in-tree S1+S2 code and are VERIFIED (10/10 iterations
+of a+b+c pass after applying them). The item description is slightly imprecise on both points.
+
+### 11.1 Use `_make_lazy_daemon(host_factory=)`, NOT `_make_daemon(host_factory=)`
+The item says "`_make_daemon()` with `host_factory=`". But `_make_daemon` (test_daemon.py:512) ALWAYS
+injects `recorder=_StubRecorder()` (its body defaults `rec` to `_StubRecorder()`), so passing
+`host_factory=` alongside has NO effect — `__init__`'s `elif recorder is not None:` branch wins and the
+daemon boots LOADED behind a `_LegacyRecorderHostAdapter` (is_alive=True always). The factory is never
+called, so `d._host` is the adapter (no flippable `_alive`), and the dead-host path never fires.
+`_make_lazy_daemon` (line 2498) passes `recorder=None` explicitly → genuine lazy boot → `d.start()` →
+`_load_host()` uses the factory → `_FakeHost` with flippable `_alive`. **Use `_make_lazy_daemon`.**
+(Verified: `_make_daemon(host_factory=)` → detection never fires; `_make_lazy_daemon` → works.)
+
+### 11.2 Poll `_load_error` for the cleanup-wait, NOT `_host is None` / `_models_loaded is False`
+`_handle_dead_host()` (daemon.py:778-800) sets its state in this ORDER, all under `self._lock`:
+  1. `self._host = None`
+  2. `self._models_loaded = False`
+  3. `self._listening.clear()`
+  4. `self._feedback.set_phase("unloaded")`      ← real Feedback: SLOW atomic state.json write
+  5. `self._feedback.set_models_loaded(False)`    ← real Feedback: SLOW write
+  6. `self._feedback.set_listening(False)`        ← real Feedback: SLOW write
+  7. `self._load_error = "recorder-host child died unexpectedly"`   ← LAST
+
+A `_wait_for(lambda: d._host is None)` (or `_models_loaded is False`) predicate observes step 1/2
+BEFORE step 7 — and with REAL Feedback (test c) the three disk writes in steps 4-6 hold `_lock` long
+enough that the main thread reads `_load_error` while it is STILL None (the race is ~50% reproducible).
+With `_DaemonFakeFeedback` (tests a/b) steps 4-6 are instant list-appends, so the window is
+microseconds and not observed — but it is still a latent race.
+**Fix: poll the LAST assignment.** `_wait_for(lambda: d._load_error == "recorder-host child died
+unexpectedly", timeout=2.0)` (a/b) / `_wait_for(lambda: "died" in (d._load_error or ""), timeout=2.0)`
+(c). Because `_load_error` is written LAST (step 7), observing it guarantees steps 1-6 already ran
+(CPython program order + GIL). This makes all three tests DETERMINISTIC (verified 10/10).
+
+NOTE for (b): `_load_host()` SUCCESS resets `_load_error = None` (daemon.py:677), so after the re-arm
+`d._load_error` is None again — that's expected and correct (the cleanup-wait runs BEFORE the re-arm).
+
+## 12. Scope (do / don't)
 
 DO: append exactly THREE test functions (+ a section comment header) to the END of
 `tests/test_daemon.py`. Use `_make_daemon(host_factory=...)` for (a)/(b); a real-Feedback +

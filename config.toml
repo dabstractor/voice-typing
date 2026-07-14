@@ -20,7 +20,9 @@
 #   voice_typing/config.py is the single source of truth for the schema and the
 #   default values; this file mirrors it. Keep the two in lockstep: if you change
 #   a default in code, change it here too. Unknown keys are REJECTED at load time
-#   (a typo raises an error instead of being silently ignored).
+#   (a typo raises an error instead of being silently ignored). Wrong-typed values are
+#   rejected at load too: a string where a number is expected raises TypeError (so
+#   `auto_stop_idle_seconds = "thirty"` fails fast, not silently).
 #
 # =============================================================================
 

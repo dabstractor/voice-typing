@@ -114,7 +114,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Major Robustness Fixes — Phase Lifecycle (Issue 2) + Child Crash Recovery (Issue 3)",
-          "status": "Complete",
+          "status": "Ready",
           "description": "Fix two major state-correctness issues: (Issue 2) phase field stuck at listening/speaking after disarm — add set_phase('idle') to _disarm(); (Issue 3) dead recorder-host child goes undetected — add liveness checks in run() loop and _load_host() guard, plus _handle_dead_host() recovery method.",
           "tasks": [
             {
@@ -160,7 +160,7 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Detect dead recorder-host child and recover (Issue 3)",
-              "status": "Complete",
+              "status": "Ready",
               "description": "The run() loop never checks host.is_alive, and _load_host() short-circuits on stale _models_loaded without checking liveness. Add a liveness check in run() that detects a dead child, cleans up state via a new _handle_dead_host() method, and modifies _load_host() to re-spawn when the host is dead.",
               "subtasks": [
                 {
@@ -196,7 +196,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S3",
                   "title": "Tests: dead child detection in run(), recovery on next arm, status correctness",
-                  "status": "Complete",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1",
@@ -217,21 +217,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Minor Config Hardening — Type Validation (Issue 4)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Config numeric fields (auto_stop_idle_seconds, auto_unload_idle_seconds, etc.) accept wrong types silently (e.g., string 'thirty' loads as str), breaking the feature at runtime when TypeError is swallowed by the watchdog. Add __post_init__ type validation to AsrConfig that raises TypeError at load time, mirroring the existing unknown-key rejection.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Add type validation for config numeric and string fields",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add __post_init__ to AsrConfig that validates field types with isinstance, raising TypeError on mismatch. This runs at construction time (when from_toml calls AsrConfig(**section)), so wrong-typed TOML values fail fast at load with a clear error.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Add __post_init__ type validation to AsrConfig (and FeedbackConfig.notify_ms)",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/bug_analysis.md §Issue 4 Root Cause. VoiceTypingConfig.from_toml() (config.py ~line 178) passes TOML values directly to dataclass constructors via section_cls(**section) with NO type validation. Python dataclasses do NOT enforce type annotations at runtime. So auto_stop_idle_seconds = 'thirty' (a str) loads silently. At runtime time.monotonic() - ts < 'thirty' raises TypeError, which _idle_watchdog swallows → auto-stop silently breaks. The existing unknown-key rejection uses TypeError (dataclass __init__ rejects unknown kwargs) — the new validation should use TypeError too for consistency.\n2. INPUT: voice_typing/config.py AsrConfig dataclass (~line 34). Fields and expected types: final_model: str, realtime_model: str, language: str, device: str, post_speech_silence_duration: float, realtime_processing_pause: float, auto_stop_idle_seconds: float, auto_unload_idle_seconds: float. FeedbackConfig.notify_ms: int (~line 73). The dataclass decorator and field definitions. tomllib parses TOML floats as Python float, ints as int, strings as str, bools as bool.\n3. LOGIC: (a) Add __post_init__ to AsrConfig that validates each field with isinstance: float fields (post_speech_silence_duration, realtime_processing_pause, auto_stop_idle_seconds, auto_unload_idle_seconds) must be isinstance(value, (int, float)) AND NOT isinstance(value, bool) — bool is a subclass of int in Python but is NOT a valid numeric config value. String fields (final_model, realtime_model, language, device) must be isinstance(value, str). Raise TypeError(f'[asr] {field_name} expects {expected_type}, got {type(value).__name__}: {value!r}') on mismatch. (b) Optionally add the same to FeedbackConfig for notify_ms (must be int, not bool, not float). (c) Ensure valid TOML values still load fine (regression guard: float 30.0, int 2500, str 'cuda' all pass).\n4. OUTPUT: auto_stop_idle_seconds = 'thirty' in config.toml raises TypeError at daemon load time (before models load, before systemd Restart loops), with a clear error message naming the field and the bad value.\n5. DOCS: [Mode A] Add a brief comment to config.toml (~line 18-24 area, the existing 'Unknown keys are REJECTED' comment) noting that wrong-typed values are also rejected at load time (e.g., append: 'Wrong-typed values (e.g. a string where a number is expected) are also rejected with TypeError').",
@@ -245,7 +245,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Test wrong-typed config values raise TypeError at load",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"

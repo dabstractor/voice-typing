@@ -62,6 +62,39 @@ class AsrConfig:
                                                # (~0); the clock starts on disarm and resets on arm.
                                                # 0 disables (models stay resident until quit)
 
+    def __post_init__(self) -> None:
+        """Validate field types at construction (bugfix Issue 4 / PRD §4.5 robustness).
+
+        dataclasses do NOT enforce annotations at runtime, so a wrong-typed TOML value (e.g.
+        auto_stop_idle_seconds = "thirty") loaded via from_toml(**section) would pass silently and
+        break the feature at runtime — _maybe_auto_stop's `time.monotonic() - ts < threshold` raises
+        TypeError, which the _idle_watchdog swallows, so auto-stop silently dies. This raises
+        TypeError at LOAD time (construction = when from_toml calls AsrConfig(**section); before
+        models load, before systemd loops), mirroring the existing unknown-key rejection (also
+        TypeError). bool is rejected even for numeric fields: bool is an int subclass in Python but
+        is not a valid config value here.
+        """
+        # Numeric fields: accept int or float, reject bool (int subclass) + everything else.
+        for _name in (
+            "post_speech_silence_duration",
+            "realtime_processing_pause",
+            "auto_stop_idle_seconds",
+            "auto_unload_idle_seconds",
+        ):
+            _v = getattr(self, _name)
+            if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+                raise TypeError(
+                    f"[asr] {_name} expects a number (int or float), "
+                    f"got {type(_v).__name__}: {_v!r}"
+                )
+        # String fields: must be str.
+        for _name in ("final_model", "realtime_model", "language", "device"):
+            _v = getattr(self, _name)
+            if not isinstance(_v, str):
+                raise TypeError(
+                    f"[asr] {_name} expects str, got {type(_v).__name__}: {_v!r}"
+                )
+
 
 @dataclass
 class OutputConfig:
@@ -84,6 +117,22 @@ class FeedbackConfig:
                                   # status line, so this is redundant for most setups — set False to
                                   # keep only the brief ●/■ start/stop popups. hypr_notify=False
                                   # still wins (suppresses ALL popups).
+
+    def __post_init__(self) -> None:
+        """Validate notify_ms is an int (bugfix Issue 4 / PRD §4.5 robustness).
+
+        notify_ms is the only runtime-numeric FeedbackConfig field. tomllib parses a bare `2500` as
+        int (correct); `2500.0` parses as float and `true`/`"2500"` as bool/str. Reject all but a
+        genuine int (and reject bool, an int subclass) at load time, mirroring AsrConfig.__post_init__
+        and the unknown-key TypeError. Only notify_ms is validated here — the other fields are out of
+        scope (a wrong-typed state_file fails at file-open with a clear error; a wrong-typed bool is
+        merely truthy).
+        """
+        _v = self.notify_ms
+        if isinstance(_v, bool) or not isinstance(_v, int):
+            raise TypeError(
+                f"[feedback] notify_ms expects int, got {type(_v).__name__}: {_v!r}"
+            )
 
     def resolved_state_file(self) -> str:
         """Return the effective state-file path (lazy XDG_RUNTIME_DIR resolution).

@@ -15,7 +15,7 @@ host and transitions to `unloaded`; **(b)** the next arm re-spawns a FRESH host 
 
 **Deliverable** (3 NEW test functions + 1 section comment header, APPENDED to the END of
 `tests/test_daemon.py`; **NO production file edited, NO existing helper/fake modified, NO new import**):
-1. `test_run_loop_detects_dead_host_and_transitions_to_unloaded` — `_make_daemon(host_factory=)`,
+1. `test_run_loop_detects_dead_host_and_transitions_to_unloaded` — `_make_lazy_daemon(host_factory=)`,
    run loop in a thread, arm, kill host (`_alive=False`), assert unloaded transition.
 2. `test_load_host_respawns_after_dead_child` — arm, kill, `d.start()` again, assert a NEW host
    spawned + loaded + listening (recovery).
@@ -54,7 +54,7 @@ re-introduces the silent-stuck-on-listening failure (or removes the run() livene
   and asserts the daemon recovers on the next arm." This task delivers exactly that.
 - **The test seam is already built and CUDA-free.** `_FakeHost` (test_daemon.py:434) already has a
   flippable `is_alive` (`self._alive`, set True by `spawn()`), a `spawn_calls` counter, and a fast
-  `text()` (returns `""` instantly). `_fake_host_factory()` + `_make_daemon(host_factory=)` +
+  `text()` (returns `""` instantly). `_fake_host_factory()` + `_make_lazy_daemon(host_factory=)` +
   `_wait_for()` are the documented integration-test seams (architecture/test_infrastructure.md).
   No new fake is needed.
 - **Three tests = the three parts of the fix.** (a) proves S1's run() detection + `_handle_dead_host`
@@ -73,9 +73,11 @@ the last P1.M2.T1.S2 test). Each starts the daemon's `run()` in a daemon thread,
 `d._host._alive = False`, polls with `_wait_for(...)`, asserts the post-crash state, and tears down
 with the canonical `request_shutdown()` + `_wait_for(not t.is_alive)` + `t.join()` pattern.
 
-- **(a)/(b)** use `_make_daemon(host_factory=_fake_host_factory(spawn_result=True))` (the
+- **(a)/(b)** use `_make_lazy_daemon(host_factory=_fake_host_factory(spawn_result=True))` (the
   `_DaemonFakeFeedback` it builds records `fb.phases` / `fb.listening_states` for bonus assertions;
-  daemon attrs carry the load-bearing asserts).
+  daemon attrs carry the load-bearing asserts). NOTE: `_make_lazy_daemon` (NOT `_make_daemon`) passes
+  `recorder=None` for a genuine lazy boot — `_make_daemon(host_factory=)` injects a `_StubRecorder` →
+  legacy adapter → never lazy (Critical #9).
 - **(c)** builds a **real `Feedback`** daemon (a `host_factory=` variant of
   `_make_daemon_with_feedback`) because `status_snapshot()` reads `phase`/`models_loaded` from
   `self._feedback.snapshot()`, which `_DaemonFakeFeedback` lacks. (`listening` + `load_error` come
@@ -96,7 +98,7 @@ with the canonical `request_shutdown()` + `_wait_for(not t.is_alive)` + `t.join(
 ### Context Completeness Check
 
 _Pass._ A developer new to this repo can implement it from this PRP + the research note. The exact
-test seams (`_make_daemon(host_factory=)`, `_fake_host_factory()`, `_FakeHost._alive`/`spawn_calls`,
+test seams (`_make_lazy_daemon(host_factory=)`, `_fake_host_factory()`, `_FakeHost._alive`/`spawn_calls`,
 `_wait_for()`, `status_snapshot()`'s feedback dependency) are documented (research §1-§2). The
 **status-snapshot gotcha** — `status_snapshot()` calls `self._feedback.snapshot()` which
 `_DaemonFakeFeedback` lacks, so test (c) MUST use real `Feedback` — is the single most important
@@ -147,7 +149,8 @@ test bodies are given in the Implementation Blueprint below.
         threading (349), time as _time (350), Feedback (1393), FeedbackConfig (1392), pytest (21),
         daemon/VoiceTypingConfig (24)."
   critical: "Do NOT modify _FakeHost/_make_daemon/_make_daemon_with_feedback/_DaemonFakeFeedback or add imports.
-             Use _make_daemon(host_factory=) for (a)/(b); real Feedback + host_factory= for (c). Inject the
+             Use _make_lazy_daemon(host_factory=) for (a)/(b) (NOT _make_daemon — Critical #9); real
+             Feedback + host_factory= for (c). Poll _load_error for cleanup-waits (Critical #10). Inject the
              _FakeHost ONLY via host_factory= (NOT recorder_host=; _alive defaults False -> instant false death)."
 
 # MUST READ — the production methods these tests assert against (READ-ONLY; S1/S2 own them).
@@ -167,7 +170,7 @@ test bodies are given in the Implementation Blueprint below.
 
 # Background — the test-infra doc (the seams this task uses).
 - docfile: plan/003_27d1f88f5a9f/bugfix/001_c804c734947d/architecture/test_infrastructure.md
-  why: "Documents _FakeHost, _make_daemon(host_factory=), _wait_for, the run-loop integration pattern
+  why: "Documents _FakeHost, _make_lazy_daemon(host_factory=), _wait_for, the run-loop integration pattern
         (thread target=d.run + _wait_for + request_shutdown), and the coverage gap 'Child crash recovery: None'."
   critical: "Background. The item CONTRACT (LOGIC a/b/c) prescribes the three tests verbatim."
 
@@ -200,9 +203,10 @@ test bodies are given in the Implementation Blueprint below.
 # CRITICAL #1 — ★ status_snapshot() READS feedback.snapshot(); _DaemonFakeFeedback HAS NO .snapshot().
 #   daemon.status_snapshot() (daemon.py:1282) does `snap = self._feedback.snapshot()` then reads
 #   snap.get("phase"/"models_loaded"). _DaemonFakeFeedback (the _make_daemon default) has NO snapshot()
-#   method AND its set_models_loaded is a no-op. So a _make_daemon(host_factory=) daemon CANNOT service
-#   status_snapshot() (AttributeError). => Tests (a)/(b) assert DAEMON ATTRS (d._host, d._models_loaded,
-#   d.is_listening(), d._load_error) + the _DaemonFakeFeedback lists (fb.phases[-1], fb.listening_states[-1]).
+#   method AND its set_models_loaded is a no-op. So a _make_lazy_daemon(host_factory=) (or _make_daemon)
+#   daemon — both use _DaemonFakeFeedback — CANNOT service status_snapshot() (AttributeError). => Tests
+#   (a)/(b) assert DAEMON ATTRS (d._host, d._models_loaded, d.is_listening(), d._load_error) + the
+#   _DaemonFakeFeedback lists (fb.phases[-1], fb.listening_states[-1]).
 #   => Test (c) builds a REAL Feedback daemon (host_factory= variant of _make_daemon_with_feedback) so
 #   .snapshot() exists and reflects set_phase('unloaded')/set_models_loaded(False). (Research §2.)
 
@@ -231,6 +235,29 @@ test bodies are given in the Implementation Blueprint below.
 #   time @_time @350, Feedback @1393, FeedbackConfig @1392, pytest @21, daemon/VoiceTypingConfig @24 are all
 #   already module-level), do NOT edit any production file. (Research §7.)
 
+# CRITICAL #9 — ★ USE _make_lazy_daemon(host_factory=), NEVER _make_daemon(host_factory=). The item says
+#   "_make_daemon() with host_factory=" but that is IMPRECISE: _make_daemon (test_daemon.py:512) ALWAYS injects
+#   recorder=_StubRecorder() (its body defaults rec to _StubRecorder()), so _make_daemon(host_factory=factory)
+#   passes BOTH recorder=_StubRecorder() AND host_factory=factory -> __init__'s `elif recorder is not None:`
+#   branch WINS -> _host=_LegacyRecorderHostAdapter (is_alive=True ALWAYS) -> the factory is NEVER called ->
+#   d._host._alive=False flips a non-existent attr on the adapter -> the dead host is NEVER detected (test hangs
+#   at the _wait_for). _make_lazy_daemon (test_daemon.py:2498) passes recorder=None explicitly -> genuine LAZY
+#   boot -> d.start() -> _load_host() uses the factory -> _FakeHost with flippable _alive. VERIFIED empirically.
+#   (Research §1, §11.1.)
+
+# CRITICAL #10 — ★ POLL _load_error FOR THE CLEANUP-WAIT, NOT _host is None / _models_loaded is False.
+#   _handle_dead_host() (daemon.py:778-800) sets state in this ORDER under self._lock: (1) _host=None,
+#   (2) _models_loaded=False, (3) _listening.clear(), (4) feedback.set_phase('unloaded'), (5) set_models_loaded,
+#   (6) set_listening, (7) _load_error='...' LAST. A _wait_for(lambda: d._host is None) observes step (1) BEFORE
+#   step (7); with REAL Feedback (test c) the 3 disk writes in steps (4-6) hold _lock long enough that the main
+#   thread reads _load_error while it is STILL None (~50% reproducible race -> flaky test). _DaemonFakeFeedback
+#   (a/b) makes steps (4-6) instant so the window is microseconds (not observed) but it is still a latent race.
+#   FIX: poll the LAST assignment -> _wait_for(lambda: d._load_error == 'recorder-host child died unexpectedly')
+#   (a/b) or _wait_for(lambda: 'died' in (d._load_error or '')) (c). Observing step (7) guarantees steps (1-6)
+#   already ran (CPython program order + GIL). VERIFIED: 10/10 iterations deterministic after this fix.
+#   NOTE for (b): _load_host() SUCCESS resets _load_error=None (daemon.py:677), so after the re-arm d._load_error
+#   is None again (expected; the cleanup-wait runs BEFORE the re-arm). (Research §11.2.)
+
 # CRITICAL #7 — USE THE CANONICAL RUN-LOOP TEARDOWN. try/finally: d.request_shutdown() in finally; then
 #   assert _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0). (Precedent: lines 845-865.)
 #   Without it a failing assertion could leave the run thread spinning (test hang). (Research §3.)
@@ -255,10 +282,11 @@ Task 1: APPEND a section comment header + test (a) to the END of tests/test_daem
   - ADD: a section comment header naming P1.M2.T2.S3 / Issue 3 (detection+recovery+status regression).
   - ADD: def test_run_loop_detects_dead_host_and_transitions_to_unloaded(monkeypatch): ...
   - CONSTRUCTION: _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS); factory=_fake_host_factory(True);
-    d, fb, _rec, _be = _make_daemon(host_factory=factory); thread target=d.run; _wait_for booted; d.start();
-    _wait_for(lambda: d._models_loaded, timeout=2.0).
+    d, fb = _make_lazy_daemon(host_factory=factory)  # recorder=None -> LAZY boot (Critical #9);
+    thread target=d.run; _wait_for booted; d.start(); _wait_for(lambda: d._models_loaded, timeout=2.0).
   - KILL: d._host._alive = False.
-  - WAIT: _wait_for(lambda: d._models_loaded is False, timeout=2.0).
+  - WAIT: _wait_for(lambda: d._load_error == "recorder-host child died unexpectedly", timeout=2.0)  # Critical #10
+    (poll _load_error — the LAST assignment in _handle_dead_host — so full completion is guaranteed).
   - ASSERT: d._host is None; d._models_loaded is False; d.is_listening() is False; "died" in (d._load_error or "");
     fb.phases[-1] == "unloaded"; fb.listening_states[-1] is False.
   - TEARDOWN: try/finally request_shutdown + _wait_for(not t.is_alive) + t.join (Critical #7).
@@ -267,9 +295,9 @@ Task 1: APPEND a section comment header + test (a) to the END of tests/test_daem
 
 Task 2: APPEND test (b) to the END of tests/test_daemon.py
   - ADD: def test_load_host_respawns_after_dead_child(monkeypatch): ...
-  - CONSTRUCTION: same as (a) (_make_daemon host_factory=).
+  - CONSTRUCTION: same as (a) (_make_lazy_daemon host_factory= — Critical #9).
   - KILL: capture old = d._host FIRST; then d._host._alive = False.
-  - WAIT cleanup: _wait_for(lambda: d._host is None, timeout=2.0).
+  - WAIT cleanup: _wait_for(lambda: d._load_error == "recorder-host child died unexpectedly", timeout=2.0)  # Critical #10.
   - RE-ARM: d.start() again (exercises S2's _load_host guard: _models_loaded False -> no short-circuit -> spawn).
   - WAIT: _wait_for(lambda: d._models_loaded, timeout=2.0).
   - ASSERT: d._host is not old; d._host.spawn_calls == 1; d._models_loaded is True; d.is_listening() is True.
@@ -284,7 +312,8 @@ Task 3: APPEND test (c) to the END of tests/test_daemon.py
     factory=_fake_host_factory(True); d=daemon.VoiceTypingDaemon(cfg, fb, recorder=None, host_factory=factory,
     backend=_FakeBackend(), mic_prober=_ok_probe).
   - KILL: d._host._alive = False after arm.
-  - WAIT cleanup: _wait_for(lambda: d._host is None, timeout=2.0).
+  - WAIT cleanup: _wait_for(lambda: "died" in (d._load_error or ""), timeout=2.0)  # Critical #10 (real Feedback
+    disk writes make _host-is-None racy; _load_error is set LAST).
   - ASSERT: snap=d.status_snapshot(); snap["listening"] is False; snap["phase"]=="unloaded";
     snap["models_loaded"] is False; "died" in snap["load_error"].
   - TEARDOWN: same canonical pattern.
@@ -300,7 +329,10 @@ Task 4: VALIDATE
 
 ### Edits — verbatim blocks to APPEND at the END of `tests/test_daemon.py`
 
-Append the following block after the last line of the file (`test_state_json_phase_idle_after_stop`):
+Append the following block after the last line of the file (`test_state_json_phase_idle_after_stop`).
+**Two empirically-verified details are baked in** (Critical #9 + #10): use `_make_lazy_daemon(host_factory=)`
+(not `_make_daemon`), and poll `_load_error` (the LAST assignment in `_handle_dead_host`) for the
+cleanup-wait (not `_host is None` / `_models_loaded` — racy under real-Feedback disk writes):
 
 ```python
 
@@ -323,7 +355,7 @@ def test_run_loop_detects_dead_host_and_transitions_to_unloaded(monkeypatch):
     """
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     factory = _fake_host_factory(spawn_result=True)
-    d, fb, _rec, _be = _make_daemon(host_factory=factory)
+    d, fb = _make_lazy_daemon(host_factory=factory)            # recorder=None -> LAZY boot (Critical #9)
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     try:
@@ -332,8 +364,9 @@ def test_run_loop_detects_dead_host_and_transitions_to_unloaded(monkeypatch):
         assert _wait_for(lambda: d._models_loaded, timeout=2.0), "host did not load+arm"
         assert d.is_listening() and d._host is not None
         d._host._alive = False                             # simulate the child crashing
-        assert _wait_for(lambda: d._models_loaded is False, timeout=2.0), \
-            "run() did not detect the dead host within 2s"
+        # Poll _load_error (set LAST in _handle_dead_host) -> guarantees full completion (Critical #10):
+        assert _wait_for(lambda: d._load_error == "recorder-host child died unexpectedly", timeout=2.0), \
+            "run() did not detect + fully handle the dead host within 2s"
         assert d._host is None
         assert d._models_loaded is False
         assert d.is_listening() is False                   # _listening cleared (died WHILE listening)
@@ -355,7 +388,7 @@ def test_load_host_respawns_after_dead_child(monkeypatch):
     """
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     factory = _fake_host_factory(spawn_result=True)
-    d, fb, _rec, _be = _make_daemon(host_factory=factory)
+    d, fb = _make_lazy_daemon(host_factory=factory)            # LAZY boot (Critical #9)
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     try:
@@ -364,7 +397,9 @@ def test_load_host_respawns_after_dead_child(monkeypatch):
         assert _wait_for(lambda: d._models_loaded, timeout=2.0)
         old_host = d._host                              # capture before killing
         old_host._alive = False                         # child crashes
-        assert _wait_for(lambda: d._host is None, timeout=2.0), "dead host not cleaned up"
+        # Poll _load_error (LAST assignment) -> cleanup fully done (Critical #10):
+        assert _wait_for(lambda: d._load_error == "recorder-host child died unexpectedly", timeout=2.0), \
+            "dead host not cleaned up"
         assert d._models_loaded is False
         d.start()                                        # re-arm -> _load_host spawns a FRESH host
         assert _wait_for(lambda: d._models_loaded, timeout=2.0), "host did not re-spawn"
@@ -388,7 +423,7 @@ def test_status_reports_unloaded_after_child_death(tmp_path, monkeypatch):
     cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
     fb = Feedback(cfg.feedback)
     factory = _fake_host_factory(spawn_result=True)
-    d = daemon.VoiceTypingDaemon(
+    d = daemon.VoiceTypingDaemon(                       # recorder=None -> LAZY boot (Critical #9)
         cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
     )
     t = threading.Thread(target=d.run, daemon=True)
@@ -398,7 +433,8 @@ def test_status_reports_unloaded_after_child_death(tmp_path, monkeypatch):
         d.start()
         assert _wait_for(lambda: d._models_loaded, timeout=2.0)
         d._host._alive = False                          # child crashes
-        assert _wait_for(lambda: d._host is None, timeout=2.0), "dead host not cleaned up"
+        # Poll _load_error (LAST assignment; real Feedback's 3 disk writes make _host-is-None racy — Critical #10):
+        assert _wait_for(lambda: "died" in (d._load_error or ""), timeout=2.0), "dead host not cleaned up"
         snap = d.status_snapshot()
         assert snap["listening"] is False               # is_listening()
         assert snap["phase"] == "unloaded"              # real Feedback.set_phase("unloaded")
@@ -435,15 +471,18 @@ finally:
 assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
 t.join(timeout=2.0)
 
-# (2) Why host_factory= (Critical #2): _FakeHost._alive defaults False; spawn() (called by
-#   _load_host via the factory) sets it True. A recorder_host= injection skips spawn() -> dead on boot.
+# (2) Why host_factory= + _make_lazy_daemon (Critical #2/#9): _FakeHost._alive defaults False; spawn()
+#   (called by _load_host via the factory) sets it True. A recorder_host= injection skips spawn() -> dead on
+#   boot. AND _make_lazy_daemon (NOT _make_daemon) passes recorder=None -> genuine lazy boot (the factory is
+#   actually consulted); _make_daemon(host_factory=) injects a _StubRecorder -> legacy adapter -> never lazy.
 factory = _fake_host_factory(spawn_result=True)
-d, fb, _rec, _be = _make_daemon(host_factory=factory)
+d, fb = _make_lazy_daemon(host_factory=factory)
 
-# (3) The kill + detection (Critical #3/#4): plain attr write; detected on the loop's next iteration
-#   (microseconds, since _FakeHost.text() returns "" instantly -> no 0.05s sleep on the listening path):
+# (3) The kill + detection (Critical #3/#4/#10): plain attr write; detected on the loop's next iteration
+#   (microseconds, since _FakeHost.text() returns "" instantly -> no 0.05s sleep on the listening path).
+#   POLL _load_error (NOT _host/_models_loaded) for the cleanup-wait — it is set LAST in _handle_dead_host:
 d._host._alive = False
-assert _wait_for(lambda: d._models_loaded is False, timeout=2.0)
+assert _wait_for(lambda: d._load_error == "recorder-host child died unexpectedly", timeout=2.0)
 
 # (4) Test (c) MUST use real Feedback (Critical #1): status_snapshot() calls self._feedback.snapshot().
 cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
@@ -462,7 +501,8 @@ TEST FILE (tests/test_daemon.py):
               daemon+VoiceTypingConfig(24) are already module-level"
   - fixtures: "(a)/(b) take monkeypatch; (c) takes tmp_path, monkeypatch (pytest built-ins, no import)"
 SEAMS USED (unchanged):
-  - _make_daemon(host_factory=): "(a)/(b) construction (_DaemonFakeFeedback records phases/listening_states)"
+  - _make_lazy_daemon(host_factory=): "(a)/(b) construction (recorder=None -> lazy boot; _DaemonFakeFeedback
+    records phases/listening_states). NOT _make_daemon (Critical #9)."
   - _fake_host_factory(spawn_result=True): "builds the factory; each call -> a NEW _FakeHost"
   - _FakeHost: "is_alive->_alive (True after spawn), spawn_calls counter, text()->instant '', pid->None"
   - _wait_for(predicate, timeout=2.0): "poll-based async assertion"
@@ -588,19 +628,28 @@ git status --short
   in-tree; these tests VERIFY them (Critical #6).
 - ❌ Don't assert `models_loaded` via `_DaemonFakeFeedback` in (a)/(b) — its `set_models_loaded` is a
   no-op stub; assert `d._models_loaded` (the daemon attr) instead (Critical #1).
+- ❌ Don't use `_make_daemon(host_factory=)` for (a)/(b) — it ALWAYS injects `recorder=_StubRecorder()`
+  → the legacy adapter (is_alive=True always) wins and the factory is NEVER consulted, so the dead
+  host is never detected. Use `_make_lazy_daemon(host_factory=)` (passes `recorder=None`) (Critical #9).
+- ❌ Don't poll `d._host is None` / `d._models_loaded is False` for the cleanup-wait — `_handle_dead_host`
+  sets those BEFORE `_load_error`, and real Feedback's 3 disk writes hold the lock long enough to make
+  the main thread read `_load_error` while still None (~50% flaky for test c). Poll `_load_error`
+  (the LAST assignment) instead (Critical #10).
 
 ---
 
 ## Confidence Score
 
-**9/10** — one-pass success likelihood. This is a pure append of three pytest functions that reuse
-existing, documented seams (`_make_daemon(host_factory=)`, `_fake_host_factory()`, `_FakeHost._alive`,
-`_wait_for()`) against already-in-tree production code (S1's run() check + `_handle_dead_host`; S2's
-`_load_host` guard — all verified present with a 345-green baseline). The two non-obvious failure
-modes are explicitly flagged and worked around: (1) test (c) uses real `Feedback` because
-`status_snapshot()` needs `.snapshot()` (Critical #1); (2) the `_FakeHost` is injected via
-`host_factory=` not `recorder_host=` because `_alive` defaults False (Critical #2). Verbatim test
-bodies are provided (including the exact assertions, kill mechanism, and teardown), and the kill
-mechanism + detection timing + watchdog non-interference are all validated facts from the S1/S2
-research probes (which exercised the identical `_FakeHost`-crash path). Residual risk is only a
-verbatim-paste indentation mismatch, which the grep/import sanity gates (Level 1) catch immediately.
+**10/10** — one-pass success likelihood. This is a pure append of three pytest functions, and the
+**EXACT test bodies have been validated empirically** by running them as throwaway probes against the
+in-tree S1+S2 code: 10/10 iterations of (a)+(b)+(c) pass with 0 failures, and the full baseline is
+345-green. Three non-obvious failure modes were caught DURING that validation and are explicitly
+worked around in the verbatim bodies: (1) test (c) uses real `Feedback` because `status_snapshot()`
+needs `.snapshot()` (Critical #1); (2) the `_FakeHost` is injected via `host_factory=` not
+`recorder_host=` because `_alive` defaults False (Critical #2); (3) **(a)/(b) use
+`_make_lazy_daemon` not `_make_daemon`** — `_make_daemon(host_factory=)` injects a `_StubRecorder` →
+legacy adapter → the factory is never consulted and detection never fires (Critical #9); and (4) the
+cleanup-wait polls `_load_error` (the LAST assignment in `_handle_dead_host`), NOT `_host is None` /
+`_models_loaded` — the latter are racy under real-Feedback disk writes (Critical #10, ~50% flaky
+before the fix). Because the verbatim bodies are pre-validated, residual risk is only a verbatim-paste
+indentation mismatch, which the grep/import sanity gates (Level 1) catch immediately.
