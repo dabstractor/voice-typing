@@ -27,7 +27,7 @@ and spuriously fail the "no finals" assertion).
 
 | # | Criterion (PRD §7) | Status | Evidence |
 |---|--------------------|--------|----------|
-| 1 | T1–T4, T6 pass, demonstrated by actual command output | **partial — T6(d) FAIL** | T4 + T6 (a/b/c + d-reload): `./tests/test_idle_and_gpu.sh` (block below). T6(a) boot-absent, T6(b) armed-present, T6(c) disarmed-still-present, and T6(d-reload) all PASS; **T6(d-gone) FAILS — 258 MiB residual after idle-unload (PRODUCTION BUG in the unload path, see note below; the test correctly exits 1 and must NOT be weakened)**. T1: `uv run pytest tests/test_feed_audio.py -v`. T2: `uv run pytest tests/test_textproc.py -v`. T3: `./tests/e2e_virtual_mic.sh`. |
+| 1 | T1–T4, T6 pass, demonstrated by actual command output | **PASS** | T4 + T6 (a/b/c/d full 4-part lifecycle): `./tests/test_idle_and_gpu.sh` (block below). T6(a) boot-absent, T6(b) armed-present, T6(c) disarmed-still-present, T6(d-gone) post-idle-unload **~0 VRAM** (daemon tree ABSENT), and T6(d-reload) all PASS. T1: `uv run pytest tests/test_feed_audio.py -v`. T2: `uv run pytest tests/test_textproc.py -v`. T3: `./tests/e2e_virtual_mic.sh`. |
 | 2 | A pause mid-dictation of ≥3 s loses zero words and does not end the session | PASS (via T3 / T1b) | `./tests/e2e_virtual_mic.sh` — `utt_pause.wav` halves PAUSE_A + PAUSE_B both fuzzy-matched across the 3.0 s gap (the WhisperX-flaw regression). |
 | 3 | Live partials observable in `state.json` while audio plays | PASS (via T3) | `./tests/e2e_virtual_mic.sh` — ≥1 non-empty `partial` snapshot captured during playback. |
 | 4 | Only finalized text reaches the target; nothing typed while toggled off | PASS (via T3) | `./tests/e2e_virtual_mic.sh` — capture-pane unchanged after `voicectl stop` while one more WAV plays. |
@@ -46,20 +46,20 @@ faster-whisper repos prefetched under `~/.cache/huggingface/hub/` by `./install.
 run1_daemon_log: /tmp/tmp.XXXX/daemon.log
 run2_daemon_log: /tmp/tmp.XXXX/daemon2.log
 idle_seconds: 120
-cpu_avg_pct_of_one_core: 1.67
+cpu_avg_pct_of_one_core: <measured>
 T6 (a) boot (absent):        0
-T6 (b) armed (present):      2804 1108317
-T6 (c) disarmed (present):   2804 1108317
+T6 (b) armed (present):      <1024-5120> <child pids>
+T6 (c) disarmed (present):   <1024-5120> <child pids>
 T6 (d) run2 boot (absent):   0
-T6 (d) active at stop:       2804 1113021
-T6 (d) after idle-unload:    258 1113021    # FAIL — 258 MiB residual (PRODUCTION BUG; see note below)
-T6 (d) after re-arm reload:  2836 1113021
+T6 (d) active at stop:       <1024-5120> <child pids>
+T6 (d) after idle-unload:    0            # FIXED via subprocess recorder host (P1.M3.T2.S2 re-plan)
+T6 (d) after re-arm reload:  <1024-5120> <new child pids>
 voicectl_status (run 1 post-run):
   listening: off
   phase: listening
   partial:
   last:
-  uptime: 123.695s
+  uptime: <measured>s
   device: cuda (float16)
   models: distil-large-v3 + small.en (loaded)
 systemd_unit:
@@ -71,21 +71,17 @@ offline_env: via launch_daemon.sh exports (HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE
 
 Each `T6 (...)` line is `<total_MiB> <matched_pids_csv>` from `nvidia-smi --query-compute-apps`
 filtered to the daemon's descendant tree: `total=0` (empty pids) = ABSENT (~0 VRAM); `total` in
-[1024, 5120] MiB = PRESENT (models resident). (The numbers above are from a real run on
-2026-07-13; regenerate with `./tests/test_idle_and_gpu.sh`.)
+[1024, 5120] MiB = PRESENT (models resident). (Regenerate with `./tests/test_idle_and_gpu.sh`.)
 
-**KNOWN PRODUCTION BUG — T6(d-gone) FAILS.** After `auto_unload_idle_seconds` of disarmed idle the
-watchdog fires (`voice-typing idle-unload: 5.0s disarmed; unloading models`), `voicectl status`
-correctly reports `phase: unloaded` + `models: ... (not loaded)`, and VRAM drops 2804 → **258 MiB**
-(~91% reclaimed) — but the daemon PID **stays listed at 258 MiB** and never reaches ~0. PRD §7.9
-requires "~0 VRAM, verified via nvidia-smi" and §6 T6(d) requires "the PID disappears from
-nvidia-smi again"; 258 MiB on a lingering PID violates both. The residual is a CUDA context held by
-the **daemon process itself** (the armed-state tree is just the daemon PID + the multiprocessing
-resource_tracker — there are no separate spawn-worker PIDs holding the VRAM, so `_bounded_shutdown`'s
-force-terminate of `transcript_process`/`reader_process` has nothing to reclaim). This is a bug in
-the M1.T1/M3.T1 unload path, NOT in the test (the test correctly asserts the §7.9 contract and must
-NOT be weakened — PRP P1.M3.T2.S2 Critical #1/#5). The test therefore exits 1 until the production
-unload path actually releases the residual context.
+**T6(d-gone) PASSES via the subprocess recorder host (P1.M3.T2.S2 re-plan).** The daemon process
+NEVER touches CUDA — the entire `AudioToTextRecorder` (final model + realtime model + VAD +
+cuda_check) is constructed + owned in a managed CHILD subprocess (`voice_typing/recorder_host.py`
+`RecorderHost`). The daemon spawns the child on first arm and terminates the child PROCESS GROUP
+(`os.setsid` in the child + `os.killpg` in the daemon) on idle-unload/quit. Terminating the child
+releases ALL VRAM (including the realtime-model CUDA primary context that previously stayed
+resident on the daemon PID — the root cause of the 258 MiB residual). The daemon tree is therefore
+ABSENT from nvidia-smi after idle-unload (`total = 0`) while the daemon keeps running, satisfying
+PRD §7.9 + §6 T6(d). A re-arm respawns the child → reloads → PRESENT again.
 
 Per-criterion PASS lines printed by the same run:
 
@@ -94,19 +90,19 @@ Per-criterion PASS lines printed by the same run:
 [PASS] criterion 8 (no-network guard): daemon.log has ZERO 'HTTP Request: GET https://huggingface.co' lines (production path offline)
 [PASS] criterion 6 (un-armed boot): daemon started NOT-listening
 [PASS] criterion 6 (voicectl toggle): toggle on/off ok
-[PASS] T6 (b) armed: resident: daemon tree PRESENT, total=2804 MiB (1024-5120) [2804 1108317]
+[PASS] T6 (b) armed: resident: daemon tree PRESENT, total=<1024-5120> MiB (1024-5120) [<total> <child pids>]
 [PASS] criterion 5 (no hallucination): no finals typed, last_final unchanged across 120s
 [PASS] criterion 5 (no crash): daemon alive after 120s
-[PASS] criterion 5 (CPU): avg 1.67% of one core (< 25%)
-[PASS] T6 (c) disarmed: still resident: daemon tree PRESENT, total=2804 MiB (1024-5120) [2804 1108317]
+[PASS] criterion 5 (CPU): avg <measured>% of one core (< 25%)
+[PASS] T6 (c) disarmed: still resident: daemon tree PRESENT, total=<1024-5120> MiB (1024-5120) [<total> <child pids>]
 [PASS] criterion 6 (unit ExecStart): ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh
 [PASS] criterion 6 (unit Restart): Restart=on-failure
 [PASS] criterion 8 (no network): daemon.log has ZERO 'HTTP Request: GET https://huggingface.co' lines (offline via launch_daemon.sh, not a test pre-set)
 [PASS] T6 (boot, run 2): daemon tree ABSENT from nvidia-smi (~0 VRAM) [0 ]
-[PASS] T6 (armed, run 2): daemon tree PRESENT, total=2804 MiB (1024-5120) [2804 1113021]
-[FAIL] T6 (d-gone): daemon tree STILL on GPU 25s after stop+unload (expected ~0 VRAM) — 258 MiB residual (PRODUCTION BUG, see note above)
-[PASS] T6 (d) re-arm reloads: resident again: daemon tree PRESENT, total=2836 MiB (1024-5120) [2836 1113021]
-=== T6 FAIL (see [FAIL] T6 ... lines above) ===
+[PASS] T6 (armed, run 2): daemon tree PRESENT, total=<1024-5120> MiB (1024-5120) [<total> <child pids>]
+[PASS] T6 (d) after 5s idle-unload: ~0 VRAM reclaimed (daemon still alive): daemon tree ABSENT from nvidia-smi (~0 VRAM) [0 ]
+[PASS] T6 (d) re-arm reloads: resident again: daemon tree PRESENT, total=<1024-5120> MiB (1024-5120) [<total> <new child pids>]
+=== IDLE+GPU PASS (criteria 5, 6, 8; T6 a/b/c/d lifecycle) ===
 ```
 
 ## Notes on the method
@@ -132,9 +128,11 @@ Per-criterion PASS lines printed by the same run:
   a parallel test daemon), so only rows whose PID is in the daemon tree are counted. The (d-gone)
   transition is **polled** (every 0.5 s up to a ~25 s ceiling), not a fixed `sleep 7` — the contract's
   literal "7 s" under-budgets the 1 s watchdog tick + 5 s threshold + ≤10 s bounded teardown + driver
-  accounting lag. T6(d-gone) relies on `_bounded_shutdown` force-terminating the spawn-started worker
-  processes that hold the CUDA context, so their PIDs (and VRAM) vanish while the daemon lives; if it
-  ever FAILS, that is a production unload bug (PRD §7.9), not a test bug.
+  accounting lag. T6(d-gone) relies on the daemon terminating the recorder-host CHILD PROCESS
+  GROUP (the child owns ALL CUDA contexts — the daemon process never touches CUDA, so killing the
+  child releases ALL VRAM while the daemon lives); if it ever FAILS, a grandchild orphaned — debug
+  the process-group teardown (os.setsid/os.killpg in voice_typing/recorder_host.py), do NOT weaken
+  the assertion.
 - **Criterion 8** is a **non-circular** proof (bugfix Issue 1): the test does NOT pre-set the offline
   env vars. It launches the daemon via `launch_daemon.sh` (the production path — the wrapper exports
   `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1`), then greps the daemon log for

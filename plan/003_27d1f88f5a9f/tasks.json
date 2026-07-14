@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Lazy-Load Feature Delta — models load on first arm, unload after idle, teardown is bounded",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Delta 003 against the already-implemented voice-typing project. Three cohesive changes with an explicit prerequisite chain: (1) bounded recorder teardown — fix the ~90s shutdown hang so idle-unload won't wedge every 30 min (PREREQUISITE); (2) lazy-load lifecycle — defer recorder construction to first arm, surface the lifecycle state machine in status/feedback; (3) idle-unload watchdog — reclaim VRAM after 30 min of disarmed idle. The system already boots eagerly building the recorder (~1.5-3 GB VRAM on every login); this delta makes it lazy so a boot where voice typing is never used consumes ~0 VRAM, while re-arms remain instant (models resident) until 30 min of disarmed idle unloads them. Research findings: plan/003_27d1f88f5a9f/architecture/.",
       "milestones": [
         {
@@ -168,7 +168,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Idle Unload + Config + T6 Test + Docs (D4, D7) — VRAM reclamation after disarmed idle",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Depends on M1 (bounded teardown) and M2 (lifecycle exists to tear down). Add the auto_unload_idle_seconds config knob (default 1800s = 30 min). Add an _idle_unload_watchdog thread modeled on the existing _idle_watchdog. When the recorder has sat loaded/not-listening for the threshold, tear it down via the M1 bounded teardown → unloaded state. Rewrite T6 as the 4-part lazy-load lifecycle test. Sync README for the new knob + lazy-load behavior.",
           "tasks": [
             {
@@ -217,7 +217,7 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Rewrite T6 as GPU-lifecycle (lazy load) + fast pytest regression",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Convert tests/test_idle_and_gpu.sh T6 from residency assertion to the 4-part lifecycle assertion: (a) idle/never-armed → daemon PID absent from nvidia-smi; (b) armed → PID + ~1-5 GB; (c) disarmed → still resident; (d) disarmed + idle ≥ auto_unload_idle_seconds → PID gone, reload reappears. Add fast pytest unit tests for the lifecycle state machine + single-flight.",
               "subtasks": [
                 {
@@ -240,7 +240,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Rewrite tests/test_idle_and_gpu.sh T6 section to 4-part lazy-load lifecycle assertions + confirm T4 still holds",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S1"

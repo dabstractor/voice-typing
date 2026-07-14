@@ -41,15 +41,16 @@
 #       nvidia-smi driver-accounting lag) → start again → T6(d-reload) POLL until tree PRESENT.
 #       The 5s threshold is ONLY on run 2 so T4's 120s window on run 1 is unaffected.
 #
-# NOTE on T6(d-gone) (PRD §7.9 + the riskiest clause): whether the daemon PID set vanishes from
-#   nvidia-smi WITHOUT process exit depends on WHICH process holds the CUDA context. RealtimeSTT /
-#   ctranslate2 inference runs in SPAWN-started worker PROCESSES (transcript_process /
-#   reader_process). _bounded_shutdown force-terminates them (daemon.py:1030+ comment: "the CUDA-
-#   context/VRAM holders — terminating them releases VRAM immediately") → their contexts die →
-#   their PIDs vanish from nvidia-smi → the daemon tree is ABSENT → ~0 VRAM while the daemon LIVES.
-#   This is the design intent. IF a FAIL here revealed the context was NOT released (nvidia-smi
-#   keeps listing the tree while the daemon lives), that is a PRODUCTION bug in M1.T1/M3.T1, NOT a
-#   test bug — the test is CORRECT to assert the §7.9 contract. Do NOT weaken the assertion.
+# NOTE on T6(d-gone) (PRD §7.9 + the riskiest clause): FIXED via the subprocess recorder host
+#   (P1.M3.T2.S2 re-plan). The daemon process now NEVER touches CUDA — the entire
+#   AudioToTextRecorder (final model + realtime model + VAD + cuda_check) is constructed + owned
+#   in a managed CHILD subprocess (voice_typing/recorder_host.py RecorderHost). The daemon spawns
+#   the child on first arm and terminates the child PROCESS GROUP (os.setsid in the child +
+#   os.killpg in the daemon) on idle-unload/quit, so ALL VRAM (including the realtime-model CUDA
+#   primary context that previously stayed resident on the daemon PID) is released. The daemon tree
+#   is therefore ABSENT from nvidia-smi after idle-unload while the daemon keeps running. A FAIL
+#   here would mean a grandchild orphaned (the killpg teardown missed it) — debug the group
+#   teardown, do NOT weaken the assertion.
 #
 # Asserts on the daemon DESCENDANT TREE (daemon_tree_pids), NOT an arbitrary nvidia-smi row — the
 # tree matches whichever process (daemon or spawn worker) holds the context. PID presence/absence
@@ -601,9 +602,11 @@ else
   T6_OK=1
 fi
 
-# stop -> disarmed. After 5s of disarmed idle the watchdog fires -> _unload_recorder ->
-# _bounded_shutdown tears down + force-terminates the spawn workers -> their CUDA contexts die ->
-# their PIDs vanish from nvidia-smi -> daemon tree ABSENT while the daemon LIVES (PRD §7.9).
+# stop -> disarmed. After 5s of disarmed idle the watchdog fires -> _unload_host ->
+# _bounded_shutdown -> host.stop() terminates the child PROCESS GROUP -> all CUDA contexts
+# (incl. the realtime-model context that used to stay on the daemon PID) die -> the daemon tree
+# vanishes from nvidia-smi -> ABSENT while the daemon LIVES (PRD §7.9). The daemon process itself
+# NEVER touched CUDA (the recorder lives in the child), so its PID was never on nvidia-smi.
 voicectl stop >/dev/null || die "voicectl stop (run 2) failed (control-lock wedge? exit 124 = timeout)"
 T6D_ACTIVE_BEFORE="$(vram_tree_state "$DAEMON_PID")"   # the pre-unload active set (self-calibration)
 echo "T6(d) active set at stop (run 2): $T6D_ACTIVE_BEFORE"

@@ -424,12 +424,100 @@ def _wait_for(predicate, timeout=2.0, interval=0.01):
     return predicate()
 
 
-def _make_daemon(*, recorder=None, backend=None, cfg=None):
+# P1.M3.T2.S2 (re-plan): the recorder now lives in a RecorderHost child. The lazy-load tests inject
+# a FAKE host factory (host_factory=) so _load_host stays CUDA-free + fast. _FakeHost mirrors the
+# real RecorderHost's surface (spawn/set_microphone/abort/text/stop/device) but never spawns a child.
+# It wraps a _StubRecorder so the existing assertions on rec.mic/rec.aborts/rec.text_calls still work,
+# and it records spawn()/stop() calls so the single-flight + idle-unload tests can assert on them.
+
+
+class _FakeHost:
+    """A fake RecorderHost for the lazy-load / idle-unload tests (CUDA-free, fast).
+
+    spawn() returns a configurable result (default True) + sets a fake device dict so _load_host can
+    seed _resolved_device_cache. set_microphone/abort/text proxy to the wrapped _StubRecorder so the
+    existing assertions (rec.mic / rec.aborts / rec.text_calls) hold. stop() records the call + a
+    bounded join on the wrapped recorder's shutdown() (mirrors the legacy adapter's force-cleanup).
+    """
+
+    def __init__(self, cfg, feedback, latency, on_final, on_partial, on_speech, *, force_cpu=False):
+        # Mirror the real RecorderHost.__init__ signature so host_factory=lambda *a, **k: _FakeHost(*a, **k)
+        # works. Store the callbacks (the tests do not exercise them, but the daemon wires them).
+        self.cfg = cfg
+        self.feedback = feedback
+        self.latency = latency
+        self.on_final = on_final
+        self.on_partial = on_partial
+        self.on_speech = on_speech
+        self.force_cpu = force_cpu
+        self.recorder = _StubRecorder()   # the wrapped stub the tests assert on
+        self.spawn_calls = 0
+        self.spawn_result = True
+        self.stop_calls = 0
+        self.device = {"device": "cuda", "compute_type": "float16",
+                       "final_model": "distil-large-v3", "realtime_model": "small.en"}
+        self._alive = False
+
+    def spawn(self, timeout=180.0):
+        self.spawn_calls += 1
+        self._alive = bool(self.spawn_result)
+        return self.spawn_result
+
+    @property
+    def is_alive(self):
+        return self._alive
+
+    @property
+    def pid(self):
+        return None
+
+    def set_microphone(self, on):
+        self.recorder.set_microphone(on)
+
+    def abort(self):
+        self.recorder.abort()
+
+    def text(self, on_final):
+        self.recorder.text(on_final)
+
+    def stop(self, timeout=5.0):
+        self.stop_calls += 1
+        self._alive = False
+        # bounded best-effort shutdown of the wrapped stub (mirrors the legacy adapter).
+        import threading as _t
+        done = _t.Event()
+        def _do():
+            try:
+                self.recorder.shutdown()
+            except Exception:
+                pass
+            finally:
+                done.set()
+        th = _t.Thread(target=_do, daemon=True)
+        th.start()
+        done.wait(timeout=timeout)
+
+
+def _fake_host_factory(spawn_result=True, device=None):
+    """Build a host_factory callable returning a _FakeHost with the given spawn() result + device."""
+    def _factory(cfg, feedback, latency, on_final, on_partial, on_speech):
+        host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech)
+        host.spawn_result = spawn_result
+        if device is not None:
+            host.device = dict(device)
+        return host
+    return _factory
+
+
+def _make_daemon(*, recorder=None, recorder_host=None, host_factory=None, backend=None, cfg=None):
     cfg = cfg or VoiceTypingConfig()
     fb = _DaemonFakeFeedback()
     rec = recorder if recorder is not None else _StubRecorder()
     be = backend if backend is not None else _FakeBackend()
-    d = daemon.VoiceTypingDaemon(cfg, fb, recorder=rec, backend=be, mic_prober=_ok_probe)
+    d = daemon.VoiceTypingDaemon(
+        cfg, fb, recorder=rec, recorder_host=recorder_host, host_factory=host_factory,
+        backend=be, mic_prober=_ok_probe,
+    )
     return d, fb, rec, be
 
 
@@ -2051,117 +2139,89 @@ def test_log_resolved_device_reads_cache_after_cpu_fallback(caplog):
 # ===========================================================================
 
 
-def _make_lazy_daemon(cfg=None):
-    """A daemon with NO injected recorder: self._recorder is None, _models_loaded False (the lazy boot state).
+def _make_lazy_daemon(cfg=None, host_factory=None):
+    """A daemon with NO injected recorder: self._host is None, _models_loaded False (the lazy boot state).
 
-    Mirrors production lazy boot. Tests that exercise _load_recorder monkeypatch daemon.build_recorder
-    themselves (so construction stays hermetic)."""
+    Mirrors production lazy boot. Tests that exercise _load_host inject a host_factory (so the spawn
+    stays hermetic — no real child). P1.M3.T2.S2 re-plan: "loading" is now host.spawn()."""
     cfg = cfg or VoiceTypingConfig()
     fb = _DaemonFakeFeedback()
-    return daemon.VoiceTypingDaemon(cfg, fb, recorder=None, backend=_FakeBackend(), mic_prober=_ok_probe), fb
+    return daemon.VoiceTypingDaemon(
+        cfg, fb, recorder=None, host_factory=host_factory, backend=_FakeBackend(), mic_prober=_ok_probe
+    ), fb
 
 
 def test_lazy_daemon_boots_unloaded_with_no_recorder():
-    """A recorder-less daemon boots lazy: _recorder None, _models_loaded False (§4.2bis)."""
+    """A recorder-less daemon boots lazy: _host None, _models_loaded False (§4.2bis)."""
     d, _fb = _make_lazy_daemon()
-    assert d._recorder is None
+    assert d._host is None
+    assert d._recorder is None                        # back-compat property (None when no legacy adapter)
     assert d._models_loaded is False
     assert d._loading is False
     assert d._load_error is None
 
 
 def test_load_recorder_success_loads_and_marks_loaded(monkeypatch):
-    """_load_recorder() builds via build_recorder + flips _models_loaded; returns True."""
-    d, fb = _make_lazy_daemon()
-    built = {"n": 0, "force_cpu": None}
-
-    def fake_build(cfg, feedback, latency=None, force_cpu=False, on_speech=None):
-        built["n"] += 1
-        built["force_cpu"] = force_cpu
-        return _StubRecorder()
-
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    """_load_host() spawns via host_factory + flips _models_loaded; returns True."""
+    factory = _fake_host_factory(spawn_result=True)
+    d, fb = _make_lazy_daemon(host_factory=factory)
     assert d._load_recorder() is True
-    assert built["n"] == 1 and built["force_cpu"] is False
-    assert d._recorder is not None and d._models_loaded is True
+    assert d._host is not None and d._host.spawn_calls == 1
+    assert d._models_loaded is True
     assert d._load_error is None
     assert fb.phases[-1] == "idle"          # phase driven to 'idle' on success
 
 
 def test_load_recorder_is_noop_once_loaded(monkeypatch):
-    """A second _load_recorder() after success does NOT call build_recorder again (resident)."""
-    d, _fb = _make_lazy_daemon()
-    built = {"n": 0}
-
-    def fake_build(*a, **k):
-        built["n"] += 1
-        return _StubRecorder()
-
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    """A second _load_recorder() after success does NOT spawn again (resident)."""
+    factory = _fake_host_factory(spawn_result=True)
+    d, _fb = _make_lazy_daemon(host_factory=factory)
     assert d._load_recorder() is True
     assert d._load_recorder() is True       # resident -> no-op
-    assert built["n"] == 1                  # build_recorder called exactly ONCE
+    assert d._host.spawn_calls == 1         # spawn called exactly ONCE
 
 
 def test_load_recorder_cpu_fallback_on_cuda_failure(monkeypatch, caplog):
-    """First (cuda) build fails -> retry with force_cpu=True -> loaded (migrated from main())."""
-    d, _fb = _make_lazy_daemon()
-    attempts = {"n": 0, "force_cpu": []}
-
-    def fake_build(cfg, feedback, latency=None, force_cpu=False, on_speech=None):
-        attempts["n"] += 1
-        attempts["force_cpu"].append(force_cpu)
-        if not force_cpu:
-            raise RuntimeError("cuda construction failed")
-        return _StubRecorder()
-
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
-    with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
-        assert d._load_recorder() is True
-    assert attempts["n"] == 2                           # cuda attempt + cpu retry
-    assert attempts["force_cpu"] == [False, True]
-    assert d._recorder is not None and d._models_loaded is True
-    assert d._resolved_device()["device"] == "cpu"      # cache seeded -> status reports the ACTUAL cpu device
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any("falling back to CPU" in m and "degraded but functional" in m for m in msgs), msgs
+    """CPU fallback now lives in the CHILD (recorder_host._worker_main). At the daemon level, a
+    spawn that reports a CPU device (the child fell back) seeds _resolved_device_cache from the
+    child's 'ready' device dict — so status reports device=cpu WITHOUT the daemon probing CUDA.
+    This test pins that the daemon seeds the cache from the host's device (the post-fix path)."""
+    cpu_device = {"device": "cpu", "compute_type": "int8",
+                  "final_model": "small.en", "realtime_model": "tiny.en"}
+    factory = _fake_host_factory(spawn_result=True, device=cpu_device)
+    d, _fb = _make_lazy_daemon(host_factory=factory)
+    assert d._load_recorder() is True
+    assert d._host is not None and d._models_loaded is True
+    assert d._resolved_device()["device"] == "cpu"   # cache seeded from the host's (child's) device
 
 
 def test_load_recorder_total_failure_stays_unloaded(monkeypatch):
-    """Both cuda + cpu builds fail -> False, NO half-built recorder, _load_error set (§4.2bis)."""
-    d, _fb = _make_lazy_daemon()
-
-    def fake_build(*a, **k):
-        raise RuntimeError("nope")
-
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    """A spawn that returns False -> _load_host stays unloaded, NO half-built host, _load_error set (§4.2bis)."""
+    factory = _fake_host_factory(spawn_result=False)
+    d, _fb = _make_lazy_daemon(host_factory=factory)
     assert d._load_recorder() is False
-    assert d._recorder is None                           # NO half-built recorder
+    assert d._host is None                           # NO half-built host
     assert d._models_loaded is False
-    assert d._load_error is not None and "CPU fallback" in d._load_error
+    assert d._load_error is not None
 
 
 def test_start_on_lazy_daemon_triggers_load_then_arms(monkeypatch):
-    """start() on an unloaded daemon loads the recorder, then arms (set_microphone True)."""
-    d, _fb = _make_lazy_daemon()
-    rec = _StubRecorder()
-    monkeypatch.setattr(daemon, "build_recorder", lambda *a, **k: rec)
+    """start() on an unloaded daemon spawns the host, then arms (set_microphone True)."""
+    factory = _fake_host_factory(spawn_result=True)
+    d, _fb = _make_lazy_daemon(host_factory=factory)
     d.start()
     assert d._models_loaded is True
     assert d.is_listening() is True
-    assert rec.mic == [True]                             # armed
+    assert d._host.recorder.mic == [True]            # armed (proxied to the fake host's stub)
 
 
 def test_start_suppressed_when_load_fails(monkeypatch):
-    """A failed load -> start() returns without arming (stays not-listening, §4.2bis)."""
-    d, _fb = _make_lazy_daemon()
-
-    def fake_build(*a, **k):
-        raise RuntimeError("x")
-
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    """A failed spawn -> start() returns without arming (stays not-listening, §4.2bis)."""
+    factory = _fake_host_factory(spawn_result=False)
+    d, _fb = _make_lazy_daemon(host_factory=factory)
     d.start()
     assert d._models_loaded is False
-    assert d.is_listening() is False                     # stayed unarmed
+    assert d.is_listening() is False                 # stayed unarmed
 
 
 def test_injected_recorder_is_loaded_at_construction():
@@ -2172,20 +2232,23 @@ def test_injected_recorder_is_loaded_at_construction():
 
 
 def test_load_recorder_single_flight_one_build_under_concurrency(monkeypatch):
-    """Two concurrent _load_recorder() calls -> exactly ONE build_recorder (the 2nd waits, §4.2bis)."""
+    """Two concurrent _load_recorder() calls -> exactly ONE host spawn (the 2nd waits, §4.2bis)."""
     import threading as _t
-    d, _fb = _make_lazy_daemon()
-    built = {"n": 0}
     started = _t.Event()
     release = _t.Event()
+    spawn_count = {"n": 0}
 
-    def fake_build(cfg, feedback, latency=None, force_cpu=False, on_speech=None):
-        built["n"] += 1
-        started.set()
-        release.wait(2.0)            # make the load slow so the 2nd caller arrives while _loading
-        return _StubRecorder()
+    class _SlowFakeHost(_FakeHost):
+        def spawn(self, timeout=180.0):
+            spawn_count["n"] += 1
+            started.set()
+            release.wait(2.0)            # make the spawn slow so the 2nd caller arrives while _loading
+            return super().spawn(timeout)
 
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    def factory(cfg, feedback, latency, on_final, on_partial, on_speech):
+        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech)
+
+    d, _fb = _make_lazy_daemon(host_factory=factory)
     results = []
 
     def caller():
@@ -2194,12 +2257,12 @@ def test_load_recorder_single_flight_one_build_under_concurrency(monkeypatch):
     t1 = _t.Thread(target=caller)
     t2 = _t.Thread(target=caller)
     t1.start()
-    assert started.wait(2.0)         # ensure the loader is mid-build before the 2nd starts
+    assert started.wait(2.0)         # ensure the loader is mid-spawn before the 2nd starts
     t2.start()
-    release.set()                    # let the load finish
+    release.set()                    # let the spawn finish
     t1.join(2.0)
     t2.join(2.0)
-    assert built["n"] == 1           # exactly ONE build (single-flight)
+    assert spawn_count["n"] == 1     # exactly ONE spawn (single-flight)
     assert results == [True, True]   # both callers see success (2nd waited for the 1st)
 
 
@@ -2231,16 +2294,17 @@ class _ControllableShutdownRecorder(_StubRecorder):
         self.shutdowns += 1
 
 
-def _idle_unloaded_loaded_daemon(*, recorder=None, threshold=0.001):
+def _idle_unloaded_loaded_daemon(*, recorder=None, threshold=0.001, host_factory=None):
     """A LOADED daemon, DISARMED, with _disarmed_monotonic far in the past + a tiny threshold.
 
     So _unload_recorder()'s re-check passes when called DIRECTLY (the idle-unload fire condition,
     PRD §4.2bis) WITHOUT sleeping: time.monotonic() - 0.0 is huge vs any tiny positive threshold.
-    threshold must be > 0 (0 disables idle-unload -> _unload_recorder aborts).
+    threshold must be > 0 (0 disables idle-unload -> _unload_recorder aborts). host_factory= lets
+    the race tests inject a fake for the post-unload reload (P1.M3.T2.S2 re-plan).
     """
     cfg = VoiceTypingConfig()
     cfg.asr.auto_unload_idle_seconds = threshold
-    d, _fb, _rec, _be = _make_daemon(recorder=recorder, cfg=cfg)
+    d, _fb, _rec, _be = _make_daemon(recorder=recorder, host_factory=host_factory, cfg=cfg)
     with d._lock:
         d._disarm()                       # clears _listening; stamps _disarmed_monotonic (P1.M3.T1.S1)
         d._disarmed_monotonic = 0.0       # push the stamp far into the past -> time re-check passes NOW
@@ -2251,24 +2315,16 @@ def _idle_unloaded_loaded_daemon(*, recorder=None, threshold=0.001):
 
 def test_arm_racing_unload_waits_then_loads_fresh(monkeypatch):
     """Clause (a)+(b): an arm (start) racing an in-flight idle-unload teardown BLOCKS on self._lock
-    until _unload_recorder releases it, then _load_recorder() builds FRESH and arms. PRD §4.2bis."""
+    until _unload_host releases it, then _load_host() spawns a FRESH host and arms. PRD §4.2bis."""
     started = threading.Event()
     release = threading.Event()
     original = _ControllableShutdownRecorder(started, release)
-    d = _idle_unloaded_loaded_daemon(recorder=original)
+    # The post-unload reload uses a fake host factory (the unload tears down the legacy adapter).
+    d = _idle_unloaded_loaded_daemon(recorder=original, host_factory=_fake_host_factory())
     assert d._recorder is original
 
-    built = []
-
-    def fake_build(*a, **k):
-        rec = _StubRecorder()
-        built.append(rec)
-        return rec
-
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
-
-    # U: the idle-unload teardown. Acquires _lock, runs the REAL _bounded_shutdown (whose
-    # done.wait blocks because recorder.shutdown() blocks on `release`) -> HOLDS _lock.
+    # U: the idle-unload teardown. Acquires _lock, runs the REAL _bounded_shutdown (whose adapter
+    # stop() blocks because recorder.shutdown() blocks on `release`) -> HOLDS _lock.
     def unload():
         d._unload_recorder()
 
@@ -2276,7 +2332,7 @@ def test_arm_racing_unload_waits_then_loads_fresh(monkeypatch):
     t_u.start()
     assert started.wait(2.0), "unload never entered _bounded_shutdown (lock not held yet)"
 
-    # S: a racing arm. start() -> _load_recorder() -> `with self._lock:` BLOCKS (U holds it).
+    # S: a racing arm. start() -> _load_host() -> `with self._lock:` BLOCKS (U holds it).
     armed = threading.Event()
 
     def arm():
@@ -2290,43 +2346,48 @@ def test_arm_racing_unload_waits_then_loads_fresh(monkeypatch):
     assert t_s.is_alive(), "arm thread should still be blocked on the single-flight lock"
     assert d._lock.locked(), "the single-flight lock must be held by the teardown"
 
-    # Release the teardown -> U nulls the recorder + frees the lock -> S loads FRESH + arms.
+    # Release the teardown -> U nulls the host + frees the lock -> S spawns a FRESH host + arms.
     release.set()
     assert armed.wait(3.0), "arm did not complete after teardown released the lock"
     t_u.join(2.0)
     t_s.join(2.0)
     assert not t_u.is_alive() and not t_s.is_alive(), "threads did not finish"
 
-    # Clause (b): a FRESH recorder is resident, models loaded, listening on.
-    assert len(built) == 1, "exactly one fresh build after the unload"
-    assert d._recorder is built[0], "resident recorder must be the FRESH build, not the torn-down one"
-    assert d._recorder is not original, "the torn-down recorder must NOT be resident"
+    # Clause (b): a FRESH host is resident (the fake factory's _FakeHost), models loaded, listening on.
+    assert d._host is not None
+    assert d._host is not original, "the torn-down legacy adapter must NOT be resident"
     assert d._models_loaded is True
     assert d.is_listening() is True
 
 
 def test_recorder_never_half_torn_down_during_race(monkeypatch):
-    """Clause (c): throughout the unload->reload race, self._recorder is ALWAYS either None or a
-    fully-built recorder — never a partial/garbage value. CPython attribute reads are atomic; only
-    None + complete build_recorder results are ever assigned."""
+    """Clause (c): throughout the unload->reload race, self._host is ALWAYS either None or a
+    fully-built host — never a partial/garbage value. CPython attribute reads are atomic; only
+    None + complete host-factory results are ever assigned."""
     started = threading.Event()
     release = threading.Event()
-    d = _idle_unloaded_loaded_daemon(recorder=_ControllableShutdownRecorder(started, release))
 
-    def fake_build(*a, **k):
-        # A tiny delay WIDENS the None window (between U's _recorder=None and S's fresh assignment)
-        # so the 1ms sampler reliably observes it.
-        _time.sleep(0.05)
-        return _StubRecorder()
+    # A SLOW fake host factory: spawn() sleeps briefly to WIDEN the None window (between U's
+    # _host=None and the fresh host assignment) so the 1ms sampler reliably observes it.
+    class _SlowFakeHost(_FakeHost):
+        def spawn(self, timeout=180.0):
+            _time.sleep(0.05)
+            return super().spawn(timeout)
 
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    def slow_factory(cfg, feedback, latency, on_final, on_partial, on_speech):
+        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech)
+
+    d = _idle_unloaded_loaded_daemon(
+        recorder=_ControllableShutdownRecorder(started, release),
+        host_factory=slow_factory,
+    )
 
     samples = []
     stop = threading.Event()
 
     def sampler():
         while not stop.is_set():
-            samples.append(d._recorder)   # atomic attribute read
+            samples.append(d._host)   # atomic attribute read
             _time.sleep(0.001)
 
     t_poll = threading.Thread(target=sampler, name="test-sampler", daemon=True)
@@ -2335,25 +2396,27 @@ def test_recorder_never_half_torn_down_during_race(monkeypatch):
     def unload():
         d._unload_recorder()
 
-    threading.Thread(target=unload, name="test-unload2", daemon=True).start()
+    t_u = threading.Thread(target=unload, name="test-unload2", daemon=True)
+    t_u.start()
     assert started.wait(2.0)
-    d.start()  # racing arm (loads fresh after the unload)
-    assert _wait_for(lambda: any(r is None for r in samples), timeout=3.0), \
+    release.set()  # let the blocking shutdown() return so the unload completes quickly
+    d.start()  # racing arm (spawns fresh after the unload)
+    assert _wait_for(lambda: any(h is None for h in samples), timeout=3.0), \
         "sampler never observed the torn-down None state"
-    _time.sleep(0.1)  # let the reload land + the sampler observe the fresh resident recorder
+    _time.sleep(0.1)  # let the reload land + the sampler observe the fresh resident host
     stop.set()
     t_poll.join(1.0)
 
-    assert samples, "sampler never observed the recorder"
-    for rec in samples:
-        assert rec is None or (
-            callable(getattr(rec, "text", None))
-            and callable(getattr(rec, "set_microphone", None))
-            and callable(getattr(rec, "abort", None))
-            and callable(getattr(rec, "shutdown", None))
-        ), f"observed a non-None, non-complete recorder: {rec!r}"
-    assert any(r is None for r in samples), "never saw the torn-down None state"
-    assert any(r is not None for r in samples), "never saw a resident recorder"
+    assert samples, "sampler never observed the host"
+    for host in samples:
+        assert host is None or (
+            callable(getattr(host, "set_microphone", None))
+            and callable(getattr(host, "abort", None))
+            and callable(getattr(host, "text", None))
+            and callable(getattr(host, "stop", None))
+        ), f"observed a non-None, non-complete host: {host!r}"
+    assert any(h is None for h in samples), "never saw the torn-down None state"
+    assert any(h is not None for h in samples), "never saw a resident host"
 
 
 def test_load_and_unload_serialize_on_the_same_single_flight_lock():
@@ -2385,8 +2448,8 @@ def test_load_and_unload_serialize_on_the_same_single_flight_lock():
 
 
 def test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded(monkeypatch):
-    """Clause (d): _unload_recorder() tears down via _bounded_shutdown() (bounded <=10s; proven in
-    test_bounded_shutdown_force_cleans_on_timeout). So a racing arm's wait is bounded by THAT
+    """Clause (d): _unload_host() tears down via _bounded_shutdown() (bounded <=5s; the host's stop()
+    joins the child for ~5s then SIGKILLs the group). So a racing arm's wait is bounded by THAT
     teardown, never the legacy ~90s recorder.shutdown() wedge (PRD §8). Asserts routing + a bounded
     completion window."""
     d = _idle_unloaded_loaded_daemon()
@@ -2395,7 +2458,7 @@ def test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded(monkeypat
 
     def recording_bounded(timeout=10.0):
         calls.append(timeout)
-        return real(timeout)  # delegate so the recorder is actually shut down (stays hermetic)
+        return real(timeout)  # delegate so the host is actually torn down (stays hermetic)
 
     monkeypatch.setattr(d, "_bounded_shutdown", recording_bounded)
 
@@ -2403,9 +2466,9 @@ def test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded(monkeypat
     d._unload_recorder()
     elapsed = _time.monotonic() - start
 
-    assert calls == [10.0], f"_unload_recorder did not route through _bounded_shutdown(10.0): {calls}"
+    assert calls == [5.0], f"_unload_host did not route through _bounded_shutdown(5.0): {calls}"
     assert elapsed < 2.0, f"unload took {elapsed:.2f}s (a racing arm would wait this long)"
-    assert d._models_loaded is False and d._recorder is None, "unload did not complete"
+    assert d._models_loaded is False and d._host is None, "unload did not complete"
 
 
 def test_armed_state_aborts_unload_via_listening_recheck():
@@ -2421,7 +2484,7 @@ def test_armed_state_aborts_unload_via_listening_recheck():
     d._unload_recorder()  # re-check sees _listening.is_set() -> abort
 
     assert d._models_loaded is True, "unload must abort when an arm raced in (listening is on)"
-    assert d._recorder is not None, "the recorder must stay resident (unload aborted)"
+    assert d._host is not None, "the host must stay resident (unload aborted)"
 
 
 # ===========================================================================
@@ -2452,22 +2515,25 @@ def test_lazy_boot_records_unloaded_phase():
 
 
 def test_concurrent_start_calls_build_recorder_once(monkeypatch):
-    """Clause (c) gap: two concurrent start() calls build the recorder EXACTLY ONCE (single-flight
+    """Clause (c) gap: two concurrent start() calls spawn the host EXACTLY ONCE (single-flight
     through the start() entry point). The existing test_load_recorder_single_flight_one_build_under_
-    concurrency proves it at the _load_recorder level; this proves start()'s load-then-arm does not
+    concurrency proves it at the _load_host level; this proves start()'s load-then-arm does not
     undermine it (and both calls arm)."""
-    d, _fb = _make_lazy_daemon()
-    built = {"n": 0}
     started = threading.Event()
     release = threading.Event()
+    spawn_count = {"n": 0}
 
-    def fake_build(cfg, feedback, latency=None, force_cpu=False, on_speech=None):
-        built["n"] += 1
-        started.set()
-        release.wait(2.0)            # slow the build so the 2nd start() arrives while _loading
-        return _StubRecorder()
+    class _SlowFakeHost(_FakeHost):
+        def spawn(self, timeout=180.0):
+            spawn_count["n"] += 1
+            started.set()
+            release.wait(2.0)            # slow the spawn so the 2nd start() arrives while _loading
+            return super().spawn(timeout)
 
-    monkeypatch.setattr(daemon, "build_recorder", fake_build)
+    def factory(cfg, feedback, latency, on_final, on_partial, on_speech):
+        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech)
+
+    d, _fb = _make_lazy_daemon(host_factory=factory)
     errors = []
 
     def starter():
@@ -2479,13 +2545,13 @@ def test_concurrent_start_calls_build_recorder_once(monkeypatch):
     t1 = threading.Thread(target=starter, name="test-start-a", daemon=True)
     t2 = threading.Thread(target=starter, name="test-start-b", daemon=True)
     t1.start()
-    assert started.wait(2.0), "first start() never entered build_recorder"
+    assert started.wait(2.0), "first start() never spawned the host"
     t2.start()
-    release.set()                      # let the in-flight load finish
+    release.set()                      # let the in-flight spawn finish
     t1.join(2.0)
     t2.join(2.0)
     assert not errors, errors
-    assert built["n"] == 1, f"single-flight violated: {built['n']} builds under two concurrent start()s"
+    assert spawn_count["n"] == 1, f"single-flight violated: {spawn_count['n']} spawns under two concurrent start()s"
     assert d._models_loaded is True
     assert d.is_listening() is True    # armed (both starts armed; the load is shared)
 
