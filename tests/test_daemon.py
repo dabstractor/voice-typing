@@ -1481,6 +1481,146 @@ def test_shutdown_is_noop_when_recorder_is_none():
     d.shutdown()  # must NOT raise
 
 
+# ===========================================================================
+# P1.M1.T2.S1 — daemon-level single-flight shutdown coordination (bugfix Issue 1)
+# (_shutdown_done claim + _teardown_done Event; request_shutdown + shutdown concurrency.)
+# ===========================================================================
+
+
+class _CountingHost:
+    """Minimal host for shutdown-coordination tests: counts stop() calls. The daemon calls no
+    other host method in the teardown path (only host.stop()), so this suffices."""
+
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    def stop(self, timeout: float | None = None) -> None:
+        self.stop_calls += 1
+
+
+class _GatedHost:
+    """Host whose stop() BLOCKS until the test releases it — simulates an in-flight teardown so
+    a concurrent shutdown() can be observed WAITING (not starting its own stop)."""
+
+    def __init__(self) -> None:
+        self.stop_calls = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def stop(self, timeout: float | None = None) -> None:
+        self.stop_calls += 1
+        self.entered.set()
+        self.release.wait(timeout=5.0)  # block until the test releases (bounded — no hang)
+
+
+def test_request_shutdown_claims_and_signals_teardown_done():
+    """request_shutdown claims _shutdown_done + signals _teardown_done (the SIGTERM-path contract)."""
+    host = _CountingHost()
+    d, *_ = _make_daemon(recorder_host=host)
+    assert not d._teardown_done.is_set()
+    d.request_shutdown()
+    assert d._shutdown_done is True
+    assert d._teardown_done.is_set()    # finally fired
+    assert host.stop_calls == 1          # exactly one teardown
+
+
+def test_shutdown_does_own_teardown_when_called_first():
+    """Normal/called-first path: shutdown() claims + does the teardown + signals _teardown_done."""
+    host = _CountingHost()
+    d, *_ = _make_daemon(recorder_host=host)
+    assert not d._teardown_done.is_set()
+    d.shutdown()
+    assert d._shutdown_done is True
+    assert d._teardown_done.is_set()
+    assert host.stop_calls == 1
+
+
+def test_shutdown_waits_for_inflight_teardown_no_second_stop():
+    """SIGTERM path (core fix): while request_shutdown's teardown is in flight, a concurrent
+    shutdown() WAITS on _teardown_done and does NOT start a second host.stop()."""
+    host = _GatedHost()
+    d, *_ = _make_daemon(recorder_host=host)
+    # Thread A (signal thread): request_shutdown -> host.stop() blocks on `release`.
+    ta = threading.Thread(target=d.request_shutdown, name="sig")
+    ta.start()
+    assert host.entered.wait(timeout=2.0), "request_shutdown did not reach host.stop()"
+    # Claim is made; teardown in flight; _teardown_done NOT yet set.
+    assert d._shutdown_done is True
+    assert not d._teardown_done.is_set()
+    # Thread B (main-thread finally analog): shutdown() must WAIT, not start a 2nd host.stop().
+    main_done = threading.Event()
+
+    def _main_shutdown():
+        d.shutdown()
+        main_done.set()
+
+    tm = threading.Thread(target=_main_shutdown, name="main", daemon=True)
+    tm.start()
+    _time.sleep(0.2)                       # let shutdown() reach _teardown_done.wait()
+    assert host.stop_calls == 1, "shutdown() started a 2nd host.stop() while it should WAIT"
+    assert not main_done.is_set(), "shutdown() returned before the in-flight teardown finished"
+    # Release the in-flight teardown -> request_shutdown finishes -> _teardown_done set ->
+    # shutdown()'s wait returns -> main_done set. Exactly ONE host.stop().
+    host.release.set()
+    ta.join(timeout=5.0)
+    tm.join(timeout=5.0)
+    assert main_done.is_set(), "shutdown() did not return after the teardown finished"
+    assert host.stop_calls == 1, "exactly ONE host.stop() — shutdown() waited, no double-teardown"
+
+
+def test_shutdown_returns_immediately_when_teardown_already_done():
+    """Quit path (sequential): after request_shutdown finishes, shutdown() sees _teardown_done
+    already set and returns immediately (no second host.stop())."""
+    host = _CountingHost()
+    d, *_ = _make_daemon(recorder_host=host)
+    d.request_shutdown()                  # teardown done + _teardown_done set
+    assert host.stop_calls == 1
+    d.shutdown()                          # the on_quit call, strictly after
+    assert host.stop_calls == 1, "shutdown() re-tore-down on the sequential quit path"
+
+
+def test_request_shutdown_idempotent_vs_second_call():
+    """A second request_shutdown (double signal / quit+signal overlap) returns without
+    re-tearing-down (single-flight)."""
+    host = _CountingHost()
+    d, *_ = _make_daemon(recorder_host=host)
+    d.request_shutdown()
+    d.request_shutdown()                  # second call — must no-op
+    assert host.stop_calls == 1, "second request_shutdown re-tore-down"
+    assert d._teardown_done.is_set()
+
+
+def test_shutdown_falls_back_to_own_teardown_on_wait_timeout(monkeypatch):
+    """If the in-flight teardown doesn't signal within the wait timeout (signal thread died),
+    shutdown() logs a warning and falls back to its OWN _bounded_shutdown(). Safe via _stop_lock
+    (P1.M1.T1.S1) on a real host; here we assert the fallback PATH fires (host.stop called twice:
+    the in-flight one + the fallback one). The wait timeout is shrunk to keep the test fast."""
+    monkeypatch.setattr(daemon, "_TEARDOWN_WAIT_TIMEOUT", 0.2)   # CRITICAL #4: fast fallback
+    host = _GatedHost()
+    d, *_ = _make_daemon(recorder_host=host)
+    ta = threading.Thread(target=d.request_shutdown, name="sig", daemon=True)
+    ta.start()
+    assert host.entered.wait(timeout=2.0)     # request_shutdown's host.stop() in flight (blocked)
+    main_done = threading.Event()
+
+    def _main_shutdown():
+        d.shutdown()
+        main_done.set()
+
+    tm = threading.Thread(target=_main_shutdown, name="main", daemon=True)
+    tm.start()
+    # shutdown() waits 0.2s, times out, logs, falls back to its OWN host.stop() (stop_calls=2).
+    assert _wait_for(lambda: host.stop_calls >= 2, timeout=3.0), (
+        f"fallback did not fire (stop_calls={host.stop_calls})"
+    )
+    # release both host.stop() calls (the in-flight + the fallback) so threads can finish
+    host.release.set()
+    ta.join(timeout=5.0)
+    tm.join(timeout=5.0)
+    assert main_done.is_set()
+    assert host.stop_calls == 2, "fallback must run its own host.stop() (the wait timed out)"
+
+
 # --- Layer B: install_shutdown_signal_handlers() -------------------------------------------
 
 

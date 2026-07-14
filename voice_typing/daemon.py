@@ -334,6 +334,13 @@ def _default_control_socket_path() -> str:
 _LATENCY_LOG_PREFIX = "voice-typing latency:"   # STABLE prefix — T1 greps this (do not rename)
 _LATENCY_RING_SIZE = 64
 
+# P1.M1.T2.S1 / bugfix Issue 1: bounded wait shutdown() uses for an in-flight teardown claimed
+# by request_shutdown() (the SIGTERM signal thread). 8.0s covers a ~7s teardown (5s join +
+# 2s second join, post-T2.S2) with margin; a timeout falls back to shutdown()'s OWN teardown
+# (safe — RecorderHost._stop_lock serializes host.stop, P1.M1.T1.S1). A named constant (not a
+# literal) so the fallback unit test can monkeypatch it to ~0.2s and stay fast.
+_TEARDOWN_WAIT_TIMEOUT = 8.0
+
 
 def _ms(seconds: float) -> float:
     """Seconds → milliseconds, rounded to 0.1 ms (log readability + stable parse)."""
@@ -540,6 +547,11 @@ class VoiceTypingDaemon:
         self._on_final_lock = threading.Lock()
         self._listening = threading.Event()   # cleared → NOT listening at boot (PRD §4.9)
         self._shutdown = threading.Event()    # cleared → keep looping
+        # P1.M1.T2.S1 / bugfix Issue 1: signaled when the in-flight _bounded_shutdown() finishes, so
+        #   a concurrent shutdown() (main-thread finally, on the SIGTERM path) can WAIT for it
+        #   instead of starting a second teardown (SIGTERM double-teardown fix). Set in
+        #   request_shutdown()'s finally + shutdown()'s finally.
+        self._teardown_done = threading.Event()
         # In-flight text() tracking (validation Issue 1 / abort() deadlock fix): SET while the
         # run() loop is blocked INSIDE recorder.text(), CLEAR otherwise. RealtimeSTT's abort()
         # blocks on was_interrupted.wait(), an event set ONLY inside text() (transcription_api.py
@@ -1146,17 +1158,29 @@ class VoiceTypingDaemon:
         child and returns within ~0.5s -> run() exits -> main()'s finally runs -> clean exit.
 
         This mirrors what the voicectl quit path already does (ControlServer._dispatch("quit") ->
-        request_shutdown() -> on_quit=daemon.shutdown()). Routing the teardown through
-        _bounded_shutdown() (NOT shutdown()'s _shutdown_done guard) lets the idempotent shutdown()
-        in main()'s finally still run as a belt-and-suspenders no-op.
+        request_shutdown() -> on_quit=daemon.shutdown()). P1.M1.T2.S1: this method CLAIMS
+        _shutdown_done under _lock and signals _teardown_done on completion, so a CONCURRENT
+        shutdown() (main-thread finally, on the SIGTERM path) WAITS for this teardown instead of
+        starting a second one (bugfix Issue 1). The quit path is unaffected (sequential: shutdown()
+        sees _teardown_done already set and returns immediately).
 
         abort() + _bounded_shutdown() are called OUTSIDE _lock (validation NEW-2; see _disarm
         docstring) so a slow teardown can't wedge the shutdown signal or block concurrent
-        start/stop/toggle. _shutdown.set() is the real signal the run() loop checks.
+        start/stop/toggle. Only the _shutdown_done claim is under _lock (short critical section).
+        _shutdown.set() is the real signal the run() loop checks.
         """
         self._shutdown.set()
         if self._host is None:
             return  # nothing loaded (never armed, or already torn down) -> _shutdown is enough
+        # P1.M1.T2.S1 / bugfix Issue 1: CLAIM the teardown so a concurrent shutdown() (main-thread
+        # finally, on the SIGTERM path) WAITS on _teardown_done instead of starting a SECOND
+        # _bounded_shutdown() (the double-teardown that blew TimeoutStopSec). Under _lock (short
+        # critical section); the teardown itself runs OUTSIDE _lock. Idempotent: a second signal /
+        # quit+signal overlap sees _shutdown_done already True and returns here.
+        with self._lock:
+            if getattr(self, "_shutdown_done", False):
+                return  # another path already claimed/is doing the teardown — don't re-tear-down
+            self._shutdown_done = True
         # abort() gated on _text_in_flight (validation Issue 1; see _safe_abort): when no thread is
         # blocked in text() there is nothing to wake — abort() would hang forever.
         self._safe_abort()    # break any blocked text() so run() can return promptly (NOT under _lock)
@@ -1164,7 +1188,12 @@ class VoiceTypingDaemon:
         # child death and returns, unblocking the run() loop for a prompt, bounded SIGTERM exit.
         # _bounded_shutdown() is best-effort + never re-raises; safe to run alongside main()'s
         # finally-block shutdown() (which is a guarded no-op if the child is already gone).
-        self._bounded_shutdown()
+        # P1.M1.T2.S1: wrap in try/finally so _teardown_done ALWAYS fires — a concurrent shutdown()
+        # is waiting on it (a missing signal would deadlock it until the wait timeout).
+        try:
+            self._bounded_shutdown()
+        finally:
+            self._teardown_done.set()
 
     def is_listening(self) -> bool:
         return self._listening.is_set()
@@ -1293,8 +1322,14 @@ class VoiceTypingDaemon:
         shutdown_recorder() — confirmed). Keeps the idempotency + defensive guarantees; never
         re-raises.
 
-        IDEMPOTENT: a getattr-guarded flag (no __init__ edit) plus RealtimeSTT's own is_shut_down
-        guard make a double call (quit on_quit + main() finally) a no-op the second time.
+        IDEMPOTENT + SINGLE-FLIGHT (P1.M1.T2.S1 / bugfix Issue 1): _shutdown_done (under
+        _lock) + _teardown_done (Event) coordinate the SIGTERM path, where request_shutdown()
+        (signal thread) + this method (main-thread finally) run CONCURRENTLY. The first caller
+        claims + does the teardown + signals _teardown_done; a concurrent second caller WAITS on
+        _teardown_done (bounded _TEARDOWN_WAIT_TIMEOUT) instead of starting a second
+        _bounded_shutdown(). The quit path (sequential) sees _teardown_done already set and
+        returns immediately. A wait timeout falls back to this method's own teardown, kept
+        single-flight by RecorderHost._stop_lock (P1.M1.T1.S1).
         DEFENSIVE: a recorder.shutdown() failure is logged inside the bounded thread via
         logger.exception, NOT re-raised — the daemon is exiting and teardown is best-effort (a
         broken teardown must not mask the original shutdown reason).
@@ -1305,10 +1340,26 @@ class VoiceTypingDaemon:
         run while the main thread is inside recorder.text() — request_shutdown()/abort() guarantees
         it has exited text() before this is reached.
         """
+        # P1.M1.T2.S1 / bugfix Issue 1: daemon-level single-flight. If request_shutdown() (the SIGTERM
+        # signal thread) already CLAIMED _shutdown_done, a second _bounded_shutdown() here would race
+        # it (the double-teardown that blew TimeoutStopSec). Instead WAIT on _teardown_done (bounded,
+        # OUTSIDE _lock — a slow teardown must not hold _lock) and return when it finishes. On
+        # timeout (signal thread died) fall back to our OWN teardown — safe because
+        # RecorderHost._stop_lock (P1.M1.T1.S1) serializes host.stop(), so the fallback cannot
+        # reproduce the double-teardown.
         with self._lock:
-            if getattr(self, "_shutdown_done", False):
-                return
-            self._shutdown_done = True
+            already_claimed = getattr(self, "_shutdown_done", False)
+            if not already_claimed:
+                self._shutdown_done = True        # WE claim the teardown (called-first / normal path)
+        if already_claimed:
+            # Another path is doing (or did) the teardown — wait for it, do NOT start a second one.
+            if self._teardown_done.wait(timeout=_TEARDOWN_WAIT_TIMEOUT):
+                return                           # in-flight teardown finished -> done (no second teardown)
+            logger.warning(
+                "shutdown(): in-flight teardown did not signal within %.1fs; proceeding with fallback",
+                _TEARDOWN_WAIT_TIMEOUT,
+            )
+            # fall through: do our own teardown as the fallback (safe via _stop_lock)
         if self._host is None:
             # M2 lazy-load prep: the recorder-host child is spawned on first arm, so it may never
             # exist (e.g. a session that never armed). Nothing to tear down.
@@ -1320,6 +1371,9 @@ class VoiceTypingDaemon:
             # shutdown() itself must NEVER re-raise (a teardown failure must not mask the original
             # shutdown reason).
             logger.exception("bounded teardown failed (best-effort; ignored)")
+        finally:
+            # P1.M1.T2.S1: signal any waiter (covers the called-first path + the fallback path).
+            self._teardown_done.set()
 
 
 # --- ControlServer (P1.M4.T2.S1; PRD §4.2(3), §4.8) -----------------------------------------

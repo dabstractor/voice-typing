@@ -64,7 +64,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Single-flight coordination: request_shutdown sets _shutdown_done + _teardown_done Event; shutdown waits for in-flight teardown",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -80,7 +80,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Reduce _bounded_shutdown default timeout from 10s to 5s",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/bug_analysis.md §Issue 1 Fix Strategy (timeout reduction). _bounded_shutdown(self, timeout=10.0) (~line 1310) passes timeout to host.stop(timeout=timeout). Inside host.stop(): proc.join(timeout) + [if alive: _terminate_group() + join(2.0)]. With timeout=10: join(10)+join(2)=12s per call. Plus ControlServer.stop() join(2)=2s. Total=14s, dangerously close to TimeoutStopSec=15. Reducing to 5s: join(5)+join(2)=7s per call + server.stop() 2s = 9s total, comfortable headroom. _unload_host already calls _bounded_shutdown(timeout=5.0) explicitly — that is unaffected. The callers that use the default are request_shutdown() and shutdown().\n2. INPUT: voice_typing/daemon.py _bounded_shutdown() method signature (~line 1310). All call sites: request_shutdown() (~line 1140, uses default), shutdown() (~line 1330, uses default), _unload_host() (~line 880, uses explicit 5.0).\n3. LOGIC: Change the default parameter from `timeout: float = 10.0` to `timeout: float = 5.0`. Update the docstring budget math: 'host.stop(timeout=5) → join(5)+killpg+join(2) ≈ 7s max per call; plus ControlServer.stop() join(2) = 9s total, comfortable headroom under TimeoutStopSec=15.' Verify _unload_host's explicit timeout=5.0 call is now redundant but harmless (explicit == default). Verify no test asserts on the 10s default value.\n4. OUTPUT: Each _bounded_shutdown call is bounded at ~7s. With single-flight coordination (S1), only ONE teardown ever runs, so the total is ~7s+2s=9s max — well under 15s.\n5. DOCS: [Mode A] Update the timeout-budget comment in systemd/voice-typing.service lines 42-50: change 'The 15s budget = 10s bound + 5s grace' to reflect the new 5s default (e.g., 'The 15s budget = 5s bounded teardown + 5s signal/shutdown coordination + 5s headroom'). The TimeoutStopSec=15 value itself does NOT change.",
