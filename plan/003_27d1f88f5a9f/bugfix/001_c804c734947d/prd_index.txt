@@ -1,0 +1,13 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+  h3.0 Issue 1: systemctl stop (SIGTERM) while armed hangs 15s → SIGKILL + "Failed with result 'timeout'"
+ h2.2 Major Issues (Should Fix)
+  h3.1 Issue 2: phase field stays listening/speaking after stop (never returns to idle)
+  h3.2 Issue 3: No detection/recovery when the recorder-host child crashes → daemon silently stuck "listening: on"
+ h2.3 Minor Issues (Nice to Fix)
+  h3.3 Issue 4: Config numeric fields accept wrong types silently, breaking the feature at runtime
+  h3.4 Issue 5: Stale 43 MiB realtimesst.log committed-era artifact left in the repo
+ h2.4 Testing Summary
+---
+code:3 para:23 list:5
