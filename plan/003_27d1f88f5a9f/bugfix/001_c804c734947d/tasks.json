@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Make RecorderHost.stop() single-flight (thread-safe)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add a threading.Lock to RecorderHost that serializes stop() calls. Concurrent callers block on the lock until the first finishes, then see self._proc is None and return immediately. This directly eliminates the 'two parallel host.stop() calls' race that is the root cause of the SIGTERM hang.",
               "subtasks": [
                 {
@@ -39,7 +39,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Test concurrent stop() calls share ONE teardown",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -64,7 +64,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Single-flight coordination: request_shutdown sets _shutdown_done + _teardown_done Event; shutdown waits for in-flight teardown",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"

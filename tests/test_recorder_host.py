@@ -229,6 +229,71 @@ def test_stop_with_dead_process_is_noop():
     host.stop()  # must not raise; join returns immediately (not alive)
 
 
+def test_concurrent_stop_calls_share_one_teardown(monkeypatch):
+    """Two concurrent stop() callers share ONE teardown (single-flight under _stop_lock).
+
+    Regression guard for bugfix Issue 1 (P1.M1.T1.S1): on the SIGTERM path request_shutdown()
+    (signal-handler thread) + shutdown() (main-thread finally) both call host.stop() at once.
+    Without serialization each caller passes the `self._proc is None` guard and runs its own
+    join+killpg, so os.killpg fires TWICE and two parallel multi-second teardowns blow
+    systemd's 15s TimeoutStopSec. _stop_lock makes check-then-teardown atomic: the second
+    caller blocks on the lock, then sees _proc is None and no-ops — exactly ONE killpg.
+
+    Hermetic + fast (~0.6s): a _SlowProc whose join() sleeps 0.3s + is_alive() stays True
+    forces stop() into the join->_terminate_group path (not the early-return), and
+    os.getpgid/os.killpg are monkeypatched so no real process is signaled. Two threads +
+    a Barrier maximize contention. The PROOF is the killpg call count (1 with the lock,
+    2 without) — see the L3 mutation in this subtask's PRP.
+    """
+
+    class _SlowProc:
+        pid = 4242
+
+        def is_alive(self):
+            return True
+
+        def join(self, timeout=None):
+            time.sleep(0.3)  # wedge long enough that both callers overlap inside stop()
+
+    host = _make_host()
+    host._proc = _SlowProc()
+
+    killpg_calls: list[tuple] = []
+    monkeypatch.setattr(recorder_host.os, "getpgid", lambda _pid: 99999)
+    monkeypatch.setattr(
+        recorder_host.os, "killpg", lambda pgid, sig: killpg_calls.append((pgid, sig))
+    )
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def _call_stop() -> None:
+        try:
+            barrier.wait(timeout=2.0)
+            host.stop()
+        except BaseException as exc:  # noqa: BLE001 — capture, re-assert below
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_call_stop, name="stop-A")
+    t2 = threading.Thread(target=_call_stop, name="stop-B")
+    start = time.monotonic()
+    t1.start()
+    t2.start()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+    elapsed = time.monotonic() - start
+
+    assert not errors, f"a stop() caller raised: {errors!r}"
+    assert not t1.is_alive() and not t2.is_alive(), "a stop() thread did not finish"
+    assert elapsed < 2.0, f"concurrent stop took {elapsed:.2f}s (single-flight ~0.6s expected)"
+    assert len(killpg_calls) == 1, (
+        f"os.killpg called {len(killpg_calls)}x (expected 1) — _stop_lock single-flight is "
+        "broken: two concurrent callers must share ONE teardown"
+    )
+    assert host._proc is None, "host._proc not cleared after teardown"
+    assert host._dead is True, "host._dead not set after teardown"
+
+
 # ---------------------------------------------------------------------------
 # spawn() ready/error wait — tested via the dispatch path (no real child; pytest+spawn is
 # fragile because the spawn child re-imports the test module). The real spawn() process path is
