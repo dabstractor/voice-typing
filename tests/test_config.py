@@ -125,6 +125,68 @@ def test_from_toml_section_not_a_table_raises():
         VoiceTypingConfig.from_toml({"asr": "not-a-table"})
 
 
+# ---------------------------------------------------------------------------
+# from_toml — wrong-TYPED values raise TypeError at load (bugfix Issue 4 / PRD §4.5)
+#
+# Unknown keys already raise TypeError (test_from_toml_unknown_key_raises). A wrong TYPE
+# (e.g. auto_stop_idle_seconds = "thirty") used to load silently and break the feature at
+# runtime (a TypeError the _idle_watchdog swallowed -> auto-stop silently died).
+# AsrConfig/FeedbackConfig __post_init__ (P1.M3.T1.S1) now validates types at construction
+# (= load time). These pin that fail-fast contract.
+# ---------------------------------------------------------------------------
+
+
+def test_string_for_float_field_raises():
+    """A string where a float is expected raises TypeError naming the field + bad value."""
+    with pytest.raises(TypeError) as excinfo:
+        VoiceTypingConfig.from_toml({"asr": {"auto_stop_idle_seconds": "thirty"}})
+    assert "auto_stop_idle_seconds" in str(excinfo.value)
+    assert "thirty" in str(excinfo.value)
+
+
+def test_bool_for_float_field_raises():
+    """A bool where a float is expected raises TypeError (the isinstance(True, int) gotcha)."""
+    with pytest.raises(TypeError, match="post_speech_silence_duration"):
+        VoiceTypingConfig.from_toml({"asr": {"post_speech_silence_duration": True}})
+
+
+def test_int_for_string_field_raises():
+    """An int where a str is expected raises TypeError naming the field."""
+    with pytest.raises(TypeError, match="device"):
+        VoiceTypingConfig.from_toml({"asr": {"device": 123}})
+
+
+def test_none_for_float_field_raises():
+    """None is not a valid numeric value -> TypeError (a common real-world wrong value)."""
+    with pytest.raises(TypeError, match="auto_unload_idle_seconds"):
+        VoiceTypingConfig.from_toml({"asr": {"auto_unload_idle_seconds": None}})
+
+
+def test_valid_types_still_load():
+    """Correctly-typed values load fine and override the defaults (no false positives)."""
+    cfg = VoiceTypingConfig.from_toml(
+        {"asr": {"auto_stop_idle_seconds": 30.0, "post_speech_silence_duration": 0.6}}
+    )
+    assert cfg.asr.auto_stop_idle_seconds == 30.0
+    assert cfg.asr.post_speech_silence_duration == 0.6
+
+
+def test_int_accepted_for_float():
+    """A bare int is acceptable for a float field (TOML allows bare integers); not coerced."""
+    cfg = VoiceTypingConfig.from_toml({"asr": {"auto_stop_idle_seconds": 30}})
+    assert cfg.asr.auto_stop_idle_seconds == 30
+    assert isinstance(cfg.asr.auto_stop_idle_seconds, int)  # accepted as-is, not coerced to float
+
+
+def test_notify_ms_wrong_type_raises():
+    """FeedbackConfig.notify_ms: a float/bool/str is rejected at load (same Issue 4 fix); int OK."""
+    for bad in (2500.0, True, "2500"):
+        with pytest.raises(TypeError, match="notify_ms"):
+            VoiceTypingConfig.from_toml({"feedback": {"notify_ms": bad}})
+    cfg = VoiceTypingConfig.from_toml({"feedback": {"notify_ms": 9999}})
+    assert cfg.feedback.notify_ms == 9999
+
+
 def test_from_toml_file_reads_toml(tmp_path):
     """from_toml_file parses a real TOML file (binary mode — tomllib requirement)."""
     f = tmp_path / "c.toml"

@@ -217,14 +217,14 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Minor Config Hardening — Type Validation (Issue 4)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Config numeric fields (auto_stop_idle_seconds, auto_unload_idle_seconds, etc.) accept wrong types silently (e.g., string 'thirty' loads as str), breaking the feature at runtime when TypeError is swallowed by the watchdog. Add __post_init__ type validation to AsrConfig that raises TypeError at load time, mirroring the existing unknown-key rejection.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Add type validation for config numeric and string fields",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add __post_init__ to AsrConfig that validates field types with isinstance, raising TypeError on mismatch. This runs at construction time (when from_toml calls AsrConfig(**section)), so wrong-typed TOML values fail fast at load with a clear error.",
               "subtasks": [
                 {
@@ -245,7 +245,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Test wrong-typed config values raise TypeError at load",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -279,7 +279,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Update README.md teardown claims + phase lifecycle description",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1",
