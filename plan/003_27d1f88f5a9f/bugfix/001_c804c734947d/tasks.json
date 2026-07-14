@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bug Fix Implementation — SIGTERM Teardown, Phase Lifecycle, Child Crash Recovery, Config Validation",
-      "status": "Researching",
+      "status": "Ready",
       "description": "Fix four issues found in creative end-to-end QA: (1) Critical — SIGTERM while armed causes double-teardown race exceeding TimeoutStopSec=15 → SIGKILL; (2) Major — phase field stays listening/speaking after disarm, never returns to idle; (3) Major — dead recorder-host child goes undetected, daemon silently stuck 'listening: on'; (4) Minor — config numeric fields accept wrong types silently, breaking auto-stop at runtime. All fixes follow TDD (implied: write failing test → implement → pass). Research findings in plan/003_27d1f88f5a9f/bugfix/001_c804c734947d/architecture/.",
       "milestones": [
         {
@@ -265,14 +265,14 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Changeset-Level Documentation Sync",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Update changeset-level documentation (README.md, tests/ACCEPTANCE.md) to accurately reflect the post-fix teardown behavior, phase lifecycle, and config validation. This is the Mode B catch-all that prevents a coherent delta from shipping with stale overview docs.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Sweep README.md and tests/ACCEPTANCE.md to align teardown claims, phase lifecycle description, and config validation notes with the bug fixes. The README currently claims 'SIGKILL is gone' (inaccurate — Issue 1 proved it still happens on SIGTERM), and the phase lifecycle description does not mention the disarm→idle transition explicitly. ACCEPTANCE.md references '≤10s bounded teardown' (now ≤5s).",
               "subtasks": [
                 {
@@ -302,7 +302,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Update tests/ACCEPTANCE.md teardown criteria + add SIGTERM-path test coverage note",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T2.S1",
