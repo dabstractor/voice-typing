@@ -1016,6 +1016,137 @@ def test_request_shutdown_unblocks_loop_when_abort_does_not_fire_final(monkeypat
     assert not t.is_alive()
 
 
+# ===========================================================================
+# P1.M1.T2.S3 — concurrent request_shutdown + shutdown (SIGTERM double-teardown race)
+# End-to-end regression for bugfix Issue 1: drives the REAL run() loop + lazy host spawn on
+# arm, runs request_shutdown (signal thread) + shutdown (main-thread finally) CONCURRENTLY,
+# and asserts exactly ONE host.stop() (single-flight), wall < 8s, clean run-thread exit.
+# (S1's _CountingHost/_GatedHost unit tests above prove the mechanics WITHOUT the run loop;
+#  THIS test wires them through the real lifecycle — bug_analysis.md §Test Gap.)
+# ===========================================================================
+
+
+def test_concurrent_request_shutdown_and_shutdown_only_one_stop(monkeypatch):
+    """SIGTERM-path regression (bugfix Issue 1 / P1.M1.T2.S3).
+
+    The real SIGTERM race: the signal-handler thread runs request_shutdown() (tears the child
+    down via _bounded_shutdown() -> host.stop()) WHILE main()'s finally-block runs
+    daemon.shutdown() CONCURRENTLY. Pre-fix (pre-P1.M1.T2.S1) BOTH called _bounded_shutdown()
+    -> host.stop() TWICE -> the double teardown that blew systemd's 15s TimeoutStopSec -> SIGKILL.
+    Post-fix, shutdown() WAITS on _teardown_done instead of a 2nd teardown, so exactly ONE
+    host.stop() runs.
+
+    This is the END-TO-END proof (vs S1's unit-level _GatedHost test above): real run()
+    loop in a thread + real lazy host spawn on arm (host_factory) + concurrent request_shutdown
+    (thread A) + shutdown (thread B). bug_analysis.md §Test Gap: 'No existing test exercises
+    the concurrent request_shutdown() + shutdown() path (the SIGTERM path) ... with a real
+    _FakeHost' — this is that test.
+
+    The default _FakeHost.stop() returns INSTANTLY (_StubRecorder.shutdown() is a counter++),
+    so it gives no concurrency-overlap window. _GatedFakeHost.stop() blocks on a release Event
+    to GUARANTEE the in-flight window during which shutdown() is observed WAITING (not starting
+    a 2nd stop). Its text() mirrors RecorderHost.text() (blocks until final or child death), so
+    run() is genuinely listening when the SIGTERM fires (same shape as the _StrandingHost test).
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic (belt-and-suspenders)
+
+    class _GatedFakeHost(_FakeHost):
+        """A _FakeHost whose stop() blocks on a release gate (the in-flight teardown window)
+        and whose text() blocks until child death — so a concurrent shutdown() can be observed
+        WAITING on _teardown_done instead of starting a 2nd host.stop(). Full _FakeHost surface
+        preserved so run()/_load_host/arm work unchanged."""
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._final_evt = threading.Event()
+            self._dead = False
+            self.stop_entered = threading.Event()
+            self.stop_release = threading.Event()
+
+        def text(self, on_final):
+            self.recorder.text_calls += 1
+            self.recorder.last_callback = on_final
+            # Mirror RecorderHost.text()'s wait loop: return on final OR child death (stop()).
+            while not self._final_evt.wait(timeout=0.05):
+                if self._dead:
+                    return  # child death -> host.text() returns -> run() re-checks _shutdown
+
+        def stop(self, timeout=5.0):
+            self.stop_calls += 1
+            self._alive = False
+            self._dead = True          # child death -> any blocked text() returns (run() exits)
+            self.stop_entered.set()     # tell the test we are INSIDE the teardown
+            self.stop_release.wait(timeout=5.0)  # in-flight teardown window (bounded; never hangs)
+
+    def _factory(*a, **k):
+        return _GatedFakeHost(*a, **k)
+
+    d, _fb = _make_lazy_daemon(host_factory=_factory)
+    t_run = threading.Thread(target=d.run, daemon=True)
+    t_run.start()
+    wall_start = _time.monotonic()
+    host = None
+    t_sig = None
+    t_main = None
+    main_done = threading.Event()
+    try:
+        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)  # run() booted
+        d.start()  # first arm lazily spawns the gated host (_load_host -> factory -> _arm)
+        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), "loop did not enter text()"
+        host = d._host
+        assert isinstance(host, _GatedFakeHost), "arm did not spawn the gated host"
+
+        # --- Thread A: the SIGTERM signal-handler analog ---
+        t_sig = threading.Thread(target=d.request_shutdown, name="sigterm-sig", daemon=True)
+        t_sig.start()
+        # request_shutdown claimed _shutdown_done + is INSIDE host.stop() (blocked on stop_release).
+        assert host.stop_entered.wait(timeout=2.0), "request_shutdown did not reach host.stop()"
+        assert d._shutdown_done is True            # the single-flight CLAIM
+        assert not d._teardown_done.is_set()       # teardown still in flight
+
+        # --- Thread B: main()'s finally-block analog (runs CONCURRENTLY with A) ---
+        def _main_shutdown():
+            d.shutdown()
+            main_done.set()
+
+        t_main = threading.Thread(target=_main_shutdown, name="sigterm-main", daemon=True)
+        t_main.start()
+        _time.sleep(0.2)  # let shutdown() reach _teardown_done.wait()
+
+        # CORE REGRESSION ASSERT: B is WAITING, NOT starting a 2nd host.stop().
+        assert host.stop_calls == 1, (
+            f"shutdown() started a SECOND host.stop() (double teardown!) stop_calls={host.stop_calls}"
+        )
+        assert not main_done.is_set(), "shutdown() returned before the in-flight teardown finished"
+
+        # Release the in-flight teardown -> A finishes -> _teardown_done set -> B's wait returns.
+        host.stop_release.set()
+        assert _wait_for(main_done.is_set, timeout=5.0), "shutdown() did not return after release"
+        t_sig.join(timeout=5.0)
+        t_main.join(timeout=5.0)
+        assert not t_sig.is_alive() and not t_main.is_alive(), "shutdown threads did not finish"
+
+        # run() exits: request_shutdown set _shutdown first; text() saw _dead -> returned.
+        assert _wait_for(lambda: not t_run.is_alive(), timeout=3.0), "run() thread did not exit cleanly"
+
+        # FINAL regression asserts: still exactly ONE teardown; bounded wall time.
+        assert host.stop_calls == 1, f"double teardown after release! stop_calls={host.stop_calls}"
+        wall = _time.monotonic() - wall_start
+        assert wall < 8.0, f"total wall time {wall:.2f}s >= 8s (bounded-teardown regression?)"
+    finally:
+        # ALWAYS release + signal + join so no thread is left blocked (test isolation).
+        if host is not None:
+            host.stop_release.set()
+        d.request_shutdown()  # idempotent under S1's _shutdown_done guard; re-sets _shutdown
+        if t_sig is not None:
+            t_sig.join(timeout=5.0)
+        if t_main is not None:
+            t_main.join(timeout=5.0)
+        _wait_for(lambda: not t_run.is_alive(), timeout=3.0)
+        t_run.join(timeout=3.0)
+    assert not t_run.is_alive(), "run() thread still alive after teardown"
+
+
 # --- run() loop ---
 
 

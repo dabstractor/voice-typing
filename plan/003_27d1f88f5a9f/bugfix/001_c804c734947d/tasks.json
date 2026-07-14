@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Critical Fix — SIGTERM Teardown Race (Issue 1)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Make the SIGTERM/systemctl-stop teardown single-flight so the armed-daemon stop completes bounded in seconds, well under TimeoutStopSec=15, with no SIGKILL. Three measures: (A) thread-safe RecorderHost.stop() via a lock so concurrent callers share ONE teardown; (B) daemon-level coordination so request_shutdown() sets the _shutdown_done guard + signals completion, letting main()'s shutdown() wait-and-return instead of starting a second concurrent teardown; (C) reduce the _bounded_shutdown timeout from 10s to 5s for headroom.",
           "tasks": [
             {
@@ -57,7 +57,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Coordinate daemon shutdown paths + reduce teardown timeout budget",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Make request_shutdown() and shutdown() coordinate via _shutdown_done + _teardown_done so main()'s finally-block shutdown() does NOT start a second concurrent _bounded_shutdown(). Also reduce the default _bounded_shutdown timeout from 10s to 5s so a single teardown + server.stop() is comfortably under TimeoutStopSec=15.",
               "subtasks": [
                 {
@@ -93,7 +93,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "Test concurrent request_shutdown + shutdown (SIGTERM path simulation) — assert single host.stop() + bounded time",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1",
@@ -128,7 +128,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Add set_phase('idle') to _disarm() to reflect 'loaded / not listening' lifecycle state",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/bug_analysis.md §Issue 2 Root Cause. _disarm() (daemon.py ~line 970) clears _listening, sets _disarmed_monotonic, calls host.set_microphone(False), calls feedback.set_listening(False). It NEVER calls feedback.set_phase('idle'). Phase is only set by VAD callbacks (on_vad_detect_start→'listening', on_vad_start→'speaking', on_vad_stop→'listening'). PRD §4.2bis: 'loaded / not listening ⇒ phase idle'. The PRD also suggests optionally gating the child's ('vad',...) relay to ignore phases while not listening (prevents a stray late VAD event from re-flipping phase after disarm).\n2. INPUT: VoiceTypingDaemon._disarm() method in voice_typing/daemon.py (~line 970). Runs under self._lock (called by stop/toggle/_maybe_auto_stop). self._feedback is a Feedback instance with set_phase(str).\n3. LOGIC: In _disarm(), after `self._feedback.set_listening(False)`, add `self._feedback.set_phase('idle')`. This is a one-line addition. The 'idle' phase correctly represents the 'loaded / not listening' state per PRD §4.2bis. Optional hardening: in recorder_host.py _dispatch() (~line 260), when handling kind=='vad', check if the daemon is listening before calling self._feedback.set_phase(phase) — but this requires the host to know the listening state (it does not currently). The simpler approach: accept that a stray late VAD event could transiently re-flip phase; the next disarm resets it. Only add the gate if observed in practice (PRD says 'if that is observed').\n4. OUTPUT: After any disarm (stop, toggle-off, 30s auto-stop), state.json and voicectl status show phase: idle instead of the stale last VAD value.\n5. DOCS: none — behavior fix, no new config/API surface.",
