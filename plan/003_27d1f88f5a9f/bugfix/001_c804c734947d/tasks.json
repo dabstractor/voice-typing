@@ -265,14 +265,14 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Changeset-Level Documentation Sync",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Update changeset-level documentation (README.md, tests/ACCEPTANCE.md) to accurately reflect the post-fix teardown behavior, phase lifecycle, and config validation. This is the Mode B catch-all that prevents a coherent delta from shipping with stale overview docs.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Sweep README.md and tests/ACCEPTANCE.md to align teardown claims, phase lifecycle description, and config validation notes with the bug fixes. The README currently claims 'SIGKILL is gone' (inaccurate — Issue 1 proved it still happens on SIGTERM), and the phase lifecycle description does not mention the disarm→idle transition explicitly. ACCEPTANCE.md references '≤10s bounded teardown' (now ≤5s).",
               "subtasks": [
                 {
@@ -302,7 +302,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Update tests/ACCEPTANCE.md teardown criteria + add SIGTERM-path test coverage note",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T2.S1",

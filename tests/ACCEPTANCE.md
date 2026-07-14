@@ -127,7 +127,7 @@ Per-criterion PASS lines printed by the same run:
   defaults) for T6(d). The GPU routinely hosts unrelated compute apps (e.g. a browser GPU process, or
   a parallel test daemon), so only rows whose PID is in the daemon tree are counted. The (d-gone)
   transition is **polled** (every 0.5 s up to a ~25 s ceiling), not a fixed `sleep 7` — the contract's
-  literal "7 s" under-budgets the 1 s watchdog tick + 5 s threshold + ≤10 s bounded teardown + driver
+  literal "7 s" under-budgets the 1 s watchdog tick + 5 s threshold + ≤5 s single-flight teardown + driver
   accounting lag. T6(d-gone) relies on the daemon terminating the recorder-host CHILD PROCESS
   GROUP (the child owns ALL CUDA contexts — the daemon process never touches CUDA, so killing the
   child releases ALL VRAM while the daemon lives); if it ever FAILS, a grandchild orphaned — debug
@@ -144,3 +144,19 @@ Per-criterion PASS lines printed by the same run:
   `vtidle` tmux session is gone, and the temp dir is removed on every exit path — PASS, error, and
   Ctrl-C (`SIGINT`). The default audio source is never touched (this test listens to ambient room
   silence on the real mic).
+
+- **Regression-test coverage (bugfix Issues 1–3).** The SIGTERM/systemctl-stop teardown path now has
+  explicit automated coverage — `test_concurrent_request_shutdown_and_shutdown_only_one_stop`
+  (`tests/test_daemon.py`) drives `request_shutdown()` (the signal-handler thread) and `shutdown()`
+  (the main-thread `finally`) **concurrently** against a live armed daemon and asserts that exactly
+  ONE `host.stop()` runs and the teardown stays bounded in time (the daemon single-flight of
+  P1.M1.T2.S1 + the ≤5 s per-call budget of P1.M1.T2.S2; the recorder-host-level single-flight is
+  covered by `test_concurrent_stop_calls_share_one_teardown` in `tests/test_recorder_host.py`).
+  Previously only the `voicectl quit` path was exercised — which is exactly why Issue 1 (the SIGTERM
+  double-teardown hang → SIGKILL + `Failed with result 'timeout'`) slipped through. Issue 2 (`phase`
+  stuck `listening`/`speaking` after disarm) and Issue 3 (silent recorder-host child crash leaving
+  `listening: on`) likewise now have regression tests in `tests/test_daemon.py`:
+  `test_disarm_resets_phase_to_idle`, `test_toggle_off_resets_phase_to_idle`, and
+  `test_auto_stop_resets_phase_to_idle` (Issue 2); `test_run_loop_detects_dead_host_and_transitions_to_unloaded`,
+  `test_load_host_respawns_after_dead_child`, and `test_status_reports_unloaded_after_child_death`
+  (Issue 3).
