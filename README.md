@@ -161,7 +161,12 @@ cpu).
 To change VAD sensitivity, edit `daemon.py` and restart the daemon. Do **not** add
 these names to `config.toml`. The config loader (`config.py`) rejects unknown keys
 with `TypeError`, so a stray key makes the daemon fail to load and systemd's
-`Restart=on-failure` loops it forever.
+`Restart=on-failure` loops it forever. A value of the **wrong type** is rejected the
+same way: `auto_stop_idle_seconds = "thirty"` (a string where a number is expected)
+or `device = 123` (a number where a string is expected) raises `TypeError` at load
+with a message naming the field, rather than loading silently and breaking the
+feature at runtime. Bare integers are accepted for numeric fields; a `true`/`false`
+bool is not.
 
 ## CPU-only mode
 
@@ -307,7 +312,10 @@ arm.
 
 `voicectl status` surfaces the lifecycle: `phase:` is `unloaded` (boot /
 idle-unloaded), `loading` (first arm), `idle` (loaded, disarmed), or `listening`
-(armed); the `models:` line ends in `(loaded)` or `(not loaded)`. The journal logs
+(armed); the `models:` line ends in `(loaded)` or `(not loaded)`. Disarming the mic
+— a manual `stop`, a `toggle` off, or the 30 s auto-stop — transitions `phase` back
+to **`idle`** (loaded, not listening), so a stopped daemon never reports a stale
+`listening`/`speaking` while `listening:` is off. The journal logs
 `voice-typing models loaded (lazy load complete); recorder resident` on load and
 `voice-typing idle-unload: 1800.0s disarmed; unloading models` on idle teardown.
 
@@ -327,7 +335,13 @@ systemctl --user stop voice-typing
 systemctl --user disable voice-typing
 ```
 
-`voicectl quit` and `systemctl --user stop` complete in seconds. Teardown is
-bounded at ≤10s — if `recorder.shutdown()` wedges, the recorder's worker processes
-are force-terminated so VRAM is actually released. The old ~90s systemd stop
-timeout (`Failed with result 'timeout'` / SIGKILL) is gone.
+`voicectl quit` and `systemctl --user stop` (and any session logout, which systemd
+signals with SIGTERM) complete in seconds. Teardown is **single-flight and
+bounded**: `RecorderHost.stop()` joins the recorder-host child for up to 5 s, then
+SIGKILLs its process group, so VRAM is force-released even when
+`recorder.shutdown()` wedges in RealtimeSTT's thread joins. One teardown therefore
+takes a few seconds — comfortably under the unit's `TimeoutStopSec=15`, so there is
+no systemd `Failed with result 'timeout'` / SIGKILL. The teardown is single-flight
+under a lock, so the SIGTERM signal-handler thread and the main-thread `finally`
+block no longer race a second, parallel teardown (that double-teardown was what blew
+the 15 s budget on `systemctl stop` while armed).
