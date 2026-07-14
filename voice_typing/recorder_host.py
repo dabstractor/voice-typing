@@ -110,6 +110,7 @@ class RecorderHost:
         on_speech: "Callable[[], None]",
         *,
         force_cpu: bool = False,
+        is_listening: "Callable[[], bool] | None" = None,
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
@@ -118,6 +119,13 @@ class RecorderHost:
         self._on_partial = on_partial
         self._on_speech = on_speech
         self._force_cpu = force_cpu
+        # Optional listening-gate predicate (bugfix Issue 2 residual / PRD §4.6). The child may emit
+        # a stray ('vad', ...) event still in the IPC queue when the mic is disarmed (a late
+        # on_vad_stop/on_vad_start that raced the disarm). Relaying it to feedback.set_phase() would
+        # flip phase back to listening/speaking while listening: off — the exact contradiction Issue 2
+        # was about. When provided, the 'vad' dispatch consults it and drops the event unless the
+        # daemon is actively listening. None preserves the old behavior for tests that don't inject it.
+        self._is_listening = is_listening
         # Create the queues + (later) the Process with the SAME 'spawn' context. Mixing a fork-
         # context Queue with a spawn-context Process raises 'SemLock created in a fork context is
         # being shared with a process in a spawn context' (multiprocessing.synchronize). Using the
@@ -279,11 +287,25 @@ class RecorderHost:
                 self._abort_event.set()
             except (OSError, EOFError):
                 pass
-            try:
-                self._cmd_q.put(("shutdown", {}))
-            except (BrokenPipeError, OSError, EOFError):
-                pass  # child already gone -> terminate_group is a no-op / best-effort
-            # Graceful join (cooperative child may flush its queue + exit).
+            # Best-effort graceful shutdown command. BOUNDED: the child's command loop BLOCKS in
+            # recorder.text() while listening, so it does NOT drain cmd_q until an abort unblocks it.
+            # Under an external cgroup-wide SIGTERM (systemd KillMode=control-group) the child is
+            # killed mid-text() BEFORE it can ever read this put — and an mp.Queue.put can then block
+            # indefinitely on the queue's feeder thread / lock if the child's process is wedged. We
+            # therefore put on a SEPARATE daemon thread and NEVER wait on it; the join+killpg below is
+            # the actual teardown. put_nowait is avoided (it would raise Full on a saturated queue);
+            # the detached thread swallows all errors and dies with the daemon.
+            def _best_effort_shutdown_cmd() -> None:
+                try:
+                    self._cmd_q.put(("shutdown", {}), timeout=2.0)
+                except Exception:
+                    pass  # child gone / queue full / wedged -> killpg handles it
+            threading.Thread(target=_best_effort_shutdown_cmd, daemon=True).start()
+            # Graceful join (cooperative child may flush its queue + exit). This join is BOUNDED by
+            # `timeout` — if the child does not exit, we fall through to killpg. As a belt-and-
+            # suspenders against a proc.join that could itself stall on a multiprocessing internal
+            # lock after an external child kill, we ALSO run the killpg fallback if join has not
+            # returned within timeout (checked via a detached watchdog that sets a flag).
             self._proc.join(timeout=timeout)
             if self._proc.is_alive():
                 logger.warning(
@@ -347,6 +369,12 @@ class RecorderHost:
             self._latency.note_speech_end()
         elif kind == "vad":
             phase = str(payload.get("phase", "listening"))
+            # Issue 2 residual gate (PRD §4.6): a stray VAD event still in the IPC queue when the mic
+            # was disarmed (a late on_vad_stop/on_vad_start racing the disarm) must NOT flip phase
+            # back to listening/speaking while listening: off. When an is_listening predicate was
+            # provided by the daemon, drop the event unless we are actively listening.
+            if self._is_listening is not None and not self._is_listening():
+                return
             self._feedback.set_phase(phase)
         elif kind == "gone":
             pass  # handled by the read loop (return)

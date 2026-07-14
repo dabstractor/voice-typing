@@ -663,10 +663,21 @@ class VoiceTypingDaemon:
             self._feedback.set_models_loaded(False)  # P1.M2.T2.S1: models not resident while loading
         # --- heavy spawn OUTSIDE _lock (status/stop stay responsive during the ~1–3 s child load) ---
         factory = self._host_factory or RecorderHost
-        host = factory(
-            self._cfg, self._feedback, self._latency,
-            self.on_final, self._on_partial, self._touch_speech,
-        )
+        # Issue 2 residual gate: the real RecorderHost gets an is_listening predicate so stray
+        # ('vad', ...) events racing a disarm cannot flip phase while listening: off. We snapshot
+        # is_listening (a bound method on _listening) here; it is queried on the host reader thread.
+        # Test fakes (self._host_factory) keep the old surface; only the real RecorderHost takes it.
+        if self._host_factory is None:
+            host = factory(
+                self._cfg, self._feedback, self._latency,
+                self.on_final, self._on_partial, self._touch_speech,
+                is_listening=self.is_listening,
+            )
+        else:
+            host = factory(
+                self._cfg, self._feedback, self._latency,
+                self.on_final, self._on_partial, self._touch_speech,
+            )
         ok = host.spawn()
         # --- re-acquire _lock to publish the result + wake any waiters ---
         with self._lock:

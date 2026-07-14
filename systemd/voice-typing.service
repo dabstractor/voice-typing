@@ -39,6 +39,21 @@ ExecStartPre=/usr/bin/systemctl --user import-environment WAYLAND_DISPLAY DISPLA
 ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh
 Restart=on-failure
 RestartSec=2
+# KillMode=mixed (bugfix Issue 1 / PRD §4.2bis,§8,§7.9): systemd's DEFAULT is control-group, which
+# sends SIGTERM to EVERY process in the unit's cgroup SIMULTANEOUSLY — the daemon AND the
+# recorder-host child AND the multiprocessing resource tracker. The recorder-host child does NOT
+# install a SIGTERM handler (only the daemon's main() does), so a cgroup-wide SIGTERM kills the
+# child mid-recorder.text(), wedging the multiprocessing Queue/Process such that the daemon's
+# correct single-flight host.stop() (proc.join / cmd_q.put("shutdown")) never completes — the
+# daemon's 8s _teardown_done fallback fires, its OWN host.stop() hits the same wedged state, and
+# systemd SIGKILLs both at TimeoutStopSec=15s (Result=timeout). Proven: `kill -TERM <MainPID>`
+# (signal to the MAIN process only) exits cleanly in ~1.3s; only `systemctl stop` (cgroup-wide)
+# wedges. KillMode=mixed makes systemd deliver SIGTERM to the MAIN daemon process ONLY (letting
+# the daemon's already-correct bounded host.stop() tear its OWN child group down via killpg),
+# while still sending the final SIGKILL to the whole group only after TimeoutStopSec — preserving
+# the outer safety net. KillMode=process is the stricter alternative (also main-only for both
+# signals); mixed is preferred because it keeps the SIGKILL safety net on the full group.
+KillMode=mixed
 # Bound systemd's stop so the daemon is never SIGKILLed at the 90s DEFAULT (PRD §8 risk row:
 # "recorder.shutdown() hangs ~90s … SIGKILL after systemd TimeoutStopSec"; journal:
 # 'Failed with result timeout'). With no TimeoutStopSec, systemd applies its 90s default.

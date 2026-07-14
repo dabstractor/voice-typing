@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bug Fix Implementation — SIGTERM Teardown, Phase Lifecycle, Child Crash Recovery, Config Validation",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Fix four issues found in creative end-to-end QA: (1) Critical — SIGTERM while armed causes double-teardown race exceeding TimeoutStopSec=15 → SIGKILL; (2) Major — phase field stays listening/speaking after disarm, never returns to idle; (3) Major — dead recorder-host child goes undetected, daemon silently stuck 'listening: on'; (4) Minor — config numeric fields accept wrong types silently, breaking auto-stop at runtime. All fixes follow TDD (implied: write failing test → implement → pass). Research findings in plan/003_27d1f88f5a9f/bugfix/001_c804c734947d/architecture/.",
       "milestones": [
         {
@@ -114,7 +114,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Major Robustness Fixes — Phase Lifecycle (Issue 2) + Child Crash Recovery (Issue 3)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Fix two major state-correctness issues: (Issue 2) phase field stuck at listening/speaking after disarm — add set_phase('idle') to _disarm(); (Issue 3) dead recorder-host child goes undetected — add liveness checks in run() loop and _load_host() guard, plus _handle_dead_host() recovery method.",
           "tasks": [
             {
@@ -160,7 +160,7 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Detect dead recorder-host child and recover (Issue 3)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "The run() loop never checks host.is_alive, and _load_host() short-circuits on stale _models_loaded without checking liveness. Add a liveness check in run() that detects a dead child, cleans up state via a new _handle_dead_host() method, and modifies _load_host() to re-spawn when the host is dead.",
               "subtasks": [
                 {
@@ -196,7 +196,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S3",
                   "title": "Tests: dead child detection in run(), recovery on next arm, status correctness",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1",

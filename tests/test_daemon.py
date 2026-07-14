@@ -440,7 +440,7 @@ class _FakeHost:
     bounded join on the wrapped recorder's shutdown() (mirrors the legacy adapter's force-cleanup).
     """
 
-    def __init__(self, cfg, feedback, latency, on_final, on_partial, on_speech, *, force_cpu=False):
+    def __init__(self, cfg, feedback, latency, on_final, on_partial, on_speech, *, force_cpu=False, is_listening=None):
         # Mirror the real RecorderHost.__init__ signature so host_factory=lambda *a, **k: _FakeHost(*a, **k)
         # works. Store the callbacks (the tests do not exercise them, but the daemon wires them).
         self.cfg = cfg
@@ -450,6 +450,7 @@ class _FakeHost:
         self.on_partial = on_partial
         self.on_speech = on_speech
         self.force_cpu = force_cpu
+        self.is_listening = is_listening
         self.recorder = _StubRecorder()   # the wrapped stub the tests assert on
         self.spawn_calls = 0
         self.spawn_result = True
