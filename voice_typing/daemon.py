@@ -737,6 +737,18 @@ class VoiceTypingDaemon:
         # DISARMED. Mirrors the idle-watchdog start above; same _shutdown.wait(1.0) tick + daemon thread.
         threading.Thread(target=self._idle_unload_watchdog, name="voice-typing-idle-unload", daemon=True).start()
         while not self._shutdown.is_set():
+            # Liveness check (bugfix Issue 3 / P1.M2.T2.S1): detect a crashed recorder-host child
+            # (CUDA OOM / segfault / OOM-killer) on each ~50ms idle iteration. is_alive is cheap
+            # (proc.is_alive() + _dead flag) and always True for the legacy injected-recorder adapter,
+            # so this is dormant in unit tests. On a real death: log the pid, reset to 'unloaded', and
+            # idle — the next arm re-spawns via _load_host() (_models_loaded=False => no short-circuit).
+            if self._host is not None and not self._host.is_alive:
+                logger.warning(
+                    "recorder-host child (pid=%s) died; transitioning to unloaded",
+                    getattr(self._host, "pid", "?"),
+                )
+                self._handle_dead_host()
+                continue
             if self._host is None:
                 time.sleep(0.05)   # no models loaded yet → idle, ~0 VRAM (PRD §4.2(1)/§4.2bis)
                 continue
@@ -757,6 +769,32 @@ class VoiceTypingDaemon:
             else:
                 time.sleep(0.05)
         logger.info("shutdown requested; run() loop exiting")
+
+    def _handle_dead_host(self) -> None:
+        """Recover from an unexpected recorder-host child death (bugfix Issue 3 / PRD §4.2bis).
+
+        Called from run() when the resident host's `is_alive` is False (the child crashed: CUDA OOM,
+        segfault, uncaught exception, OOM-killer). The child is ALREADY gone, so this does NOT call
+        host.stop() (nothing to tear down — and stop() on a dead host could block/error); it drops the
+        dead reference and resets the daemon to the 'unloaded' lifecycle state UNDER self._lock so a
+        consistent snapshot is published. Clears _listening (the child died WHILE listening) so
+        voicectl status reports listening: off, sets _load_error so status surfaces the crash, and
+        clears both idle clocks. The run() loop then sees self._host is None -> idles (~0 work); the
+        NEXT arm re-spawns a fresh child via _load_host() (the _models_loaded=False reset means
+        _load_host()'s `if self._models_loaded: return True` guard does NOT short-circuit). Composes
+        with idle-unload: _unload_host() re-checks `not self._models_loaded` first -> no-op if this
+        ran first. Mirrors the cleanup half of _unload_host() (without the host.stop() teardown).
+        """
+        with self._lock:
+            self._host = None
+            self._models_loaded = False
+            self._listening.clear()
+            self._feedback.set_phase("unloaded")
+            self._feedback.set_models_loaded(False)
+            self._feedback.set_listening(False)
+            self._load_error = "recorder-host child died unexpectedly"
+            self._disarmed_monotonic = None
+            self._last_speech_monotonic = None
 
     def _configure_log_level(self) -> None:
         """Apply cfg.log.level to the `voice_typing` namespace logger (PRD §4.2 'DEBUG via config').
