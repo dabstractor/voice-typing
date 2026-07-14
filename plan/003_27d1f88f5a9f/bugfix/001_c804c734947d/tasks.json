@@ -121,7 +121,7 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Reset phase to idle on disarm (Issue 2)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "_disarm() never calls feedback.set_phase('idle'), so phase stays stuck at the last VAD value after any stop/toggle-off/auto-stop. Add the call after set_listening(False).",
               "subtasks": [
                 {
@@ -142,7 +142,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Test phase returns to idle after disarm (stop, toggle-off, auto-stop)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -167,7 +167,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Add liveness check in run() loop + _handle_dead_host() recovery method",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See architecture/bug_analysis.md §Issue 3 Root Cause. run() loop (~line 730) checks `if self._host is None` but never `host.is_alive`. When the child dies, self._host is still the dead host object, _listening is True, _models_loaded is True. host.text() returns immediately (dead child → _dead=True). After 30s auto-stop fires, _models_loaded stays True. Next start() → _load_host() short-circuits. RecorderHost.is_alive (~line 135) already exists and correctly returns False when _proc is None or not alive or _dead is True. _handle_dead_host() does not exist yet.\n2. INPUT: VoiceTypingDaemon.run() (~line 700) and its while loop (~line 730). The loop structure: `while not self._shutdown.is_set(): if self._host is None: sleep(0.05); continue; if self._listening.is_set(): text(); else: sleep(0.05)`. self._lock, self._feedback (with set_phase/set_models_loaded/set_listening), self._models_loaded, self._load_error, self._listening (Event). RecorderHost.is_alive property.\n3. LOGIC: (a) Add a new method _handle_dead_host() that performs cleanup under self._lock: `self._host = None`, `self._models_loaded = False`, `self._listening.clear()`, `self._feedback.set_phase('unloaded')`, `self._feedback.set_models_loaded(False)`, `self._feedback.set_listening(False)`, `self._load_error = 'recorder-host child died unexpectedly'`, `self._disarmed_monotonic = None`, `self._last_speech_monotonic = None`. Log a WARNING with the dead host's pid. (b) In run(), at the TOP of the while loop body (before the `if self._host is None` check), add: `if self._host is not None and not self._host.is_alive: logger.warning('recorder-host child (pid=%s) died; transitioning to unloaded', getattr(self._host, 'pid', '?')); self._handle_dead_host(); continue`. This detects a dead child on each ~50ms idle iteration, cleans up state, and idles. The next arm re-spawns via _load_host(). (c) The _handle_dead_host() must clear _listening (the child died WHILE listening) so status reports listening: off.\n4. OUTPUT: Dead child detected within ~50ms of the next loop iteration. Daemon transitions to unloaded state (phase: unloaded, models_loaded: false, listening: false). load_error surfaces the crash in status. Next arm re-spawns.\n5. DOCS: none — internal robustness fix.",

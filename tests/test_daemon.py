@@ -3006,3 +3006,59 @@ def test_arm_resets_idle_unload_clock():
     d._maybe_idle_unload()
     assert d._recorder is rec                              # stayed resident (arm reset cancelled it)
     assert d._models_loaded is True
+
+
+# ===========================================================================
+# P1.M2.T1.S2 — phase returns to 'idle' after disarm (stop / toggle-off / auto-stop)
+# Regression for Issue 2: _disarm() now calls feedback.set_phase("idle") (P1.M2.T1.S1),
+# publishing the 'loaded / not listening' lifecycle state to state.json + voicectl status
+# (PRD §4.2bis/§4.6). Without that one line these tests FAIL (fb.phases[-1] stays at the
+# last VAD value 'listening'/'speaking'). Synchronous unit tests — no run loop, no GPU.
+# ===========================================================================
+import json  # noqa: E402  (state.json read in the _make_daemon_with_feedback test below)
+
+
+def test_disarm_resets_phase_to_idle():
+    """stop() -> _disarm() -> phase 'idle' (the 'loaded / not listening' state, PRD §4.2bis/§4.6)."""
+    d, fb, _rec, _be = _make_daemon()
+    d.start()                                  # arm (set_microphone True, listening on)
+    d._feedback.set_phase("listening")         # simulate the child's VAD advancing phase
+    assert d.is_listening() is True
+    d.stop()                                   # -> _disarm() -> set_listening(False) + set_phase("idle")
+    assert d.is_listening() is False
+    assert fb.phases[-1] == "idle", f"phase after stop = {fb.phases[-1]!r}"
+
+
+def test_toggle_off_resets_phase_to_idle():
+    """toggle() while listening disarms -> phase 'idle'."""
+    d, fb, _rec, _be = _make_daemon()
+    d.start()
+    d._feedback.set_phase("speaking")          # VAD had reached 'speaking' before the toggle
+    assert d.is_listening() is True
+    d.toggle()                                 # listening -> disarm branch -> _disarm()
+    assert d.is_listening() is False
+    assert fb.phases[-1] == "idle", f"phase after toggle-off = {fb.phases[-1]!r}"
+
+
+def test_auto_stop_resets_phase_to_idle():
+    """The 30s idle auto-stop (_maybe_auto_stop -> _disarm) resets phase to 'idle'."""
+    d, fb, _rec, _be = _make_daemon()
+    d.start()                                  # arm -> _last_speech_monotonic = now
+    d._feedback.set_phase("speaking")
+    # Idle > 30.0s default threshold (mirrors test_auto_stop_disarms_when_idle_beyond_threshold @583):
+    d._last_speech_monotonic = _time.monotonic() - 31.0
+    d._maybe_auto_stop()                       # -> _disarm() -> set_phase("idle")
+    assert d.is_listening() is False
+    assert fb.phases[-1] == "idle", f"phase after auto-stop = {fb.phases[-1]!r}"
+
+
+def test_state_json_phase_idle_after_stop(tmp_path, monkeypatch):
+    """The REAL Feedback writes phase 'idle' to state.json on disarm (on-disk contract, PRD §4.6)."""
+    d, fb = _make_daemon_with_feedback(tmp_path, monkeypatch)
+    d.start()
+    fb.set_phase("listening")                  # real Feedback.set_phase (writes state.json)
+    assert fb.snapshot()["phase"] == "listening"
+    d.stop()                                   # _disarm -> set_phase("idle") -> atomic state.json write
+    state = json.load(open(tmp_path / "state.json"))   # _make_daemon_with_feedback writes here
+    assert state["phase"] == "idle", state
+    assert state["listening"] is False
