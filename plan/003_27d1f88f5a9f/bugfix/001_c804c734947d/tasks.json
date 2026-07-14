@@ -114,7 +114,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Major Robustness Fixes — Phase Lifecycle (Issue 2) + Child Crash Recovery (Issue 3)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Fix two major state-correctness issues: (Issue 2) phase field stuck at listening/speaking after disarm — add set_phase('idle') to _disarm(); (Issue 3) dead recorder-host child goes undetected — add liveness checks in run() loop and _load_host() guard, plus _handle_dead_host() recovery method.",
           "tasks": [
             {
@@ -160,7 +160,7 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Detect dead recorder-host child and recover (Issue 3)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "The run() loop never checks host.is_alive, and _load_host() short-circuits on stale _models_loaded without checking liveness. Add a liveness check in run() that detects a dead child, cleans up state via a new _handle_dead_host() method, and modifies _load_host() to re-spawn when the host is dead.",
               "subtasks": [
                 {
@@ -196,7 +196,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S3",
                   "title": "Tests: dead child detection in run(), recovery on next arm, status correctness",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1",

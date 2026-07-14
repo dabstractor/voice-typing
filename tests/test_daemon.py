@@ -3062,3 +3062,125 @@ def test_state_json_phase_idle_after_stop(tmp_path, monkeypatch):
     state = json.load(open(tmp_path / "state.json"))   # _make_daemon_with_feedback writes here
     assert state["phase"] == "idle", state
     assert state["listening"] is False
+
+
+# ---------------------------------------------------------------------------
+# Regression for Issue 3 (P1.M2.T2.S3): dead recorder-host child detection,
+# recovery on next arm, and status correctness. Exercises run()'s liveness
+# check + _handle_dead_host() (S1, daemon.py:750/778) and _load_host()'s is_alive
+# guard (S2, daemon.py:654) via a _FakeHost whose is_alive flips to False
+# (simulating a CUDA-OOM / segfault / OOM-killer child crash).
+# ---------------------------------------------------------------------------
+
+
+def test_run_loop_detects_dead_host_and_transitions_to_unloaded(monkeypatch):
+    """A crashed recorder-host child is detected by run() and the daemon resets to 'unloaded'.
+
+    Arms (start -> _load_host spawns a _FakeHost via host_factory -> _alive=True), then flips
+    host._alive=False to simulate the child dying. run()'s liveness check fires _handle_dead_host():
+    _host=None, _models_loaded=False, _listening cleared, phase 'unloaded', _load_error set.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    factory = _fake_host_factory(spawn_result=True)
+    # recorder=None => lazy boot (self._host is None, _models_loaded False) so start()'s _load_host()
+    # spawns a _FakeHost via the factory (_alive=True). A non-None recorder would be wrapped in a
+    # _LegacyRecorderHostAdapter (is_alive always True -> undetectable death). Mirrors _make_lazy_daemon.
+    fb = _DaemonFakeFeedback()
+    d = daemon.VoiceTypingDaemon(
+        VoiceTypingConfig(), fb, recorder=None, host_factory=factory,
+        backend=_FakeBackend(), mic_prober=_ok_probe,
+    )
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)   # run() booted
+        d.start()                                          # _load_host spawns _FakeHost (_alive=True) + _arm
+        assert _wait_for(lambda: d._models_loaded, timeout=2.0), "host did not load+arm"
+        assert d.is_listening() and d._host is not None
+        d._host._alive = False                             # simulate the child crashing
+        assert _wait_for(
+            lambda: d._host is None and "died" in (d._load_error or ""), timeout=2.0
+        ), "run() did not detect the dead host within 2s"
+        assert d._host is None
+        assert d._models_loaded is False
+        assert d.is_listening() is False                   # _listening cleared (died WHILE listening)
+        assert "died" in (d._load_error or ""), d._load_error
+        assert fb.phases[-1] == "unloaded"                 # _handle_dead_host -> set_phase("unloaded")
+        assert fb.listening_states[-1] is False
+    finally:
+        d.request_shutdown()
+    assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
+    t.join(timeout=2.0)
+
+
+def test_load_host_respawns_after_dead_child(monkeypatch):
+    """After a dead-child cleanup, the next arm re-spawns a FRESH host (recovery).
+
+    Recovery (_handle_dead_host) clears _models_loaded=False, so _load_host()'s
+    `if self._models_loaded and ... is_alive` guard (S2) does NOT short-circuit -> the factory
+    builds a NEW _FakeHost and spawn() runs again. Proves Issue 3 self-heals on re-arm.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    factory = _fake_host_factory(spawn_result=True)
+    # recorder=None => lazy boot so start()'s _load_host() spawns a _FakeHost (see test (a)).
+    fb = _DaemonFakeFeedback()
+    d = daemon.VoiceTypingDaemon(
+        VoiceTypingConfig(), fb, recorder=None, host_factory=factory,
+        backend=_FakeBackend(), mic_prober=_ok_probe,
+    )
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)
+        d.start()
+        assert _wait_for(lambda: d._models_loaded, timeout=2.0)
+        old_host = d._host                              # capture before killing
+        old_host._alive = False                         # child crashes
+        assert _wait_for(
+            lambda: d._host is None and d._load_error, timeout=2.0
+        ), "dead host not cleaned up"
+        assert d._models_loaded is False
+        d.start()                                        # re-arm -> _load_host spawns a FRESH host
+        assert _wait_for(lambda: d._models_loaded, timeout=2.0), "host did not re-spawn"
+        assert d._host is not old_host, "re-arm reused the dead host instead of spawning a new one"
+        assert d._host.spawn_calls == 1, "the new host was not spawned exactly once"
+        assert d._models_loaded is True
+        assert d.is_listening() is True                 # recovery: listening again
+    finally:
+        d.request_shutdown()
+    assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
+    t.join(timeout=2.0)
+
+
+def test_status_reports_unloaded_after_child_death(tmp_path, monkeypatch):
+    """status_snapshot() surfaces the crash (listening off / phase unloaded / models not loaded / load_error).
+
+    Uses a REAL Feedback (not _DaemonFakeFeedback) because status_snapshot() reads phase/models_loaded
+    from feedback.snapshot(), which the fake lacks. Asserts the §7.6 status contract.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    fb = Feedback(cfg.feedback)
+    factory = _fake_host_factory(spawn_result=True)
+    d = daemon.VoiceTypingDaemon(
+        cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
+    )
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)
+        d.start()
+        assert _wait_for(lambda: d._models_loaded, timeout=2.0)
+        d._host._alive = False                          # child crashes
+        assert _wait_for(
+            lambda: d._host is None and "died" in (d._load_error or ""), timeout=2.0
+        ), "dead host not cleaned up"
+        snap = d.status_snapshot()
+        assert snap["listening"] is False               # is_listening()
+        assert snap["phase"] == "unloaded"              # real Feedback.set_phase("unloaded")
+        assert snap["models_loaded"] is False           # real Feedback.set_models_loaded(False)
+        assert "died" in snap["load_error"], snap["load_error"]   # self._load_error
+    finally:
+        d.request_shutdown()
+    assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
+    t.join(timeout=2.0)
