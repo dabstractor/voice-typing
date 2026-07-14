@@ -133,6 +133,11 @@ class RecorderHost:
         # Spawn-context (same as the Process) so the child inherits it cleanly.
         self._abort_event: Any = ctx.Event()
         self._proc: Any = None
+        # Single-flight lock for stop(): serializes concurrent callers (SIGTERM signal thread +
+        # main-thread finally both reach host.stop()) so exactly ONE join+killpg teardown runs; the
+        # 2nd caller blocks on the lock, then sees _proc is None and no-ops. See stop() (bugfix
+        # Issue 1 / P1.M1.T1.S1). Plain Lock (not RLock): stop() is never re-entered.
+        self._stop_lock = threading.Lock()
         self._reader: threading.Thread | None = None
         self._final_evt = threading.Event()
         self._ready_evt = threading.Event()
@@ -248,36 +253,47 @@ class RecorderHost:
                 return  # child gone -> no final; run loop idles
 
     def stop(self, timeout: float = _STOP_JOIN_TIMEOUT_S) -> None:
-        """Terminate the child PROCESS GROUP. Idempotent. THE bounded teardown.
+        """Terminate the child PROCESS GROUP. Idempotent + SINGLE-FLIGHT. THE bounded teardown.
 
         Sends "shutdown" (best-effort graceful), joins up to `timeout`, then SIGKILL the child's
         PROCESS GROUP (os.setsid in the child -> it is its own group leader; killpg reaches its
         RealtimeSTT-spawned grandchildren: transcript_process/reader_process). Killing the group
         releases ALL VRAM (the whole point) and cannot reproduce RealtimeSTT's ~90 s shutdown wedge
         (we do NOT wait on its unbounded thread joins). Supersedes _bounded_shutdown (P1.M1.T1.S2).
+
+        SINGLE-FLIGHT (thread-safe, bugfix Issue 1 / P1.M1.T1.S1): the ENTIRE body — including
+        the `self._proc is None` early guard — runs under `self._stop_lock`. On the SIGTERM path
+        two threads call stop() concurrently (request_shutdown() on the signal-handler thread +
+        shutdown() on the main-thread finally); without serialization both passed the None-guard
+        and ran two parallel teardowns, blowing systemd's 15s TimeoutStopSec. Under the lock the
+        second caller blocks until the first finishes the join+killpg and sets `self._proc =
+        None`, then acquires the lock, sees `_proc is None`, and returns immediately — so exactly
+        ONE process-group teardown ever executes. (Plain Lock, not RLock: stop() is never
+        re-entered.)
         """
-        if self._proc is None:
-            return
-        # Set the abort event so a child blocked in text() unblocks before we tear it down.
-        try:
-            self._abort_event.set()
-        except (OSError, EOFError):
-            pass
-        try:
-            self._cmd_q.put(("shutdown", {}))
-        except (BrokenPipeError, OSError, EOFError):
-            pass  # child already gone -> terminate_group is a no-op / best-effort
-        # Graceful join (cooperative child may flush its queue + exit).
-        self._proc.join(timeout=timeout)
-        if self._proc.is_alive():
-            logger.warning(
-                "recorder host: child did not exit within %.1fs; SIGKILL-ing the process group",
-                timeout,
-            )
-            self._terminate_group()
-            self._proc.join(timeout=2.0)
-        self._dead = True
-        self._proc = None
+        with self._stop_lock:
+            if self._proc is None:
+                return
+            # Set the abort event so a child blocked in text() unblocks before we tear it down.
+            try:
+                self._abort_event.set()
+            except (OSError, EOFError):
+                pass
+            try:
+                self._cmd_q.put(("shutdown", {}))
+            except (BrokenPipeError, OSError, EOFError):
+                pass  # child already gone -> terminate_group is a no-op / best-effort
+            # Graceful join (cooperative child may flush its queue + exit).
+            self._proc.join(timeout=timeout)
+            if self._proc.is_alive():
+                logger.warning(
+                    "recorder host: child did not exit within %.1fs; SIGKILL-ing the process group",
+                    timeout,
+                )
+                self._terminate_group()
+                self._proc.join(timeout=2.0)
+            self._dead = True
+            self._proc = None
 
     # --- internals ---
 
