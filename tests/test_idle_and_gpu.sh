@@ -149,9 +149,9 @@ CPU_LIMIT_PCT=25                  # < 25% of ONE core (PRD §6 T4; do NOT divide
 VRAM_MIN_MIB=1024                 # PRD §6 T6: '~1 GB'
 VRAM_MAX_MIB=5120                 # PRD §6 T6: '~5 GB'
 # voicectl's socket readline() has NO timeout (makefile is incompatible with settimeout, ctl.py
-# _send_command), so a control-lock wedge (daemon.py _disarm() docstring: start/stop/toggle hit
-# the wedge after an auto-stop abort) would hang voicectl FOREVER. Wrap the control commands in
-# `timeout` so a wedge fails LOUD (exit 124) instead of stalling the whole heavy test. 30s is far
+# _send_command), so any daemon-side hang (e.g. a regression of the abort()-under-_lock wedge, or
+# the SIGTERM-path teardown stall) would hang voicectl FOREVER. Wrap the control commands in
+# `timeout` so a hang fails LOUD (exit 124) instead of stalling the whole heavy test. 30s is far
 # above any legit arm/disarm (the cold first-arm load is ~1-3s; status is lock-free and fast).
 VOICECTL_TIMEOUT=30
 
@@ -350,10 +350,10 @@ trap cleanup EXIT
 die() { echo "FAIL: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Run a voicectl CONTROL command (start/stop/toggle/quit) under `timeout` so a control-lock wedge
-# (daemon.py _disarm() docstring) fails LOUD (exit 124) instead of hanging the test forever
-# (voicectl's makefile readline() has no socket timeout). `status` is lock-free + needs the full
-# output, so callers invoke it directly (it never wedges). Usage: voicectl start|stop|toggle|quit.
+# Run a voicectl CONTROL command (start/stop/toggle/quit) under `timeout` so any daemon-side
+# hang fails LOUD (exit 124) instead of hanging the test forever (voicectl's makefile readline()
+# has no socket timeout). `status` is lock-free + needs the full output, so callers invoke it
+# directly (it never hangs). Usage: voicectl start|stop|toggle|quit.
 voicectl() { timeout "$VOICECTL_TIMEOUT" "$VOICECTL" "$@"; }
 
 # Read typed text from the tmux pane via capture-pane (reads the tty ECHO, live; G-CAPTURE).
@@ -392,14 +392,10 @@ WORK="$(mktemp -d)"
 # auto_stop_idle_seconds stays at its DEFAULT (30.0): it composes with the 1800s idle-UNLOAD (§4.5
 # hands off to §4.2bis). During T4's 120 s window the 30 s auto-stop disarms the mic (expected — the
 # original passing T4 run measured its ~2.5% CPU precisely because of this handoff), then the 1800s
-# idle-UNLOAD clock starts but 120 s << 1800 s so no VRAM unload corrupts T6(c). AFTER T4 we avoid a
-# REDUNDANT voicectl stop (see the T6(c) block): calling stop on a daemon ALREADY disarmed by
-# auto-stop wedges the control lock (daemon.py _disarm() docstring — voicectl stop/start/toggle hit
-# timeout → exit 124 after auto-stop's abort() leaves the recorder in a state where a second abort()
-# wedges _lock). That wedge is a pre-existing production issue (NOT this test's concern, Critical #1);
-# the test sidesteps it by skipping the redundant stop when status already shows listening: off. This
-# is a config override via XDG_CONFIG_HOME (G-CONFIG), NOT an edit to production code or the repo
-# config.toml.
+# idle-UNLOAD clock starts but 120 s << 1800 s so no VRAM unload corrupts T6(c). The T6(c) block re-checks status and calls `voicectl stop` if still armed
+# (ISSUE-3: the old "stop-on-disarmed wedges the control lock" premise is STALE — _safe_abort()
+# gating, commit 81d2ad8, fixed that, so a redundant stop after auto-stop is now safe). This is a
+# config override via XDG_CONFIG_HOME (G-CONFIG), NOT an edit to production code or the repo config.toml.
 mkdir -p "$WORK/config/voice-typing"
 cat > "$WORK/config/voice-typing/config.toml" <<EOF
 [output]
@@ -531,20 +527,20 @@ fi
 # stop does NOT unload). On the default 1800s config the idle-unload clock (DISARMED-only) won't
 # fire during this assertion (120s << 1800s).
 #
-# WEDGE SIDESTEP: during T4's 120 s window the default auto_stop_idle_seconds=30 fires and
-# disarms the mic. Calling `voicectl stop` on a daemon ALREADY disarmed by auto-stop WEDGES the
-# control lock (daemon.py _disarm() docstring: voicectl stop/start/toggle hit timeout → exit 124
-# after auto-stop's abort() leaves the recorder in a state where a second abort() wedges _lock).
-# That wedge is a pre-existing PRODUCTION issue (Critical #1 — not this test's concern). The test
-# sidesteps it: if status already shows `listening: off` (auto-stop fired), the daemon is ALREADY
-# disarmed — skip the redundant `voicectl stop` (T6(c) needs disarmed+resident, which is exactly
-# the auto-stop state). Only call `stop` if the mic is still armed (e.g. ambient speech kept it on).
+# ISSUE-3 (resolved): the old comment claimed calling `voicectl stop` on a daemon ALREADY
+# disarmed by auto-stop WEDGES the control lock — that premise is STALE. _safe_abort() gating
+# (commit 81d2ad8 "gate abort() on in-flight text to fix hang") made stop() skip abort() when no
+# thread is in text(), so a redundant stop after auto-stop returns instantly (no wedge). We still
+# re-check status and only issue `stop` if armed (T6(c) needs disarmed+resident; if auto-stop
+# already disarmed we have that state — calling stop again is now harmless but unnecessary).
 POST_T4_LISTENING="$("$VOICECTL" status 2>/dev/null | grep -E '^listening:' || true)"
 if echo "$POST_T4_LISTENING" | grep -q '^listening: on'; then
-  voicectl stop >/dev/null || die "voicectl stop failed (control-lock wedge? see daemon.py _disarm docstring; exit 124 = timeout)"
+  voicectl stop >/dev/null || die "voicectl stop failed (exit 124 = timeout)"
   echo "voicectl stop issued (mic was still armed after T4)"
 else
-  echo "voicectl stop SKIPPED — mic already disarmed (auto_stop_idle_seconds=30 fired during T4; calling stop now would wedge the control lock — pre-existing production issue, Critical #1)"
+  # Auto-stop already disarmed (T6(c) needs disarmed+resident — this IS that state). ISSUE-3: a
+  # redundant stop here is now SAFE (no wedge) but unnecessary; we skip it to keep the test fast.
+  echo "voicectl stop SKIPPED — mic already disarmed by auto_stop_idle_seconds=30 during T4 (disarmed+resident state reached; redundant stop is now safe per ISSUE-3 but unnecessary)"
 fi
 T6C_OUT="$(vram_tree_state "$DAEMON_PID")"
 assert_vram_present "$DAEMON_PID" "(c) disarmed: still resident" || true
@@ -607,7 +603,7 @@ fi
 # (incl. the realtime-model context that used to stay on the daemon PID) die -> the daemon tree
 # vanishes from nvidia-smi -> ABSENT while the daemon LIVES (PRD §7.9). The daemon process itself
 # NEVER touched CUDA (the recorder lives in the child), so its PID was never on nvidia-smi.
-voicectl stop >/dev/null || die "voicectl stop (run 2) failed (control-lock wedge? exit 124 = timeout)"
+voicectl stop >/dev/null || die "voicectl stop (run 2) failed (exit 124 = timeout)"
 T6D_ACTIVE_BEFORE="$(vram_tree_state "$DAEMON_PID")"   # the pre-unload active set (self-calibration)
 echo "T6(d) active set at stop (run 2): $T6D_ACTIVE_BEFORE"
 

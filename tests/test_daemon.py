@@ -801,24 +801,31 @@ def test_stop_never_calls_recorder_shutdown():
 # --- request_shutdown ---
 
 
-def test_request_shutdown_sets_event_and_aborts_not_shutdown():
+def test_request_shutdown_sets_event_aborts_and_tears_down_child():
+    # BUG-1 fix: request_shutdown() now ALSO tears down the recorder-host child (so a run() loop
+    # blocked in host.text() unblocks via child death, not just a racy "final"). This mirrors the
+    # voicectl quit path. _shutdown is set, abort() wakes any in-flight text(), AND the child is
+    # torn down (host.stop() -> rec.shutdown() via the legacy adapter).
     d, fb, rec, be = _make_daemon()
     d._text_in_flight.set()   # run() loop blocked inside recorder.text() -> abort() wakes it
     d.request_shutdown()
-    assert rec.aborts >= 1
-    assert rec.shutdowns == 0   # NO full teardown here (P1.M4.T2.S2 owns it)
+    assert d._shutdown.is_set() is True
+    assert rec.aborts >= 1        # in-flight text() -> abort() wakes it
+    assert rec.shutdowns >= 1     # BUG-1: child teardown so host.text() unblocks on child death
 
 
-def test_request_shutdown_skips_abort_when_no_text_in_flight():
+def test_request_shutdown_skips_abort_but_tears_down_when_no_text_in_flight():
     # validation Issue 1: when no thread is blocked in text(), abort() would hang forever on
     # was_interrupted.wait() (set only inside text()). _shutdown.set() is the real signal the
     # run() loop re-checks on its next 0.05s tick; abort() is correctly skipped when idle.
+    # BUG-1: the child is STILL torn down (host.stop()) regardless — it's belt-and-suspenders
+    # for the idle case but required for the in-text() case, and harmless/idempotent either way.
     d, fb, rec, be = _make_daemon()
     assert not d._text_in_flight.is_set()
     d.request_shutdown()
     assert d._shutdown.is_set() is True
-    assert rec.aborts == 0       # no thread in text() -> abort() skipped (would deadlock)
-    assert rec.shutdowns == 0
+    assert rec.aborts == 0        # no thread in text() -> abort() skipped (would deadlock)
+    assert rec.shutdowns >= 1     # BUG-1: child teardown runs regardless (idempotent vs quit path)
 
 
 # --- validation Issue 1: abort()-deadlock regression (run-loop integration) ---
@@ -933,6 +940,80 @@ def test_stop_while_text_in_flight_aborts_and_unblocks_loop(monkeypatch):
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0)
     t.join(timeout=2.0)
+
+
+def test_request_shutdown_unblocks_loop_when_abort_does_not_fire_final(monkeypatch):
+    """BUG-1 regression: SIGTERM while listening must exit promptly even when the aborted
+    recorder.text() does NOT fire a final.
+
+    The real failure: while the run() loop is blocked in host.text(), the SIGTERM handler calls
+    request_shutdown(). The child's aborted recorder.text() does NOT always emit a "final" (it
+    returns silently ~40% of the time), so _safe_abort() alone leaves host.text()'s wait-loop
+    stranded -> the run() loop never re-checks _shutdown -> main()'s finally never runs -> systemd
+    SIGKILLs after TimeoutStopSec. The fix: request_shutdown() ALSO tears down the child
+    (host.stop()), so host.text()'s wait-loop detects child death and returns within ~0.5s.
+
+    This stub mimics the REAL RecorderHost.text() loop: it blocks on a final-event until either a
+    final arrives OR the host is stopped (child death). Pre-fix (abort-only, no stop()) this hung
+    indefinitely because abort() never produced a final; post-fix the loop exits within the
+    bounded wait because stop() marks the host dead.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+
+    class _StrandingHost(_FakeHost):
+        """Mimics RecorderHost.text(): blocks on a final-event OR host death (stop()).
+
+        abort() sets the child abort event (as in production) but the recorder does NOT fire a
+        final on abort (the racy ~40% path). Only stop() (child teardown) unblocks text().
+        """
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._final_evt = threading.Event()
+            self._dead = False
+
+        def text(self, on_final):
+            self.recorder.text_calls += 1
+            self.recorder.last_callback = on_final
+            # Mirror RecorderHost.text()'s wait loop: return on final OR death.
+            while not self._final_evt.wait(timeout=0.05):
+                if self._dead:
+                    return
+
+        def abort(self):
+            self.recorder.abort()  # set, but NO final fires (the race) -> text() stays blocked
+
+        def stop(self, timeout=5.0):
+            self._dead = True       # child death -> host.text()'s loop returns
+            super().stop(timeout=timeout)
+
+    factory = _fake_host_factory()
+    _orig_factory = factory
+
+    def _wrap(*a, **k):
+        h = _orig_factory(*a, **k)
+        # rebuild as a _StrandingHost sharing the same cfg/callbacks
+        s = _StrandingHost(*a, **k)
+        s.recorder = h.recorder
+        s.device = h.device
+        return s
+
+    d, fb = _make_lazy_daemon(host_factory=_wrap)
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        d.start()  # first arm lazily spawns the host
+        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), "loop did not enter text()"
+        # SIGTERM path: request_shutdown() must unblock host.text() via child teardown (BUG-1 fix).
+        d.request_shutdown()
+        assert _wait_for(lambda: not t.is_alive(), timeout=3.0), (
+            "BUG-1: run() thread did not exit within 3s — request_shutdown() failed to unblock "
+            "a stranded host.text() (child teardown missing?)"
+        )
+    finally:
+        d.request_shutdown()
+        _wait_for(lambda: not t.is_alive(), timeout=2.0)
+    t.join(timeout=2.0)
+    assert not t.is_alive()
 
 
 # --- run() loop ---
@@ -1321,14 +1402,18 @@ def test_shutdown_swallows_recorder_failure(caplog):
     assert any("recorder.shutdown() failed" in r.getMessage() for r in caplog.records)
 
 
-def test_stop_and_request_shutdown_still_never_shutdown():
-    # Regression proof: shutdown() is a NEW path; stop/toggle/request_shutdown keep NOT tearing down.
+def test_stop_and_toggle_never_shutdown_but_request_shutdown_does():
+    # Regression proof: shutdown() is a distinct path; stop/toggle keep NOT tearing down the
+    # recorder (models stay resident for instant re-arm). request_shutdown() (BUG-1 fix) now DOES
+    # tear down the child so a SIGTERM while listening unblocks the run loop — that is the fix,
+    # not a regression.
     d, fb, rec, be = _make_daemon()
     d.start()
     d.stop()
     d.toggle()
+    assert rec.shutdowns == 0   # stop/toggle NEVER tear down (models resident)
     d.request_shutdown()
-    assert rec.shutdowns == 0
+    assert rec.shutdowns >= 1   # BUG-1: request_shutdown tears down (SIGTERM-path unblock)
 
 
 # P1.M1.T1.S2 — bounded teardown: _bounded_shutdown force-cleans on timeout (ADDITIVE).

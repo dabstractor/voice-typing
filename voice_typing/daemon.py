@@ -1134,20 +1134,37 @@ class VoiceTypingDaemon:
                 self._arm()
 
     def request_shutdown(self) -> None:
-        """Signal run() to exit. Sets the event + aborts (breaks a blocked text()). NO shutdown().
+        """Signal run() to exit + tear down the child so a blocked text() unblocks (BUG-1 fix).
 
-        abort() is called OUTSIDE _lock (validation NEW-2; see _disarm docstring) so a slow abort
-        can't wedge the shutdown signal or block concurrent start/stop/toggle. _shutdown.set() is
-        the real signal the run() loop checks; abort() merely speeds up unblocking a sleeping
-        text() so the loop re-checks _shutdown promptly.
+        Sets _shutdown (the real signal run() checks on its 0.05s tick) + aborts any in-flight
+        text() (a best-effort nudge) + tears down the recorder-host child via _bounded_shutdown().
+        The child teardown is REQUIRED for the SIGTERM/systemctl-stop path: while listening the
+        run() loop is blocked inside host.text(), whose wait-loop only returns on a "final" event
+        OR child death. The child's aborted recorder.text() does NOT always fire a final, so
+        _safe_abort() alone leaves the loop stranded ~40% of the time -> SIGKILL after
+        TimeoutStopSec. Killing the child (host.stop()) guarantees host.text()'s loop sees a dead
+        child and returns within ~0.5s -> run() exits -> main()'s finally runs -> clean exit.
+
+        This mirrors what the voicectl quit path already does (ControlServer._dispatch("quit") ->
+        request_shutdown() -> on_quit=daemon.shutdown()). Routing the teardown through
+        _bounded_shutdown() (NOT shutdown()'s _shutdown_done guard) lets the idempotent shutdown()
+        in main()'s finally still run as a belt-and-suspenders no-op.
+
+        abort() + _bounded_shutdown() are called OUTSIDE _lock (validation NEW-2; see _disarm
+        docstring) so a slow teardown can't wedge the shutdown signal or block concurrent
+        start/stop/toggle. _shutdown.set() is the real signal the run() loop checks.
         """
         self._shutdown.set()
+        if self._host is None:
+            return  # nothing loaded (never armed, or already torn down) -> _shutdown is enough
         # abort() gated on _text_in_flight (validation Issue 1; see _safe_abort): when no thread is
-        # blocked in text() there is nothing to wake — abort() would hang forever, and _shutdown.set()
-        # is already the real signal the run() loop re-checks on its next 0.05s tick anyway.
-        if self._host is not None:
-            self._safe_abort()    # break any blocked text() so run() can return promptly (NOT under _lock)
-        # host.stop() (full child teardown) is wired by the quit handler in P1.M4.T2.S2, NOT here.
+        # blocked in text() there is nothing to wake — abort() would hang forever.
+        self._safe_abort()    # break any blocked text() so run() can return promptly (NOT under _lock)
+        # Tear down the child (BUG-1): kills the process group so host.text()'s wait-loop detects
+        # child death and returns, unblocking the run() loop for a prompt, bounded SIGTERM exit.
+        # _bounded_shutdown() is best-effort + never re-raises; safe to run alongside main()'s
+        # finally-block shutdown() (which is a guarded no-op if the child is already gone).
+        self._bounded_shutdown()
 
     def is_listening(self) -> bool:
         return self._listening.is_set()
