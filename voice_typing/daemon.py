@@ -646,8 +646,13 @@ class VoiceTypingDaemon:
         phase='unloaded', return False.
         """
         with self._lock:
-            if self._models_loaded:
-                return True                       # resident → instant (second+ arm)
+            # Liveness guard (bugfix Issue 3 / P1.M2.T2.S2): a stale _models_loaded with a DEAD host
+            # (the child died in the race window before run()/_handle_dead_host cleared it) must NOT
+            # short-circuit — fall through to the spawn path for a fresh host. run()'s _handle_dead_host
+            # (S1) normally clears _models_loaded first; this is the belt-and-suspenders for that race.
+            # is_alive is always True for the injected-recorder adapter and for a freshly-spawned host.
+            if self._models_loaded and self._host is not None and self._host.is_alive:
+                return True                       # resident + alive → instant (second+ arm)
             if self._loading:
                 while self._loading:               # wait for the in-flight spawn (spurious-wake safe)
                     self._load_cond.wait()
