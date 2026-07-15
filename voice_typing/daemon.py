@@ -778,6 +778,7 @@ class VoiceTypingDaemon:
                 # abort() when the loop is idle in time.sleep(0.05) — which would block forever on
                 # was_interrupted.wait() (set only inside text()). See _safe_abort().
                 self._text_in_flight.set()
+                logger.info("VTDBG daemon run: entering host.text() (listening=True)")
                 try:
                     self._host.text(self.on_final)
                 finally:

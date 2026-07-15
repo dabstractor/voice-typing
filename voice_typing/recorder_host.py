@@ -360,7 +360,9 @@ class RecorderHost:
                 logger.exception("recorder host reader: on_final raised (ignored)")
             self._final_evt.set()
         elif kind == "partial":
-            self._on_partial(str(payload.get("text", "")))
+            text = str(payload.get("text", ""))
+            logger.info("VTDBG daemon dispatch partial: %r", text)
+            self._on_partial(text)
         elif kind == "speech":
             self._on_speech()
         elif kind == "speech_end":
@@ -489,6 +491,7 @@ def _worker_main(
     # A SEPARATE abort-handler thread watches abort_event so stop()/toggle(off) can interrupt a
     # blocked text() (the main loop cannot read cmd_q while blocked in text()).
     def _child_on_final(text: str) -> None:
+        print(f"VTDBG child on_final: {text!r}", flush=True)
         _safe_put(evt_q, ("final", {"text": text}))
 
     stop_abort_thread = threading.Event()
@@ -518,11 +521,24 @@ def _worker_main(
                     # Clear any stale abort before entering text() so a leftover set from a previous
                     # session does not immediately abort this utterance.
                     abort_event.clear()
-                    recorder.text(_child_on_final)  # blocks until a final (or an abort)
+                    print("VTDBG child: recv text cmd, entering recorder.text()", flush=True)
+                    # blocks until a final (or an abort). _run_text_and_emit_final GUARANTEES a
+                    # ('final', ...) event on BOTH paths (real final via on_final, OR abort via the
+                    # sentinel) so the daemon's host.text() always unblocks — without it an abort
+                    # (stop/toggle-off/auto-stop) leaves host.text() blocked forever (the child is
+                    # still alive), wedging the run() loop so no further utterance transcribes.
+                    _run_text_and_emit_final(recorder, evt_q, _child_on_final)
+                    print("VTDBG child: recorder.text() returned", flush=True)
                 elif kind == "arm":
                     recorder.set_microphone(True)
                 elif kind == "disarm":
                     recorder.set_microphone(False)
+                    # Drop ALL buffered/queued audio so the next arm transcribes fresh speech, not the
+                    # previous (aborted) utterance. RealtimeSTT's wait_audio() falls back to
+                    # transcribing leftover recorder.frames / last_frames / recorded_audio_queue when a
+                    # new text() finds no queued recording — so without this, re-arming after a toggle-off
+                    # types the OLD utterance again (the "flushed out the last of what got cut off" bug).
+                    _clear_recorder_audio(recorder)
                 elif kind == "abort":
                     recorder.abort()  # belt-and-suspenders (the abort_event path is the primary one)
                 elif kind == "shutdown":
@@ -547,6 +563,88 @@ def _safe_put(evt_q: Any, item: tuple) -> None:
         evt_q.put(item)
     except (BrokenPipeError, OSError, EOFError):
         pass
+
+
+def _clear_recorder_audio(recorder: Any) -> None:
+    """Drop ALL buffered/queued audio so a disarm does not leak a stale final into the next arm.
+
+    RealtimeSTT's wait_audio() (core/lifecycle.py) consumes a queued completed recording via
+    get_next_recorded_audio(), and when none is queued it FALLS BACK to transcribing leftover
+    recorder.frames / recorder.last_frames. So after a toggle-off aborts an utterance mid-flight,
+    the captured frames + any queued recording persist; the NEXT arm's text() then transcribes that
+    STALE audio and types the old utterance again (the "flushed out the last of what got cut off
+    from the previous attempt" double-type). Clearing on disarm makes each arm start fresh.
+
+    Defensive: every clear is wrapped (RealtimeSTT version drift could rename/drop an attribute;
+    a clear failure must never break the disarm). The public clear_audio_queue() clears audio_queue +
+    the pre-recording buffer; we ALSO drain recorded_audio_queue (completed recordings awaiting
+    transcription — the stale-final source) and frames/last_frames/audio (the wait_audio() fallbacks).
+    """
+    try:
+        recorder.clear_audio_queue()  # public: drains audio_queue + pre-recording buffer
+    except Exception:
+        logger.debug("child: recorder.clear_audio_queue() raised (ignored)", exc_info=True)
+    for _attr in ("recorded_audio_queue",):
+        q = getattr(recorder, _attr, None)
+        if q is None:
+            continue
+        try:
+            while True:
+                try:
+                    q.get_nowait()
+                except Exception:
+                    break  # queue.Empty (or anything) -> drained
+        except Exception:
+            logger.debug("child: draining %s raised (ignored)", _attr, exc_info=True)
+    for _attr in ("frames", "last_frames"):
+        buf = getattr(recorder, _attr, None)
+        try:
+            if buf is not None and hasattr(buf, "clear"):
+                buf.clear()
+        except Exception:
+            logger.debug("child: clearing %s raised (ignored)", _attr, exc_info=True)
+    try:
+        recorder.audio = None
+    except Exception:
+        logger.debug("child: clearing recorder.audio raised (ignored)", exc_info=True)
+
+
+def _run_text_and_emit_final(recorder: Any, evt_q: Any, on_final: "Callable[[str], None]") -> None:
+    """Child: run ONE recorder.text(on_final) call AND guarantee a ('final', ...) event when it ends.
+
+    This is the fix for the run()-loop wedge (regression: stop / toggle-off / auto-stop wedged the
+    daemon after the first disarm so NO further utterance was ever transcribed). recorder.text()
+    has TWO return paths in RealtimeSTT (core/transcription_api.py `text()`):
+      - NORMAL finalization (with on_transcription_finished provided): it runs `transcribe()` then
+        `threading.Thread(target=on_final, args=(...)).start()` and returns None. on_final fires in
+        that thread and emits ('final', {text}) itself.
+      - ABORT / shutdown: recorder.abort() sets interrupt_stop_event, so text() returns '' WITHOUT
+        ever calling on_final -> NO ('final', ...) is emitted.
+    The daemon's host.text() blocks until a 'final' event OR child death (recorder_host.text()).
+    On the abort path the child is still alive, so WITHOUT this helper host.text() blocks FOREVER —
+    the run() loop can never send the next ('text', {}) and every subsequent arm transcribes
+    nothing. request_shutdown() already works around this by KILLING the child (so host.text() sees
+    child death), but stop()/toggle()/auto-stop keep the child resident and relied on _safe_abort()
+    alone, which 'leaves the loop stranded' (its own docstring) 100% of the time on the abort path.
+
+    FIX: detect the no-callback abort path by the non-None return value (the normal path returns
+    None because on_final is always provided) and emit a ('final', {text:''}) sentinel so host.text()
+    unblocks. The daemon's on_final handles the empty text safely: a disarm has already cleared
+    _listening (the on_final gate returns early) and textproc.clean('') rejects it regardless, so
+    nothing is ever typed from the sentinel — it is purely an unblock signal. This restores the
+    in-process semantics (where abort simply made recorder.text() return and the run() loop
+    re-checked _listening) now that text() lives behind IPC.
+
+    API-drift note: the non-None return as the abort marker is verified against RealtimeSTT v1.0.2
+    (core/transcription_api.py). If a future version returns None on the abort path this helper would
+    stop emitting the sentinel and the wedge would recur; the recorder-host integration test
+    (tests/test_idle_and_gpu.sh) + the abort-path unit test guard that contract.
+    """
+    result = recorder.text(on_final)
+    if result is not None:
+        # Abort/shutdown path: text() returned '' and did NOT invoke on_final. Emit the sentinel so
+        # the daemon's host.text() unblocks instead of wedging the run() loop forever.
+        _safe_put(evt_q, ("final", {"text": ""}))
 
 
 def _child_resolved_device(cfg: "VoiceTypingConfig", force_cpu: bool) -> dict[str, str]:
@@ -589,6 +687,7 @@ class _RelayFeedback:
         self._evt_q = evt_q
 
     def update_partial(self, text: str) -> None:
+        print(f"VTDBG child relay partial: {text!r}", flush=True)
         _safe_put(self._evt_q, ("partial", {"text": text}))
 
     def set_phase(self, phase: str) -> None:

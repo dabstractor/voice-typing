@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 
 
 from voice_typing import recorder_host
@@ -380,3 +381,131 @@ def test_initial_properties():
     assert host.device == {}
     assert host.is_alive is False       # no process yet
     assert host.pid is None
+
+
+# ---------------------------------------------------------------------------
+# _run_text_and_emit_final — the child's text() command handler (P1.M2.T2.S4 follow-up:
+# the run()-loop wedge fix). recorder.text() on the ABORT path returns '' WITHOUT calling the
+# callback; the helper MUST still emit a ('final', ...) sentinel so the daemon's host.text()
+# unblocks instead of wedging the run() loop forever (stop/toggle-off/auto-stop regression).
+# Hermetic: a fake recorder mimics RealtimeSTT's text() return semantics.
+# ---------------------------------------------------------------------------
+
+
+class _AbortFakeRecorder:
+    """Mimics RealtimeSTT's ABORT path: text(cb) returns '' and NEVER calls cb.
+
+    RealtimeSTT core/transcription_api.py `text()`: when recorder.abort() set interrupt_stop_event,
+    text() `return ""` before the `if on_transcription_finished:` branch, so the callback never
+    fires. This is the exact behavior that, pre-fix, left the daemon's host.text() blocked forever.
+    """
+
+    def __init__(self) -> None:
+        self.text_calls = 0
+
+    def text(self, callback):
+        self.text_calls += 1
+        return ""   # abort path: return '' WITHOUT calling the callback
+
+
+class _NormalFakeRecorder:
+    """Mimics RealtimeSTT's NORMAL path: text(cb) calls cb in a thread and returns None.
+
+    RealtimeSTT: `threading.Thread(target=on_transcription_finished, args=(recorder.transcribe(),))
+    .start()` then returns None (implicit) — the callback is delivered via the thread, NOT the
+    return value, so result is None and the helper must NOT emit an extra sentinel.
+    """
+
+    def __init__(self) -> None:
+        self.text_calls = 0
+
+    def text(self, callback):
+        self.text_calls += 1
+        threading.Thread(target=callback, args=("hello world",), daemon=True).start()
+        return None
+
+
+def _drain(queue) -> list:
+    out = []
+    while True:
+        try:
+            out.append(queue.get_nowait())
+        except Exception:
+            break
+    return out
+
+
+def test_run_text_emits_sentinel_final_on_abort_path():
+    """REGRESSION (the wedge): an aborted recorder.text() returns '' without the callback, so the
+    helper MUST emit a ('final', {text:''}) sentinel. Without this, the daemon's host.text() blocks
+    forever (the child is still alive) and the run() loop can never send the next ('text', {}) —
+    so stop/toggle-off/auto-stop permanently breaks transcription after the first use."""
+    import queue as _queue
+
+    evt_q: Any = _queue.Queue()
+    finals: list[str] = []
+
+    def _child_on_final(text: str) -> None:
+        recorder_host._safe_put(evt_q, ("final", {"text": text}))
+        finals.append(text)
+
+    rec = _AbortFakeRecorder()
+    recorder_host._run_text_and_emit_final(rec, evt_q, _child_on_final)
+
+    assert rec.text_calls == 1
+    assert finals == [], "abort path must NOT invoke the on_final callback"
+    events = _drain(evt_q)
+    assert events == [("final", {"text": ""})], (
+        f"abort path must emit exactly one ('final', {{'text': ''}}) sentinel so host.text() unblocks; "
+        f"got {events!r}"
+    )
+
+
+def test_run_text_does_not_double_emit_on_normal_path():
+    """On the NORMAL path the callback fires (in a thread) and text() returns None; the helper must
+    NOT add a spurious empty sentinel (that would race a real final onto the queue and double-fire
+    on_final). Asserts result-None => no extra emit."""
+    import queue as _queue
+
+    evt_q: Any = _queue.Queue()
+    finals: list[str] = []
+
+    def _child_on_final(text: str) -> None:
+        recorder_host._safe_put(evt_q, ("final", {"text": text}))
+        finals.append(text)
+
+    rec = _NormalFakeRecorder()
+    recorder_host._run_text_and_emit_final(rec, evt_q, _child_on_final)
+
+    assert rec.text_calls == 1
+    # the callback runs in a thread; give it a beat to enqueue its real final
+    for _ in range(50):
+        if finals:
+            break
+        time.sleep(0.01)
+    assert finals == ["hello world"], "normal path must invoke the callback with the transcription"
+    events = _drain(evt_q)
+    assert events == [("final", {"text": "hello world"})], (
+        f"normal path must emit ONLY the callback's real final, never an extra sentinel; got {events!r}"
+    )
+
+
+def test_abort_sentinel_unblocks_blocked_host_text():
+    """END-TO-END of the fix at the host layer: host.text() blocks on _final_evt; feeding the
+    ('final', {text:''}) sentinel that _run_text_and_emit_final emits on the abort path MUST unblock
+    it. This is the daemon-side half of the regression — pre-fix no such event was ever produced."""
+    host = _make_host()
+    done = threading.Event()
+
+    def _text():
+        host.text(lambda _t: None)
+        done.set()
+
+    t = threading.Thread(target=_text, daemon=True)
+    t.start()
+    time.sleep(0.1)
+    assert not done.is_set(), "text() returned before any final/sentinel event"
+    # The sentinel the child now emits on the abort path:
+    host._dispatch("final", {"text": ""})
+    assert done.wait(2.0), "the abort-path ('final', {text:''}) sentinel did NOT unblock host.text()"
+    t.join(2.0)
