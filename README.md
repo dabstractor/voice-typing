@@ -60,9 +60,9 @@ disarmed; see [Model lifecycle & VRAM](#model-lifecycle--vram)).
 ```
 systemctl --user start voice-typing
 /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle   # arms the mic
-# speak. Watch the tmux status line for live partials, or the hyprctl popups:
-#   a dot means listening, a check mark means a final was typed
-#   (the ✔ final popup is optional — see feedback.notify_on_final).
+# speak. Watch the tmux status line for live partials, or the hyprctl toasts:
+#   the first arm shows "Loading…" then "Recording"; later arms just "Recording";
+#   disarming shows "Recording Stopped" (the ✔ final popup is optional — see feedback.notify_on_final).
 /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle   # disarms
 ```
 
@@ -135,7 +135,7 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | --- | --- | --- |
 | `asr.post_speech_silence_duration` | `0.6` | seconds of silence before a final is emitted. Lower is snappier but can cut deliberate pauses. |
 | `asr.realtime_processing_pause` | `0.15` | cadence of the live partial previews. Lower is more responsive; higher uses less CPU. |
-| `asr.auto_stop_idle_seconds` | `30.0` | auto-disarm (stop listening) after this many seconds with no recognized speech — partials reset the clock while you talk, so it only fires when you truly go silent (a forgotten hot-mic guard, not a mid-thought cut). `0` disables. Fires the normal `■` stop popup + a journal line. |
+| `asr.auto_stop_idle_seconds` | `30.0` | auto-disarm (stop listening) after this many seconds with no recognized speech — partials reset the clock while you talk, so it only fires when you truly go silent (a forgotten hot-mic guard, not a mid-thought cut). `0` disables. Fires the normal `Recording Stopped` toast + a journal line. |
 | `asr.auto_unload_idle_seconds` | `1800.0` | after this many seconds DISARMED (models loaded, not listening), tear down the recorder to free VRAM (~0). The clock starts on disarm (manual stop, toggle-off, or the 30s auto-stop) and resets on any arm; time listening doesn't count. `0` disables (models then stay resident until `quit`). The next arm reloads (~1-3s). See Model lifecycle. |
 | `asr.device` | `"cuda"` | `"cuda"` or `"cpu"`. Auto-falls-back to `cpu` if no CUDA device is visible. |
 | `asr.final_model` | `"distil-large-v3"` | the model whose output gets typed. |
@@ -144,7 +144,7 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"tmux"`. `wtype` auto-falls-back to `ydotool`. |
 | `output.tmux_target` | `""` | pane target, used only when `backend="tmux"`, e.g. `"voicetest:0.0"`. |
 | `output.append_space` | `true` | append one trailing space after each final. |
-| `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each final's text (`✔ <text>`). Set `false` to keep only the brief `●`/`■` start/stop popups — the text is already typed into the focused window and shown in the tmux status line, so the final popup is redundant. |
+| `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each final's text (`✔ <text>`). Set `false` to keep only the brief `Recording` / `Recording Stopped` toasts — the text is already typed into the focused window and shown in the tmux status line, so the final popup is redundant. |
 | `feedback.notify_ms` | `2500` | how long hyprctl popups stay on screen (ms). Lower for a brief start/stop flash. `hypr_notify` is the master on/off switch. |
 | `filter.min_chars` | `2` | finals shorter than this are dropped. |
 | `filter.blocklist` | list | exact, case-insensitive phrases dropped (classic Whisper silence hallucinations). |

@@ -30,11 +30,12 @@ from voice_typing.config import AsrConfig, VoiceTypingConfig
 
 
 class _FakeFeedback:
-    """Records update_partial/set_phase calls. Matches the Feedback contract S1 wires."""
+    """Records update_partial/set_phase/notify calls. Matches the Feedback contract S1+ wires."""
 
     def __init__(self) -> None:
         self.partials: list[str] = []
         self.phases: list[str] = []
+        self.notifies: list[str] = []
 
     def update_partial(self, text: str) -> None:
         self.partials.append(text)
@@ -44,6 +45,9 @@ class _FakeFeedback:
 
     def set_models_loaded(self, loaded: bool) -> None:  # P1.M2.T2.S1: mirror Feedback contract (no-op stub)
         pass
+
+    def notify(self, msg: str) -> None:  # cold-load UX popup (mirrors Feedback.notify)
+        self.notifies.append(msg)
 
 
 class _FakeRecorder:
@@ -2570,6 +2574,53 @@ def test_start_on_lazy_daemon_triggers_load_then_arms(monkeypatch):
     assert d._models_loaded is True
     assert d.is_listening() is True
     assert d._host.recorder.mic == [True]            # armed (proxied to the fake host's stub)
+
+
+def test_cold_first_arm_fires_loading_toast(monkeypatch):
+    """A COLD first arm (models not loaded) shows a 'Loading…' toast before the model load.
+
+    The lazy model load blocks ~1–3 s; to make the hotkey's effect visible the daemon fires a
+    'Loading…' hyprctl toast (_load_host -> Feedback.notify) BEFORE spawning the host. The arm
+    then fires the normal 'Recording' start toast (set_listening). This pins that 'Loading…' fires
+    exactly once on a cold arm (the start toast's wording is pinned in test_feedback.py).
+    """
+    factory = _fake_host_factory(spawn_result=True)
+    d, fb = _make_lazy_daemon(host_factory=factory)
+    d.start()
+    assert d.is_listening() is True
+    assert fb.notifies == ["Loading…"]               # fired once, before the spawn
+
+
+def test_warm_arm_fires_no_loading_toast(monkeypatch):
+    """A WARM arm (models already resident) fires NO 'Loading…' toast.
+
+    Resident arms reply in ms — there is no model load to announce, so 'Loading…' never fires; only
+    the 'Recording' start toast (set_listening) does. This is the every-arm-after-the-first case.
+    """
+    d, fb, _rec, _be = _make_daemon()                # injected recorder -> _models_loaded True at boot
+    d.start()
+    assert d.is_listening() is True
+    assert fb.notifies == []                          # no cold load -> no 'Loading…' toast
+
+
+def test_cold_arm_after_idle_unload_refires_loading_toast(monkeypatch):
+    """After an idle-unload tears the host down, the next arm is cold AGAIN -> 'Loading…' refires.
+
+    A session that idle-unloads (PRD §4.2bis) returns to _models_loaded=False, so the subsequent arm
+    pays the load again and must re-announce it (the user should not see a silent gap on re-arm).
+    """
+    factory = _fake_host_factory(spawn_result=True)
+    d, fb = _make_lazy_daemon(host_factory=factory)
+    d.start()                                         # cold arm #1: 'Loading…'
+    assert fb.notifies == ["Loading…"]
+    d.stop()                                         # disarm -> _disarmed_monotonic stamped
+    # Force the idle-UNLOAD condition (the _idle_unload_watchdog thread only starts in run(),
+    # which these unit tests never call); mirror test_arm_resets_idle_unload_clock's -9999.0 trick.
+    d._disarmed_monotonic = _time.monotonic() - 9999.0
+    d._maybe_idle_unload()
+    assert d._models_loaded is False                  # host torn down -> next arm is cold again
+    d.start()                                         # cold arm #2 (reloaded): refires 'Loading…'
+    assert fb.notifies == ["Loading…", "Loading…"]
 
 
 def test_start_suppressed_when_load_fails(monkeypatch):

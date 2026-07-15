@@ -3,7 +3,8 @@
 Feedback is the daemon's live-state publisher. It writes a small JSON snapshot of the
 current voice-typing session (listening flag, VAD phase, latest partial, last final,
 timestamp) to an atomic state file, and fires fire-and-forget `hyprctl notify` popups
-on the three events that are NOT spammy: listening-start, each final, listening-stop.
+on the events that are NOT spammy: listening-start, each final, listening-stop, and (for a
+cold model load) a one-shot 'Loading…' toast before the start.
 
 STATE FILE (PRD §4.6), written atomically (tempfile + os.replace) to
 $XDG_RUNTIME_DIR/voice-typing/state.json (overridable via feedback.state_file):
@@ -16,10 +17,14 @@ NOTIFICATION DISCIPLINE (the #1 contract — PRD §4.6 inline example is SUPERSE
 Hyprland notifications are NOT replaceable by ID, so per-partial popups would stack into
 unreadable spam. Partials go to the state file ONLY (tmux shows them live). hyprctl popups
 fire EXCLUSIVELY on:
-  - listening-start  -> "● listening"   (set_listening False->True transition)
+  - listening-start  -> "Recording"     (set_listening False->True transition)
   - each final       -> "✔ <text>"      (record_final; GATED by notify_on_final — the text is
                                           already typed + shown in tmux, so this popup is optional)
-  - listening-stop   -> "■ stopped"      (set_listening True->False transition)
+  - listening-stop   -> "Recording Stopped" (set_listening True->False transition; ANY disarm)
+  - cold model load  -> "Loading…" (Feedback.notify, BEFORE the lazy first-arm model load). The
+                        daemon fires this ONCE per session so the hotkey isn't a silent ~1–3 s gap;
+                        the load is then confirmed by the normal "Recording" start toast. Warm arms
+                        (models resident) skip it. All of these are transient hyprctl toasts.
 NEVER on update_partial. NEVER on set_phase (VAD phase flips are not start/final/stop events).
 
 THROTTLE: update_partial is capped at >=10 Hz max (min 0.1 s between disk writes). The
@@ -72,7 +77,8 @@ logger = logging.getLogger(__name__)
 _PARTIAL_WRITE_MIN_INTERVAL = 0.1
 
 # hyprctl notify icon "-1" means "No icon" (verified: `hyprctl notify --help`) — so the
-# leading glyph in the message string (●/✔/■) IS the visual. Color is Nord frost (PRD §4.6).
+# message text itself ('Recording' / 'Loading…' / 'Recording Stopped' / '✔ <text>') IS the
+# visual. Color is Nord frost (PRD §4.6).
 _HYPR_ICON = "-1"
 _HYPR_COLOR = "rgb(88c0d0)"
 
@@ -145,7 +151,7 @@ class Feedback:
 
         The '✔ <text>' notification fires only when BOTH cfg.hypr_notify AND cfg.notify_on_final
         are True — the popup is redundant once the text is typed and shown live in tmux, so
-        notify_on_final lets users keep just the brief ●/■ start/stop indicators.
+        notify_on_final lets users keep just the brief Recording / Recording Stopped toasts.
         """
         self._state["last_final"] = text
         self._state["partial"] = text  # status line shows the final, not the stale last partial
@@ -156,14 +162,16 @@ class Feedback:
     def set_listening(self, listening: bool) -> None:
         """Set the master listening gate; always write; notify start/stop ON TRANSITION ONLY.
 
-        start (False->True): '● listening', AND clears any stale partial left over from the
-        previous session — otherwise the tmux status-right flashes the old words the instant
-        the mic arms (status.sh renders '🎤 <partial>' as soon as listening flips true). The
-        partial repopulates from the next on_realtime_transcription_stabilized callback once
-        speech is actually detected. stop (True->False): '■ stopped'. A no-op call (same
-        value) writes but does NOT notify (avoids startup spam — daemon starts not-listening
-        per PRD §4.9) and does NOT clear (no transition). Notifications fire only when
-        cfg.hypr_notify is True.
+        start (False->True): 'Recording' (a transient hyprctl toast), AND clears any stale partial
+        left over from the previous session — otherwise the tmux status-right flashes the old words
+        the instant the mic arms (status.sh renders '🎤 <partial>' as soon as listening flips true).
+        The partial repopulates from the next on_realtime_transcription_stabilized callback once
+        speech is actually detected. For the FIRST arm of a session the daemon ALSO fires a 'Loading…'
+        toast beforehand (Feedback.notify), so a cold model load reads 'Loading…' then 'Recording'.
+        Warm arms (models resident) show just 'Recording'. stop (True->False): 'Recording Stopped',
+        for ANY disarm (manual stop, toggle-off, the idle auto-stop). A no-op call (same value)
+        writes but does NOT notify (avoids startup spam — daemon starts not-listening per PRD §4.9)
+        and does NOT clear (no transition). Notifications fire only when cfg.hypr_notify is True.
         """
         prev = self._state["listening"]
         self._state["listening"] = listening
@@ -171,7 +179,7 @@ class Feedback:
             self._state["partial"] = ""  # fresh session: don't flash last session's words
         self._write()
         if self._cfg.hypr_notify and listening != prev:
-            self._notify("● listening" if listening else "■ stopped")
+            self._notify("Recording" if listening else "Recording Stopped")
 
     def snapshot(self) -> dict:
         """A shallow copy of the live in-memory state {listening,phase,models_loaded,partial,last_final,ts}.
@@ -183,6 +191,18 @@ class Feedback:
         serialization is the daemon's _on_final_lock; see the THREAD SAFETY note above).
         """
         return dict(self._state)
+
+    def notify(self, msg: str) -> None:
+        """Fire an ad-hoc hyprctl toast, gated by cfg.hypr_notify (no state change, no disk write).
+
+        Used for the 'Loading…' toast the daemon fires BEFORE the cold first-arm model load (~1–3 s)
+        so the hotkey isn't a silent gap (that load is then confirmed by the 'Recording' start toast
+        from set_listening). Unlike set_listening / record_final this is NOT a session transition —
+        it neither touches the state file nor follows the start/final/stop notify discipline; it is a
+        one-shot toast. hypr_notify=False suppresses it (the same master switch as every other toast).
+        """
+        if self._cfg.hypr_notify:
+            self._notify(msg)
 
     # --- internals ---
 

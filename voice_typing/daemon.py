@@ -121,6 +121,14 @@ _PARTIAL_CALLBACK_ATTR = "on_realtime_transcription_stabilized"
 # when the last probe is within this window; __init__ (force=True) and explicit force=True bypass it.
 _MIC_PROBE_TTL_S: float = 30.0
 
+# Cold first-arm model-load toast (PRD §4.2bis lazy load). The FIRST arm of a session blocks
+# ~1–3 s while the recorder-host child loads the Whisper models. To make that gap visible (the
+# hotkey would otherwise look dead), the daemon fires this transient hyprctl toast BEFORE the load
+# (Feedback.notify). The load is then confirmed by the normal 'Recording' start toast from
+# set_listening. Warm arms (models already resident) reply in ms and skip this toast — only the
+# 'Recording' start toast fires. See _load_host.
+_COLD_LOAD_NOTIFY_LOADING = "Loading…"
+
 
 def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     """Build cuda_check defaults from cfg, then resolve (applies PRD §4.4 CPU fallback).
@@ -661,6 +669,12 @@ class VoiceTypingDaemon:
             self._load_error = None
             self._feedback.set_phase("loading")
             self._feedback.set_models_loaded(False)  # P1.M2.T2.S1: models not resident while loading
+        # Cold-load UX toast (see _COLD_LOAD_NOTIFY_LOADING): tell the user the hotkey registered —
+        # the arm blocks ~1–3 s on the model load next. Fire-and-forget, gated by hypr_notify inside
+        # Feedback.notify. Warm arms short-circuit above (return True) and never reach here, so this
+        # fires at most ONCE per session (and again after an idle-unload / dead-host reload). The
+        # load is then confirmed by the 'Recording' start toast from _arm() -> set_listening(True).
+        self._feedback.notify(_COLD_LOAD_NOTIFY_LOADING)
         # --- heavy spawn OUTSIDE _lock (status/stop stay responsive during the ~1–3 s child load) ---
         factory = self._host_factory or RecorderHost
         # Issue 2 residual gate: the real RecorderHost gets an is_listening predicate so stray
@@ -894,7 +908,11 @@ class VoiceTypingDaemon:
             )
 
     def _arm(self) -> None:
-        """Private: arm mic + set listening + notify. Called under the lock by start/toggle."""
+        """Private: arm mic + set listening + notify. Called under the lock by start/toggle.
+
+        set_listening(True) fires the transient 'Recording' start toast (feedback.py). A COLD first
+        arm is preceded by a 'Loading…' toast from _load_host(); a warm arm fires only 'Recording'.
+        """
         self._listening.set()
         self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
         self._disarmed_monotonic = None                  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
@@ -1165,7 +1183,8 @@ class VoiceTypingDaemon:
     def start(self) -> None:
         # Lazy load (PRD §4.2bis): spawn the recorder-host child on the first arm. _load_host() is a
         # single-flight no-op once resident. Called OUTSIDE _lock (it acquire-release-reacquires that
-        # lock; under _lock it would deadlock).
+        # lock; under _lock it would deadlock). A cold load fires a 'Loading…' toast inside
+        # _load_host before the spawn; the arm then fires the 'Recording' start toast.
         if not self._load_host():
             return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
         with self._lock:
@@ -1196,6 +1215,8 @@ class VoiceTypingDaemon:
             if self._host is not None:
                 self._safe_abort()
         else:
+            # A cold load fires a 'Loading…' toast inside _load_host before the spawn; the arm then
+            # fires the 'Recording' start toast.
             if not self._load_host():
                 return  # load failed → stay unarmed
             with self._lock:

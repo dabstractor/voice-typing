@@ -115,8 +115,8 @@ class FeedbackConfig:
     notify_on_final: bool = True  # also pop a hyprctl popup per final ("✔ <text>")? The text is
                                   # already typed into the focused window + shown live in the tmux
                                   # status line, so this is redundant for most setups — set False to
-                                  # keep only the brief ●/■ start/stop popups. hypr_notify=False
-                                  # still wins (suppresses ALL popups).
+                                  # keep only the brief Recording / Recording Stopped toasts.
+                                  # hypr_notify=False still wins (suppresses ALL popups).
 
     def __post_init__(self) -> None:
         """Validate notify_ms is an int (bugfix Issue 4 / PRD §4.5 robustness).

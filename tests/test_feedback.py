@@ -239,7 +239,7 @@ def test_hyprctl_argv_exact_on_listening_start(feedback):
     _fb, rec, _clock = feedback
     feedback[0].set_listening(True)
     assert rec.argvs[0] == (
-        "hyprctl", "notify", "-1", "2500", "rgb(88c0d0)", "● listening"
+        "hyprctl", "notify", "-1", "2500", "rgb(88c0d0)", "Recording"
     )
 
 
@@ -287,14 +287,14 @@ def test_record_final_silent_when_notify_on_final_false(monkeypatch, tmp_path):
     assert state["last_final"] == "a final" and state["partial"] == "a final"
     fb.set_listening(False)       # stop popup STILL fires
     msgs = [a[-1] for a in rec.argvs if a[0] == "hyprctl"]
-    assert msgs == ["● listening", "■ stopped"]   # NO "✔ a final" in the list
+    assert msgs == ["Recording", "Recording Stopped"]   # NO "✔ a final" in the list
 
 
 def test_set_listening_stop_notifies_stopped(feedback):
     fb, rec, _clock = feedback
     fb.set_listening(True)   # start
     fb.set_listening(False)  # stop
-    assert rec.argvs[-1][-1] == "■ stopped"
+    assert rec.argvs[-1][-1] == "Recording Stopped"
 
 
 def test_update_partial_never_invokes_hyprctl(feedback):
