@@ -129,6 +129,14 @@ _MIC_PROBE_TTL_S: float = 30.0
 # 'Recording' start toast fires. See _load_host.
 _COLD_LOAD_NOTIFY_LOADING = "Loading…"
 
+# Graceful-stop drain timeout (seconds). When the user stops mid-utterance we do NOT abort — we let
+# the run loop's blocked text() return the natural final (the large model finishes + on_final types
+# it), THEN disarm. This is the max we'll wait for that final before the drain watchdog aborts the
+# blocked text() so the stop can't hang (no pending utterance / model wedged). Comfortably covers
+# post_speech_silence_duration (~1.5s trailing silence to trigger finalization) + the final model's
+# transcription time (~0.5–1.5s); raise if you load a much larger final model.
+_DRAIN_TIMEOUT_S: float = 5.0
+
 
 def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     """Build cuda_check defaults from cfg, then resolve (applies PRD §4.4 CPU fallback).
@@ -584,6 +592,17 @@ class VoiceTypingDaemon:
         # Per-utterance latency collector (P1.M4.T1.S3): fed by on_vad_stop/partial (via
         # build_recorder→_build_callbacks) + on_final. Injectable for tests; a real one otherwise.
         self._latency = latency if latency is not None else LatencyLog()
+        # Graceful-stop drain (let the FINAL model finish before disarming). _final_pending is True
+        # from the first speech of an utterance (_touch_speech) until its final is typed (on_final),
+        # so _request_stop can tell "an utterance is in flight — let it finish" from "idle — stop
+        # now". _drain is set by _request_stop when a final is pending; the run loop completes the
+        # drain (disarms) once text() returns the final. _drain_timer is the hang safety net: if no
+        # final fires within _DRAIN_TIMEOUT_S it aborts the blocked text() so the drain still ends.
+        # All bool/Timer-ref stores here are atomic in CPython (written by reader/control threads,
+        # read by the run loop + watchdog).
+        self._final_pending: bool = False
+        self._drain: bool = False
+        self._drain_timer: threading.Timer | None = None
         # Lazy load (PRD §4.2bis / delta D1,D2): the recorder (now in a child subprocess owned by a RecorderHost)
         # is NOT built at boot — it is spawned on the FIRST arm (start/toggle) via _load_host(), so a session that
         # never arms stays at ~0 VRAM. recorder_host= injected (unit tests / a pre-built host) → already loaded;
@@ -782,6 +801,12 @@ class VoiceTypingDaemon:
             if self._host is None:
                 time.sleep(0.05)   # no models loaded yet → idle, ~0 VRAM (PRD §4.2(1)/§4.2bis)
                 continue
+            if self._drain:
+                # A graceful stop is pending and text() just returned (the final was emitted, or the
+                # drain watchdog aborted it). Complete the disarm here, then idle. Checked BEFORE the
+                # _listening re-entry so a drained session disarms instead of re-listening.
+                self._complete_drain()
+                continue
             if self._listening.is_set():
                 # blocks until ONE utterance finalizes → on_final on the host's reader thread → returns → re-listen.
                 # Returning is NORMAL SEGMENTATION, never session end (the WhisperX-flaw fix, PRD §1 #1).
@@ -792,7 +817,6 @@ class VoiceTypingDaemon:
                 # abort() when the loop is idle in time.sleep(0.05) — which would block forever on
                 # was_interrupted.wait() (set only inside text()). See _safe_abort().
                 self._text_in_flight.set()
-                logger.info("VTDBG daemon run: entering host.text() (listening=True)")
                 try:
                     self._host.text(self.on_final)
                 finally:
@@ -875,6 +899,7 @@ class VoiceTypingDaemon:
             cleaned = textproc.clean(text, self._cfg.filter)
             if not cleaned:                    # rejected: blocklist hallucination / below min_chars
                 return
+            self._final_pending = False  # the in-flight utterance is finalized; a pending drain can finish
             payload = cleaned + (" " if self._cfg.output.append_space else "")
             try:
                 self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
@@ -949,24 +974,94 @@ class VoiceTypingDaemon:
         # NOTE: caller MUST call self._safe_abort() AFTER releasing _lock (see start/stop/toggle).
 
     def _touch_speech(self) -> None:
-        """Mark 'recognized speech happened now' — resets the idle auto-stop clock.
+        """Mark 'recognized speech happened now' — resets the idle auto-stop clock + flags an
+        in-flight utterance.
 
         Wired into the host's 'speech' event (the child's realtime partial callback fires
         on_speech → ('speech', {}) → the host reader thread calls this). Called from the host's
-        reader thread; the float store is atomic in CPython. Finals are always preceded by
-        partials, so this single hook covers all active speech.
+        reader thread; the stores are atomic in CPython. Finals are always preceded by partials, so
+        this single hook covers all active speech. _final_pending (cleared in on_final) lets
+        _request_stop tell "an utterance is in flight" from "idle" so a premature stop can drain.
         """
         self._last_speech_monotonic = time.monotonic()
+        self._final_pending = True
 
     def _on_partial(self, text: str) -> None:
         """Handle a realtime partial from the host's reader thread (P1.M3.T2.S2 re-plan).
 
         Mirrors the in-process _build_callbacks partial callback: update the Feedback partial +
         count it for the latency log. The 'speech' event (fired alongside by the child's on_speech
-        hook) drives _touch_speech separately. Called from the host reader thread (daemon thread).
+        hook) drives _touch_speech separately (which flags the in-flight utterance for the drain).
+        Called from the host reader thread (daemon thread).
         """
         self._feedback.update_partial(text)
         self._latency.note_partial(text)
+
+    def _request_stop(self) -> None:
+        """Stop listening — gracefully: let the final model finish an in-flight utterance, then disarm.
+
+        The user presses the hotkey (toggle-off) or `voicectl stop`. If an utterance is in flight
+        (the run loop is blocked inside text() AND speech has occurred since the last final) we do
+        NOT abort — aborting kills the large model mid-finalization and drops its text. Instead we
+        set a drain flag and let text() return the natural final (on_final types it), after which
+        the run loop completes the drain (disarms). A watchdog aborts the rare case where no final
+        ever fires so the drain can't hang. If NOTHING is in flight (idle, or the last utterance
+        already finalized) we disarm immediately + abort as before — responsive when there's
+        nothing to wait for. Routed by stop()/toggle()'s disarm branch.
+        """
+        if self._host is not None and self._text_in_flight.is_set() and self._final_pending:
+            self._begin_drain()
+        else:
+            with self._lock:
+                self._disarm()
+            if self._host is not None:
+                self._safe_abort()
+
+    def _begin_drain(self) -> None:
+        """Mark a drain in progress + arm the hang watchdog. Idempotent vs a re-press of the hotkey."""
+        with self._lock:
+            if self._drain:
+                return  # already draining (e.g. the hotkey was pressed again mid-drain)
+            self._drain = True
+        self._drain_timer = threading.Timer(_DRAIN_TIMEOUT_S, self._drain_timeout)
+        self._drain_timer.daemon = True
+        self._drain_timer.start()
+        logger.info("voice-typing drain: letting the final model finish the utterance before stop")
+
+    def _complete_drain(self) -> None:
+        """Finish a drain: disarm now that text() returned the final (or the watchdog aborted it).
+
+        Called from the run loop after text() returns while _drain is set. Disarms (mic off, listen
+        gate cleared, 'Recording Stopped' toast, phase idle) and cancels the watchdog. No abort is
+        needed here — text() has already returned, so the run loop won't re-enter it before the
+        _listening re-check.
+        """
+        timer = None
+        with self._lock:
+            if not self._drain:
+                return  # not draining (defensive — run loop shouldn't call otherwise)
+            self._drain = False
+            self._disarm()
+            timer = self._drain_timer
+            self._drain_timer = None
+        if timer is not None:
+            timer.cancel()
+        logger.info("voice-typing drain complete; stopped")
+
+    def _drain_timeout(self) -> None:
+        """Watchdog: the final didn't fire in time — abort the blocked text() so the drain completes.
+
+        Runs on the Timer thread. The abort breaks the blocked text(); the run loop then sees _drain
+        still set and calls _complete_drain. Best-effort + never re-raises (a wedged abort must not
+        strand the drain). Covers the case where nothing was actually pending (the _final_pending
+        heuristic raced) or the final model wedged.
+        """
+        if self._drain and self._host is not None and self._text_in_flight.is_set():
+            logger.info(
+                "voice-typing drain: no final within %.1fs; aborting to complete stop",
+                _DRAIN_TIMEOUT_S,
+            )
+            self._safe_abort()  # breaks the blocked text(); run loop then completes the drain
 
     def _maybe_auto_stop(self) -> None:
         """Disarm if listening AND idle beyond cfg.asr.auto_stop_idle_seconds. Thread-safe (_lock).
@@ -991,7 +1086,9 @@ class VoiceTypingDaemon:
             self._disarm()
             disarmed = True
         # abort() moved OUT of _lock (validation NEW-2; see _disarm docstring) + gated on
-        # _text_in_flight (validation Issue 1; see _safe_abort).
+        # _text_in_flight (validation Issue 1; see _safe_abort). Auto-stop fires only after
+        # auto_stop_idle_seconds of NO speech, so the last utterance finalized long ago — nothing to
+        # drain, an immediate disarm+abort is correct.
         if disarmed and self._host is not None:
             self._safe_abort()
 
@@ -1191,13 +1288,9 @@ class VoiceTypingDaemon:
             self._arm()
 
     def stop(self) -> None:
-        with self._lock:
-            self._disarm()
-        # abort() moved OUT of _lock to avoid the control-lock wedge (validation NEW-2; see
-        # _disarm docstring) AND gated on _text_in_flight to avoid the abort()-deadlocks-forever
-        # bug when no thread is in text() (validation Issue 1; see _safe_abort).
-        if self._host is not None:
-            self._safe_abort()
+        # Graceful stop: if an utterance is in flight, let the final model finish + emit its text
+        # before disarming (drain); otherwise disarm immediately + abort. See _request_stop.
+        self._request_stop()
 
     def toggle(self) -> None:
         # Decide arm vs disarm, then act. Disarm is fast; the ARM path lazy-loads FIRST (outside _lock —
@@ -1207,13 +1300,9 @@ class VoiceTypingDaemon:
         with self._lock:
             disarmed = self._listening.is_set()
         if disarmed:
-            with self._lock:
-                self._disarm()
-            # abort() moved OUT of _lock (validation NEW-2) + gated on _text_in_flight (validation
-            # Issue 1). Only on disarm — arming must not abort a sibling text() that's about to
-            # start transcribing.
-            if self._host is not None:
-                self._safe_abort()
+            # Graceful stop: if an utterance is in flight, let the final model finish + emit its
+            # text before disarming (drain); otherwise disarm immediately + abort. See _request_stop.
+            self._request_stop()
         else:
             # A cold load fires a 'Loading…' toast inside _load_host before the spawn; the arm then
             # fires the 'Recording' start toast.
@@ -1247,6 +1336,10 @@ class VoiceTypingDaemon:
         _shutdown.set() is the real signal the run() loop checks.
         """
         self._shutdown.set()
+        # Cancel any pending graceful-stop drain watchdog so it can't fire mid-teardown.
+        timer, self._drain_timer = self._drain_timer, None
+        if timer is not None:
+            timer.cancel()
         if self._host is None:
             return  # nothing loaded (never armed, or already torn down) -> _shutdown is enough
         # P1.M1.T2.S1 / bugfix Issue 1: CLAIM the teardown so a concurrent shutdown() (main-thread

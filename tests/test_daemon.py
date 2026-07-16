@@ -579,6 +579,84 @@ def test_on_final_typing_raises_is_caught_and_record_still_happens():
     assert fb.finals == ["boom"]   # record_final STILL called (recognition is final regardless)
 
 
+# --- graceful-stop drain: a premature stop lets the FINAL model finish, then disarms ---
+# stop()/toggle-off do NOT abort an in-flight utterance (that would kill the large model + drop its
+# text). When speech is pending (_final_pending) and the run loop is inside text() (_text_in_flight),
+# _request_stop sets _drain; the run loop disarms once text() returns the natural final. A watchdog
+# (_drain_timeout) aborts the rare no-final case so the drain can't hang. Idle stops disarm at once.
+
+def test_stop_drains_when_utterance_in_flight():
+    """stop() mid-utterance does NOT abort — it drains: lets the final finish, THEN disarms."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()               # speech happened -> _final_pending=True
+    d._text_in_flight.set()         # simulate the run loop blocked inside text()
+    d.stop()                        # graceful stop -> drain (NOT abort)
+    assert d._drain is True         # draining
+    assert d.is_listening() is True # still listening — the final model is still working
+    assert rec.aborts == 0          # NOT aborted: the large model is allowed to finish
+    # The run loop would let text() return the final then complete the drain; simulate that:
+    d._text_in_flight.clear()
+    d._complete_drain()
+    assert d.is_listening() is False   # now disarmed
+    assert d._drain is False
+
+
+def test_toggle_off_drains_when_utterance_in_flight():
+    """toggle-off (the hotkey) mid-utterance drains, exactly like stop()."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()
+    d._text_in_flight.set()
+    d.toggle()                      # listening -> disarm branch -> _request_stop -> drain
+    assert d._drain is True
+    assert rec.aborts == 0
+
+
+def test_stop_disarms_immediately_when_idle():
+    """stop() when idle (no utterance in flight) disarms immediately — nothing to wait for."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d.stop()                        # no _final_pending, not in text() -> immediate disarm
+    assert d.is_listening() is False
+    assert d._drain is False
+
+
+def test_stop_aborts_immediately_when_text_idle_no_speech():
+    """stop() while text() is blocked but no speech is pending -> immediate disarm + abort."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._text_in_flight.set()         # loop in text(), idle-waiting for the next utterance
+    d.stop()                        # _final_pending False -> immediate path
+    assert d.is_listening() is False
+    assert d._drain is False
+    assert rec.aborts == 1          # aborted (no utterance to finish)
+
+
+def test_drain_timeout_aborts_blocked_text():
+    """If no final fires during a drain, the watchdog aborts so the stop completes (no hang)."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()
+    d._text_in_flight.set()
+    d._begin_drain()
+    assert rec.aborts == 0
+    d._drain_timeout()              # simulate the watchdog firing (final never came)
+    assert rec.aborts == 1          # aborted the blocked text()
+    assert d._drain is True         # still set until the run loop completes the drain
+
+
+def test_on_final_clears_final_pending():
+    """A real final clears _final_pending (the utterance is finalized) and types its text."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()
+    assert d._final_pending is True
+    d.on_final("hello world")
+    assert d._final_pending is False
+    assert be.typed == ["hello world "]
+
+
 # --- idle auto-stop (asr.auto_stop_idle_seconds) ---
 # _idle_watchdog ticks ~1s and calls _maybe_auto_stop(); here we call it directly for deterministic
 # logic tests (no real timing). _touch_speech (wired into the partial callback via on_speech) and

@@ -361,7 +361,6 @@ class RecorderHost:
             self._final_evt.set()
         elif kind == "partial":
             text = str(payload.get("text", ""))
-            logger.info("VTDBG daemon dispatch partial: %r", text)
             self._on_partial(text)
         elif kind == "speech":
             self._on_speech()
@@ -491,7 +490,6 @@ def _worker_main(
     # A SEPARATE abort-handler thread watches abort_event so stop()/toggle(off) can interrupt a
     # blocked text() (the main loop cannot read cmd_q while blocked in text()).
     def _child_on_final(text: str) -> None:
-        print(f"VTDBG child on_final: {text!r}", flush=True)
         _safe_put(evt_q, ("final", {"text": text}))
 
     stop_abort_thread = threading.Event()
@@ -521,14 +519,12 @@ def _worker_main(
                     # Clear any stale abort before entering text() so a leftover set from a previous
                     # session does not immediately abort this utterance.
                     abort_event.clear()
-                    print("VTDBG child: recv text cmd, entering recorder.text()", flush=True)
                     # blocks until a final (or an abort). _run_text_and_emit_final GUARANTEES a
                     # ('final', ...) event on BOTH paths (real final via on_final, OR abort via the
                     # sentinel) so the daemon's host.text() always unblocks — without it an abort
                     # (stop/toggle-off/auto-stop) leaves host.text() blocked forever (the child is
                     # still alive), wedging the run() loop so no further utterance transcribes.
                     _run_text_and_emit_final(recorder, evt_q, _child_on_final)
-                    print("VTDBG child: recorder.text() returned", flush=True)
                 elif kind == "arm":
                     recorder.set_microphone(True)
                 elif kind == "disarm":
@@ -687,7 +683,6 @@ class _RelayFeedback:
         self._evt_q = evt_q
 
     def update_partial(self, text: str) -> None:
-        print(f"VTDBG child relay partial: {text!r}", flush=True)
         _safe_put(self._evt_q, ("partial", {"text": text}))
 
     def set_phase(self, phase: str) -> None:
