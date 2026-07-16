@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Lite Mode Silence Gate — lite_post_speech_silence_duration (PRD §4.2ter, §4.5)",
-      "status": "Planned",
+      "status": "Researching",
       "description": "PRD commit a66b9d4 ('Refine Lite mode latency via silence gate') introduced the requirement for lite mode to use its own shorter post_speech_silence_duration, but the implementation was NEVER done. Currently cfg_to_kwargs(cfg, lite=True) uses the SAME post_speech_silence_duration (0.6s) for both normal and lite modes, meaning lite mode feels 'no faster than the big model' despite the small model being ~1.6x faster at transcription — the silence gate, not the model, is the perceived-latency bottleneck. This phase adds the lite_post_speech_silence_duration config field (default 0.5s), wires it into the lite-mode recorder kwargs, updates all affected tests, and syncs documentation. The change is small (1 new config field, 1 kwargs override, ~5 test updates, 2 doc files) but touches the config schema, daemon, tests, and docs — each of which has a drift-guard that will fail if any piece is missed.",
       "milestones": [
         {
@@ -108,21 +108,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Sync changeset-level documentation (Mode B — final task)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Update README.md and tests/ACCEPTANCE.md to reflect the new lite_post_speech_silence_duration config field and the lite-mode silence-gate latency optimization. These are cross-cutting changeset-level docs that only make sense once the config field (M1) and daemon wiring (M2) are both in place. Per SOW §5 Mode B, this is the final task with dependencies on all implementing subtasks.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Update README.md (Lite mode section + config tuning table) and tests/ACCEPTANCE.md (criterion #10) to document the lite_post_speech_silence_duration config field and the silence-gate latency optimization.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md — Lite mode section + config tuning table for lite_post_speech_silence_duration",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -140,7 +140,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Update tests/ACCEPTANCE.md criterion #10 for lite_post_speech_silence_duration",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
