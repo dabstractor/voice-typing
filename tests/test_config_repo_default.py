@@ -25,7 +25,7 @@ def test_repo_config_toml_equals_defaults():
 
 
 def test_repo_config_toml_has_no_extra_keys():
-    """The repo default must carry only the 17 schema keys (no compute_type etc.)."""
+    """The repo default must carry only the 20 schema keys (no compute_type etc.)."""
     import tomllib
 
     with open(_repo_config_path(), "rb") as fh:
@@ -38,6 +38,7 @@ def test_repo_config_toml_has_no_extra_keys():
             "language",
             "device",
             "post_speech_silence_duration",
+            "lite_post_speech_silence_duration",   # PRD §4.2ter: lite-mode silence threshold
             "realtime_processing_pause",
             "auto_stop_idle_seconds",
             "auto_unload_idle_seconds",   # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)

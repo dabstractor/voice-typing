@@ -56,6 +56,11 @@ class AsrConfig:
     language: str = "en"
     device: str = "cuda"  # "cuda" | "cpu" (daemon may override via cuda_check at startup)
     post_speech_silence_duration: float = 0.6  # VAD: finalize after this much silence (seconds)
+    lite_post_speech_silence_duration: float = 0.5  # PRD §4.2ter: lite-mode silence threshold —
+                                               # the silence gate, not the model, is the
+                                               # perceived-latency bottleneck (see §4.2ter).
+                                               # 0.3 = razor-snappy (may split a brief pause);
+                                               # 0.6 = safe.
     realtime_processing_pause: float = 0.15    # partials cadence (seconds)
     auto_stop_idle_seconds: float = 30.0       # auto-disarm after this many seconds of no recognized
                                                # speech (partials reset the clock); 0 disables
@@ -79,6 +84,7 @@ class AsrConfig:
         # Numeric fields: accept int or float, reject bool (int subclass) + everything else.
         for _name in (
             "post_speech_silence_duration",
+            "lite_post_speech_silence_duration",
             "realtime_processing_pause",
             "auto_stop_idle_seconds",
             "auto_unload_idle_seconds",
