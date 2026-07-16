@@ -581,6 +581,9 @@ class _StubFeedback:
     def set_models_loaded(self, loaded: bool) -> None:  # P1.M2.T2.S1: mirror Feedback contract (no-op stub)
         pass
 
+    def set_mode(self, mode: str) -> None:  # PRD §4.2ter: mirror Feedback.set_mode (no-op stub)
+        pass
+
     def record_final(self, text: str) -> None:
         self.finals.append(text)
 
