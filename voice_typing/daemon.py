@@ -1341,32 +1341,45 @@ class VoiceTypingDaemon:
         self._request_stop()
 
     def toggle(self) -> None:
-        # NORMAL-mode toggle (PRD §4.2ter). Decide arm vs disarm, then act. Disarm is fast; the ARM
-        # path lazy-loads FIRST (outside _lock — _load_host acquire-release-reacquires that lock;
-        # calling it under _lock deadlocks). The read/act split is race-tolerant exactly like the
-        # abort()-outside-_lock design (the listening Event + on_final gate are the source of truth;
-        # toggle is user-paced).
+        """NORMAL-mode toggle (PRD §4.2ter / delta §3.4): mode-specific arming.
+
+        Disarms ONLY if currently armed in NORMAL; otherwise arms in normal. So: pressing D while
+        idle arms in normal; pressing D while armed-in-normal disarms; pressing D while armed-in
+        LITE switches to normal (one bounded reload — the same mode-switch _load_host uses). Each
+        key only ever toggles its own mode on/off; the cross-mode press switches (one reload).
+
+        The read/act split is race-tolerant exactly like the abort()-outside-_lock design (the
+        listening Event + on_final gate are the source of truth; toggle is user-paced): both
+        _listening + _mode are read together under one _lock, then _load_host runs OUTSIDE _lock
+        (it acquire-release-reacquires that lock; calling it under _lock deadlocks).
+        """
         with self._lock:
-            disarmed = self._listening.is_set()
-        if disarmed:
-            self._request_stop()
+            listening = self._listening.is_set()
+            mode = self._mode
+        if listening and mode == "normal":
+            self._request_stop()           # armed-in-normal → disarm
         else:
+            # idle, OR armed-in-lite → arm in normal (switch from lite = one reload via _load_host)
             if not self._load_host("normal"):
                 return  # load failed → stay unarmed
             with self._lock:
                 self._arm()
 
     def toggle_lite(self) -> None:
-        """LITE-mode toggle (PRD §4.2ter): arm in lite mode when idle, else disarm (graceful stop).
+        """LITE-mode toggle (PRD §4.2ter / delta §3.4): mode-specific arming.
 
-        An independent toggle from toggle() so each keybind (D=normal, F=lite) is unambiguous:
-        pressing F while listening (in EITHER mode) stops; pressing F while idle arms in lite mode.
+        Disarms ONLY if currently armed in LITE; otherwise arms in lite. So: pressing F while idle
+        arms in lite; pressing F while armed-in-lite disarms; pressing F while armed-in NORMAL
+        switches to lite (one bounded reload — the same mode-switch _load_host uses). Each key only
+        ever toggles its own mode on/off; the cross-mode press switches (one reload).
         """
         with self._lock:
-            disarmed = self._listening.is_set()
-        if disarmed:
-            self._request_stop()
+            listening = self._listening.is_set()
+            mode = self._mode
+        if listening and mode == "lite":
+            self._request_stop()           # armed-in-lite → disarm
         else:
+            # idle, OR armed-in-normal → arm in lite (switch from normal = one reload via _load_host)
             if not self._load_host("lite"):
                 return  # load failed → stay unarmed
             with self._lock:

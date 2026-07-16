@@ -2806,13 +2806,17 @@ def test_same_mode_arm_is_instant_no_reload():
     assert d._host.mode == "lite"
 
 
-def test_toggle_lite_while_listening_stops():
-    """toggle_lite while listening (any mode) disarms (graceful stop), like toggle."""
+def test_toggle_lite_while_listening_in_lite_stops():
+    """toggle_lite while listening IN LITE disarms (mode-specific arming, delta §3.4).
+
+    The cross-mode case (toggle_lite while armed-in-normal → switch to lite) is covered by
+    test_toggle_lite_while_armed_in_normal_switches_to_lite in the P1.M1.T2.S1 section below.
+    """
     factory = _fake_host_factory(spawn_result=True)
     d, fb = _make_lazy_daemon(host_factory=factory)
-    d.start()                                        # listening in normal
+    d.start_lite()                                  # listening in lite
     assert d.is_listening() is True
-    d.toggle_lite()                                  # listening -> disarm branch
+    d.toggle_lite()                                  # armed-in-lite -> disarm branch
     assert d.is_listening() is False
 
 
@@ -3458,3 +3462,88 @@ def test_status_reports_unloaded_after_child_death(tmp_path, monkeypatch):
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
     t.join(timeout=2.0)
+
+
+# ===========================================================================
+# P1.M1.T2.S1 — toggle/toggle_lite mode-specific arming (delta §3.4 / BUG-B)
+# (Each key toggles its own mode; cross-mode press switches = one reload.)
+# ===========================================================================
+
+def _spawning_factory(spawns):
+    """A host_factory that appends each built _FakeHost to `spawns` (so reloads are countable)
+    and respects the `mode` kwarg _load_host passes (no closure override)."""
+    def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
+        host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
+        spawns.append(host)
+        return host
+    return factory
+
+
+def test_toggle_lite_while_idle_arms_in_lite():
+    """F while idle → arms in lite (mode becomes lite, one spawn)."""
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    assert not d.is_listening() and d._mode == "normal"
+    d.toggle_lite()
+    assert d.is_listening() is True
+    assert d._mode == "lite"
+    assert d._host.mode == "lite"
+    assert len(spawns) == 1                      # armed once (no reload from idle)
+
+
+def test_toggle_lite_while_armed_in_lite_disarms():
+    """F while armed-in-lite → disarms (no reload)."""
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    d.start_lite()                               # arm in lite
+    assert d._mode == "lite" and d.is_listening()
+    d.toggle_lite()                              # armed-in-lite → disarm
+    assert d.is_listening() is False
+    assert len(spawns) == 1                      # no reload on a same-mode disarm
+
+
+def test_toggle_lite_while_armed_in_normal_switches_to_lite():
+    """BUG-B fix: F while armed-in-NORMAL → switches to lite (exactly ONE reload)."""
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    d.start()                                    # arm in normal
+    assert d._mode == "normal" and d.is_listening()
+    d.toggle_lite()                              # cross-mode press → switch (not disarm!)
+    assert d.is_listening() is True              # re-armed in lite (not disarmed)
+    assert d._mode == "lite"
+    assert d._host.mode == "lite"
+    assert len(spawns) == 2                      # normal spawn + ONE lite reload
+
+
+def test_toggle_while_idle_arms_in_normal():
+    """D while idle → arms in normal (mode becomes normal, one spawn)."""
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    d.toggle()
+    assert d.is_listening() is True
+    assert d._mode == "normal"
+    assert d._host.mode == "normal"
+    assert len(spawns) == 1
+
+
+def test_toggle_while_armed_in_normal_disarms():
+    """D while armed-in-normal → disarms (no reload)."""
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    d.start()                                    # arm in normal
+    d.toggle()                                   # armed-in-normal → disarm
+    assert d.is_listening() is False
+    assert len(spawns) == 1
+
+
+def test_toggle_while_armed_in_lite_switches_to_normal():
+    """BUG-B fix: D while armed-in-LITE → switches to normal (exactly ONE reload)."""
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    d.start_lite()                               # arm in lite
+    assert d._mode == "lite" and d.is_listening()
+    d.toggle()                                   # cross-mode press → switch (not disarm!)
+    assert d.is_listening() is True              # re-armed in normal (not disarmed)
+    assert d._mode == "normal"
+    assert d._host.mode == "normal"
+    assert len(spawns) == 2                      # lite spawn + ONE normal reload
