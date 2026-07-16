@@ -162,6 +162,53 @@ def test_cfg_to_kwargs_cpu_fallback(cfg, monkeypatch):
     assert kw["realtime_model_type"] == "tiny.en"
 
 
+def test_cfg_to_kwargs_lite_cpu_fallback_uses_tiny_en(cfg):
+    """lite + CPU → tiny.en for BOTH model fields (pins S1 / delta §3.2 BUG-A; PRD §4.2ter).
+
+    On the CPU path lite mode loads the CPU lite substitute 'tiny.en' for BOTH the final and
+    realtime model — mirroring how normal CPU-fallback maps small.en→tiny.en for the realtime
+    field. Passing resolved=CPU_FALLBACK skips the cuda_check probe, so this is deterministic
+    with NO CUDA and NO monkeypatch. use_main_model_for_realtime stays True (one-model guarantee
+    holds on CPU too). This is the committed regression for S1 (P1.M1.T1.S1), which S1's PRP
+    explicitly deferred to S2.
+    """
+    kw = daemon.cfg_to_kwargs(
+        cfg, resolved=dict(daemon.cuda_check.CPU_FALLBACK), lite=True
+    )
+    assert kw["model"] == "tiny.en", kw["model"]
+    assert kw["realtime_model_type"] == "tiny.en", kw["realtime_model_type"]
+    assert kw["device"] == "cpu"
+    assert kw["compute_type"] == "int8"
+    assert kw["use_main_model_for_realtime"] is True   # one-model guarantee on CPU too
+
+
+def test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal(cfg, monkeypatch):
+    """Lite mode changes ONLY model/realtime_model_type/use_main_model_for_realtime — nothing else.
+
+    Drift guard (PRD §4.2ter): device/compute_type/language/timing/VAD/silero must be IDENTICAL
+    between lite and normal mode on CUDA, so a future cfg_to_kwargs / _FIXED_KWARGS edit can't
+    silently diverge lite from normal. The CUDA-lite model pick itself is pinned by
+    test_cfg_to_kwargs_lite_mode_uses_one_model; this test guards the REST of the kwargs dict.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    normal = daemon.cfg_to_kwargs(cfg)
+    lite = daemon.cfg_to_kwargs(cfg, lite=True)
+
+    differing = {"model", "realtime_model_type", "use_main_model_for_realtime"}
+    # 1) the key SETS are identical (no kwarg silently added/dropped by lite):
+    assert set(normal) == set(lite)
+    # 2) after removing the 3 allowed-to-differ keys, the remaining dicts are byte-identical:
+    assert {k: v for k, v in lite.items() if k not in differing} == \
+           {k: v for k, v in normal.items() if k not in differing}
+    # 3) and the 3 differing keys differ EXACTLY as the spec requires:
+    assert lite["model"] == cfg.asr.lite_model == "small.en"        # lite_model as the final model
+    assert lite["realtime_model_type"] == "small.en"                # AND the realtime model (one model)
+    assert lite["use_main_model_for_realtime"] is True              # skips the realtime engine
+    assert normal["model"] == "distil-large-v3"
+    assert normal["realtime_model_type"] == "small.en"
+    assert normal["use_main_model_for_realtime"] is False
+
+
 def test_cfg_to_kwargs_fixed_values(cfg, monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     kw = daemon.cfg_to_kwargs(cfg)

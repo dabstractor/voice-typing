@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Construction-layer CPU-fallback fix + test reconciliation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Fix BUG-A (the only confirmed functional gap): lite mode on the CPU-fallback path must use tiny.en, not small.en. Mirror the fix in the recorder-host child's device reporter. Add the kwargs×mode×force_cpu unit tests that pin the fix and the one-model invariant. Reconcile any remaining broken test factory closures caused by the mode= signature.",
               "subtasks": [
                 {
@@ -40,7 +40,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Add kwargs×mode×force_cpu unit tests + reconcile broken test factory closures",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -65,7 +65,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Reconcile toggle_lite/toggle to mode-specific arming (delta §3.4) + tests",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md §3.2 BUG-B. Current toggle_lite() (voice_typing/daemon.py ~1351) and toggle() (~1335) both gate on `self._listening.is_set()`: an armed press of EITHER key disarms. The current hypr-binds.conf header comment + toggle_lite docstring describe this deviating behavior ('Both keys STOP when pressed while already listening'). Delta PRD §3.4 'toggle-lite semantics (pin these down)' mandates MODE-SPECIFIC arming: toggle_lite disarms ONLY if currently armed-in-lite, otherwise arms in lite (so pressing F while armed-in-normal SWITCHES to lite — one reload); toggle disarms ONLY if armed-in-normal, otherwise arms in normal. RE-VERIFY current state first.\n2. INPUT: VoiceTypingDaemon (voice_typing/daemon.py); self._listening (threading.Event), self._mode (\"normal\"|\"lite\"), _load_host(mode), _arm(), _request_stop(), _disarm(). The mode-switch reload machinery in _load_host is already correct (do not touch it).\n3. LOGIC: Change the toggle condition from `disarmed = self._listening.is_set()` to a mode-aware check. For toggle(): if armed (listening) AND self._mode == \"normal\" → _request_stop() (disarm); else (idle, OR armed-in-lite) → _load_host(\"normal\") + _arm() (the _load_host mode-switch handles the lite→normal reload). For toggle_lite(): if armed AND self._mode == \"lite\" → _request_stop(); else → _load_host(\"lite\") + _arm(). Preserve the existing read-act split (read self._listening + self._mode under _lock, then act with _load_host OUTSIDE _lock — _load_host acquires _lock and would deadlock if nested). Update the toggle_lite/toggle docstrings AND the hypr-binds.conf header comment to describe the corrected mode-specific behavior ('pressing F while armed-in-normal switches to lite'). Add unit tests (tests/test_daemon.py, using the _FakeHost/_fake_host_factory seam): toggle_lite while armed-in-normal → arms-in-lite (exactly one reload, mode becomes lite); toggle_lite while armed-in-lite → disarms; toggle while armed-in-lite → arms-in-normal (one reload); toggle while armed-in-normal → disarms; each key while idle arms in its own mode. Use _FakeHost.mode to assert the resident mode after each action.\n4. OUTPUT: toggle_lite/toggle honor mode-specific arming per §3.4; the new unit tests pass; existing toggle/idle tests still pass. Consumed by P1.M1.T2.S2.\n5. DOCS: [Mode A] Update the toggle_lite + toggle docstrings in voice_typing/daemon.py and the hypr-binds.conf header comment (the 'switching modes' behavior description). Rides WITH the work.",

@@ -41,6 +41,7 @@ def test_defaults_match_prd_4_5():
     # [asr]
     assert cfg.asr.final_model == "distil-large-v3"
     assert cfg.asr.realtime_model == "small.en"
+    assert cfg.asr.lite_model == "small.en"   # PRD §4.2ter: the single model loaded in lite mode
     assert cfg.asr.language == "en"
     assert cfg.asr.device == "cuda"
     assert cfg.asr.post_speech_silence_duration == 0.6
@@ -154,6 +155,27 @@ def test_int_for_string_field_raises():
     """An int where a str is expected raises TypeError naming the field."""
     with pytest.raises(TypeError, match="device"):
         VoiceTypingConfig.from_toml({"asr": {"device": 123}})
+
+
+# ---------------------------------------------------------------------------
+# [asr] lite_model (PRD §4.2ter) — the single model loaded in lite mode.
+# Pinned here for parity with final_model/realtime_model/device above: it is a PRD §4.2ter
+# default AND a __post_init__-validated str field.
+# ---------------------------------------------------------------------------
+
+
+def test_lite_model_round_trips_through_toml():
+    """[asr] lite_model parses from TOML and overrides the default (PRD §4.2ter)."""
+    cfg = VoiceTypingConfig.from_toml({"asr": {"lite_model": "tiny.en"}})
+    assert cfg.asr.lite_model == "tiny.en"               # overridden
+    assert cfg.asr.final_model == "distil-large-v3"      # other defaults kept
+
+
+def test_lite_model_wrong_type_raises():
+    """A non-string lite_model is rejected at load (mirrors device/final_model type guard)."""
+    for bad in (123, 12.0, True, None, ["small.en"]):
+        with pytest.raises(TypeError, match="lite_model"):
+            VoiceTypingConfig.from_toml({"asr": {"lite_model": bad}})
 
 
 def test_none_for_float_field_raises():
