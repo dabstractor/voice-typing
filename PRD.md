@@ -122,7 +122,8 @@ Single process, three concerns:
 
 3. **Control socket (background thread).** `SOCK_STREAM` unix socket at `$XDG_RUNTIME_DIR/voice-typing/control.sock` (mkdir 0700). Protocol: one JSON object per line in, one per line out.
    - `{"cmd":"toggle"}` → `{"ok":true,"listening":true}`
-   - `{"cmd":"start"}` / `{"cmd":"stop"}` / `{"cmd":"status"}` → `{"ok":true,"listening":...,"partial":"...","uptime_s":...}`
+   - `{"cmd":"start"}` / `{"cmd":"stop"}` / `{"cmd":"status"}` → `{"ok":true,"listening":...,"partial":"...","uptime_s":...,"mode":"normal"|"lite"}`
+   - `{"cmd":"toggle-lite"}` / `{"cmd":"start-lite"}` → arm in lite mode (§4.2ter); same payload with `mode` reflecting the requested mode.
    - `{"cmd":"quit"}` → clean shutdown.
    Unknown cmd → `{"ok":false,"error":"..."}`. Remove stale socket file on startup.
 
@@ -137,7 +138,7 @@ Models MUST NOT load at daemon boot. The daemon starts with no recorder, no CUDA
 Lifecycle states (surfaced via `voicectl status` and the state file, §4.6/§4.8):
 - `unloaded` — daemon up, no recorder, ~0 VRAM. This is the boot state.
 - `loading` — first arm in progress; constructing recorder + loading models. The arm command blocks here; `voicectl` prints a `loading models…` hint.
-- `loaded` / not listening — recorder resident, mic disarmed. Instant arm from here. After `auto_unload_idle_seconds` in this state with no arm, the watchdog tears the recorder down → back to `unloaded` (see **Idle unload**).
+- `loaded` / not listening — recorder resident, mic disarmed. Instant arm from here (in the SAME mode it was loaded — switching to the other mode reloads, §4.2ter). After `auto_unload_idle_seconds` in this state with no arm, the watchdog tears the recorder down → back to `unloaded` (see **Idle unload**).
 - `loaded` / listening — armed, transcribing.
 
 Concurrency & failure rules:
@@ -148,6 +149,27 @@ Concurrency & failure rules:
 - Teardown (idle-unload and `quit`) runs under the SAME single-flight lock as load, so an arm that races an in-flight teardown waits for it, then loads fresh — an arm can never see a half-torn-down recorder.
 
 **Idle unload.** A background watchdog reclaims VRAM after a one-off use: when the recorder has sat in `loaded / not listening` for `asr.auto_unload_idle_seconds` (default `1800.0` = 30 min; `0` disables), it tears the recorder down, logs `voice-typing idle-unload: 1800.0s disarmed; unloading models`, transitions to `unloaded`, and frees the ~1.5–3 GB VRAM. The clock starts when the mic disarms (manual stop, toggle-off, or the §4.5 idle auto-stop) and resets on any arm; time spent listening does not count. The next arm then pays the ~1–3 s reload, same as a session's first arm. **Hard requirement — bounded teardown:** the `recorder.shutdown()` call invoked here MUST be non-blocking and complete in well under the arm-latency budget. It MUST NOT reproduce the ~90 s teardown hang currently seen on every `quit` (journal: `run() loop exiting` → 90 s → systemd `SIGKILL` / `Failed with result 'timeout'`), because idle-unload would trigger that hang every 30 min AND block any re-arm that races it under the single-flight lock. If `recorder.shutdown()` cannot be made to complete promptly, guard it with a hard timeout plus force-cleanup of the recorder's worker threads / `transcript_process` so VRAM is actually released. Making teardown bounded is therefore a **prerequisite** for this feature (risk row, §8).
+
+### 4.2ter Lite mode — small-model-only quick dictation
+
+A second arming mode for short, speed-critical snippets (URLs, shell commands, short replies) where latency matters more than accuracy. Lite mode loads **only** the small realtime model and uses it as both the partials source AND the final-pass model — the large `distil-large-v3` never loads, never runs. Result: ~half the VRAM and markedly faster finals, at lower accuracy. It is entered via a **separate keybind / command**, never by the normal toggle.
+
+**Configuration** (`[asr]`):
+- `lite_model` (default `"small.en"`): the single model loaded in lite mode, used for BOTH realtime partials and final transcription. On CPU fallback it auto-downgrades via cuda_check like the normal models; the approved CPU lite substitute is `tiny.en`.
+
+**Recorder construction (lite):** the recorder-host child builds the recorder with `model = lite_model`, `realtime_model_type = lite_model`, and `use_main_model_for_realtime = True`. Verified against RealtimeSTT v1.0.2: with `use_main_model_for_realtime=True` the separate realtime engine is NOT initialized (`_initialize_realtime_transcription_model` early-returns), so exactly ONE model (`lite_model`) is resident — the large final model is never constructed. All other kwargs (device, compute_type, language, VAD timing, silero) are identical to normal mode. `on_final` therefore yields `lite_model` finals — fast, lower-accuracy — over the SAME clean→type→record path as normal mode (§4.2).
+
+**Mode is a spawn-time property of the recorder-host child; the daemon tracks `self._mode` (`"normal"` | `"lite"`).** The resident child is always in exactly one mode. Arming rules:
+- Arm in mode X while resident child is mode X → instant arm (models already resident in the right mode).
+- Arm in mode X while resident child is the OTHER mode → tear the child down and respawn it in mode X (~1–3 s reload, same bounded teardown as idle-unload, "Loading…" toast). I.e. **switching modes costs one reload.**
+- Arm in mode X while unloaded → spawn in mode X (same as a session's first arm).
+Idle-unload (§4.2bis) tears down whichever mode is resident; the next arm reloads in whatever mode that arm requests. The graceful drain (§4.2 #2) and idle auto-stop (§4.5) apply identically in lite mode.
+
+**Commands / keybind:** `voicectl toggle-lite` / `voicectl start-lite` arm in lite mode (a clean toggle independent of the normal toggle, so each keybind is unambiguous); `voicectl toggle` / `start` arm in normal mode; `voicectl stop` disarms either. A second Hyprland bind (§4.10), e.g. `SUPER ALT, F` (fast), runs `voicectl toggle-lite`.
+
+**State / status:** `state.json` gains `"mode": "normal" | "lite"` (written on every arm/disarm alongside the existing fields); `voicectl status` reports `mode:`. The tmux status line prefixes lite with `⚡` so the user can see at a glance which mode is armed. Start/stop toasts stay `"Recording"` / `"Recording Stopped"` in either mode (the keybind itself disambiguates); finals still toast `✔ <text>` per `notify_on_final`.
+
+**Why a reload on switch is accepted:** it is the same ~1–3 s cost already paid on first-arm and after idle-unload, and a user picks a mode for a stretch of use rather than toggling per utterance. A no-reload alternative — committing the realtime partial from the resident two-model recorder — was REJECTED: it keeps the large model loaded, still spins its final pass per utterance, and so delivers neither the VRAM nor the latency benefit that motivates lite mode.
 
 ### 4.3 Typing backends (`typing_backends.py`)
 
@@ -193,6 +215,7 @@ Notes:
   ```
   must happen via os.execv re-exec or in a launcher wrapper, because LD_LIBRARY_PATH is read at process start — simplest robust approach: the systemd unit / launcher script sets `Environment=LD_LIBRARY_PATH=...` computed by `install.sh`, OR use `ctranslate2`'s ability to dlopen from `site-packages/nvidia/...` (recent faster-whisper handles this automatically — TEST IT; if `libcudnn_ops*.so` errors appear, apply the wrapper).
 - If CUDA init fails entirely, daemon MUST log clearly and fall back to `device="cpu", compute_type="int8"` with `realtime_model_type="tiny.en"`, model `small.en` — degraded but functional — and say so in `status`.
+- **Lite mode (§4.2ter):** the lite recorder is constructed with `model = lite_model`, `realtime_model_type = lite_model`, `use_main_model_for_realtime = True` (verified: only ONE model initializes; the large final model is never constructed).
 
 ### 4.5 Config (`config.toml`, parsed with stdlib `tomllib` into dataclasses)
 
@@ -200,6 +223,7 @@ Notes:
 [asr]
 final_model = "distil-large-v3"
 realtime_model = "small.en"
+lite_model = "small.en"             # the SINGLE model loaded in lite mode (used for both partials + finals); §4.2ter
 language = "en"
 device = "cuda"                       # "cuda" | "cpu"
 post_speech_silence_duration = 0.6
@@ -233,9 +257,9 @@ Config file search order: `$XDG_CONFIG_HOME/voice-typing/config.toml`, then repo
 
 - **State file** (atomic write via tempfile+rename) at `$XDG_RUNTIME_DIR/voice-typing/state.json`:
   ```json
-  {"listening": true, "phase": "speaking", "models_loaded": true, "partial": "this is what i am say", "last_final": "Previous sentence.", "ts": 1783718400.123}
+  {"listening": true, "phase": "speaking", "models_loaded": true, "mode": "normal", "partial": "this is what i am say", "last_final": "Previous sentence.", "ts": 1783718400.123}
   ```
-  Written on every partial update (throttle to ≥10 Hz max), phase change, final, and model-lifecycle transition. While models are not yet loaded (boot) or mid-load, `phase` is `unloaded` or `loading` and `models_loaded` is false (§4.2bis); once loaded, `phase` cycles `idle`/`listening`/`speaking`.
+  `mode` is `"normal"` or `"lite"` (§4.2ter); it is written on every arm/disarm. Written on every partial update (throttle to ≥10 Hz max), phase change, final, and model-lifecycle transition. While models are not yet loaded (boot) or mid-load, `phase` is `unloaded` or `loading` and `models_loaded` is false (§4.2bis); once loaded, `phase` cycles `idle`/`listening`/`speaking`.
 - **hyprctl notify**: `hyprctl notify -1 <notify_ms> "rgb(88c0d0)" "<msg>"` — fire-and-forget, swallow errors. Hyprland notifications are not replaceable by ID; to avoid stacking spam, only notify on: listening-start ("Recording"; the FIRST arm of a session is preceded by a one-shot "Loading…" toast while the models load — §4.2bis), each *final* ("✔ <text>" — gated by `notify_on_final`, since the text is already typed and shown in the tmux status line), listening-stop ("Recording Stopped" — for ANY disarm: manual stop, toggle-off, idle auto-stop, or the drain completing). Partials go to the state file only (that's what the tmux status consumes). `record_final` ALSO writes the finalized text back into the `partial` field so the tmux status line matches the screen (otherwise it would keep showing the last trailing realtime partial, which usually drops the final word or two).
 - **tmux status integration** (document in README, and `install.sh` prints the snippet; do NOT edit the user's tmux.conf):
   ```tmux
@@ -256,7 +280,7 @@ Unit-test this module (pure python, fast).
 
 ### 4.8 `voicectl` (`ctl.py`)
 
-`uv run voicectl <toggle|start|stop|status|quit>` and an installed console-script entry point (`[project.scripts] voicectl = "voice_typing.ctl:main"`, plus `voice-typing-daemon = "voice_typing.daemon:main"`). Connects to the socket, sends one JSON line, prints human-readable result (`listening: on`), exit code 0/1. `status` pretty-prints the state incl. partial, `phase` (`unloaded`/`loading`/`idle`/`listening`/`speaking`), and `models_loaded` (§4.2bis). If daemon not running: clear message + exit 2.
+`uv run voicectl <toggle|start|stop|status|quit|toggle-lite|start-lite>` and an installed console-script entry point (`[project.scripts] voicectl = "voice_typing.ctl:main"`, plus `voice-typing-daemon = "voice_typing.daemon:main"`). Connects to the socket, sends one JSON line, prints human-readable result (`listening: on`), exit code 0/1. `status` pretty-prints the state incl. partial, `phase` (`unloaded`/`loading`/`idle`/`listening`/`speaking`), `models_loaded` (§4.2bis), and `mode` (`normal`/`lite`, §4.2ter). `toggle-lite`/`start-lite` arm in lite mode; `stop` disarms either. If daemon not running: clear message + exit 2.
 
 ### 4.9 systemd user service (`systemd/voice-typing.service`)
 
@@ -279,8 +303,9 @@ WantedBy=default.target
 Hyprland keybinding: append to nothing — instead create `hypr-binds.conf` in the repo containing
 ```
 bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle
+bind = SUPER ALT, F, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle-lite
 ```
-and print an instruction to `source` it from `~/.config/hypr/hyprland.conf`. Do NOT modify the user's Hyprland config automatically. (Richer overlay UI is out of scope; state file + tmux status is the UI for now.)
+(`SUPER ALT, F` = "fast" → lite mode, §4.2ter.) Print an instruction to `source` it from `~/.config/hypr/hyprland.conf`. Do NOT modify the user's Hyprland config automatically. (Richer overlay UI is out of scope; state file + tmux status is the UI for now.)
 
 ---
 
@@ -329,6 +354,8 @@ Assert: (a) partials start arriving < 1.5 s after speech onset and update at lea
 
 Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while speaking; final-typed ≤ 1.5 s after end-of-utterance (0.6 s of that is the deliberate segmentation pause). If finals exceed target on GPU, first check that both models are actually on CUDA (log it), then try `large-v3-turbo`. The ~1–3 s model load on the first arm of a session (§4.2bis) is a one-time startup cost and does NOT count against utterance latency.
 
+**T7 — Lite mode (`test_feed_audio.py` lite variant + `voicectl`):** construct the lite recorder (`model = lite_model`, `realtime_model_type = lite_model`, `use_main_model_for_realtime = True`) and feed `utt_simple.wav`: assert (a) exactly ONE model is resident (no `distil-large-v3` / large-model worker — grep the child log / check VRAM ≈ half of normal); (b) finals still arrive over the normal clean→type path and fuzzy-accuracy ≥70% (lower bar than normal mode's 80%, since `small.en` is the final model); (c) final-typed latency is materially lower than normal mode on the same utterance (small model is faster). Then over the socket: `toggle-lite` arms with `mode:"lite"` in the response; `toggle-lite` again disarms; a subsequent `toggle` reloads into `mode:"normal"` (one reload); `status` reports the current `mode`.
+
 ---
 
 ## 7. Acceptance criteria (definition of done)
@@ -342,6 +369,7 @@ Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while spea
 7. Everything committed to git; README documents: install, hotkey snippet, tmux status snippet, config tuning table, troubleshooting (cuDNN libs, PyAudio device, wtype vs ydotool), and how to switch to CPU-only mode.
 8. No network access needed at runtime (models cached by install).
 9. After `auto_unload_idle_seconds` of disarmed idle, the recorder unloads (~0 VRAM, verified via `nvidia-smi`) and a later arm reloads it; the teardown is bounded (completes in seconds, no 90 s hang).
+10. **Lite mode (§4.2ter):** `voicectl toggle-lite` arms in lite mode using ONLY `lite_model` (the large model never loads — verified ~half the VRAM of normal mode on `nvidia-smi`); `voicectl toggle` arms in normal mode; switching between them costs one bounded reload; `status` and `state.json` report `mode`; both modes honor the graceful drain (§4.2 #2).
 
 ## 8. Known risks & prescribed mitigations
 
