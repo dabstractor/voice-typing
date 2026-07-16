@@ -113,6 +113,20 @@ Hyprland uses the last matching bind for a given MODS+key. Source this file LAST
 already bind that MODS+key elsewhere. Check `~/.config/hypr/custom/keybinds.conf`,
 or rebind to a free combo in `hypr-binds.conf`.
 
+## Lite mode
+
+A second arming mode for short, speed-critical snippets (URLs, shell commands, quick
+replies) where latency matters more than accuracy. Lite mode loads **only** `asr.lite_model`
+(default `small.en`) and uses it for both live partials AND finals — the large
+`distil-large-v3` never loads — so it takes ~half the VRAM and produces markedly faster
+finals, at lower accuracy. Arm it with `voicectl toggle-lite` / `start-lite`, or the
+**Alt+Super+D** keybind (`voicectl stop` disarms either mode). Arming the *other* mode while
+one is resident tears the recorder down and respawns it (~1–3 s reload, same as a cold first
+arm) — so switching modes costs one reload. Both modes share the graceful drain on stop
+(§4.2 #2), the 30 s auto-stop, and idle-unload. The armed mode shows in `voicectl status`
+(`mode:`), `state.json` (`mode`), and the tmux status line (a `⚡` prefix in lite). See
+[Hotkey](#hotkey-hyprland) for the binds and [Model lifecycle & VRAM](#model-lifecycle--vram).
+
 ## tmux status line
 
 Add these two lines to `~/.tmux.conf` (install.sh prints them; the repo never edits
@@ -316,7 +330,9 @@ models do NOT load at boot. The first `voicectl start`/`toggle` (or hotkey) each
 session loads `small.en` + `distil-large-v3` onto the GPU (~1-3s); `voicectl`
 prints `loading models… (first arm, ~1–3 s)` to stderr while it loads. After that
 first arm the recorder stays **resident** (~1.5-3 GB VRAM) so later arms are
-instant. It is torn down on `quit`/shutdown AND after
+instant. In **lite mode** the resident set is just `small.en` (~half the VRAM of normal);
+idle-unload tears down whichever mode is resident, and the next arm reloads in whatever mode
+that arm requests. It is torn down on `quit`/shutdown AND after
 `asr.auto_unload_idle_seconds` (default 1800s = 30 min) DISARMED — so the load cost
 is paid once per ~30 min of actual use, not once per boot. The clock starts on
 disarm (manual stop, toggle-off, or the 30s auto-stop) and resets on any arm; time

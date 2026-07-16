@@ -1,9 +1,9 @@
 # Acceptance evidence — voice-typing (PRD §7 definition of done)
 
-This document records the verified evidence for PRD §7 criteria 1–8. It is the human-readable
+This document records the verified evidence for PRD §7 criteria 1–10. It is the human-readable
 record criterion 1 requires ("T1–T4, T6 pass, demonstrated by actual command output").
 
-Regenerate the **5 / 6 / 8** block by running `./tests/test_idle_and_gpu.sh` and pasting its
+Regenerate the **5 / 6 / 8 / 9 / 10** block by running `./tests/test_idle_and_gpu.sh` and pasting its
 `=== ACCEPTANCE EVIDENCE ===` output into the fenced block below. Criteria **1–4** are demonstrated
 by the sibling test commands (T1/T2/T3); criterion **7** by `git status` + the README task.
 
@@ -33,10 +33,12 @@ and spuriously fail the "no finals" assertion).
 | 4 | Only finalized text reaches the target; nothing typed while toggled off | PASS (via T3) | `./tests/e2e_virtual_mic.sh` — capture-pane unchanged after `voicectl stop` while one more WAV plays. |
 | 5 | Daemon survives ≥2 min of silence with no hallucinated output and trivial CPU use | **PASS (this task — direct evidence)** | `./tests/test_idle_and_gpu.sh` — 120 s armed silence, no finals typed, `last_final` unchanged, avg **1.67 %–14 %** of one core across runs (< 25 %). (Block below.) |
 | 6 | `voicectl toggle/start/stop/status/quit` all work; systemd user service; starts un-armed; auto-restarts on failure | **PASS (this task — direct evidence)** | `./tests/test_idle_and_gpu.sh` — every subcommand returned `ok`; `listening: off` right after ready; unit `ExecStart → launch_daemon.sh` + `Restart=on-failure`. (After T4's 120 s window the 30 s auto-stop has already disarmed the mic, so the test only issues `voicectl stop` if still armed — a redundant stop after auto-stop is now SAFE: the abort()-under-_lock wedge it once worked around was fixed by _safe_abort() gating, commit 81d2ad8 (ISSUE-3). Stop is exercised on run 2 regardless.) (Block below.) |
-| 7 | Everything committed to git; README documents install / hotkey / tmux / config / troubleshooting / CPU-only mode | partial | `git status` — implementation committed on `main`; the README is task **P2.M1.T2.S1** (pending), which will document install, the hotkey snippet, the tmux status snippet, the config tuning table, troubleshooting (cuDNN libs, PyAudio device, wtype vs ydotool), and CPU-only mode. |
+| 7 | Everything committed to git; README documents install / hotkey / tmux / config / troubleshooting / CPU-only mode | partial | `git status` — README is complete (install, hotkey+lite binds, tmux, config table incl. `lite_model`, troubleshooting, CPU-only mode, lite-mode section + lifecycle note via **P1.M2.T2.S1**); the implementation + these doc edits are committed to `main` by **P1.M2.T3.S1**. |
 | 8 | No network access needed at runtime (models cached by install) | **PASS (this task — direct evidence)** | `./tests/test_idle_and_gpu.sh` — the test launches the daemon via the **production path** (`launch_daemon.sh`, no pre-set env) and asserts the daemon log has ZERO `HTTP Request: GET https://huggingface.co` lines, a non-circular proof that the deployed unit is offline (the offline vars come from the wrapper, not from the test). (Block below.) |
+| 9 | After `auto_unload_idle_seconds` of disarmed idle, the recorder unloads (~0 VRAM via `nvidia-smi`) and a later arm reloads; teardown is bounded (seconds, no 90 s hang) | **PASS** | `./tests/test_idle_and_gpu.sh` — T6(d): daemon tree ABSENT after idle-unload (`total=0`), then PRESENT again after a re-arm reload. Bounded teardown via the recorder-host child process-group SIGKILL (P1.M3.T2.S2 re-plan). (Block below.) |
+| 10 | **Lite mode (§4.2ter):** `toggle-lite` arms in lite using ONLY `lite_model` (large model never loads — ~half the VRAM on `nvidia-smi`); `toggle` arms normal; switching costs one bounded reload; `status` + `state.json` report `mode`; both modes honor the graceful drain | pending T7 | `uv run pytest tests/test_feed_audio.py -v` (lite tests: one-model `use_main_model_for_realtime`, accuracy ≥70%, lite latency < normal) + `./tests/test_idle_and_gpu.sh` T7 section (`toggle-lite`→`mode: lite`, `toggle`→reload→`mode: normal`, optional lite VRAM < normal). T7 is task **P1.M2.T1.S1** (parallel); **P1.M2.T3.S1** flips this to PASS. |
 
-### Evidence block — criteria 5, 6, 8, 9 (verbatim from a passing `./tests/test_idle_and_gpu.sh`)
+### Evidence block — criteria 5, 6, 8, 9, 10 (verbatim from a passing `./tests/test_idle_and_gpu.sh`)
 
 Captured on Arch Linux, kernel 7.0.12-arch1-1, NVIDIA RTX 3080 Ti (driver 610.43.02), all four
 faster-whisper repos prefetched under `~/.cache/huggingface/hub/` by `./install.sh`.

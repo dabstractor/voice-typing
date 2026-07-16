@@ -139,14 +139,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Sync changeset-level documentation (Mode B: README + ACCEPTANCE.md)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "The final documentation sweep that spans the whole lite-mode changeset. Per SOW §5 Mode B: updates README.md (the feature overview that only makes sense once the whole change is in place) and cross-checks tests/ACCEPTANCE.md T7. Declares dependencies on every implementing subtask so it runs last among content work.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "README.md lite-mode sections + tests/ACCEPTANCE.md T7 cross-check",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
