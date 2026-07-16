@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Lite Mode — single-small-model quick dictation (PRD §4.2ter)",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Implement the Lite-mode delta end to end: a second arming mode (voicectl toggle-lite / SUPER+ALT+F) that loads ONLY the small realtime model (lite_model, default small.en) and uses it for BOTH partials and finals, so the large distil-large-v3 never loads (~half the VRAM, faster finals, lower accuracy). Mode switching costs one bounded ~1–3s reload (teardown + respawn of the recorder-host child). CONTEXT: the working tree is a MOVING TARGET — a concurrent process has landed ~95% of this feature (config lite_model, cfg_to_kwargs(lite=), _load_host(mode) mode-switch, start_lite/toggle_lite, control-socket dispatch, feedback set_mode/state mode, ctl commands, status.sh ⚡, hypr-binds SUPER+ALT+F, and most test reconciliation). Every subtask MUST re-verify the current tree before editing. Two CONFIRMED spec bugs remain unfixed at analysis time: (A) CPU-lite fallback yields small.en instead of the mandated tiny.en; (B) toggle_lite/toggle semantics deviate from delta §3.4 (they disarm on ANY armed press instead of mode-specific arming). See plan/004_607e9cca32b7/architecture/system_context.md for the full architecture + state map, and realtimestt_lite_mode_verification.md for the verified one-model fact. The graceful-stop drain is ALREADY IMPLEMENTED and out of scope.",
       "milestones": [
         {
@@ -103,7 +103,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Lite-mode integration test, changeset-level documentation, and finalization",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Add the T7 lite feed-audio integration test (the only test exercising the REAL RealtimeSTT recorder in lite mode — one-model resident, accuracy, latency, socket mode-switch). Then sweep the changeset-level documentation (README, ACCEPTANCE.md) and finalize: run the full suite + GPU lifecycle check and commit the whole delta.",
           "tasks": [
             {
@@ -170,14 +170,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Final full-suite verification, GPU lifecycle check, and git commit",
-              "status": "Researching",
+              "status": "Complete",
               "description": "The finalization gate: run the ENTIRE test suite (fast unit + T7 integration + the GPU lifecycle/idle scripts), verify the lite-mode acceptance criteria against real command output, then commit the whole delta to git on main with a sensible message.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Run full suite + GPU lifecycle + verify acceptance #10, then git commit",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1",
