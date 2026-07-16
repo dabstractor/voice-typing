@@ -133,7 +133,7 @@ _COLD_LOAD_NOTIFY_LOADING = "Loading…"
 # the run loop's blocked text() return the natural final (the large model finishes + on_final types
 # it), THEN disarm. This is the max we'll wait for that final before the drain watchdog aborts the
 # blocked text() so the stop can't hang (no pending utterance / model wedged). Comfortably covers
-# post_speech_silence_duration (~1.5s trailing silence to trigger finalization) + the final model's
+# post_speech_silence_duration (~0.6s normal / ~0.5s lite trailing silence to trigger finalization) + the final model's
 # transcription time (~0.5–1.5s); raise if you load a much larger final model.
 _DRAIN_TIMEOUT_S: float = 5.0
 
@@ -207,6 +207,10 @@ def cfg_to_kwargs(
         # Lite mode (§4.2ter): ONE model for both realtime + final. Overrides the
         # use_main_model_for_realtime=False from _FIXED_KWARGS; verified to skip the realtime engine.
         kwargs["use_main_model_for_realtime"] = True
+        # §4.2ter latency lever: the silence gate (not the model) is the perceived-latency bottleneck, so lite
+        # uses its own SNUGGER post_speech_silence_duration (default 0.5 vs normal 0.6) to actually feel faster.
+        # Overrides the common-block value set above; mirrors the use_main_model_for_realtime override pattern.
+        kwargs["post_speech_silence_duration"] = cfg.asr.lite_post_speech_silence_duration
     return kwargs
 
 

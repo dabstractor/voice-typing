@@ -183,30 +183,52 @@ def test_cfg_to_kwargs_lite_cpu_fallback_uses_tiny_en(cfg):
 
 
 def test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal(cfg, monkeypatch):
-    """Lite mode changes ONLY model/realtime_model_type/use_main_model_for_realtime — nothing else.
+    """Lite mode changes ONLY model/realtime_model_type/use_main_model_for_realtime/post_speech_silence_duration.
 
     Drift guard (PRD §4.2ter): device/compute_type/language/timing/VAD/silero must be IDENTICAL
     between lite and normal mode on CUDA, so a future cfg_to_kwargs / _FIXED_KWARGS edit can't
     silently diverge lite from normal. The CUDA-lite model pick itself is pinned by
     test_cfg_to_kwargs_lite_mode_uses_one_model; this test guards the REST of the kwargs dict.
+    (post_speech_silence_duration is the 4th allowed difference — §4.2ter: lite's snugger silence gate is the
+    perceived-latency lever; its value is pinned by test_cfg_to_kwargs_lite_uses_shorter_silence_duration.)
     """
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     normal = daemon.cfg_to_kwargs(cfg)
     lite = daemon.cfg_to_kwargs(cfg, lite=True)
 
-    differing = {"model", "realtime_model_type", "use_main_model_for_realtime"}
+    differing = {"model", "realtime_model_type", "use_main_model_for_realtime", "post_speech_silence_duration"}
     # 1) the key SETS are identical (no kwarg silently added/dropped by lite):
     assert set(normal) == set(lite)
-    # 2) after removing the 3 allowed-to-differ keys, the remaining dicts are byte-identical:
+    # 2) after removing the 4 allowed-to-differ keys, the remaining dicts are byte-identical:
     assert {k: v for k, v in lite.items() if k not in differing} == \
            {k: v for k, v in normal.items() if k not in differing}
-    # 3) and the 3 differing keys differ EXACTLY as the spec requires:
+    # 3) and the 4 differing keys differ EXACTLY as the spec requires:
     assert lite["model"] == cfg.asr.lite_model == "small.en"        # lite_model as the final model
     assert lite["realtime_model_type"] == "small.en"                # AND the realtime model (one model)
     assert lite["use_main_model_for_realtime"] is True              # skips the realtime engine
+    assert lite["post_speech_silence_duration"] == 0.5              # §4.2ter: snugger lite silence gate
     assert normal["model"] == "distil-large-v3"
     assert normal["realtime_model_type"] == "small.en"
     assert normal["use_main_model_for_realtime"] is False
+    assert normal["post_speech_silence_duration"] == 0.6            # normal mode unchanged
+
+
+def test_cfg_to_kwargs_lite_uses_shorter_silence_duration(cfg, monkeypatch):
+    """Lite uses its own snugger post_speech_silence_duration (§4.2ter latency lever); normal is unaffected.
+
+    The silence gate — not the model — is the perceived-latency bottleneck (PRD §4.2ter), so lite MUST shorten
+    post_speech_silence_duration to actually feel faster. Pins: (a) the default lite value (0.5) reaches the kwargs;
+    (b) an override flows through; (c) normal mode is unchanged (0.6).
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    # (a) default: lite carries the snugger 0.5; normal carries 0.6.
+    assert daemon.cfg_to_kwargs(cfg, lite=True)["post_speech_silence_duration"] == 0.5
+    assert daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"] == 0.6
+    # (b) override flows through lite only (cfg fixture is function-scoped -> safe to mutate):
+    cfg.asr.lite_post_speech_silence_duration = 0.3
+    assert daemon.cfg_to_kwargs(cfg, lite=True)["post_speech_silence_duration"] == 0.3
+    # (c) normal is unaffected by the lite override (still the normal cfg value):
+    assert daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"] == 0.6
 
 
 def test_cfg_to_kwargs_fixed_values(cfg, monkeypatch):

@@ -71,21 +71,21 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Daemon Wiring — override post_speech_silence_duration in lite mode cfg_to_kwargs",
-          "status": "Planned",
+          "status": "Complete",
           "description": "Update cfg_to_kwargs() in daemon.py so that when lite=True, the post_speech_silence_duration kwarg uses cfg.asr.lite_post_speech_silence_duration (0.5) instead of cfg.asr.post_speech_silence_duration (0.6). Update the existing regression test test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal to account for the now-differing silence duration, and add a dedicated assertion test. The recorder-host child propagates automatically (it calls build_recorder → cfg_to_kwargs) — no changes to recorder_host.py.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Override post_speech_silence_duration in cfg_to_kwargs for lite mode + update/create kwargs tests",
-              "status": "Planned",
+              "status": "Complete",
               "description": "One code change in cfg_to_kwargs + update one regression test + add one new test. The code change is a single line in the existing `if lite:` block.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Override post_speech_silence_duration in cfg_to_kwargs lite path + update test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal + add test_cfg_to_kwargs_lite_uses_shorter_silence_duration",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -122,7 +122,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md — Lite mode section + config tuning table for lite_post_speech_silence_duration",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
