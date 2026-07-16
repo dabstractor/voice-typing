@@ -96,6 +96,7 @@ class Feedback:
             "listening": False,
             "phase": "unloaded",      # P1.M2.T2.S1: boot phase (models not yet loaded, §4.2bis)
             "models_loaded": False,   # P1.M2.T2.S1: True once _load_recorder succeeds (driven by the daemon)
+            "mode": "normal",        # PRD §4.2ter: "normal" | "lite" (which model set is resident/armed)
             "partial": "",
             "last_final": "",
             "ts": 0.0,
@@ -139,6 +140,14 @@ class Feedback:
         anti-spam rule as set_phase).
         """
         self._state["models_loaded"] = bool(loaded)
+        self._write()
+
+    def set_mode(self, mode: str) -> None:
+        """Record the armed mode (PRD §4.2ter: "normal" | "lite"). Driven by the daemon's _arm()
+        right before set_listening(True), so state.json + voicectl status reflect which model set
+        is active. Always writes; never notifies (not a start/final/stop event).
+        """
+        self._state["mode"] = mode
         self._write()
 
     def record_final(self, text: str) -> None:

@@ -32,7 +32,7 @@ import threading
 
 from voice_typing.daemon import _default_control_socket_path  # canonical resolver (P1.M4.T2.S1); reuse, do not duplicate
 
-_COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit")
+_COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit", "toggle-lite", "start-lite")
 # BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
 # so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
 _EX_USAGE: int = 64
@@ -64,6 +64,7 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
     if cmd == "status":
         listening = "on" if response.get("listening") else "off"
         phase = response.get("phase", "") or ""                       # P1.M2.T2.S1: lifecycle phase (§4.2bis)
+        mode = response.get("mode", "normal") or "normal"              # PRD §4.2ter: normal | lite
         partial = response.get("partial", "") or ""
         last_final = response.get("last_final", "") or ""
         uptime = response.get("uptime_s", 0.0)
@@ -84,6 +85,7 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         loaded_marker = "loaded" if models_loaded else "not loaded"   # distinguishes loaded from loading/unloaded
         text = (
             f"listening: {listening}\n"
+            f"mode: {mode}\n"
             f"phase: {phase}\n"
             f"partial: {partial}\n"
             f"last: {last_final}\n"
@@ -187,11 +189,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # 2. Talk to the daemon. Connect OSError -> exit 2; protocol ValueError -> exit 1.
-    #    start/toggle may block ~1–3 s on the first arm while the daemon lazy-loads models (PRD §4.2bis); route
-    #    them through _send_command_with_loading_hint so voicectl prints a 'loading models…' hint if the reply is
-    #    slow (resident arms reply in ms → no hint). stop/status/quit use plain send_command.
+    #    start/toggle (and their lite variants) may block ~1–3 s on a cold arm or a mode-switch
+    #    reload (PRD §4.2bis/§4.2ter) while the daemon lazy-loads models; route them through
+    #    _send_command_with_loading_hint so voicectl prints a 'loading models…' hint if the reply is
+    #    slow (resident, same-mode arms reply in ms → no hint). stop/status/quit use plain send_command.
     try:
-        if cmd in ("start", "toggle"):
+        if cmd in ("start", "toggle", "start-lite", "toggle-lite"):
             response = _send_command_with_loading_hint(socket_path, cmd)
         else:
             response = send_command(socket_path, cmd)

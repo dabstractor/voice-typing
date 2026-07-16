@@ -122,17 +122,25 @@ def test_update_partial_round_trip(feedback, tmp_path):
     assert isinstance(state["ts"], float) and state["ts"] > 0.0
 
 
-def test_state_shape_has_exactly_the_five_fields(feedback, tmp_path):
+def test_state_shape_has_the_documented_fields(feedback, tmp_path):
     fb, _rec, _clock = feedback
     fb.update_partial("x")
     state = _read_state(tmp_path)
-    assert set(state.keys()) == {"listening", "phase", "models_loaded", "partial", "last_final", "ts"}
+    assert set(state.keys()) == {"listening", "phase", "models_loaded", "mode", "partial", "last_final", "ts"}
 
 
 def test_set_phase_round_trip(feedback, tmp_path):
     fb, _rec, _clock = feedback
     fb.set_phase("speaking")
     assert _read_state(tmp_path)["phase"] == "speaking"
+
+
+def test_set_mode_writes_mode_field(feedback, tmp_path):
+    """set_mode publishes the armed mode to state.json (PRD §4.2ter)."""
+    fb, _rec, _clock = feedback
+    assert fb.snapshot()["mode"] == "normal"          # default at construction (in-memory)
+    fb.set_mode("lite")
+    assert _read_state(tmp_path)["mode"] == "lite"     # written to disk
 
 
 def test_record_final_sets_last_final(feedback, tmp_path):
@@ -424,13 +432,13 @@ def test_no_real_subprocess_run_during_tests(monkeypatch, tmp_path):
 # P1.M4.T2.S1 — Feedback.snapshot() (additive: a low-latency in-memory read for status)
 # ===========================================================================
 
-def test_snapshot_returns_a_copy_with_the_five_state_keys(tmp_path, monkeypatch):
+def test_snapshot_returns_a_copy_with_the_state_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(time, "monotonic", _Clock().monotonic)
     fb = Feedback(FeedbackConfig(state_file=str(tmp_path / "state.json")))
     fb.set_listening(True)
     fb.update_partial("hello")
     snap = fb.snapshot()
-    assert set(snap.keys()) == {"listening", "phase", "models_loaded", "partial", "last_final", "ts"}
+    assert set(snap.keys()) == {"listening", "phase", "models_loaded", "mode", "partial", "last_final", "ts"}
     assert snap["listening"] is True and snap["partial"] == "hello"
 
 

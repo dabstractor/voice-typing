@@ -78,7 +78,8 @@ microphone default source (Troubleshooting) and `post_speech_silence_duration`
 
 ## Hotkey (Hyprland)
 
-Bind SUPER+ALT+D to toggle the mic. Add this one line to
+Bind SUPER+ALT+D to toggle the mic (normal mode), and SUPER+ALT+F for **lite mode**
+(small model only — faster, lower accuracy, for short quips). Add this one line to
 `~/.config/hypr/hyprland.conf` (install.sh prints it; the repo never edits your
 hyprland.conf):
 
@@ -92,14 +93,23 @@ Then reload:
 hyprctl reload
 ```
 
-The sourced file is `hypr-binds.conf` at the repo root. Its bind is:
+The sourced file is `hypr-binds.conf` at the repo root. Its binds are:
 
 ```
 bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle
+bind = SUPER ALT, F, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle-lite
 ```
 
+**Normal mode** (`D`) loads `distil-large-v3` + `small.en` — high accuracy, slower finals.
+**Lite mode** (`F`) loads ONLY `small.en` (the large model never runs) — ~half the VRAM and
+markedly faster finals, at lower accuracy. Good for short snippets (URLs, shell commands,
+quick replies) where the big model's latency isn't worth it. Each key toggles its own mode on/off;
+switching modes reloads the model set (~1–3 s, same as a cold first arm). To switch: press the
+active key to stop, then the other key to start in its mode. The mode is shown in `voicectl status`
+and the tmux status line (a `⚡` prefix in lite).
+
 Hyprland uses the last matching bind for a given MODS+key. Source this file LAST
-(at the bottom of `hyprland.conf`) so its bind wins. If SUPER+ALT+D is inert, your
+(at the bottom of `hyprland.conf`) so its binds win. If SUPER+ALT+D/F is inert, your
 config may already bind it elsewhere. Check `~/.config/hypr/custom/keybinds.conf`,
 or rebind to a free combo in `hypr-binds.conf`.
 
@@ -140,6 +150,7 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `asr.device` | `"cuda"` | `"cuda"` or `"cpu"`. Auto-falls-back to `cpu` if no CUDA device is visible. |
 | `asr.final_model` | `"distil-large-v3"` | the model whose output gets typed. |
 | `asr.realtime_model` | `"small.en"` | the fast model that produces live partials. |
+| `asr.lite_model` | `"small.en"` | the SINGLE model loaded in **lite mode** (`toggle-lite` / SUPER+ALT+F) — used for both partials AND finals, so the large model never loads. ~half VRAM + faster finals, lower accuracy. |
 | `asr.language` | `"en"` | ISO-639-1 code. |
 | `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"tmux"`. `wtype` auto-falls-back to `ydotool`. |
 | `output.tmux_target` | `""` | pane target, used only when `backend="tmux"`, e.g. `"voicetest:0.0"`. |
@@ -280,6 +291,7 @@ Typical CUDA output:
 
 ```
 listening: on
+mode: normal
 phase: listening
 partial: this is what i am say
 last: Previous sentence.
@@ -289,7 +301,8 @@ models: distil-large-v3 + small.en (loaded)
 mic: ok
 ```
 
-`phase:` is `unloaded` at boot (no models), `loading` on the first arm, then
+`mode:` is `normal` (the two-model high-accuracy set) or `lite` (the single small model — see
+[Hotkey](#hotkey-hyprland)); `phase:` is `unloaded` at boot (no models), `loading` on the first arm, then
 `idle`/`listening`; the `(loaded)`/`(not loaded)` marker on the `models:` line
 tells you whether models are resident. On CPU fallback, `device` shows `cpu (int8)`
 and `models` shows `small.en + tiny.en (loaded)` once the CPU recorder is built.

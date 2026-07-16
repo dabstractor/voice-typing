@@ -29,13 +29,16 @@
 
 STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/voice-typing/state.json"
 
-# Render "🎤 <partial>" while listening, else "". Truncate the whole line to MAX codepoints;
-# on overflow drop the last char and append "…" so a long utterance is visibly cut rather
-# than silently chopped. jq slicing is codepoint-based, so the 4-byte 🎤 emoji counts as 1.
+# Render "🎤 <partial>" while listening (prefixed with ⚡ in LITE mode, PRD §4.2ter), else "".
+# Truncate the whole line to MAX codepoints; on overflow drop the last char and append "…" so
+# a long utterance is visibly cut rather than silently chopped. jq slicing is codepoint-based, so
+# the 4-byte emoji glyphs count as 1 each.
 # MAX defaults to 60; override for your status line with `tmux set-environment … MAX N`.
 MAX="${VOICE_TYPING_STATUS_MAX:-60}"
 jq -r --arg max "$MAX" '
-  (if (.listening // false) then "🎤 " + (.partial // "") else "" end) as $line
+  (if (.listening // false)
+     then ((if (.mode == "lite") then "⚡" else "" end) + "🎤 " + (.partial // ""))
+     else "" end) as $line
   | if ($line | length) > ($max | tonumber)
     then $line[:(($max | tonumber) - 1)] + "…"
     else $line end

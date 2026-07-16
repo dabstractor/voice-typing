@@ -37,6 +37,8 @@ class _StubDaemon:
     def toggle(self):
         self.calls.append("toggle"); self._listening = not self._listening  # noqa: E702
     def start(self): self.calls.append("start"); self._listening = True  # noqa: E702
+    def start_lite(self): self.calls.append("start-lite"); self._listening = True  # noqa: E702
+    def toggle_lite(self): self.calls.append("toggle-lite"); self._listening = not self._listening  # noqa: E702
     def stop(self): self.calls.append("stop"); self._listening = False  # noqa: E702
     def request_shutdown(self): self.calls.append("quit")
     def is_listening(self): return self._listening
@@ -124,6 +126,18 @@ def test_dispatch_status_has_all_keys():
 def test_dispatch_start_stop_set_listening():
     assert _disp({"cmd": "start"})["listening"] is True
     assert _disp({"cmd": "stop"})["listening"] is False
+
+
+def test_dispatch_lite_commands_call_daemon(monkeypatch):
+    """toggle-lite / start-lite dispatch to the daemon's lite arm methods (PRD §4.2ter)."""
+    d = _StubDaemon()
+    srv = daemon.ControlServer(d)
+    assert srv._dispatch(json.dumps({"cmd": "start-lite"}))["ok"] is True
+    assert d.calls == ["start-lite"]
+    d2 = _StubDaemon()
+    srv2 = daemon.ControlServer(d2)
+    assert srv2._dispatch(json.dumps({"cmd": "toggle-lite"}))["ok"] is True
+    assert d2.calls == ["toggle-lite"]
 
 
 def test_dispatch_quit_calls_request_shutdown():

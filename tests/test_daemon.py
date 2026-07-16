@@ -36,6 +36,7 @@ class _FakeFeedback:
         self.partials: list[str] = []
         self.phases: list[str] = []
         self.notifies: list[str] = []
+        self.modes: list[str] = []
 
     def update_partial(self, text: str) -> None:
         self.partials.append(text)
@@ -43,8 +44,14 @@ class _FakeFeedback:
     def set_phase(self, phase: str) -> None:
         self.phases.append(phase)
 
+    def snapshot(self) -> dict:                       # mirror Feedback.snapshot (status_snapshot reads it)
+        return {"phase": self.phases[-1] if self.phases else "unloaded"}
+
     def set_models_loaded(self, loaded: bool) -> None:  # P1.M2.T2.S1: mirror Feedback contract (no-op stub)
         pass
+
+    def set_mode(self, mode: str) -> None:  # PRD §4.2ter: mirror Feedback.set_mode (no-op stub)
+        self.modes.append(mode)
 
     def notify(self, msg: str) -> None:  # cold-load UX popup (mirrors Feedback.notify)
         self.notifies.append(msg)
@@ -126,6 +133,24 @@ def test_cfg_to_kwargs_cuda_path(cfg, monkeypatch):
     assert kw["compute_type"] == "float16"
     assert kw["model"] == "distil-large-v3"
     assert kw["realtime_model_type"] == "small.en"
+
+
+def test_cfg_to_kwargs_lite_mode_uses_one_model(cfg, monkeypatch):
+    """lite=True (PRD §4.2ter): lite_model for BOTH realtime + final + use_main_model_for_realtime=True.
+
+    Pins that lite mode loads exactly ONE model (the large final model is never constructed) and
+    overrides the _FIXED_KWARGS use_main_model_for_realtime=False.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    cfg.asr.lite_model = "small.en"
+    kw = daemon.cfg_to_kwargs(cfg, lite=True)
+    assert kw["model"] == "small.en"                       # lite_model as the final model
+    assert kw["realtime_model_type"] == "small.en"          # AND the realtime model (one model)
+    assert kw["use_main_model_for_realtime"] is True        # skips the separate realtime engine
+    assert kw["device"] == "cuda" and kw["compute_type"] == "float16"   # device unchanged
+    # normal mode is untouched:
+    kw_n = daemon.cfg_to_kwargs(cfg)
+    assert kw_n["model"] == "distil-large-v3" and kw_n["use_main_model_for_realtime"] is False
 
 
 def test_cfg_to_kwargs_cpu_fallback(cfg, monkeypatch):
@@ -444,7 +469,7 @@ class _FakeHost:
     bounded join on the wrapped recorder's shutdown() (mirrors the legacy adapter's force-cleanup).
     """
 
-    def __init__(self, cfg, feedback, latency, on_final, on_partial, on_speech, *, force_cpu=False, is_listening=None):
+    def __init__(self, cfg, feedback, latency, on_final, on_partial, on_speech, *, force_cpu=False, is_listening=None, mode="normal"):
         # Mirror the real RecorderHost.__init__ signature so host_factory=lambda *a, **k: _FakeHost(*a, **k)
         # works. Store the callbacks (the tests do not exercise them, but the daemon wires them).
         self.cfg = cfg
@@ -455,6 +480,7 @@ class _FakeHost:
         self.on_speech = on_speech
         self.force_cpu = force_cpu
         self.is_listening = is_listening
+        self.mode = mode                     # PRD §4.2ter: the mode this fake child was built for
         self.recorder = _StubRecorder()   # the wrapped stub the tests assert on
         self.spawn_calls = 0
         self.spawn_result = True
@@ -503,11 +529,17 @@ class _FakeHost:
         done.wait(timeout=timeout)
 
 
-def _fake_host_factory(spawn_result=True, device=None):
-    """Build a host_factory callable returning a _FakeHost with the given spawn() result + device."""
-    def _factory(cfg, feedback, latency, on_final, on_partial, on_speech):
-        host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech)
+def _fake_host_factory(spawn_result=True, device=None, mode=None):
+    """Build a host_factory callable returning a _FakeHost with the given spawn() result + device.
+
+    `mode` (default None): if given, the returned _FakeHost reports that mode (so lite/mismatch
+    tests can pin it); None leaves the _FakeHost default "normal".
+    """
+    def _factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
+        host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
         host.spawn_result = spawn_result
+        if mode is not None:
+            host.mode = mode
         if device is not None:
             host.device = dict(device)
         return host
@@ -1496,9 +1528,9 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
     fb.update_partial("hello")
     fb.record_final("world")
     s = d.status_snapshot()
-    assert set(s) == {"listening", "phase", "models_loaded", "load_error", "partial", "last_final",
+    assert set(s) == {"listening", "mode", "phase", "models_loaded", "load_error", "partial", "last_final",
                       "uptime_s", "device", "compute_type", "final_model", "realtime_model",
-                      "mic_ok", "mic_error"}                     # P1.M2.T2.S1: +phase/models_loaded/load_error
+                      "mic_ok", "mic_error"}                     # P1.M2.T2.S1: +phase/models_loaded/load_error; §4.2ter: +mode
     assert s["listening"] is False and s["partial"] == "world" and s["last_final"] == "world"   # record_final writes the final into partial so the status matches the screen
     assert s["phase"] == "idle" and s["models_loaded"] is True and s["load_error"] == ""  # P1.M2.T2.S1: injected recorder -> loaded
     assert s["device"] == "cuda" and s["compute_type"] == "float16"
@@ -2546,15 +2578,18 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
     sb = inspect.signature(daemon.build_recorder).parameters
     assert "force_cpu" in sb and sb["force_cpu"].default is False
     assert "on_speech" in sb and sb["on_speech"].default is None
-    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu", "on_speech"], list(sb)
+    assert "lite" in sb and sb["lite"].default is False            # PRD §4.2ter
+    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu", "on_speech", "lite"], list(sb)
     sc = inspect.signature(daemon._construct).parameters
     assert "force_cpu" in sc and sc["force_cpu"].default is False
     assert "on_speech" in sc and sc["on_speech"].default is None
-    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu", "on_speech"], list(sc)
+    assert "lite" in sc and sc["lite"].default is False
+    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu", "on_speech", "lite"], list(sc)
     # cfg_to_kwargs got the keyword-only resolved injection point (default None):
     sk = inspect.signature(daemon.cfg_to_kwargs).parameters
     assert "resolved" in sk and sk["resolved"].default is None
     assert sk["resolved"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert "lite" in sk and sk["lite"].default is False            # PRD §4.2ter
 
 
 def test_log_resolved_device_reads_cache_after_cpu_fallback(caplog):
@@ -2681,6 +2716,68 @@ def test_warm_arm_fires_no_loading_toast(monkeypatch):
     assert fb.notifies == []                          # no cold load -> no 'Loading…' toast
 
 
+# --- lite mode (PRD §4.2ter): small-model-only quick dictation on a separate keybind ---
+
+def test_start_lite_loads_lite_host_and_arms():
+    """start_lite() spawns the host in LITE mode (host.mode == 'lite') and arms."""
+    factory = _fake_host_factory(spawn_result=True)
+    d, fb = _make_lazy_daemon(host_factory=factory)
+    d.start_lite()
+    assert d._models_loaded is True
+    assert d.is_listening() is True
+    assert d._host.mode == "lite"                     # the child was built for lite
+    assert d._mode == "lite"                          # daemon tracks it
+    assert fb.modes == ["lite"]                       # published to state.json via set_mode
+
+
+def test_mode_switch_normal_to_lite_reloads():
+    """Arming lite while a NORMAL child is resident tears it down + respawns lite (one reload).
+
+    Pins the accepted §4.2ter tradeoff: switching modes costs one bounded reload (the recorder is
+    built with a different model set). spawn() runs AGAIN and the new host reports mode 'lite'.
+    """
+    factory = _fake_host_factory(spawn_result=True)
+    d, fb = _make_lazy_daemon(host_factory=factory)
+    d.start()                                        # cold arm -> normal host, spawn_calls == 1
+    assert d._host.mode == "normal" and d._host.spawn_calls == 1
+    d.stop()                                         # disarm (resident stays, just not listening)
+    d.start_lite()                                   # mode mismatch -> teardown + respawn lite
+    assert d._host.mode == "lite"                     # a NEW lite host is resident
+    assert d._host.spawn_calls == 1                   # the new host spawned once (fresh instance)
+    assert d._mode == "lite"
+
+
+def test_same_mode_arm_is_instant_no_reload():
+    """Re-arming the SAME mode while resident does NOT reload (instant, like a warm arm)."""
+    factory = _fake_host_factory(spawn_result=True, mode="lite")
+    d, fb = _make_lazy_daemon(host_factory=factory)
+    d.start_lite()                                   # spawn lite
+    host1 = d._host
+    d.stop()
+    d.start_lite()                                   # resident lite -> instant, no reload
+    assert d._host is host1                           # SAME host object (no teardown/respawn)
+    assert d._host.mode == "lite"
+
+
+def test_toggle_lite_while_listening_stops():
+    """toggle_lite while listening (any mode) disarms (graceful stop), like toggle."""
+    factory = _fake_host_factory(spawn_result=True)
+    d, fb = _make_lazy_daemon(host_factory=factory)
+    d.start()                                        # listening in normal
+    assert d.is_listening() is True
+    d.toggle_lite()                                  # listening -> disarm branch
+    assert d.is_listening() is False
+
+
+def test_status_snapshot_reports_mode():
+    """status_snapshot carries 'mode' (normal | lite) for voicectl status + state.json consumers."""
+    factory = _fake_host_factory(spawn_result=True)
+    d, fb = _make_lazy_daemon(host_factory=factory)
+    assert d.status_snapshot()["mode"] == "normal"   # default at boot
+    d.start_lite()
+    assert d.status_snapshot()["mode"] == "lite"
+
+
 def test_cold_arm_after_idle_unload_refires_loading_toast(monkeypatch):
     """After an idle-unload tears the host down, the next arm is cold AGAIN -> 'Loading…' refires.
 
@@ -2731,8 +2828,8 @@ def test_load_recorder_single_flight_one_build_under_concurrency(monkeypatch):
             release.wait(2.0)            # make the spawn slow so the 2nd caller arrives while _loading
             return super().spawn(timeout)
 
-    def factory(cfg, feedback, latency, on_final, on_partial, on_speech):
-        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech)
+    def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
+        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
 
     d, _fb = _make_lazy_daemon(host_factory=factory)
     results = []
@@ -2860,8 +2957,8 @@ def test_recorder_never_half_torn_down_during_race(monkeypatch):
             _time.sleep(0.05)
             return super().spawn(timeout)
 
-    def slow_factory(cfg, feedback, latency, on_final, on_partial, on_speech):
-        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech)
+    def slow_factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
+        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
 
     d = _idle_unloaded_loaded_daemon(
         recorder=_ControllableShutdownRecorder(started, release),
@@ -3016,8 +3113,8 @@ def test_concurrent_start_calls_build_recorder_once(monkeypatch):
             release.wait(2.0)            # slow the spawn so the 2nd start() arrives while _loading
             return super().spawn(timeout)
 
-    def factory(cfg, feedback, latency, on_final, on_partial, on_speech):
-        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech)
+    def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
+        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
 
     d, _fb = _make_lazy_daemon(host_factory=factory)
     errors = []

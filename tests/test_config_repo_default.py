@@ -34,6 +34,7 @@ def test_repo_config_toml_has_no_extra_keys():
         "asr": {
             "final_model",
             "realtime_model",
+            "lite_model",                 # PRD §4.2ter: lite-mode single model
             "language",
             "device",
             "post_speech_silence_duration",

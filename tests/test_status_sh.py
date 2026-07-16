@@ -84,6 +84,21 @@ def test_status_sh_listening_renders_partial_and_exits_zero(tmp_path):
     assert "hello world" in out, f"expected the partial in output, got {out!r}"
 
 
+def test_status_sh_lite_mode_prefixes_bolt(tmp_path):
+    """Lite mode (PRD §4.2ter) prefixes the status line with ⚡ so the mode is visible at a glance."""
+    _write_state(tmp_path, '{"listening": true, "mode": "lite", "partial": "quick quip"}')
+    result = _run_status(tmp_path)
+    assert result.returncode == 0, result.stderr
+    out = result.stdout.strip()
+    assert out.startswith("⚡🎤"), f"expected ⚡ prefix in lite mode, got {out!r}"
+    assert "quick quip" in out
+    # normal mode (or missing mode) does NOT get the bolt:
+    _write_state(tmp_path, '{"listening": true, "mode": "normal", "partial": "serious dictation"}')
+    out2 = _run_status(tmp_path).stdout.strip()
+    assert not out2.startswith("⚡"), f"normal mode must not get the bolt, got {out2!r}"
+    assert out2.startswith("🎤")
+
+
 def test_status_sh_not_listening_renders_empty_and_exits_zero(tmp_path):
     """Idle path: not listening -> empty stdout + exit 0 (the common idle case)."""
     _write_state(tmp_path, '{"listening": false, "partial": "leftover from before"}')

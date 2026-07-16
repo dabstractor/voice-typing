@@ -63,12 +63,20 @@ def test_format_status_multiline_has_partial_and_models():
     text, code = ctl.format_result("status", _STATUS_ON)
     assert code == 0
     assert "listening: on" in text
+    assert "mode: normal" in text                   # PRD §4.2ter: mode rendered (defaults normal)
     assert "phase: listening" in text                # P1.M2.T2.S1: lifecycle phase rendered
     assert "hello wor" in text                      # partial
     assert "distil-large-v3" in text and "small.en" in text   # models loaded
     assert "(loaded)" in text                        # P1.M2.T2.S1: models_loaded marker
     assert "cuda" in text and "float16" in text      # device + compute_type
     assert "12.345" in text                          # uptime
+
+
+def test_lite_commands_are_accepted_and_toggle_lite_renders_lite_mode():
+    """toggle-lite / start-lite are valid commands (PRD §4.2ter); status reflects mode: lite."""
+    assert set(("toggle-lite", "start-lite")).issubset(set(ctl._COMMANDS))
+    text, code = ctl.format_result("status", {**_STATUS_ON, "mode": "lite"})
+    assert code == 0 and "mode: lite" in text
 
 
 def test_format_status_shows_unloaded_state_and_load_error():

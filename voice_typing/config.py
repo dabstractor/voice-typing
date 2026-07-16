@@ -51,6 +51,8 @@ class AsrConfig:
 
     final_model: str = "distil-large-v3"
     realtime_model: str = "small.en"
+    lite_model: str = "small.en"            # PRD §4.2ter: the SINGLE model loaded in lite mode
+                                          # (used for both partials + finals; large model never loads)
     language: str = "en"
     device: str = "cuda"  # "cuda" | "cpu" (daemon may override via cuda_check at startup)
     post_speech_silence_duration: float = 0.6  # VAD: finalize after this much silence (seconds)
@@ -88,7 +90,7 @@ class AsrConfig:
                     f"got {type(_v).__name__}: {_v!r}"
                 )
         # String fields: must be str.
-        for _name in ("final_model", "realtime_model", "language", "device"):
+        for _name in ("final_model", "realtime_model", "lite_model", "language", "device"):
             _v = getattr(self, _name)
             if not isinstance(_v, str):
                 raise TypeError(
