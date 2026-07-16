@@ -1,0 +1,146 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Lite Mode — single-small-model quick dictation (PRD §4.2ter)",
+      "status": "Implementing",
+      "description": "Implement the Lite-mode delta end to end: a second arming mode (voicectl toggle-lite / SUPER+ALT+F) that loads ONLY the small realtime model (lite_model, default small.en) and uses it for BOTH partials and finals, so the large distil-large-v3 never loads (~half the VRAM, faster finals, lower accuracy). Mode switching costs one bounded ~1–3s reload (teardown + respawn of the recorder-host child). CONTEXT: the working tree is a MOVING TARGET — a concurrent process has landed ~95% of this feature (config lite_model, cfg_to_kwargs(lite=), _load_host(mode) mode-switch, start_lite/toggle_lite, control-socket dispatch, feedback set_mode/state mode, ctl commands, status.sh ⚡, hypr-binds SUPER+ALT+F, and most test reconciliation). Every subtask MUST re-verify the current tree before editing. Two CONFIRMED spec bugs remain unfixed at analysis time: (A) CPU-lite fallback yields small.en instead of the mandated tiny.en; (B) toggle_lite/toggle semantics deviate from delta §3.4 (they disarm on ANY armed press instead of mode-specific arming). See plan/004_607e9cca32b7/architecture/system_context.md for the full architecture + state map, and realtimestt_lite_mode_verification.md for the verified one-model fact. The graceful-stop drain is ALREADY IMPLEMENTED and out of scope.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Core lite mode: fix spec bugs + reconcile tests + verify orchestration",
+          "status": "Implementing",
+          "description": "Close the two confirmed spec bugs (CPU-lite tiny.en fallback; mode-specific toggle semantics), reconcile any remaining broken unit tests caused by the _load_host(mode) signature change, and verify/add unit-test coverage for the construction layer and daemon orchestration layer of lite mode.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Construction-layer CPU-fallback fix + test reconciliation",
+              "status": "Planned",
+              "description": "Fix BUG-A (the only confirmed functional gap): lite mode on the CPU-fallback path must use tiny.en, not small.en. Mirror the fix in the recorder-host child's device reporter. Add the kwargs×mode×force_cpu unit tests that pin the fix and the one-model invariant. Reconcile any remaining broken test factory closures caused by the mode= signature.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Fix CPU-lite-fallback model (small.en → tiny.en) in cfg_to_kwargs + recorder_host",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.3", "h2.3/h3.5", "h2.3/h3.6", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/004_607e9cca32b7/architecture/realtimestt_lite_mode_verification.md (the verified one-model fact) and architecture/system_context.md §3.2 BUG-A. The current code (voice_typing/daemon.py cfg_to_kwargs, ~line 181-184) has an `if lite:` branch that UNCONDITIONALLY sets resolved[\"final_model\"] = resolved[\"realtime_model\"] = cfg.asr.lite_model (\"small.en\"). cuda_check.CPU_FALLBACK (voice_typing/cuda_check.py:53) = {device:cpu, compute_type:int8, final_model:small.en, realtime_model:tiny.en}. Delta PRD §3.2 mandates: mode==lite + force_cpu → model = realtime_model_type = \"tiny.en\" (the CPU lite substitute, mirroring how normal CPU-fallback maps small.en→tiny.en).\n2. INPUT: cfg_to_kwargs(cfg, *, resolved=None, lite=False) (voice_typing/daemon.py). `resolved` is dict(cuda_check.CPU_FALLBACK) on the force_cpu path (set by _construct ~line 298), else the cuda_check resolution. RE-VERIFY the current branch state first (the working tree is a moving target; the bug may already be fixed).\n3. LOGIC: In the `if lite:` branch, when the supplied resolved dict indicates CPU (resolved[\"device\"] == \"cpu\"), use \"tiny.en\" for BOTH model fields instead of cfg.asr.lite_model. When CUDA (resolved[\"device\"] == \"cuda\"), keep cfg.asr.lite_model (\"small.en\") for both. Keep use_main_model_for_realtime=True (unchanged). The cleanest expression: `lite_model = \"tiny.en\" if resolved[\"device\"] == \"cpu\" else cfg.asr.lite_model`. Mirror the SAME device-aware downgrade in voice_typing/recorder_host.py _child_resolved_device (~line 686-688): in lite mode report tiny.en when force_cpu, else cfg.asr.lite_model, so status is accurate. Mock nothing (pure unit-testable functions; tests monkeypatch cuda_check).\n4. OUTPUT: cfg_to_kwargs(lite=True, force_cpu) → model == realtime_model_type == \"tiny.en\", device==cpu, compute_type==int8, use_main_model_for_realtime==True. cfg_to_kwargs(lite=True) on cuda → both == small.en. recorder_host._child_resolved_device(cfg, force_cpu=True, lite=True) → final_model == realtime_model == \"tiny.en\". Consumed by P1.M1.T1.S2 (tests) and by the real child via build_recorder.\n5. DOCS: [Mode A] Update the cfg_to_kwargs docstring's `lite` paragraph in voice_typing/daemon.py (note the CPU tiny.en downgrade) and the _child_resolved_device docstring in voice_typing/recorder_host.py. These ride WITH the work — do not create a separate docs subtask."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S2",
+                  "title": "Add kwargs×mode×force_cpu unit tests + reconcile broken test factory closures",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.3/h3.3", "h2.3/h3.5", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md §3.4 + §5. As of analysis time, `pytest tests/ --ignore=tests/test_feed_audio.py` had 3 remaining failures, all local test-defined `factory()` closures in tests/test_daemon.py that don't accept the new `mode=` kwarg passed by _load_host (~daemon.py:737): test_load_recorder_single_flight_one_build_under_concurrency, test_recorder_never_half_torn_down_during_race, test_concurrent_start_calls_build_recorder_once. RE-VERIFY the live failure list first (run the suite); a concurrent process may have already fixed these.\n2. INPUT: The fixed cfg_to_kwargs / _child_resolved_device from P1.M1.T1.S1. The existing test fakes in tests/test_daemon.py (_FakeHost accepts mode= already per the concurrent edits; local factory closures may not).\n3. LOGIC: (a) Fix any remaining broken local factory closures in tests/test_daemon.py: their `def factory(...)` / `def _factory(...)` closures must accept `mode=\"normal\"` and pass it through (or ignore it) so the daemon's `factory(..., mode=mode)` call works. (b) ADD lite kwargs unit tests to tests/test_daemon.py (or a dedicated module): assert cfg_to_kwargs(lite=True) on cuda → model == realtime_model_type == cfg.asr.lite_model, use_main_model_for_realtime == True, and ALL other kwargs equal to the normal-mode kwargs (device/compute_type/language/timing/_FIXED_KWARGS); cfg_to_kwargs(lite=False) unchanged (use_main_model_for_realtime == False); cfg_to_kwargs(lite=True, resolved=dict(CPU_FALLBACK)) → model == realtime_model_type == \"tiny.en\" (pins P1.M1.T1.S1's fix). (c) ADD a config test: tests/test_config.py asserts AsrConfig.lite_model default \"small.en\", parsed from TOML, rejected if non-string. Mock cuda_check.resolve_device_and_models in the kwargs tests to force cuda/cpu deterministically; the recorder class is faked (never import RealtimeSTT).\n4. OUTPUT: `.venv/bin/python -m pytest tests/test_daemon.py tests/test_config.py -q` → 0 failures, with the new lite-kwargs + lite-config tests passing. Consumed by P1.M2.T1 (T7) which exercises the real recorder.\n5. DOCS: none — no user-facing/config/API surface change beyond what P1.M1.T1.S1 documented. (test additions are implied work, §3.)"
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Daemon toggle-semantics reconciliation + mode-switch verification & tests",
+              "status": "Planned",
+              "description": "Resolve the toggle-semantics deviation (BUG-B): toggle_lite/toggle must be mode-specific per delta §3.4, not 'any armed press disarms'. Verify the mode-switch reload path (_load_host teardown-then-respawn), the set_mode/status propagation, the control-socket dispatch, the ctl rendering, and the status.sh prefix, adding unit tests where coverage is thin.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Reconcile toggle_lite/toggle to mode-specific arming (delta §3.4) + tests",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.3", "h2.3/h3.1", "h2.3/h3.11", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md §3.2 BUG-B. Current toggle_lite() (voice_typing/daemon.py ~1351) and toggle() (~1335) both gate on `self._listening.is_set()`: an armed press of EITHER key disarms. The current hypr-binds.conf header comment + toggle_lite docstring describe this deviating behavior ('Both keys STOP when pressed while already listening'). Delta PRD §3.4 'toggle-lite semantics (pin these down)' mandates MODE-SPECIFIC arming: toggle_lite disarms ONLY if currently armed-in-lite, otherwise arms in lite (so pressing F while armed-in-normal SWITCHES to lite — one reload); toggle disarms ONLY if armed-in-normal, otherwise arms in normal. RE-VERIFY current state first.\n2. INPUT: VoiceTypingDaemon (voice_typing/daemon.py); self._listening (threading.Event), self._mode (\"normal\"|\"lite\"), _load_host(mode), _arm(), _request_stop(), _disarm(). The mode-switch reload machinery in _load_host is already correct (do not touch it).\n3. LOGIC: Change the toggle condition from `disarmed = self._listening.is_set()` to a mode-aware check. For toggle(): if armed (listening) AND self._mode == \"normal\" → _request_stop() (disarm); else (idle, OR armed-in-lite) → _load_host(\"normal\") + _arm() (the _load_host mode-switch handles the lite→normal reload). For toggle_lite(): if armed AND self._mode == \"lite\" → _request_stop(); else → _load_host(\"lite\") + _arm(). Preserve the existing read-act split (read self._listening + self._mode under _lock, then act with _load_host OUTSIDE _lock — _load_host acquires _lock and would deadlock if nested). Update the toggle_lite/toggle docstrings AND the hypr-binds.conf header comment to describe the corrected mode-specific behavior ('pressing F while armed-in-normal switches to lite'). Add unit tests (tests/test_daemon.py, using the _FakeHost/_fake_host_factory seam): toggle_lite while armed-in-normal → arms-in-lite (exactly one reload, mode becomes lite); toggle_lite while armed-in-lite → disarms; toggle while armed-in-lite → arms-in-normal (one reload); toggle while armed-in-normal → disarms; each key while idle arms in its own mode. Use _FakeHost.mode to assert the resident mode after each action.\n4. OUTPUT: toggle_lite/toggle honor mode-specific arming per §3.4; the new unit tests pass; existing toggle/idle tests still pass. Consumed by P1.M1.T2.S2.\n5. DOCS: [Mode A] Update the toggle_lite + toggle docstrings in voice_typing/daemon.py and the hypr-binds.conf header comment (the 'switching modes' behavior description). Rides WITH the work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "Verify + test mode-switch reload, set_mode, status_snapshot mode, socket dispatch, ctl, status.sh",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.3/h3.3", "h2.3/h3.2", "h2.3/h3.1", "h2.3/h3.7", "h2.3/h3.9", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md §3.1 (DONE edit sites) + §5 (test matrix). These pieces are ALREADY implemented in the working tree: _load_host(mode) mode-switch (daemon.py ~678, detects resident-mode mismatch → _bounded_shutdown → respawn in requested mode, sets self._mode); _arm() calls self._feedback.set_mode(self._mode) (~972); status_snapshot()[\"mode\"] (~1480); ControlServer._dispatch handles start-lite/toggle-lite (~1808-1813); ctl _COMMANDS + format_result renders mode (~35,67,88); status.sh ⚡ prefix for .mode==\"lite\" (~40); feedback._state[\"mode\"] + set_mode (~99,145). This subtask VERIFIES they are correct and ADDS unit tests where coverage is thin. RE-VERIFY each before testing.\n2. INPUT: The reconciled toggle_lite/toggle from P1.M1.T2.S1. The implemented _load_host(mode), _arm (set_mode), status_snapshot, _dispatch, ctl, status.sh.\n3. LOGIC: ADD unit tests (tests/test_daemon.py, test_control_socket.py, test_voicectl.py, test_feedback.py, test_status_sh.py): (a) daemon: arming lite while resident-in-normal triggers exactly one teardown + one respawn in lite (use a fake host factory that records spawns/teardowns; assert _FakeHost spawned with mode=\"lite\", the old host.stop() called once); arming lite while resident-in-lite is instant (no new spawn); self._mode boot is \"normal\"; start_lite/toggle_lite set mode \"lite\" + arm; status_snapshot()[\"mode\"] reflects self._mode; idle-unload then arm-lite reloads in lite. (b) control socket: _dispatch({cmd:\"toggle-lite\"}) → daemon.toggle_lite + response carries \"mode\"; _dispatch({cmd:\"start-lite\"}) → daemon.start_lite + _arm_response; stop disarms either mode. (c) ctl: \"toggle-lite\"/\"start-lite\" accepted (not exit 64); format_result status block renders \"mode: <normal|lite>\"; exit codes unchanged (0/1/2/64). (d) feedback: _state includes \"mode\":\"normal\" default; set_mode writes it; snapshot includes mode. (e) status.sh: a state.json with mode==\"lite\" → output starts with ⚡; mode==\"normal\" → 🎤 (no ⚡); absent mode → 🎤 (default via .mode // \"normal\"). Mock the fakes; never import CUDA/RealtimeSTT.\n4. OUTPUT: `.venv/bin/python -m pytest tests/ -q --ignore=tests/test_feed_audio.py` → 0 failures with the new mode coverage passing. Consumed by P1.M2.T1 (T7 integration).\n5. DOCS: none — these verify already-documented behavior; test additions are implied work (§3)."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Lite-mode integration test, changeset-level documentation, and finalization",
+          "status": "Planned",
+          "description": "Add the T7 lite feed-audio integration test (the only test exercising the REAL RealtimeSTT recorder in lite mode — one-model resident, accuracy, latency, socket mode-switch). Then sweep the changeset-level documentation (README, ACCEPTANCE.md) and finalize: run the full suite + GPU lifecycle check and commit the whole delta.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "T7 — lite feed-audio integration test (one-model + accuracy + latency + socket mode-switch)",
+              "status": "Planned",
+              "description": "Add the T7 integration test from delta PRD §5 / PRD §6 T7. This is the only test that constructs the REAL lite recorder (use_microphone=False + feed_audio) and asserts the one-model invariant, lite accuracy ≥70%, latency materially lower than normal, and the voicectl mode-switch roundtrip over the socket.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "T7 lite feed-audio integration: one-model resident, accuracy≥70%, lower latency",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T1.S2", "P1.M1.T2.S1", "P1.M1.T2.S2"],
+                  "prd_selectors": ["h2.3/h3.3", "h2.3/h3.5", "h2.5", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/realtimestt_lite_mode_verification.md (verified: use_main_model_for_realtime=True skips the realtime engine → exactly ONE model loads). The existing normal-mode feed-audio test is tests/test_feed_audio.py (constructs build_recorder with use_microphone=False, feeds WAV chunks via recorder.feed_audio() in real-time pacing, collects partial + final callbacks). The test assets are tests/out/utt_simple.wav etc. (built by tests/make_test_audio.sh via espeak-ng). This is a CUDA/GPU integration test — it loads real models; it is SLOW and should be marked/import-gated so it does not run in the fast unit suite. RE-VERIFY whether a lite variant already exists in tests/test_feed_audio.py before adding.\n2. INPUT: build_recorder(cfg, feedback, latency, lite=True) (voice_typing/daemon.py) which produces a single-model recorder (model=realtime_model_type=lite_model, use_main_model_for_realtime=True). The test WAV tests/out/utt_simple.wav. The fuzzy-match helper from the existing test_feed_audio.py (≥token overlap, case/punct-insensitive).\n3. LOGIC: Add a lite variant to tests/test_feed_audio.py (e.g. test_lite_feed_audio_utt_simple): construct the lite recorder (build_recorder(..., lite=True), use_microphone=False), feed utt_simple.wav in real-time pacing, and assert: (a) ONE model resident — assert use_main_model_for_realtime=True reached the recorder kwargs (via cfg_to_kwargs(lite=True)); where feasible, compare a lite nvidia-smi VRAM snapshot ≈ half of a normal-mode run on the same utterance (in tests/test_idle_and_gpu.sh if cheap) and/or grep the child log for absence of a distil-large-v3 init line; (b) finals arrive over the normal clean→type→record path and fuzzy-accuracy ≥70% (lower bar than normal's 80%, since small.en is the final model); (c) final-typed latency is materially lower than normal mode on the same utterance (parse the 'voice-typing latency:' log line, total_ms). Then assert the socket mode-switch roundtrip (construct a VoiceTypingDaemon with a real/recording host OR drive voicectl): toggle-lite arms with mode:\"lite\" in the response; toggle-lite again disarms; a subsequent toggle reloads into mode:\"normal\" (exactly one reload); status reports the current mode. Mock: the typing backend (cap type_text), feedback (capture state). Do NOT mock the recorder (this is the real-model test).\n4. OUTPUT: A passing T7 that proves lite mode loads one model, types finals at ≥70% accuracy with materially lower latency, and the socket mode-switch roundtrip works. Consumed by P1.M2.T2 (docs reference T7) and P1.M2.T3 (final verify runs it).\n5. DOCS: [Mode A] If a new test idle/GPU script section is added for the VRAM comparison, document its purpose in a comment. Otherwise none."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "Sync changeset-level documentation (Mode B: README + ACCEPTANCE.md)",
+              "status": "Planned",
+              "description": "The final documentation sweep that spans the whole lite-mode changeset. Per SOW §5 Mode B: updates README.md (the feature overview that only makes sense once the whole change is in place) and cross-checks tests/ACCEPTANCE.md T7. Declares dependencies on every implementing subtask so it runs last among content work.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "README.md lite-mode sections + tests/ACCEPTANCE.md T7 cross-check",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T1.S2", "P1.M1.T2.S1", "P1.M1.T2.S2", "P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.3/h3.3", "h2.3/h3.6", "h2.3/h3.11", "h2.6", "h2.0"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md currently documents the normal-mode feature (install, hotkey SUPER+ALT+D, tmux status, config table, troubleshooting, CPU-only mode). The per-file doc-with-work (Mode A) edits for config.toml/config.py/daemon.py/recorder_host.py/feedback.py/status.sh/ctl.py/hypr-binds.conf ride with their implementing subtasks (P1.M1.*). This subtask does the CROSS-CUTTING overview sweep that only makes sense once the whole change is in place. RE-VERIFY what README already says about lite (a concurrent process may have started it).\n2. INPUT: The complete, tested lite-mode feature (all P1.M1.* + P1.M2.T1.S1 done). The actual config keys (asr.lite_model), commands (toggle-lite/start-lite), keybind (SUPER+ALT+F), and behavior (one model, ~half VRAM, faster finals, lower accuracy, one bounded reload to switch modes).\n3. LOGIC: Update README.md: (a) add lite_model to the config-tuning table under [asr]; (b) add a short 'Lite mode' subsection (what it is: single small model for low-latency snippets; voicectl toggle-lite / SUPER+ALT+F; ~half the VRAM + faster finals, lower accuracy; switching modes costs one ~1–3s reload; both modes honor the graceful stop); (c) extend the Hotkey section to list BOTH binds (SUPER+ALT+D normal, SUPER+ALT+F lite) with the mode-specific toggle behavior; (d) note lite in the Model-lifecycle section (~half VRAM when armed in lite, idle-unload tears down either mode). Then cross-check tests/ACCEPTANCE.md references T7 (add/confirm the lite-mode acceptance #10 line: toggle-lite arms in lite using only lite_model — large model never loads, ~half VRAM verified via nvidia-smi; toggle arms normal; switching costs one bounded reload; status + state.json report mode). Keep it concise — match the existing README's brevity.\n4. OUTPUT: README.md + tests/ACCEPTANCE.md accurately reflect lite mode with no drift from the implemented behavior. Consumed by P1.M2.T3 (commit includes these).\n5. DOCS: This IS the documentation task (Mode B). Do not create a further docs subtask."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T3",
+              "title": "Final full-suite verification, GPU lifecycle check, and git commit",
+              "status": "Planned",
+              "description": "The finalization gate: run the ENTIRE test suite (fast unit + T7 integration + the GPU lifecycle/idle scripts), verify the lite-mode acceptance criteria against real command output, then commit the whole delta to git on main with a sensible message.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T3.S1",
+                  "title": "Run full suite + GPU lifecycle + verify acceptance #10, then git commit",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M2.T1.S1", "P1.M2.T2.S1"],
+                  "prd_selectors": ["h2.5", "h2.6", "h2.3/h3.2", "h2.3/h3.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md §1 (drain out of scope) + §4 invariants. The project uses uv; always invoke .venv/bin/python and /home/dustin/.local/bin/uv with FULL paths (python3/pip/tmux are aliased in the interactive shell, PRD §2). The repo is on branch main; git identity is configured. tests/test_idle_and_gpu.sh asserts the lazy-load + idle-unload VRAM lifecycle via nvidia-smi (T6) — lite mode must not regress it. RE-VERIFY: `git status --porcelain` to see the exact uncommitted set before committing.\n2. INPUT: The complete, documented lite-mode feature (all prior subtasks done).\n3. LOGIC: (a) Run the FULL suite: `.venv/bin/python -m pytest tests/ -q` (including tests/test_feed_audio.py + T7) → MUST be all-pass. (b) Run the GPU lifecycle check (tests/test_idle_and_gpu.sh if it does not require interactive hardware beyond the GPU) and verify acceptance #10 against REAL output: voicectl toggle-lite → mode:lite in status, nvidia-smi shows the daemon PID with ~half the VRAM of a normal arm (the large model never loads); voicectl toggle (switch) → one bounded reload, mode:normal; status + state.json report mode; both modes honor the graceful drain (stop mid-utterance types the final). (c) Confirm no network access at runtime (models cached). (d) Stage ALL lite-mode changes (config.toml, hypr-binds.conf, voice_typing/*.py, tests/*.py, README.md, tests/ACCEPTANCE.md) and commit on main with a message like 'Add lite mode: single-small-model quick dictation (PRD §4.2ter)'. Do NOT modify PRD.md or .gitignore. Do NOT touch plan/001 (the prior plan).\n4. OUTPUT: A clean git commit on main containing the complete, tested, documented lite-mode feature; the full test suite green; acceptance #10 demonstrated by real command output.\n5. DOCS: none beyond the commit message (the README sweep is P1.M2.T2.S1)."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
