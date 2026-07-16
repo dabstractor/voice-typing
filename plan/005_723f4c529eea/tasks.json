@@ -1,0 +1,126 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Lite Mode Silence Gate — lite_post_speech_silence_duration (PRD §4.2ter, §4.5)",
+      "status": "Researching",
+      "description": "PRD commit a66b9d4 ('Refine Lite mode latency via silence gate') introduced the requirement for lite mode to use its own shorter post_speech_silence_duration, but the implementation was NEVER done. Currently cfg_to_kwargs(cfg, lite=True) uses the SAME post_speech_silence_duration (0.6s) for both normal and lite modes, meaning lite mode feels 'no faster than the big model' despite the small model being ~1.6x faster at transcription — the silence gate, not the model, is the perceived-latency bottleneck. This phase adds the lite_post_speech_silence_duration config field (default 0.5s), wires it into the lite-mode recorder kwargs, updates all affected tests, and syncs documentation. The change is small (1 new config field, 1 kwargs override, ~5 test updates, 2 doc files) but touches the config schema, daemon, tests, and docs — each of which has a drift-guard that will fail if any piece is missed.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Config Schema & Validation — add lite_post_speech_silence_duration to AsrConfig",
+          "status": "Planned",
+          "description": "Add the new config field to the AsrConfig dataclass in config.py with type validation, mirror it in config.toml with a self-documenting comment, and update the repo-default drift-guard test. These three changes are ATOMIC — the test_repo_config_toml_equals_defaults test asserts that parsing config.toml yields a config equal to the dataclass defaults, so config.py and config.toml MUST change in the same commit or the test fails. Also add dedicated config unit tests for the new field (default value, TOML round-trip, wrong-type rejection).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Add lite_post_speech_silence_duration to config schema (config.py + config.toml + drift guard)",
+              "status": "Planned",
+              "description": "Add the dataclass field with default 0.5, add __post_init__ numeric validation, add the corresponding config.toml line, and update the test_config_repo_default.py expected-key set. All in one atomic change.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Add lite_post_speech_silence_duration field to AsrConfig + config.toml + repo-default test (atomic)",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3", "h3.3", "h3.5", "h3.6", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_723f4c529eea/architecture/daemon_analysis.md for the exact line numbers and patterns. The config schema is defined in voice_typing/config.py class AsrConfig (line ~38). It currently has 9 fields. config.toml mirrors it EXACTLY (the drift-guard test test_repo_config_toml_equals_defaults asserts equality). The __post_init__ method (line ~58) validates numeric fields against bool/non-numeric types. The test_config_repo_default.py expected-key set (line ~45) lists the schema keys — currently 9 [asr] keys / 17 total.\n2. INPUT: No dependencies — this is the foundational change. The field does not yet exist anywhere in the codebase (grep -rn lite_post_speech_silence returns nothing).\n3. LOGIC: Make FOUR atomic edits (all must land in one commit or the drift-guard test fails):\n  (a) config.py — AsrConfig: Add `lite_post_speech_silence_duration: float = 0.5` AFTER the existing `post_speech_silence_duration` field (line ~53). The comment should reference PRD §4.2ter: 'lite-mode silence threshold — the silence gate, not the model, is the perceived-latency bottleneck; see §4.2ter'.\n  (b) config.py — AsrConfig.__post_init__: Add 'lite_post_speech_silence_duration' to the numeric-fields validation tuple (line ~67, the `for _name in (...)` loop that currently lists post_speech_silence_duration, realtime_processing_pause, auto_stop_idle_seconds, auto_unload_idle_seconds). Place it right after post_speech_silence_duration. This ensures `lite_post_speech_silence_duration = True` or `= \"0.5\"` raises TypeError at load time (mirroring the existing numeric-field validation).\n  (c) config.toml — [asr] section: Add `lite_post_speech_silence_duration = 0.5` AFTER the existing `post_speech_silence_duration = 0.6` line (line ~35). Comment: `# PRD §4.2ter: lite-mode silence threshold (the silence gate, not the model, is the perceived-latency bottleneck). 0.3 = razor-snappy (may split a brief pause); 0.6 = safe.`\n  (d) tests/test_config_repo_default.py — Update the expected key set: add `\"lite_post_speech_silence_duration\"` to the `expected[\"asr\"]` set (line ~46), and update the docstring from '17 schema keys' to '18 schema keys'.\n4. OUTPUT: AsrConfig.lite_post_speech_silence_duration is accessible (float, default 0.5). config.toml is in sync. The drift-guard test passes.\n5. DOCS: Mode A — the config.toml comment added in step (c) IS the user-facing documentation for this field. No separate docs subtask. The self-documenting comment pattern is established by every other field in config.toml."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Add config unit tests for lite_post_speech_silence_duration",
+              "status": "Planned",
+              "description": "Add dedicated unit tests mirroring the existing lite_model test pattern: default value assertion, TOML round-trip override, wrong-type TypeError rejection, and type check.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Add config unit tests for lite_post_speech_silence_duration (default, round-trip, wrong-type, type check)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.3", "h3.3", "h3.6", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_723f4c529eea/architecture/daemon_analysis.md §Test Impact Analysis. The existing config tests follow a consistent pattern — look at test_lite_model_round_trips_through_toml (line ~167) and test_lite_model_wrong_type_raises (line ~174) in tests/test_config.py. Also look at the existing post_speech_silence_duration tests around lines 44-47 and 82 and 150-151.\n2. INPUT: AsrConfig.lite_post_speech_silence_duration field from P1.M1.T1.S1.\n3. LOGIC: Add the following tests to tests/test_config.py (follow the existing file's naming + style):\n  (a) Default value: `cfg = VoiceTypingConfig()` then `assert cfg.asr.lite_post_speech_silence_duration == 0.5`. Add near the existing assertion for post_speech_silence_duration (line ~47) or as a new test function.\n  (b) TOML round-trip: `cfg = VoiceTypingConfig.from_toml({'asr': {'lite_post_speech_silence_duration': 0.3}})` then `assert cfg.asr.lite_post_speech_silence_duration == 0.3`. Mirror test_lite_model_round_trips_through_toml.\n  (c) Wrong-type rejection: For each bad value in [True, '0.5', None, [0.5]], assert VoiceTypingConfig.from_toml({'asr': {'lite_post_speech_silence_duration': bad}}) raises TypeError with match='lite_post_speech_silence_duration'. Mirror test_lite_model_wrong_type_raises.\n  (d) Type check: `assert isinstance(cfg.asr.lite_post_speech_silence_duration, float)` in the default-config test (mirrors line ~82 for post_speech_silence_duration).\n4. OUTPUT: All config tests pass, including the new ones. Run: `.venv/bin/python -m pytest tests/test_config.py tests/test_config_repo_default.py -v`.\n5. DOCS: none — no user-facing/config/API surface change beyond the field itself (already documented by config.toml in P1.M1.T1.S1)."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Daemon Wiring — override post_speech_silence_duration in lite mode cfg_to_kwargs",
+          "status": "Planned",
+          "description": "Update cfg_to_kwargs() in daemon.py so that when lite=True, the post_speech_silence_duration kwarg uses cfg.asr.lite_post_speech_silence_duration (0.5) instead of cfg.asr.post_speech_silence_duration (0.6). Update the existing regression test test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal to account for the now-differing silence duration, and add a dedicated assertion test. The recorder-host child propagates automatically (it calls build_recorder → cfg_to_kwargs) — no changes to recorder_host.py.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Override post_speech_silence_duration in cfg_to_kwargs for lite mode + update/create kwargs tests",
+              "status": "Planned",
+              "description": "One code change in cfg_to_kwargs + update one regression test + add one new test. The code change is a single line in the existing `if lite:` block.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "Override post_speech_silence_duration in cfg_to_kwargs lite path + update test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal + add test_cfg_to_kwargs_lite_uses_shorter_silence_duration",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.3", "h3.1", "h3.3", "h3.5", "h2.5", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/005_723f4c529eea/architecture/daemon_analysis.md for the exact code location and the required change. cfg_to_kwargs is at voice_typing/daemon.py ~line 158. The `if lite:` block at ~line 206 currently sets only `kwargs['use_main_model_for_realtime'] = True`. The common kwargs dict at ~line 195 sets `post_speech_silence_duration` from cfg.asr.post_speech_silence_duration for BOTH modes. The regression test test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal is at tests/test_daemon.py ~line 185 and has a `differing = {'model', 'realtime_model_type', 'use_main_model_for_realtime'}` set.\n2. INPUT: AsrConfig.lite_post_speech_silence_duration (float, default 0.5) from P1.M1.T1.S1.\n3. LOGIC: Three changes:\n  (a) daemon.py cfg_to_kwargs — In the existing `if lite:` block (~line 206), ADD one line after the existing `kwargs['use_main_model_for_realtime'] = True`:\n      `kwargs['post_speech_silence_duration'] = cfg.asr.lite_post_speech_silence_duration`\n      This OVERRIDES the common-block value (0.6) with the lite value (0.5). The common block sets it first, then the lite block overrides — mirroring the existing use_main_model_for_realtime override pattern (set to False in _FIXED_KWARGS, overridden to True in the lite block).\n      ALSO: Update the stale comment in _DRAIN_TIMEOUT_S (~line 94) which says 'Comfortably covers post_speech_silence_duration (~1.5s trailing silence...)' — the actual value is 0.6s (normal) / 0.5s (lite), not ~1.5s. Update to '~0.6s (normal) / ~0.5s (lite)' to prevent confusion. This is Mode A (the comment is in a file being edited and is directly about the value being changed).\n  (b) tests/test_daemon.py — Update test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal (~line 185):\n      - Add 'post_speech_silence_duration' to the `differing` set.\n      - Add assertions: `assert lite['post_speech_silence_duration'] == 0.5` and `assert normal['post_speech_silence_duration'] == 0.6`.\n      - Update the docstring to note that lite also differs in post_speech_silence_duration.\n  (c) tests/test_daemon.py — Add a new test test_cfg_to_kwargs_lite_uses_shorter_silence_duration:\n      - With default config: `kw = daemon.cfg_to_kwargs(cfg, lite=True)` → `assert kw['post_speech_silence_duration'] == 0.5`.\n      - With override: `cfg.asr.lite_post_speech_silence_duration = 0.3` → `kw = daemon.cfg_to_kwargs(cfg, lite=True)` → `assert kw['post_speech_silence_duration'] == 0.3`.\n      - Normal unaffected: `kw_n = daemon.cfg_to_kwargs(cfg)` → `assert kw_n['post_speech_silence_duration'] == 0.6`.\n      Use the existing `cfg` fixture and `_cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)` pattern from sibling tests.\n4. OUTPUT: lite mode kwargs carry post_speech_silence_duration=0.5 (or the configured lite value). Normal mode is unaffected. All daemon kwargs tests pass. Run: `.venv/bin/python -m pytest tests/test_daemon.py -k 'lite' -v`.\n5. DOCS: Mode A — the _DRAIN_TIMEOUT_S comment update in step (a). No separate docs subtask. The user-facing config field documentation is the config.toml comment from P1.M1.T1.S1."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Sync changeset-level documentation (Mode B — final task)",
+          "status": "Planned",
+          "description": "Update README.md and tests/ACCEPTANCE.md to reflect the new lite_post_speech_silence_duration config field and the lite-mode silence-gate latency optimization. These are cross-cutting changeset-level docs that only make sense once the config field (M1) and daemon wiring (M2) are both in place. Per SOW §5 Mode B, this is the final task with dependencies on all implementing subtasks.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Update README.md (Lite mode section + config tuning table) and tests/ACCEPTANCE.md (criterion #10) to document the lite_post_speech_silence_duration config field and the silence-gate latency optimization.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Update README.md — Lite mode section + config tuning table for lite_post_speech_silence_duration",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.3", "h3.3", "h3.6", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md has a 'Lite mode' section (~line 117) and a 'Configuration' tuning table (~line 158). The table currently lists post_speech_silence_duration (0.6) and lite_model (small.en) but NOT lite_post_speech_silence_duration. The Lite mode section currently says 'produces markedly faster finals' but does NOT mention that the speed comes from BOTH the smaller model AND the shorter silence gate — which is the key insight from PRD §4.2ter's latency note.\n2. INPUT: The implemented feature — lite mode now uses its own shorter post_speech_silence_duration (default 0.5s) from P1.M1.T1.S1 + P1.M2.T1.S1.\n3. LOGIC: Two edits to README.md:\n  (a) Config tuning table (~line 160): Add a new row AFTER the existing `asr.post_speech_silence_duration` row:\n      `| asr.lite_post_speech_silence_duration | 0.5 | lite-mode silence threshold — seconds of silence before a final in LITE mode. Lower is snappier (0.3 = razor-snappy, may split a brief pause; 0.6 = safe). The silence gate, not the model size, is the perceived-latency bottleneck — this is what makes lite FEEL instant. |`\n  (b) Lite mode section (~line 117-126): Add a sentence after the existing 'produces markedly faster finals, at lower accuracy' clause explaining the silence-gate optimization. Something like: 'Lite mode also uses its own shorter silence threshold (`lite_post_speech_silence_duration`, default 0.5 s vs 0.6 s) — the silence gate, not the model size, is the perceived-latency bottleneck, so shortening it is what makes lite feel instant rather than just transcribing slightly faster.'\n4. OUTPUT: README.md reflects the new config field and explains WHY lite feels faster (silence gate, not just model speed).\n5. DOCS: Mode B — this IS the changeset-level documentation sync for README.md."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S2",
+                  "title": "Update tests/ACCEPTANCE.md criterion #10 for lite_post_speech_silence_duration",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M2.T1.S1"],
+                  "prd_selectors": ["h2.3", "h3.3", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/ACCEPTANCE.md is the human-readable record of PRD §7 acceptance evidence. Criterion #10 (Lite mode) is at ~line 39. It currently does NOT mention lite_post_speech_silence_duration. The PRD §7 criterion #10 was updated in commit a66b9d4 to require: 'lite uses its own shorter post_speech_silence_duration (the silence gate is the perceived bottleneck — §4.2ter) so it is observably snappier end-to-end, not just faster at transcription'.\n2. INPUT: The implemented feature from P1.M1.T1.S1 + P1.M2.T1.S1. The PRD's updated acceptance criterion #10 text.\n3. LOGIC: Update criterion #10's Status and Evidence columns in tests/ACCEPTANCE.md:\n  (a) Status: Keep as 'PASS' (the feature is now implemented) or update from the previous status if it was 'partial'.\n  (b) Evidence: Add a note that lite mode now uses lite_post_speech_silence_duration=0.5 (config field + kwargs wired). Mention the unit test `test_cfg_to_kwargs_lite_uses_shorter_silence_duration` as evidence. The evidence should reference the PRD §4.2ter latency note: 'the silence gate, not the model, is the perceived-latency bottleneck'.\n  (c) Do NOT regenerate the full evidence block (that requires running test_idle_and_gpu.sh, which is a manual GPU integration test ~5-8 min). Just update the criterion #10 row text to reflect the new field.\n4. OUTPUT: ACCEPTANCE.md criterion #10 reflects the lite_post_speech_silence_duration implementation.\n5. DOCS: Mode B — this IS the changeset-level documentation sync for ACCEPTANCE.md."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
