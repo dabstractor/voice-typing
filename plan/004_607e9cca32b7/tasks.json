@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Core lite mode: fix spec bugs + reconcile tests + verify orchestration",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Close the two confirmed spec bugs (CPU-lite tiny.en fallback; mode-specific toggle semantics), reconcile any remaining broken unit tests caused by the _load_host(mode) signature change, and verify/add unit-test coverage for the construction layer and daemon orchestration layer of lite mode.",
           "tasks": [
             {
@@ -58,7 +58,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Daemon toggle-semantics reconciliation + mode-switch verification & tests",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Resolve the toggle-semantics deviation (BUG-B): toggle_lite/toggle must be mode-specific per delta §3.4, not 'any armed press disarms'. Verify the mode-switch reload path (_load_host teardown-then-respawn), the set_mode/status propagation, the control-socket dispatch, the ctl rendering, and the status.sh prefix, adding unit tests where coverage is thin.",
               "subtasks": [
                 {
@@ -80,7 +80,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Verify + test mode-switch reload, set_mode, status_snapshot mode, socket dispatch, ctl, status.sh",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1"
@@ -110,14 +110,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "T7 — lite feed-audio integration test (one-model + accuracy + latency + socket mode-switch)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add the T7 integration test from delta PRD §5 / PRD §6 T7. This is the only test that constructs the REAL lite recorder (use_microphone=False + feed_audio) and asserts the one-model invariant, lite accuracy ≥70%, latency materially lower than normal, and the voicectl mode-switch roundtrip over the socket.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "T7 lite feed-audio integration: one-model resident, accuracy≥70%, lower latency",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",

@@ -140,6 +140,24 @@ def test_dispatch_lite_commands_call_daemon(monkeypatch):
     assert d2.calls == ["toggle-lite"]
 
 
+def test_dispatch_status_response_carries_mode():
+    """P1.M1.T2.S2: the wire status response carries the daemon's 'mode' field.
+
+    The shared _StubDaemon.status_snapshot() omits 'mode' (and test_dispatch_status_has_all_keys
+    pins exactly 9 keys), so this uses a subclass that emits it — proving the
+    {'ok': True, **status_snapshot()} spread surfaces mode on the wire (the PRD §4.2 status-payload
+    contract). The subclass override is local to this test (no ripple to the shared stub).
+    """
+    class _ModeDaemon(_StubDaemon):
+        def status_snapshot(self):
+            return {**super().status_snapshot(), "mode": "lite"}
+
+    srv = daemon.ControlServer(_ModeDaemon())
+    r = srv._dispatch(json.dumps({"cmd": "status"}))
+    assert r["ok"] is True
+    assert r.get("mode") == "lite", f"status response missing 'mode': {r}"
+
+
 def test_dispatch_quit_calls_request_shutdown():
     d = _StubDaemon()
     daemon.ControlServer(d)._dispatch(json.dumps({"cmd": "quit"}))

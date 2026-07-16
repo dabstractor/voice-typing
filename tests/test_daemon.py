@@ -2829,6 +2829,53 @@ def test_status_snapshot_reports_mode():
     assert d.status_snapshot()["mode"] == "lite"
 
 
+def test_mode_switch_stops_outgoing_host():
+    """P1.M1.T2.S2: a normal->lite mode switch TEARS DOWN the outgoing resident host
+    (host.stop() called exactly once), not just respawns.
+
+    Pins the switch_mode teardown branch (daemon.py: resident-wrong-mode -> _bounded_shutdown ->
+    host.stop path). The existing test_mode_switch_normal_to_lite_reloads counts the NEW host's
+    spawns but never reads the OUTGOING host's stop_calls (the default _fake_host_factory drops the
+    old instance); this closes that gap. A regression that respawns but forgets to tear down the
+    old host would leak VRAM + leave a dangling child.
+    """
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    d.start()                                        # resident + armed in normal
+    assert len(spawns) == 1 and spawns[0].mode == "normal"
+    assert spawns[0].stop_calls == 0
+    d.start_lite()                                   # switch normal -> lite (teardown normal, spawn lite, arm)
+    assert len(spawns) == 2
+    assert spawns[1].mode == "lite" and d._mode == "lite" and d._host is spawns[1]
+    assert spawns[0].stop_calls == 1, (              # the OUTGOING normal host was torn down exactly once
+        f"mode switch did not stop the outgoing host (stop_calls={spawns[0].stop_calls})"
+    )
+    assert spawns[1].stop_calls == 0                 # the new lite host has not been stopped
+
+
+def test_start_lite_after_idle_unload_reloads_in_lite(monkeypatch):
+    """P1.M1.T2.S2: after idle-unload (no resident), start_lite() reloads in LITE mode (the lite
+    counterpart of test_cold_arm_after_idle_unload for normal).
+
+    Mirrors test_cold_arm_after_idle_unload_refires_loading_toast's idle-unload trigger verbatim
+    (the _idle_unload_watchdog only starts in run(), which the fast suite never calls; the tests
+    force the condition via the -9999.0 _disarmed_monotonic trick + _maybe_idle_unload()).
+    """
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    d.start_lite()                                   # load + arm lite
+    assert len(spawns) == 1 and spawns[0].mode == "lite" and d._mode == "lite"
+    d.stop()                                         # disarm -> _disarmed_monotonic stamped
+    # Force the idle-UNLOAD condition (the _idle_unload_watchdog thread only starts in run(),
+    # which these unit tests never call); mirror test_cold_arm_after_idle_unload's -9999.0 trick.
+    d._disarmed_monotonic = _time.monotonic() - 9999.0
+    d._maybe_idle_unload()
+    assert d._models_loaded is False and d._host is None   # host torn down -> next arm is cold again
+    d.start_lite()                                   # reload after idle-unload -> lite again
+    assert len(spawns) == 2
+    assert spawns[1].mode == "lite" and d._mode == "lite" and d._host is spawns[1]
+
+
 def test_cold_arm_after_idle_unload_refires_loading_toast(monkeypatch):
     """After an idle-unload tears the host down, the next arm is cold AGAIN -> 'Loading…' refires.
 
