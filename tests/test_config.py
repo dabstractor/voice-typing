@@ -45,6 +45,7 @@ def test_defaults_match_prd_4_5():
     assert cfg.asr.language == "en"
     assert cfg.asr.device == "cuda"
     assert cfg.asr.post_speech_silence_duration == 0.6
+    assert cfg.asr.lite_post_speech_silence_duration == 0.5  # PRD §4.2ter: lite-mode silence threshold (snugger than 0.6)
     assert cfg.asr.realtime_processing_pause == 0.15
     assert cfg.asr.auto_stop_idle_seconds == 30.0
     assert cfg.asr.auto_unload_idle_seconds == 1800.0  # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)
@@ -80,6 +81,7 @@ def test_field_types_are_tomllib_natural_types():
     """Defaults carry the Python types tomllib yields (float for 0.6, int, bool)."""
     cfg = VoiceTypingConfig()
     assert isinstance(cfg.asr.post_speech_silence_duration, float)  # 0.6, not int 0
+    assert isinstance(cfg.asr.lite_post_speech_silence_duration, float)  # 0.5, not int 0 (PRD §4.2ter)
     assert isinstance(cfg.asr.realtime_processing_pause, float)
     assert isinstance(cfg.filter.min_chars, int)
     assert isinstance(cfg.feedback.notify_ms, int)
@@ -176,6 +178,20 @@ def test_lite_model_wrong_type_raises():
     for bad in (123, 12.0, True, None, ["small.en"]):
         with pytest.raises(TypeError, match="lite_model"):
             VoiceTypingConfig.from_toml({"asr": {"lite_model": bad}})
+
+
+def test_lite_post_speech_silence_duration_round_trips_through_toml():
+    """[asr] lite_post_speech_silence_duration parses from TOML and overrides the default (PRD §4.2ter)."""
+    cfg = VoiceTypingConfig.from_toml({"asr": {"lite_post_speech_silence_duration": 0.3}})
+    assert cfg.asr.lite_post_speech_silence_duration == 0.3   # overridden (0.5 default -> 0.3)
+
+
+def test_lite_post_speech_silence_duration_wrong_type_raises():
+    """A non-numeric lite_post_speech_silence_duration is rejected at load (mirrors the
+    post_speech_silence_duration numeric guard; bool/str/None/list all raise TypeError)."""
+    for bad in [True, "0.5", None, [0.5]]:
+        with pytest.raises(TypeError, match="lite_post_speech_silence_duration"):
+            VoiceTypingConfig.from_toml({"asr": {"lite_post_speech_silence_duration": bad}})
 
 
 def test_none_for_float_field_raises():

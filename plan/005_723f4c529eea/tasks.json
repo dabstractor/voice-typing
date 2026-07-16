@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Config Schema & Validation — add lite_post_speech_silence_duration to AsrConfig",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Add the new config field to the AsrConfig dataclass in config.py with type validation, mirror it in config.toml with a self-documenting comment, and update the repo-default drift-guard test. These three changes are ATOMIC — the test_repo_config_toml_equals_defaults test asserts that parsing config.toml yields a config equal to the dataclass defaults, so config.py and config.toml MUST change in the same commit or the test fails. Also add dedicated config unit tests for the new field (default value, TOML round-trip, wrong-type rejection).",
           "tasks": [
             {
@@ -43,14 +43,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Add config unit tests for lite_post_speech_silence_duration",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add dedicated unit tests mirroring the existing lite_model test pattern: default value assertion, TOML round-trip override, wrong-type TypeError rejection, and type check.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Add config unit tests for lite_post_speech_silence_duration (default, round-trip, wrong-type, type check)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
