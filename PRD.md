@@ -165,7 +165,7 @@ A second arming mode for short, speed-critical snippets (URLs, shell commands, s
 - Arm in mode X while unloaded → spawn in mode X (same as a session's first arm).
 Idle-unload (§4.2bis) tears down whichever mode is resident; the next arm reloads in whatever mode that arm requests. The graceful drain (§4.2 #2) and idle auto-stop (§4.5) apply identically in lite mode.
 
-**Commands / keybind:** `voicectl toggle-lite` / `voicectl start-lite` arm in lite mode (a clean toggle independent of the normal toggle, so each keybind is unambiguous); `voicectl toggle` / `start` arm in normal mode; `voicectl stop` disarms either. A second Hyprland bind (§4.10), e.g. `SUPER ALT, F` (fast), runs `voicectl toggle-lite`.
+**Commands / keybind:** `voicectl toggle-lite` / `voicectl start-lite` arm in lite mode (a clean toggle independent of the normal toggle, so each keybind is unambiguous); `voicectl toggle` / `start` arm in normal mode; `voicectl stop` disarms either. Two Hyprland binds (§4.10): `Ctrl+Alt+Super+D` → `toggle` (big/normal model) and `Alt+Super+D` → `toggle-lite` (little/lite model).
 
 **State / status:** `state.json` gains `"mode": "normal" | "lite"` (written on every arm/disarm alongside the existing fields); `voicectl status` reports `mode:`. The tmux status line prefixes lite with `⚡` so the user can see at a glance which mode is armed. Start/stop toasts stay `"Recording"` / `"Recording Stopped"` in either mode (the keybind itself disambiguates); finals still toast `✔ <text>` per `notify_on_final`.
 
@@ -302,10 +302,10 @@ WantedBy=default.target
 
 Hyprland keybinding: append to nothing — instead create `hypr-binds.conf` in the repo containing
 ```
-bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle
-bind = SUPER ALT, F, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle-lite
+bind = CTRL SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle
+bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle-lite
 ```
-(`SUPER ALT, F` = "fast" → lite mode, §4.2ter.) Print an instruction to `source` it from `~/.config/hypr/hyprland.conf`. Do NOT modify the user's Hyprland config automatically. (Richer overlay UI is out of scope; state file + tmux status is the UI for now.)
+(`Ctrl+Alt+Super+D` = big/normal model; `Alt+Super+D` = little/lite model, §4.2ter.) Print an instruction to `source` it from `~/.config/hypr/hyprland.conf`. Do NOT modify the user's Hyprland config automatically. (Richer overlay UI is out of scope; state file + tmux status is the UI for now.)
 
 ---
 

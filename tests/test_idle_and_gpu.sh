@@ -572,6 +572,100 @@ fi
 # offline (not just that the daemon CAN run offline).
 echo "[PASS] criterion 8 (no network): daemon.log has ZERO 'HTTP Request: GET https://huggingface.co' lines (offline via launch_daemon.sh, not a test pre-set)"
 
+# ===================== T7 (PRD §4.2ter/§6 + acceptance #10): lite mode-switch roundtrip =====================
+# Drives the REAL daemon's mode-switch via voicectl: toggle-lite (normal->lite reload) -> disarm ->
+# toggle (lite->normal reload) -> status. Complements P1.M1.T2.S2's UNIT mode-switch tests (mocked
+# host) by proving the REAL reload + status mode end-to-end. Optional VRAM: lite-armed <
+# normal-armed (small.en only vs distil-large-v3+small.en). Placed LAST in Run 1 so the
+# normal->lite/lite->normal reloads do NOT corrupt the earlier T6(a/b/c) VRAM assertions
+# (CRITICAL #6 — the reload tears down + respawns the resident host, changing VRAM attribution).
+#   1. snapshot normal-armed VRAM (re-arm normal first if the mic was disarmed by auto-stop/T6(c)).
+#   2. voicectl toggle-lite  -> POLL status until 'mode: lite' (the normal->lite reload; ~1-3s).
+#      (optional) snapshot lite-armed VRAM; assert lite_total < normal_total (≈half; best-effort).
+#   3. voicectl toggle-lite  -> disarm (listening: off; mode stays lite).
+#   4. voicectl toggle       -> POLL status until 'mode: normal' (the lite->normal reload).
+#   5. voicectl status       -> assert 'mode: normal'.
+T7_OK=0   # T7 (lite mode-switch + VRAM) failures
+# --- 1. re-arm NORMAL + snapshot normal-armed VRAM (T6(c) left the mic disarmed+resident; arm it so
+# we measure the normal-armed VRAM on the SAME resident host the reloads will swap). The first arm
+# is ~1-3s on a cold resident set; subsequent resident arms reply in ms.
+voicectl start >/dev/null || die "T7: voicectl start (normal re-arm) failed"
+if ! wait_vram_present "$DAEMON_PID" 15; then
+  echo "[FAIL] T7: normal-armed tree not PRESENT within 15s (cannot snapshot baseline VRAM)"
+  T7_OK=1
+fi
+T7_NORMAL_VRAM="$(vram_tree_state "$DAEMON_PID")"
+T7_NORMAL_TOTAL="${T7_NORMAL_VRAM%% *}"
+echo "T7 baseline: normal-armed VRAM total=${T7_NORMAL_TOTAL} MiB [$T7_NORMAL_VRAM]"
+
+# --- 2. voicectl toggle-lite -> POLL status until 'mode: lite' (the normal->lite reload; ~1-3s).
+voicectl toggle-lite >/dev/null || die "T7: voicectl toggle-lite (normal->lite) failed"
+T7_LITE_MODE_OK=0
+for _ in $(seq 1 60); do           # 60 x 0.5s = 30s ceiling for the reload + status settle
+  if "$VOICECTL" status 2>/dev/null | grep -q '^mode: lite'; then
+    T7_LITE_MODE_OK=1; break
+  fi
+  kill -0 "$DAEMON_PID" 2>/dev/null || break
+  sleep 0.5
+done
+if [ "$T7_LITE_MODE_OK" = 1 ]; then
+  echo "[PASS] T7 mode-switch: toggle-lite -> mode: lite"
+else
+  echo "[FAIL] T7 mode-switch: toggle-lite did NOT reach 'mode: lite' within 30s"
+  "$VOICECTL" status 2>/dev/null | grep -E '^mode:|^listening:|^models:' | sed 's/^/    /' || true
+  T7_OK=1
+fi
+# (optional) snapshot lite-armed VRAM; assert lite_total < normal_total (≈half; best-effort <).
+T7_LITE_VRAM="$(vram_tree_state "$DAEMON_PID")"
+T7_LITE_TOTAL="${T7_LITE_VRAM%% *}"
+echo "T7 lite-armed VRAM total=${T7_LITE_TOTAL} MiB [$T7_LITE_VRAM]"
+if awk -v l="$T7_LITE_TOTAL" -v n="$T7_NORMAL_TOTAL" 'BEGIN{ exit !(l+0 < n+0) }'; then
+  echo "[PASS] T7 VRAM≈half: lite ${T7_LITE_TOTAL} MiB < normal ${T7_NORMAL_TOTAL} MiB (best-effort <)"
+else
+  echo "[WARN] T7 VRAM≈half: lite ${T7_LITE_TOTAL} MiB NOT < normal ${T7_NORMAL_TOTAL} MiB (best-effort; not fatal)"
+fi
+
+# --- 3. voicectl toggle-lite -> disarm (listening: off; mode stays lite). A second toggle-lite on
+# an already-armed lite daemon disarms it (mirrors the normal toggle's idempotent on/off).
+voicectl toggle-lite >/dev/null || die "T7: voicectl toggle-lite (disarm) failed"
+if "$VOICECTL" status 2>/dev/null | grep -q '^listening: off'; then
+  echo "[PASS] T7 disarm: second toggle-lite -> listening: off (mode still lite)"
+else
+  echo "[FAIL] T7 disarm: second toggle-lite did NOT disarm (expected 'listening: off')"
+  "$VOICECTL" status 2>/dev/null | grep -E '^mode:|^listening:' | sed 's/^/    /' || true
+  T7_OK=1
+fi
+
+# --- 4. voicectl toggle -> POLL status until 'mode: normal' (the lite->normal reload; ONE reload).
+voicectl toggle >/dev/null || die "T7: voicectl toggle (lite->normal reload) failed"
+T7_NORMAL_MODE_OK=0
+for _ in $(seq 1 60); do           # 60 x 0.5s = 30s ceiling for the reload + status settle
+  if "$VOICECTL" status 2>/dev/null | grep -q '^mode: normal'; then
+    T7_NORMAL_MODE_OK=1; break
+  fi
+  kill -0 "$DAEMON_PID" 2>/dev/null || break
+  sleep 0.5
+done
+if [ "$T7_NORMAL_MODE_OK" = 1 ]; then
+  echo "[PASS] T7 mode-switch: toggle -> mode: normal (one bounded reload)"
+else
+  echo "[FAIL] T7 mode-switch: toggle did NOT reach 'mode: normal' within 30s"
+  "$VOICECTL" status 2>/dev/null | grep -E '^mode:|^listening:' | sed 's/^/    /' || true
+  T7_OK=1
+fi
+
+# --- 5. voicectl status -> assert 'mode: normal' (final confirmation).
+T7_STATUS="$("$VOICECTL" status 2>/dev/null || true)"
+echo "voicectl status (T7 final):"; echo "$T7_STATUS" | grep -E '^mode:|^listening:' | sed 's/^/  /' || true
+if echo "$T7_STATUS" | grep -q '^mode: normal'; then
+  echo "[PASS] T7 status: mode: normal (roundtrip complete)"
+else
+  echo "[FAIL] T7 status: final mode is NOT 'normal'"
+  T7_OK=1
+fi
+# Disarm so the subsequent clean quit is a clean listening:off state.
+voicectl stop >/dev/null 2>&1 || true
+
 # Clean quit of run 1 before run 2 (the default-config daemon; T4 + T6 a/b/c are done).
 stop_daemon_run
 echo "run 1 daemon stopped cleanly"
@@ -658,6 +752,8 @@ echo "T6 (d) run2 boot (absent):   $T6D_BOOT_OUT"
 echo "T6 (d) active at stop:       $T6D_ACTIVE_BEFORE"
 echo "T6 (d) after idle-unload:    $T6D_GONE_OUT"
 echo "T6 (d) after re-arm reload:  $T6D_RELOAD_OUT"
+echo "T7 normal-armed VRAM (MiB):   $T7_NORMAL_VRAM"
+echo "T7 lite-armed VRAM (MiB):     $T7_LITE_VRAM"
 echo "voicectl_status (run 1 post-run):"
 while IFS= read -r _line; do echo "  $_line"; done <<EOF
 $STATUS_RUN
@@ -669,12 +765,13 @@ echo "offline_env: via launch_daemon.sh exports (HF_HUB_OFFLINE=1 TRANSFORMERS_O
 echo "=== END ACCEPTANCE EVIDENCE ==="
 
 # --- result ---
-if [ "$IDLE_OK" = 0 ] && [ "$T6_OK" = 0 ]; then
-  echo "=== IDLE+GPU PASS (criteria 5, 6, 8; T6 a/b/c/d lifecycle) ==="
+if [ "$IDLE_OK" = 0 ] && [ "$T6_OK" = 0 ] && [ "$T7_OK" = 0 ]; then
+  echo "=== IDLE+GPU PASS (criteria 5, 6, 8; T6 a/b/c/d lifecycle; T7 lite mode-switch) ==="
   exit 0
 else
   [ "$IDLE_OK" = 0 ] || echo "=== T4/criterion-5 FAIL ==="
   [ "$T6_OK" = 0 ]   || echo "=== T6 FAIL (see [FAIL] T6 ... lines above) ==="
+  [ "$T7_OK" = 0 ]   || echo "=== T7 FAIL (see [FAIL] T7 ... lines above) ==="
   echo "daemon logs: $RUN1_LOG ; $RUN2_LOG"
   echo "--- run1 daemon.log tail ---"; tail -n 30 "$RUN1_LOG" 2>/dev/null || true
   echo "--- run2 daemon.log tail ---"; tail -n 30 "$RUN2_LOG" 2>/dev/null || true
