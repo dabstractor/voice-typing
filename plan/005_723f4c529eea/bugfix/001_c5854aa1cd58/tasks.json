@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Lite-mode documentation defect remediation",
-      "status": "Ready",
+      "status": "Planned",
       "description": "Remediate a coherent set of 4 documentation defects (1 Major, 3 Minor) where lite-mode user-facing surfaces (install.sh onboarding output, config.toml comment, voicectl CLI help text, daemon.py docstring) contradict the PRD keybind/command spec (§4.8 lists 7 commands; §4.10 pins keybinds to Ctrl+Alt+Super+D=normal and Alt+Super+D=lite) and contradict each other. No core functionality is broken — all 363 unit/integration tests pass and all lite commands work correctly. These are stale docs/help/comments that were not synced when lite mode was added (commit 1b91154). The silence-gate feature itself (PRD §4.2ter/§4.5) is already correct and complete.",
       "milestones": [
         {
@@ -18,18 +18,23 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Fix install.sh onboarding usage line and keybind hint (Issue 1 — Major)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "The first thing every user sees after ./install.sh — lines 178-179 — lists only 5 of 7 commands and states a factually wrong keybind mapping (says SUPER+ALT+D -> toggle, but that bind is toggle-lite). Fix both the usage line (add toggle-lite|start-lite) and the bind hint (Ctrl+Alt+Super+D -> toggle, Alt+Super+D -> toggle-lite).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S1",
                   "title": "Correct the usage line to list all 7 commands and fix the bind hint to the correct keybinds",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.0", "h2.2", "h3.0", "h2.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: install.sh:178-179 (confirmed in plan/.../architecture/system_context.md). The canonical command set is ctl.py:35 _COMMANDS = (\"toggle\", \"start\", \"stop\", \"status\", \"quit\", \"toggle-lite\", \"start-lite\"). The canonical keybinds are hypr-binds.conf:42,44: CTRL SUPER ALT,D -> voicectl toggle (NORMAL); SUPER ALT,D -> voicectl toggle-lite (LITE). Both binds use key D, never F.\n2. INPUT: No code dependencies — install.sh is a standalone bash script. Read install.sh lines 163-190 for the full [7/7] output block context.\n3. LOGIC: Implement PRD §4.8 (7 commands) + §4.10 (correct keybinds). Two edits in install.sh:\n   (a) Line 178 — change `echo \"usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|quit\"` to include all 7 commands: append `|toggle-lite|start-lite`.\n   (b) Line 179 — change `echo \"          (bind SUPER+ALT+D -> voicectl toggle; see the Hyprland note below)\"` to correctly state BOTH binds, e.g. `echo \"          (bind Ctrl+Alt+Super+D -> voicectl toggle;  Alt+Super+D -> voicectl toggle-lite; see the Hyprland note below)\"`.\n   TDD: Write a test (in tests/test_systemd_unit.py or a new test_install_sh.py) that greps install.sh source to assert the usage line contains \"toggle-lite\" and \"start-lite\", and that the bind hint contains \"Ctrl+Alt+Super+D\" and does NOT claim SUPER+ALT+D maps to toggle. Pattern: read install.sh as text, assert substrings. Then implement the fix.\n   MOCKING: No external services — pure static text validation of the install.sh file.\n4. OUTPUT: install.sh [7/7] block prints 7 commands and correct keybinds. Test passes.\n5. DOCS: [Mode A] install.sh stdout IS the user-facing install/usage quick-start (per header comment lines 21-22). The fix IS the doc update — no separate docs subtask for this surface."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: install.sh:178-179 (confirmed in plan/.../architecture/system_context.md). The canonical command set is ctl.py:35 _COMMANDS = (\"toggle\", \"start\", \"stop\", \"status\", \"quit\", \"toggle-lite\", \"start-lite\"). The canonical keybinds are hypr-binds.conf:42,44: CTRL SUPER ALT,D -> voicectl toggle (NORMAL); SUPER ALT,D -> voicectl toggle-lite (LITE). Both binds use key D, never F.\n2. INPUT: No code dependencies — install.sh is a standalone bash script. Read install.sh lines 163-190 for the full [7/7] output block context.\n3. LOGIC: Implement PRD §4.8 (7 commands) + §4.10 (correct keybinds). Two edits in install.sh:\n   (a) Line 178 — change `echo \"usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|quit\"` to include all 7 commands: append `|toggle-lite|start-lite`.\n   (b) Line 179 — change `echo \"          (bind SUPER+ALT+D -> voicectl toggle; see the Hyprland note below)\"` to correctly state BOTH binds, e.g. `echo \"          (bind Ctrl+Alt+Super+D -> voicectl toggle;  Alt+Super+D -> voicectl toggle-lite; see the Hyprland note below)\"`.\n   TDD: Write a test (in tests/test_systemd_unit.py or a new test_install_sh.py) that greps install.sh source to assert the usage line contains \"toggle-lite\" and \"start-lite\", and that the bind hint contains \"Ctrl+Alt+Super+D\" and does NOT claim SUPER+ALT+D maps to toggle. Pattern: read install.sh as text, assert substrings. Then implement the fix.\n   MOCKING: No external services — pure static text validation of the install.sh file.\n4. OUTPUT: install.sh [7/7] block prints 7 commands and correct keybinds. Test passes.\n5. DOCS: [Mode A] install.sh stdout IS the user-facing install/usage quick-start (per header comment lines 21-22). The fix IS the doc update — no separate docs subtask for this surface.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.2",
+                    "h3.0",
+                    "h2.4"
+                  ]
                 }
               ]
             },
@@ -37,18 +42,22 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Fix config.toml lite_model keybind comment (Issue 2 — Minor)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "config.toml:34 documents the wrong lite-mode keybind letter — says SUPER+ALT+F (key F) instead of SUPER+ALT+D (key D). A user reading the config to learn the lite hotkey would press F and nothing would happen.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Correct SUPER+ALT+F → SUPER+ALT+D in the lite_model comment",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
-                  "prd_selectors": ["h2.0", "h2.3", "h3.1"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: config.toml:34 (confirmed in plan/.../architecture/system_context.md). The lite_model comment says `(`voicectl toggle-lite` / SUPER+ALT+F)` — the F is wrong. The correct keybind is SUPER+ALT+D (key D), matching hypr-binds.conf:44 `bind = SUPER ALT, D, exec, .../voicectl toggle-lite`.\n2. INPUT: No code dependencies. Read config.toml lines 30-40 for the [asr] section context.\n3. LOGIC: Implement PRD §4.10. One edit in config.toml line 34: change `SUPER+ALT+F` to `SUPER+ALT+D` within the lite_model comment. Keep all surrounding comment text intact.\n   TDD: Write a test (in tests/test_config_repo_default.py) that reads config.toml as text and asserts the lite_model comment line contains `SUPER+ALT+D` (not `SUPER+ALT+F`). Pattern: open config.toml, find the lite_model line, assert the keybind substring. Then implement the fix.\n   MOCKING: No external services — pure static text validation.\n4. OUTPUT: config.toml lite_model comment references the correct key D.\n5. DOCS: [Mode A] config.toml is user-facing configuration documentation. The fix IS the doc update — no separate docs subtask."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: config.toml:34 (confirmed in plan/.../architecture/system_context.md). The lite_model comment says `(`voicectl toggle-lite` / SUPER+ALT+F)` — the F is wrong. The correct keybind is SUPER+ALT+D (key D), matching hypr-binds.conf:44 `bind = SUPER ALT, D, exec, .../voicectl toggle-lite`.\n2. INPUT: No code dependencies. Read config.toml lines 30-40 for the [asr] section context.\n3. LOGIC: Implement PRD §4.10. One edit in config.toml line 34: change `SUPER+ALT+F` to `SUPER+ALT+D` within the lite_model comment. Keep all surrounding comment text intact.\n   TDD: Write a test (in tests/test_config_repo_default.py) that reads config.toml as text and asserts the lite_model comment line contains `SUPER+ALT+D` (not `SUPER+ALT+F`). Pattern: open config.toml, find the lite_model line, assert the keybind substring. Then implement the fix.\n   MOCKING: No external services — pure static text validation.\n4. OUTPUT: config.toml lite_model comment references the correct key D.\n5. DOCS: [Mode A] config.toml is user-facing configuration documentation. The fix IS the doc update — no separate docs subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.1"
+                  ]
                 }
               ]
             },
@@ -66,8 +75,13 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.0", "h2.3", "h3.2", "h2.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/ctl.py (confirmed in plan/.../architecture/system_context.md). The canonical command set is _COMMANDS (line 35) = 7 commands. Three stale surfaces omit toggle-lite/start-lite:\n   (a) Module docstring line 20: `Usage:  voicectl <toggle|start|stop|status|quit>` — AND the subcommand block (lines 14-18) only documents 5 subcommands.\n   (b) argparse epilog line 156: `\"subcommands: toggle, start, stop, status, quit  (see the project README for the full usage table)\"`.\n   (c) Positional `cmd` help line 161: `help=\"toggle | start | stop | status | quit\"`.\n   The no-arg error path (main() lines 177-181) ALREADY correctly lists all 7 via _COMMANDS — use it as the consistency reference.\n2. INPUT: No code dependencies — all edits are in voice_typing/ctl.py.\n3. LOGIC: Implement PRD §4.8 (7 commands). Four edits in ctl.py:\n   (a) Module docstring line 20: append `|toggle-lite|start-lite` to the Usage line.\n   (b) Module docstring subcommand block (after line 18): add two lines documenting toggle-lite and start-lite (e.g. `toggle-lite  arm/disarm in LITE mode (single small model — PRD §4.2ter)` and `start-lite   arm in LITE mode (start listening with the small model only)`).\n   (c) Epilog line 156: append `, toggle-lite, start-lite` to the subcommands list.\n   (d) Positional help line 161: append ` | toggle-lite | start-lite`.\n   TDD: Write a test in tests/test_voicectl.py that asserts ALL 7 commands appear in each help surface. Approach: build the parser via ctl._build_parser(), format its help via parser.format_help(), assert all 7 command names (including toggle-lite, start-lite) appear in the help text. Also assert ctl.__doc__ (module docstring) contains toggle-lite. Then implement the fix.\n   MOCKING: No external services — argparse formatting is pure stdlib.\n4. OUTPUT: voicectl --help and the module docstring list all 7 commands consistently.\n5. DOCS: [Mode A] ctl.py docstring/epilog/help is the user-facing CLI surface. The fix IS the doc update — no separate docs subtask."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/ctl.py (confirmed in plan/.../architecture/system_context.md). The canonical command set is _COMMANDS (line 35) = 7 commands. Three stale surfaces omit toggle-lite/start-lite:\n   (a) Module docstring line 20: `Usage:  voicectl <toggle|start|stop|status|quit>` — AND the subcommand block (lines 14-18) only documents 5 subcommands.\n   (b) argparse epilog line 156: `\"subcommands: toggle, start, stop, status, quit  (see the project README for the full usage table)\"`.\n   (c) Positional `cmd` help line 161: `help=\"toggle | start | stop | status | quit\"`.\n   The no-arg error path (main() lines 177-181) ALREADY correctly lists all 7 via _COMMANDS — use it as the consistency reference.\n2. INPUT: No code dependencies — all edits are in voice_typing/ctl.py.\n3. LOGIC: Implement PRD §4.8 (7 commands). Four edits in ctl.py:\n   (a) Module docstring line 20: append `|toggle-lite|start-lite` to the Usage line.\n   (b) Module docstring subcommand block (after line 18): add two lines documenting toggle-lite and start-lite (e.g. `toggle-lite  arm/disarm in LITE mode (single small model — PRD §4.2ter)` and `start-lite   arm in LITE mode (start listening with the small model only)`).\n   (c) Epilog line 156: append `, toggle-lite, start-lite` to the subcommands list.\n   (d) Positional help line 161: append ` | toggle-lite | start-lite`.\n   TDD: Write a test in tests/test_voicectl.py that asserts ALL 7 commands appear in each help surface. Approach: build the parser via ctl._build_parser(), format its help via parser.format_help(), assert all 7 command names (including toggle-lite, start-lite) appear in the help text. Also assert ctl.__doc__ (module docstring) contains toggle-lite. Then implement the fix.\n   MOCKING: No external services — argparse formatting is pure stdlib.\n4. OUTPUT: voicectl --help and the module docstring list all 7 commands consistently.\n5. DOCS: [Mode A] ctl.py docstring/epilog/help is the user-facing CLI surface. The fix IS the doc update — no separate docs subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.2",
+                    "h2.4"
+                  ]
                 }
               ]
             },
@@ -85,8 +99,12 @@
                   "status": "Planned",
                   "story_points": 0.5,
                   "dependencies": [],
-                  "prd_selectors": ["h2.0", "h2.3", "h3.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/daemon.py:1410-1411 (confirmed in plan/.../architecture/system_context.md). The toggle_lite() docstring has 3 occurrences of 'pressing F' — all should be 'pressing D'. The sibling toggle() docstring (lines 1377-1378) correctly uses 'pressing D' as the reference pattern. The lite keybind is Alt+Super+D (key D, per hypr-binds.conf:44), never F.\n2. INPUT: No code dependencies. Read daemon.py lines 1375-1420 for both toggle() and toggle_lite() docstring context.\n3. LOGIC: Implement PRD §4.10. Three replacements in daemon.py toggle_lite() docstring (lines 1410-1411):\n   - 'pressing F while idle' → 'pressing D while idle'\n   - 'pressing F while armed-in-lite' → 'pressing D while armed-in-lite'\n   - 'pressing F while armed-in NORMAL' → 'pressing D while armed-in NORMAL'\n   TDD: Write a test in tests/test_daemon.py that reads VoiceTypingDaemon.toggle_lite.__doc__ and asserts 'pressing D' is present and 'pressing F' is absent. Pattern: import the daemon class, access the docstring, assert substring. Then implement the fix.\n   MOCKING: No external services — pure docstring text validation. The daemon class can be imported without instantiation for __doc__ access.\n4. OUTPUT: toggle_lite() docstring references key D consistently with toggle() and hypr-binds.conf.\n5. DOCS: [Mode A] daemon.py docstring is maintainer-facing documentation. The fix IS the doc update — no separate docs subtask."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/daemon.py:1410-1411 (confirmed in plan/.../architecture/system_context.md). The toggle_lite() docstring has 3 occurrences of 'pressing F' — all should be 'pressing D'. The sibling toggle() docstring (lines 1377-1378) correctly uses 'pressing D' as the reference pattern. The lite keybind is Alt+Super+D (key D, per hypr-binds.conf:44), never F.\n2. INPUT: No code dependencies. Read daemon.py lines 1375-1420 for both toggle() and toggle_lite() docstring context.\n3. LOGIC: Implement PRD §4.10. Three replacements in daemon.py toggle_lite() docstring (lines 1410-1411):\n   - 'pressing F while idle' → 'pressing D while idle'\n   - 'pressing F while armed-in-lite' → 'pressing D while armed-in-lite'\n   - 'pressing F while armed-in NORMAL' → 'pressing D while armed-in NORMAL'\n   TDD: Write a test in tests/test_daemon.py that reads VoiceTypingDaemon.toggle_lite.__doc__ and asserts 'pressing D' is present and 'pressing F' is absent. Pattern: import the daemon class, access the docstring, assert substring. Then implement the fix.\n   MOCKING: No external services — pure docstring text validation. The daemon class can be imported without instantiation for __doc__ access.\n4. OUTPUT: toggle_lite() docstring references key D consistently with toggle() and hypr-binds.conf.\n5. DOCS: [Mode A] daemon.py docstring is maintainer-facing documentation. The fix IS the doc update — no separate docs subtask.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.3",
+                    "h3.3"
+                  ]
                 }
               ]
             },
@@ -103,9 +121,23 @@
                   "title": "Verify README.md and overview docs are consistent with the corrected lite-mode surfaces",
                   "status": "Planned",
                   "story_points": 0.5,
-                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T3.S1", "P1.M1.T4.S1"],
-                  "prd_selectors": ["h2.0", "h2.2", "h3.0", "h2.3", "h3.1", "h3.2", "h3.3", "h2.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md is already correct (confirmed in plan/.../architecture/system_context.md). Key correct references: line 81 (Ctrl+Alt+Super+D / Alt+Super+D), lines 99-100 (correct bind lines), line 125 (toggle-lite / Alt+Super+D), line 171 (config table: toggle-lite / Alt+Super+D). The install.sh header comment (lines 21-22) says README copies usage/tmux/hypr snippets verbatim, but README does NOT copy install.sh's usage line verbatim — it has independent correct content.\n2. INPUT: The corrected install.sh, config.toml, ctl.py, and daemon.py from subtasks P1.M1.T1.S1 through P1.M1.T4.S1.\n3. LOGIC: Sweep README.md for any stale lite-mode references that contradict the now-corrected surfaces. Check: (a) keybind letter is D (not F) everywhere, (b) all 7 commands are listed/mentioned where a command list appears, (c) keybind→command mappings match hypr-binds.conf (Ctrl+Alt+Super+D=toggle, Alt+Super+D=toggle-lite). Also check tests/ACCEPTANCE.md for any stale references. If README.md is already correct (expected per research), document that verification with a grep showing the correct strings — no code changes needed. If a gap IS found, fix it in-place.\n   MOCKING: No external services — pure documentation text validation.\n4. OUTPUT: README.md and tests/ACCEPTANCE.md confirmed consistent (or corrected if a gap is found).\n5. DOCS: [Mode B] This IS the changeset-level documentation sync task. It sweeps the overview/README docs that span the whole lite-mode delta."
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M1.T2.S1",
+                    "P1.M1.T3.S1",
+                    "P1.M1.T4.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md is already correct (confirmed in plan/.../architecture/system_context.md). Key correct references: line 81 (Ctrl+Alt+Super+D / Alt+Super+D), lines 99-100 (correct bind lines), line 125 (toggle-lite / Alt+Super+D), line 171 (config table: toggle-lite / Alt+Super+D). The install.sh header comment (lines 21-22) says README copies usage/tmux/hypr snippets verbatim, but README does NOT copy install.sh's usage line verbatim — it has independent correct content.\n2. INPUT: The corrected install.sh, config.toml, ctl.py, and daemon.py from subtasks P1.M1.T1.S1 through P1.M1.T4.S1.\n3. LOGIC: Sweep README.md for any stale lite-mode references that contradict the now-corrected surfaces. Check: (a) keybind letter is D (not F) everywhere, (b) all 7 commands are listed/mentioned where a command list appears, (c) keybind→command mappings match hypr-binds.conf (Ctrl+Alt+Super+D=toggle, Alt+Super+D=toggle-lite). Also check tests/ACCEPTANCE.md for any stale references. If README.md is already correct (expected per research), document that verification with a grep showing the correct strings — no code changes needed. If a gap IS found, fix it in-place.\n   MOCKING: No external services — pure documentation text validation.\n4. OUTPUT: README.md and tests/ACCEPTANCE.md confirmed consistent (or corrected if a gap is found).\n5. DOCS: [Mode B] This IS the changeset-level documentation sync task. It sweeps the overview/README docs that span the whole lite-mode delta.",
+                  "prd_selectors": [
+                    "h2.0",
+                    "h2.2",
+                    "h3.0",
+                    "h2.3",
+                    "h3.1",
+                    "h3.2",
+                    "h3.3",
+                    "h2.4"
+                  ]
                 }
               ]
             }

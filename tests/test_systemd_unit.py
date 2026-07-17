@@ -213,3 +213,37 @@ def test_install_sh_offline_grep_and_summary():
     assert "no network at runtime" in text, (
         "install.sh is missing the offline summary line (Mode A user-facing offline promise)."
     )
+
+
+def test_install_sh_usage_lists_all_commands_and_correct_keybinds():
+    """install.sh [7/7] onboarding lists ALL 7 commands (PRD §4.8) + the CORRECT keybinds
+    (PRD §4.10 / hypr-binds.conf: Ctrl+Alt+Super+D -> toggle [normal], Alt+Super+D ->
+    toggle-lite). bugfix Issue 1 (P1.M1.T1.S1). Static read_text check (same pattern as
+    test_install_sh_offline_grep_and_summary) — closes the gap that let the wrong hint ship
+    (the config drift-guard checks only parsed VALUES, not usage/help strings).
+    """
+    text = _install_sh_path().read_text()
+    # (a) usage line lists all 7 commands (PRD §4.8; ctl.py _COMMANDS).
+    assert "toggle-lite" in text, (
+        "install.sh usage line omits 'toggle-lite' (PRD §4.8 lists 7 commands)."
+    )
+    assert "start-lite" in text, (
+        "install.sh usage line omits 'start-lite' (PRD §4.8 lists 7 commands)."
+    )
+    # (b) correct NORMAL keybind is stated (hypr-binds.conf:5; PRD §4.10).
+    assert "Ctrl+Alt+Super+D" in text, (
+        "install.sh bind hint is missing the correct normal bind 'Ctrl+Alt+Super+D' "
+        "(PRD §4.10: CTRL+SUPER+ALT+D -> voicectl toggle)."
+    )
+    # (c) correct LITE keybind is stated and mapped to toggle-lite.
+    assert "Alt+Super+D -> voicectl toggle-lite" in text, (
+        "install.sh bind hint is missing the correct lite bind "
+        "'Alt+Super+D -> voicectl toggle-lite' (hypr-binds.conf:6)."
+    )
+    # (d) the WRONG mapping is gone. 'SUPER+ALT+D -> voicectl toggle' claimed the LITE bind
+    #     (SUPER+ALT+D) maps to normal toggle — backwards. Exact-substring check so the
+    #     legitimate 'Alt+Super+D -> voicectl toggle-lite' does NOT trip it.
+    assert "SUPER+ALT+D -> voicectl toggle" not in text, (
+        "install.sh still claims 'SUPER+ALT+D -> voicectl toggle' — WRONG: SUPER+ALT+D is "
+        "the LITE bind (toggle-lite); normal toggle is Ctrl+Alt+Super+D (PRD §4.10)."
+    )

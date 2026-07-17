@@ -175,8 +175,8 @@ echo "daemon : running and NOT listening (~0 VRAM; first 'voicectl toggle' loads
 echo "CUDA   : ${VERDICT:-unknown}"
 echo "offline: daemon runs fully local (HF_HUB_OFFLINE=1 via launch_daemon.sh) — no network at runtime"
 echo
-echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|quit"
-echo "          (bind SUPER+ALT+D -> voicectl toggle; see the Hyprland note below)"
+echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|quit|toggle-lite|start-lite"
+echo "          (bind Ctrl+Alt+Super+D -> voicectl toggle;  Alt+Super+D -> voicectl toggle-lite; see the Hyprland note below)"
 echo
 echo "tmux status (add these TWO lines to ~/.tmux.conf — we never edit it for you):"
 echo '  set -g status-interval 1'
