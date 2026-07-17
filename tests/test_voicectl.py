@@ -378,3 +378,27 @@ def test_dispatch_start_ok_true_when_no_load_error_attr():
     resp = srv._dispatch(json.dumps({"cmd": "start"}))
     assert resp["ok"] is True
     assert resp["listening"] is True   # _StubDaemon.start() arms
+# ===========================================================================
+# P1.M1.T3.S1 — help text surfaces all 7 commands (bugfix Issue 3)
+# (argparse format_help() + the module docstring must list toggle-lite/start-lite, matching
+#  _COMMANDS + PRD §4.8 + the no-arg error path. Before the fix --help showed only 5 while
+#  `voicectl` (no args) showed 7 — internally inconsistent. TDD red→green.)
+# ===========================================================================
+def test_help_surfaces_list_all_seven_commands():
+    """All 7 commands appear in every help surface (PRD §4.8; bugfix Issue 3).
+
+    argparse's format_help() renders BOTH the positional `cmd` help AND the epilog (the two
+    --help surfaces); ctl.__doc__ is the module docstring (Usage line + subcommand block). All
+    must list toggle-lite/start-lite, matching _COMMANDS + the no-arg error path. Before the
+    ctl.py fix this is RED (the lite commands are absent from --help + the docstring).
+    """
+    seven = {"toggle", "start", "stop", "status", "quit", "toggle-lite", "start-lite"}
+    assert set(ctl._COMMANDS) == seven, sorted(ctl._COMMANDS)   # _COMMANDS = the source of truth
+    # (1) argparse --help (format_help renders BOTH the positional help AND the epilog):
+    help_text = ctl._build_parser().format_help()
+    for cmd in seven:
+        assert cmd in help_text, f"{cmd!r} missing from --help:\n{help_text}"
+    # (2) module docstring (Usage line + subcommand block):
+    assert ctl.__doc__ is not None, "ctl module docstring is missing"
+    for cmd in seven:
+        assert cmd in ctl.__doc__, f"{cmd!r} missing from the ctl module docstring"

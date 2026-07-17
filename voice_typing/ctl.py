@@ -16,8 +16,10 @@ Subcommands (PRD §4.8):
     stop     disarm the mic (stop listening)
     status   pretty-print listening + partial + last final + uptime + device + loaded models
     quit     request a clean daemon shutdown (releases GPU workers)
+    toggle-lite  arm/disarm in LITE mode (single small model — PRD §4.2ter)
+    start-lite   arm in LITE mode (start listening with the small model only)
 
-Usage:  voicectl <toggle|start|stop|status|quit>
+Usage:  voicectl <toggle|start|stop|status|quit|toggle-lite|start-lite>
         (the full usage table is in the project README; this is the user-facing CLI surface.)
 
 Stdlib-only: argparse, json, socket, sys + the shared socket-path resolver from voice_typing.daemon.
@@ -153,12 +155,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "prints the result. Exits 0 on success, 1 on a logical failure, 2 if the daemon is not "
             "running, 64 on a usage error (unknown/missing command)."
         ),
-        epilog="subcommands: toggle, start, stop, status, quit  (see the project README for the full usage table)",
+        epilog="subcommands: toggle, start, stop, status, quit, toggle-lite, start-lite  (see the project README for the full usage table)",
     )
     parser.add_argument(
         "cmd",
         nargs="?",
-        help="toggle | start | stop | status | quit",
+        help="toggle | start | stop | status | quit | toggle-lite | start-lite",
     )
     return parser
 

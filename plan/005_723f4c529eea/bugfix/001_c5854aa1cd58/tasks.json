@@ -65,14 +65,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Fix voicectl CLI help text to surface all 7 commands (Issue 3 — Minor)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "ctl.py has 3 stale help surfaces that list only 5 of 7 commands — the module docstring (lines 11-20), the argparse epilog (line 156), and the positional cmd help (line 161). This is internally inconsistent: the no-arg error path in main() correctly prints all 7 via _COMMANDS, but --help hides lite mode. No test currently asserts the help strings.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Update module docstring, argparse epilog, and positional help to list all 7 commands + add help-text assertion test",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/ctl.py (confirmed in plan/.../architecture/system_context.md). The canonical command set is _COMMANDS (line 35) = 7 commands. Three stale surfaces omit toggle-lite/start-lite:\n   (a) Module docstring line 20: `Usage:  voicectl <toggle|start|stop|status|quit>` — AND the subcommand block (lines 14-18) only documents 5 subcommands.\n   (b) argparse epilog line 156: `\"subcommands: toggle, start, stop, status, quit  (see the project README for the full usage table)\"`.\n   (c) Positional `cmd` help line 161: `help=\"toggle | start | stop | status | quit\"`.\n   The no-arg error path (main() lines 177-181) ALREADY correctly lists all 7 via _COMMANDS — use it as the consistency reference.\n2. INPUT: No code dependencies — all edits are in voice_typing/ctl.py.\n3. LOGIC: Implement PRD §4.8 (7 commands). Four edits in ctl.py:\n   (a) Module docstring line 20: append `|toggle-lite|start-lite` to the Usage line.\n   (b) Module docstring subcommand block (after line 18): add two lines documenting toggle-lite and start-lite (e.g. `toggle-lite  arm/disarm in LITE mode (single small model — PRD §4.2ter)` and `start-lite   arm in LITE mode (start listening with the small model only)`).\n   (c) Epilog line 156: append `, toggle-lite, start-lite` to the subcommands list.\n   (d) Positional help line 161: append ` | toggle-lite | start-lite`.\n   TDD: Write a test in tests/test_voicectl.py that asserts ALL 7 commands appear in each help surface. Approach: build the parser via ctl._build_parser(), format its help via parser.format_help(), assert all 7 command names (including toggle-lite, start-lite) appear in the help text. Also assert ctl.__doc__ (module docstring) contains toggle-lite. Then implement the fix.\n   MOCKING: No external services — argparse formatting is pure stdlib.\n4. OUTPUT: voicectl --help and the module docstring list all 7 commands consistently.\n5. DOCS: [Mode A] ctl.py docstring/epilog/help is the user-facing CLI surface. The fix IS the doc update — no separate docs subtask.",
@@ -89,14 +89,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "Fix daemon.py toggle_lite docstring key reference (Issue 4 — Minor)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "daemon.py:1410-1411 toggle_lite docstring says 'pressing F' (3 occurrences) instead of 'pressing D' — the same thinko as Issue 2. The sibling toggle() docstring (lines 1377-1378) correctly says 'pressing D'.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Correct 'pressing F' → 'pressing D' (3 occurrences) in the toggle_lite docstring",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/daemon.py:1410-1411 (confirmed in plan/.../architecture/system_context.md). The toggle_lite() docstring has 3 occurrences of 'pressing F' — all should be 'pressing D'. The sibling toggle() docstring (lines 1377-1378) correctly uses 'pressing D' as the reference pattern. The lite keybind is Alt+Super+D (key D, per hypr-binds.conf:44), never F.\n2. INPUT: No code dependencies. Read daemon.py lines 1375-1420 for both toggle() and toggle_lite() docstring context.\n3. LOGIC: Implement PRD §4.10. Three replacements in daemon.py toggle_lite() docstring (lines 1410-1411):\n   - 'pressing F while idle' → 'pressing D while idle'\n   - 'pressing F while armed-in-lite' → 'pressing D while armed-in-lite'\n   - 'pressing F while armed-in NORMAL' → 'pressing D while armed-in NORMAL'\n   TDD: Write a test in tests/test_daemon.py that reads VoiceTypingDaemon.toggle_lite.__doc__ and asserts 'pressing D' is present and 'pressing F' is absent. Pattern: import the daemon class, access the docstring, assert substring. Then implement the fix.\n   MOCKING: No external services — pure docstring text validation. The daemon class can be imported without instantiation for __doc__ access.\n4. OUTPUT: toggle_lite() docstring references key D consistently with toggle() and hypr-binds.conf.\n5. DOCS: [Mode A] daemon.py docstring is maintainer-facing documentation. The fix IS the doc update — no separate docs subtask.",
