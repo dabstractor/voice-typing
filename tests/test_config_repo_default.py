@@ -51,3 +51,23 @@ def test_repo_config_toml_has_no_extra_keys():
     assert set(data.keys()) == set(expected.keys()), data.keys()
     for section, keys in expected.items():
         assert set(data[section].keys()) == keys, (section, data[section].keys())
+
+
+def test_repo_config_lite_model_comment_names_correct_keybind():
+    """The lite_model comment must name SUPER+ALT+D (the real lite bind), not the stale SUPER+ALT+F.
+
+    config.toml is user-facing config DOC (Mode A); a wrong keybind letter sends users to a dead
+    key (F is unbound). tomllib DROPS comments, so the value drift-guards above don't catch this —
+    assert on the RAW text. Source of truth: hypr-binds.conf `bind = SUPER ALT, D, ... toggle-lite`
+    (PRD §4.10). (bugfix Issue 2.)
+    """
+    with open(_repo_config_path()) as fh:
+        text = fh.read()
+    lite_lines = [ln for ln in text.splitlines() if ln.lstrip().startswith("lite_model")]
+    assert lite_lines, "no lite_model line in config.toml"
+    line = lite_lines[0]
+    assert "SUPER+ALT+D" in line, (
+        "config.toml lite_model comment must reference SUPER+ALT+D (the lite keybind, PRD §4.10 / "
+        "hypr-binds.conf), not a stale letter (Issue 2)."
+    )
+    assert "SUPER+ALT+F" not in line, "config.toml lite_model comment still has the stale SUPER+ALT+F"

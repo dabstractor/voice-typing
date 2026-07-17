@@ -31,7 +31,7 @@
 
 final_model                  = "distil-large-v3"  # final, high-accuracy transcription model (faster-whisper). Sets the quality and latency of the text that actually gets typed.
 realtime_model               = "small.en"          # faster model used for live partial previews (shown in the tmux status line while you speak).
-lite_model                   = "small.en"          # PRD §4.2ter: the SINGLE model loaded in LITE mode (`voicectl toggle-lite` / SUPER+ALT+F) — used for both partials AND finals, so the large model never loads. ~half the VRAM + faster finals, lower accuracy. Good for short quips/prompts where the big model's latency isn't worth it.
+lite_model                   = "small.en"          # PRD §4.2ter: the SINGLE model loaded in LITE mode (`voicectl toggle-lite` / SUPER+ALT+D) — used for both partials AND finals, so the large model never loads. ~half the VRAM + faster finals, lower accuracy. Good for short quips/prompts where the big model's latency isn't worth it.
 language                     = "en"                # ISO-639-1 code, e.g. "en", "es", "fr", "de".
 device                       = "cuda"              # "cuda" | "cpu". The daemon AUTO-FALLS-BACK to "cpu" (and smaller models) at startup if ctranslate2 finds no usable CUDA device; see voice_typing/cuda_check.py (PRD 4.4). Usually leave this as "cuda".
 post_speech_silence_duration = 0.6                 # seconds of silence after speech before a final is emitted. Lower = snappier but can cut off pauses; higher = fewer false finals but slower.
