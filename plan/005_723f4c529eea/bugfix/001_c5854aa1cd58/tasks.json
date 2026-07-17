@@ -4,14 +4,14 @@
       "type": "Phase",
       "id": "P1",
       "title": "Lite-mode documentation defect remediation",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Remediate a coherent set of 4 documentation defects (1 Major, 3 Minor) where lite-mode user-facing surfaces (install.sh onboarding output, config.toml comment, voicectl CLI help text, daemon.py docstring) contradict the PRD keybind/command spec (§4.8 lists 7 commands; §4.10 pins keybinds to Ctrl+Alt+Super+D=normal and Alt+Super+D=lite) and contradict each other. No core functionality is broken — all 363 unit/integration tests pass and all lite commands work correctly. These are stale docs/help/comments that were not synced when lite mode was added (commit 1b91154). The silence-gate feature itself (PRD §4.2ter/§4.5) is already correct and complete.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P1.M1",
           "title": "User-facing lite-mode surface corrections",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Correct all 4 documentation defects across install.sh, config.toml, ctl.py, and daemon.py so that every lite-mode surface consistently reports the 7-command set and the correct keybind letter (D, not F). Each fix carries its own regression test per the implicit-TDD workflow, and a final changeset-level docs-sync task verifies README.md remains consistent.",
           "tasks": [
             {
@@ -112,14 +112,14 @@
               "type": "Task",
               "id": "P1.M1.T5",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Mode B catch-all: verify that README.md and any cross-cutting overview docs remain consistent with the corrected lite-mode surfaces. Per research (architecture/system_context.md), README.md is ALREADY correct for all 4 issues — it uses the right keybinds (Ctrl+Alt+Super+D / Alt+Super+D) and the full command set throughout. This task verifies that consistency holds and makes no changes unless a gap is found.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T5.S1",
                   "title": "Verify README.md and overview docs are consistent with the corrected lite-mode surfaces",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1",
