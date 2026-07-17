@@ -122,7 +122,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md — Lite mode section + config tuning table for lite_post_speech_silence_duration",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

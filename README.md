@@ -119,7 +119,10 @@ A second arming mode for short, speed-critical snippets (URLs, shell commands, q
 replies) where latency matters more than accuracy. Lite mode loads **only** `asr.lite_model`
 (default `small.en`) and uses it for both live partials AND finals — the large
 `distil-large-v3` never loads — so it takes ~half the VRAM and produces markedly faster
-finals, at lower accuracy. Arm it with `voicectl toggle-lite` / `start-lite`, or the
+finals, at lower accuracy. It also uses its own shorter silence threshold
+(`asr.lite_post_speech_silence_duration`, default `0.5` s vs the normal `0.6`) — the silence
+gate, not the model, is the perceived-latency bottleneck, so shortening it is what makes lite
+feel instant rather than merely transcribing a little faster. Arm it with `voicectl toggle-lite` / `start-lite`, or the
 **Alt+Super+D** keybind (`voicectl stop` disarms either mode). Arming the *other* mode while
 one is resident tears the recorder down and respawns it (~1–3 s reload, same as a cold first
 arm) — so switching modes costs one reload. Both modes share the graceful drain on stop
@@ -158,6 +161,7 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | Section.key | Default | Effect |
 | --- | --- | --- |
 | `asr.post_speech_silence_duration` | `0.6` | seconds of silence before a final is emitted. Lower is snappier but can cut deliberate pauses. |
+| `asr.lite_post_speech_silence_duration` | `0.5` | lite-mode silence threshold — seconds of silence before a final in **lite mode**. Lower is snappier (0.3 = razor-snappy, may split a brief pause; 0.6 = safe). The silence gate, not the model size, is the perceived-latency bottleneck — this is what makes lite **feel** instant. |
 | `asr.realtime_processing_pause` | `0.15` | cadence of the live partial previews. Lower is more responsive; higher uses less CPU. |
 | `asr.auto_stop_idle_seconds` | `30.0` | auto-disarm (stop listening) after this many seconds with no recognized speech — partials reset the clock while you talk, so it only fires when you truly go silent (a forgotten hot-mic guard, not a mid-thought cut). `0` disables. Fires the normal `Recording Stopped` toast + a journal line. |
 | `asr.auto_unload_idle_seconds` | `1800.0` | after this many seconds DISARMED (models loaded, not listening), tear down the recorder to free VRAM (~0). The clock starts on disarm (manual stop, toggle-off, or the 30s auto-stop) and resets on any arm; time listening doesn't count. `0` disables (models then stay resident until `quit`). The next arm reloads (~1-3s). See Model lifecycle. |
