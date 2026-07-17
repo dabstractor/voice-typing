@@ -3616,3 +3616,81 @@ def test_toggle_while_armed_in_lite_switches_to_normal():
     assert d._mode == "normal"
     assert d._host.mode == "normal"
     assert len(spawns) == 2                      # lite spawn + ONE normal reload
+
+
+# --- validation Issue MEDIUM: a failed cross-mode toggle must clear stale `listening` ---
+#
+# toggle()/toggle_lite() call _load_host() for the mode switch; on failure they used to `return`
+# WITHOUT clearing _listening (set True by the previous arm). _load_host tears down the resident
+# host on failure (_host = None), so the daemon ended up reporting listening: True with NO recorder,
+# and status_snapshot (hence voicectl status) printed a misleading 'listening: on'. These tests pin
+# the fix: on a failed cross-mode reload the daemon DISARMS (listening: off, _load_error surfaced).
+
+
+def _failing_second_spawn_factory(spawns):
+    """host_factory whose FIRST spawn succeeds (arms the first mode) and whose SECOND spawn fails.
+
+    The second spawn is the cross-mode RELOAD; making it fail reproduces the MEDIUM-bug scenario
+    (resident host torn down by _load_host, _load_error set, listening left stale without the fix).
+    """
+    def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
+        host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
+        # First built host spawns True; every subsequent one fails.
+        host.spawn_result = len(spawns) == 0
+        spawns.append(host)
+        return host
+    return factory
+
+
+def test_toggle_lite_while_armed_in_normal_failed_reload_clears_listening():
+    """Failed cross-mode toggle_lite (armed-in-normal → lite reload fails) clears stale listening.
+
+    Regression guard for validation Issue MEDIUM: without the fix, the failed reload left
+    is_listening() == True with _host is None + models_loaded False, so status_snapshot reported
+    'listening: on' for a daemon with no recorder and never surfaced _load_error.
+    """
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
+    d.start()                                    # arm in normal (first spawn succeeds)
+    assert d._mode == "normal" and d.is_listening()
+    d.toggle_lite()                              # cross-mode switch → lite reload FAILS
+    assert d.is_listening() is False             # FIXED: disarmed (was stale-True without the fix)
+    assert d._host is None                       # the resident host was torn down by _load_host
+    assert d._models_loaded is False
+    assert d._load_error is not None             # surfaced so status/voicectl can report it
+    assert d._mode == "normal"                   # never flipped to lite (spawn failed)
+
+
+def test_toggle_while_armed_in_lite_failed_reload_clears_listening():
+    """Failed cross-mode toggle (armed-in-lite → normal reload fails) clears stale listening.
+
+    The lite→normal mirror of the test above.
+    """
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
+    d.start_lite()                               # arm in lite (first spawn succeeds)
+    assert d._mode == "lite" and d.is_listening()
+    d.toggle()                                   # cross-mode switch → normal reload FAILS
+    assert d.is_listening() is False             # FIXED: disarmed
+    assert d._host is None
+    assert d._models_loaded is False
+    assert d._load_error is not None
+    assert d._mode == "lite"                     # never flipped to normal (spawn failed)
+
+
+def test_failed_cross_mode_toggle_status_snapshot_is_honest():
+    """After a failed cross-mode toggle, status_snapshot() reports listening: False (not stale True).
+
+    Pins the user-visible symptom from validation Issue MEDIUM: voicectl status must NOT print
+    'listening: on' for a daemon whose recorder failed to (re)load. Also asserts load_error is
+    surfaced in the snapshot so the failure is diagnosable.
+    """
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
+    d.start()                                    # arm in normal
+    assert d.is_listening() is True
+    d.toggle_lite()                              # lite reload fails
+    snap = d.status_snapshot()
+    assert snap["listening"] is False            # honest status (was True without the fix)
+    assert snap["models_loaded"] is False
+    assert snap["load_error"]                     # the failure reason is surfaced

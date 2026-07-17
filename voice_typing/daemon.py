@@ -1271,10 +1271,34 @@ class VoiceTypingDaemon:
         (bugfix Issue 4 invariant). Opens a SEPARATE, short-lived PyAudio instance only to ENUMERATE
         (no stream opened) — does not disturb the recorder's own capture stream. May RAISE on
         pyaudio-not-installed / no audio subsystem; _refresh_mic_status converts that to (False, str).
+
+        ALSA journal noise suppression (validation Issue LOW): PortAudio's ALSA backend probes every
+        ALSA device during PyAudio()/get_device_count(), and the ALSA C lib writes a burst of ~20–30
+        'ALSA lib ... Cannot get card index for 0' / 'Unknown PCM ...' lines to stderr (→ journald)
+        on EVERY daemon boot, before the 'daemon ready' line. The probe itself succeeds; this is pure
+        log noise that clutters the journal and can mask real errors. We temporarily dup2 a throwaway
+        fd over stderr for the duration of the enumeration so the C-level noise is silenced while the
+        Python-level result (the device list) is unaffected. Suppressed ONLY here (a short, bounded
+        enumeration), never globally, so genuine runtime errors elsewhere still reach the journal.
         """
+        import os
         import pyaudio  # lazy: preserve ctl import purity (bugfix Issue 4)
 
-        pa = pyaudio.PyAudio()
+        # Silence ALSA C-lib stderr chatter ONLY during device enumeration (see docstring).
+        _saved_stderr_fd = os.dup(2)
+        _null_fd = None
+        try:
+            _null_fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(_null_fd, 2)
+            pa = pyaudio.PyAudio()
+        except Exception:
+            # PyAudio() itself failed (pyaudio missing, no audio subsystem). Restore stderr first so
+            # any traceback we let propagate is logged normally, then re-raise for the caller.
+            if _null_fd is not None:
+                os.dup2(_saved_stderr_fd, 2)
+                os.close(_null_fd)
+            os.close(_saved_stderr_fd)
+            raise
         try:
             inputs = [
                 i for i in range(pa.get_device_count())
@@ -1282,6 +1306,9 @@ class VoiceTypingDaemon:
             ]
         finally:
             pa.terminate()
+            # Restore stderr ASAP so nothing after the probe is silenced.
+            os.dup2(_saved_stderr_fd, 2)
+            os.close(_saved_stderr_fd)
         if not inputs:
             return False, "no PyAudio input devices available"
         return True, None
@@ -1365,6 +1392,14 @@ class VoiceTypingDaemon:
         else:
             # idle, OR armed-in-lite → arm in normal (switch from lite = one reload via _load_host)
             if not self._load_host("normal"):
+                # Load failed. If this was a cross-mode switch (was armed-in-lite), the resident
+                # host has been torn down by _load_host (self._host is None) but _listening is still
+                # set from the previous arm → a stale 'listening: on' for a daemon with no recorder
+                # (validation Issue MEDIUM). Clear it + publish disarm so status_snapshot is honest
+                # and _load_error surfaces. No abort needed: _load_host already stopped the child.
+                if listening:
+                    with self._lock:
+                        self._disarm()
                 return  # load failed → stay unarmed
             with self._lock:
                 self._arm()
@@ -1385,6 +1420,14 @@ class VoiceTypingDaemon:
         else:
             # idle, OR armed-in-normal → arm in lite (switch from normal = one reload via _load_host)
             if not self._load_host("lite"):
+                # Load failed. If this was a cross-mode switch (was armed-in-normal), the resident
+                # host has been torn down by _load_host (self._host is None) but _listening is still
+                # set from the previous arm → a stale 'listening: on' for a daemon with no recorder
+                # (validation Issue MEDIUM). Clear it + publish disarm so status_snapshot is honest
+                # and _load_error surfaces. No abort needed: _load_host already stopped the child.
+                if listening:
+                    with self._lock:
+                        self._disarm()
                 return  # load failed → stay unarmed
             with self._lock:
                 self._arm()
@@ -1824,7 +1867,13 @@ class ControlServer:
         if cmd == "toggle":
             was_listening = self._daemon.is_listening()
             self._daemon.toggle()
-            if not was_listening:            # this toggle attempted to arm -> a load may have failed (§4.2bis)
+            # A toggle arms UNLESS we were armed-in-THIS-mode (then it disarms). On the disarm path
+            # nothing loaded; on every arm path a load may have failed — including a cross-mode
+            # switch where was_listening was True (validation Issue MEDIUM: _load_host tears down the
+            # resident host on failure, and _disarm now clears _listening, so _arm_response surfaces
+            # _load_error honestly). Route through _arm_response whenever an arm was ATTEMPTED.
+            arm_attempted = not was_listening or self._daemon.is_listening()
+            if arm_attempted:
                 return self._arm_response()
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "start":
@@ -1836,7 +1885,8 @@ class ControlServer:
         if cmd == "toggle-lite":             # PRD §4.2ter: lite-mode toggle (arms lite when idle)
             was_listening = self._daemon.is_listening()
             self._daemon.toggle_lite()
-            if not was_listening:
+            arm_attempted = not was_listening or self._daemon.is_listening()
+            if arm_attempted:
                 return self._arm_response()
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "stop":

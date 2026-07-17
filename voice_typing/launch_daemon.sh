@@ -71,4 +71,33 @@ fi
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
+# Pull the display vars from the systemd USER-manager environment so the daemon ALWAYS has
+# them regardless of boot order (validation Issue 1, root cause of the wtype-on-cold-boot
+# regression). The systemd unit is WantedBy=default.target / After=pipewire+ydotool — it does
+# NOT wait for graphical-session.target, and Hyprland imports WAYLAND_DISPLAY into the user
+# manager only AT graphical-session startup. So a daemon started at default.target WINS that
+# race: the unit's ExecStartPre=`systemctl --user import-environment WAYLAND_DISPLAY DISPLAY`
+# runs while the manager env does not yet hold WAYLAND_DISPLAY → the import is a no-op, and the
+# daemon runs the whole session without it. `wtype` (the default typing backend) is a Wayland
+# `virtual-keyboard-v1` client that cannot connect without WAYLAND_DISPLAY, so every finalized
+# utterance silently fails wtype + falls back to ydotool (~1.2s extra latency + the non-ASCII /
+# layout quirks PRD §4.3 reserves for the rare fallback path).
+#
+# Fetching from `systemctl --user show-environment` here makes the daemon robust to boot order
+# ITSELF: this wrapper is exec'd at daemon start, by which point the compositor has invariably
+# imported the vars (graphical-session.target is satisfied before the user is interacting). It is
+# also belt-and-suspenders for a manual launch from a stripped environment. Each var is only set
+# if not already present in our own env (idempotent; honors an explicit override). A missing var
+# in the manager env is non-fatal (older compositors / X-only setups): we leave it unset and let
+# the daemon's typing-backend fallback chain do its job.
+for _v in WAYLAND_DISPLAY DISPLAY; do
+    if [ -z "${!_v:-}" ]; then
+        _val="$(systemctl --user show-environment -p "$_v" --value 2>/dev/null || true)"
+        if [ -n "$_val" ]; then
+            export "$_v=$_val"
+        fi
+    fi
+done
+unset _v _val
+
 exec "$PY" -m voice_typing.daemon "$@"

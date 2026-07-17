@@ -156,6 +156,47 @@ def test_launch_daemon_exports_offline_vars():
     )
 
 
+def test_launch_daemon_fetches_wayland_display_from_manager():
+    """launch_daemon.sh must fetch WAYLAND_DISPLAY (+DISPLAY) from the user-manager environment.
+
+    Regression guard for validation Issue 1 (HIGH): the wtype default backend is silently broken on
+    every cold boot because the systemd unit (WantedBy=default.target) does NOT wait for
+    graphical-session.target, so the unit's ExecStartPre=`import-environment WAYLAND_DISPLAY` runs
+    while the manager env does not yet hold WAYLAND_DISPLAY → the import is a no-op and the daemon
+    runs without it. The wrapper-side fix fetches the vars from `systemctl --user show-environment`
+    at exec time (when the compositor has inevitably imported them), making the daemon robust to
+    boot order itself. This static check pins that the fetch loop is present and runs BEFORE exec.
+    """
+    lines = _launch_daemon_path().read_text().splitlines()
+    # The fetch loop spans two lines: `for _v in WAYLAND_DISPLAY DISPLAY; do` (the vars) and
+    # `_val="$(systemctl --user show-environment ...)"` (the fetch command). Check both pieces are
+    # present, then that the fetch command precedes exec. Accept either line form so a future
+    # reformat (e.g. unrolling the loop) still passes as long as both the var + the fetch command
+    # remain.
+    show_env_idx = next(
+        (i for i, ln in enumerate(lines) if "systemctl --user show-environment" in ln),
+        None,
+    )
+    assert show_env_idx is not None, (
+        "launch_daemon.sh is missing the `systemctl --user show-environment` fetch — the "
+        "boot-order-robust fix for the wtype-on-cold-boot regression (validation Issue 1)."
+    )
+    wayland_idx = next(
+        (i for i, ln in enumerate(lines) if "WAYLAND_DISPLAY" in ln),
+        None,
+    )
+    assert wayland_idx is not None, "launch_daemon.sh never references WAYLAND_DISPLAY."
+    exec_idx = next((i for i, ln in enumerate(lines) if _EXEC_RE.match(ln)), None)
+    assert exec_idx is not None, (
+        "launch_daemon.sh has no `exec \"$PY\" -m voice_typing.daemon` line — cannot verify "
+        "fetch ordering."
+    )
+    assert show_env_idx < exec_idx, (
+        f"the WAYLAND_DISPLAY fetch (line {show_env_idx + 1}) must precede "
+        f"`exec \"$PY\" …` (line {exec_idx + 1}) — the var must be in the env before python starts."
+    )
+
+
 def test_install_sh_offline_grep_and_summary():
     """install.sh must (a) grep the post-restart journal for huggingface.co HTTP calls
     (warn-level runtime regression surface) and (b) print an offline summary line (the Mode A
