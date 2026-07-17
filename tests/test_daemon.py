@@ -3694,3 +3694,23 @@ def test_failed_cross_mode_toggle_status_snapshot_is_honest():
     assert snap["listening"] is False            # honest status (was True without the fix)
     assert snap["models_loaded"] is False
     assert snap["load_error"]                     # the failure reason is surfaced
+
+
+# ===========================================================================
+# P1.M1.T4.S1 — toggle_lite docstring references the correct key D (bugfix Issue 4)
+# (the lite keybind is Alt+Super+D — key D, never F (hypr-binds.conf:44 / PRD §4.10). The
+#  toggle_lite docstring previously said "pressing F" 3×; this pins it at "pressing D",
+#  mirroring the sibling toggle() docstring. Pure static-text assertion on __doc__ — no
+#  instantiation, no GPU/socket/recorder.)
+# ===========================================================================
+def test_toggle_lite_docstring_says_pressing_d_not_f():
+    """toggle_lite.__doc__ references key D (the lite bind is Alt+Super+D), never F (Issue 4).
+
+    The lite keybind is SUPER ALT, D (hypr-binds.conf:44 / PRD §4.10) — key D, not F. The
+    docstring must mirror the sibling toggle() docstring, which correctly says "pressing D".
+    Before the fix this was RED: "pressing F" present (3×), "pressing D" absent.
+    """
+    doc = daemon.VoiceTypingDaemon.toggle_lite.__doc__
+    assert doc is not None, "toggle_lite is missing its docstring"
+    assert "pressing D" in doc, "toggle_lite docstring must say 'pressing D' (lite bind = Alt+Super+D)"
+    assert "pressing F" not in doc, "toggle_lite docstring must NOT reference key F (it is D)"

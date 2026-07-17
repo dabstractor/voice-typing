@@ -4,14 +4,14 @@
       "type": "Phase",
       "id": "P1",
       "title": "Lite-mode documentation defect remediation",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Remediate a coherent set of 4 documentation defects (1 Major, 3 Minor) where lite-mode user-facing surfaces (install.sh onboarding output, config.toml comment, voicectl CLI help text, daemon.py docstring) contradict the PRD keybind/command spec (§4.8 lists 7 commands; §4.10 pins keybinds to Ctrl+Alt+Super+D=normal and Alt+Super+D=lite) and contradict each other. No core functionality is broken — all 363 unit/integration tests pass and all lite commands work correctly. These are stale docs/help/comments that were not synced when lite mode was added (commit 1b91154). The silence-gate feature itself (PRD §4.2ter/§4.5) is already correct and complete.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P1.M1",
           "title": "User-facing lite-mode surface corrections",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Correct all 4 documentation defects across install.sh, config.toml, ctl.py, and daemon.py so that every lite-mode surface consistently reports the 7-command set and the correct keybind letter (D, not F). Each fix carries its own regression test per the implicit-TDD workflow, and a final changeset-level docs-sync task verifies README.md remains consistent.",
           "tasks": [
             {
@@ -89,14 +89,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "Fix daemon.py toggle_lite docstring key reference (Issue 4 — Minor)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "daemon.py:1410-1411 toggle_lite docstring says 'pressing F' (3 occurrences) instead of 'pressing D' — the same thinko as Issue 2. The sibling toggle() docstring (lines 1377-1378) correctly says 'pressing D'.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Correct 'pressing F' → 'pressing D' (3 occurrences) in the toggle_lite docstring",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/daemon.py:1410-1411 (confirmed in plan/.../architecture/system_context.md). The toggle_lite() docstring has 3 occurrences of 'pressing F' — all should be 'pressing D'. The sibling toggle() docstring (lines 1377-1378) correctly uses 'pressing D' as the reference pattern. The lite keybind is Alt+Super+D (key D, per hypr-binds.conf:44), never F.\n2. INPUT: No code dependencies. Read daemon.py lines 1375-1420 for both toggle() and toggle_lite() docstring context.\n3. LOGIC: Implement PRD §4.10. Three replacements in daemon.py toggle_lite() docstring (lines 1410-1411):\n   - 'pressing F while idle' → 'pressing D while idle'\n   - 'pressing F while armed-in-lite' → 'pressing D while armed-in-lite'\n   - 'pressing F while armed-in NORMAL' → 'pressing D while armed-in NORMAL'\n   TDD: Write a test in tests/test_daemon.py that reads VoiceTypingDaemon.toggle_lite.__doc__ and asserts 'pressing D' is present and 'pressing F' is absent. Pattern: import the daemon class, access the docstring, assert substring. Then implement the fix.\n   MOCKING: No external services — pure docstring text validation. The daemon class can be imported without instantiation for __doc__ access.\n4. OUTPUT: toggle_lite() docstring references key D consistently with toggle() and hypr-binds.conf.\n5. DOCS: [Mode A] daemon.py docstring is maintainer-facing documentation. The fix IS the doc update — no separate docs subtask.",
@@ -112,14 +112,14 @@
               "type": "Task",
               "id": "P1.M1.T5",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Mode B catch-all: verify that README.md and any cross-cutting overview docs remain consistent with the corrected lite-mode surfaces. Per research (architecture/system_context.md), README.md is ALREADY correct for all 4 issues — it uses the right keybinds (Ctrl+Alt+Super+D / Alt+Super+D) and the full command set throughout. This task verifies that consistency holds and makes no changes unless a gap is found.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T5.S1",
                   "title": "Verify README.md and overview docs are consistent with the corrected lite-mode surfaces",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1",

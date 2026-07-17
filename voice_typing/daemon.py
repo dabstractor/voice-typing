@@ -1407,8 +1407,8 @@ class VoiceTypingDaemon:
     def toggle_lite(self) -> None:
         """LITE-mode toggle (PRD §4.2ter / delta §3.4): mode-specific arming.
 
-        Disarms ONLY if currently armed in LITE; otherwise arms in lite. So: pressing F while idle
-        arms in lite; pressing F while armed-in-lite disarms; pressing F while armed-in NORMAL
+        Disarms ONLY if currently armed in LITE; otherwise arms in lite. So: pressing D while idle
+        arms in lite; pressing D while armed-in-lite disarms; pressing D while armed-in NORMAL
         switches to lite (one bounded reload — the same mode-switch _load_host uses). Each key only
         ever toggles its own mode on/off; the cross-mode press switches (one reload).
         """
