@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Config schema & TOML loader compliance (§4.5)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify voice_typing/config.py (308 lines) and config.toml against PRD §4.5. The config dataclasses (AsrConfig, OutputConfig, FeedbackConfig, FilterConfig, LogConfig) and the tomllib loader with search-order ($XDG_CONFIG_HOME → repo config.toml → built-in defaults) must match the PRD exactly. Existing tests: test_config.py (34 tests), test_config_repo_default.py (3 tests). Audit for: all PRD fields present with correct defaults, type validation (bool rejected for numeric, unknown keys rejected), config.toml mirroring config.py defaults, blocklist matching PRD (note VT-006: bare 'you' was removed — config.toml comment documents this).",
               "subtasks": [
                 {
@@ -38,7 +38,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Verify config.toml ↔ config.py schema lockstep & blocklist correctness",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -52,7 +52,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "Verify config search-order & XDG resolution path",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1"
