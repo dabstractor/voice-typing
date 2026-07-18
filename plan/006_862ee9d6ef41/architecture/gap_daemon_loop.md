@@ -150,3 +150,186 @@ from the contract's literal wording are deliberate, documented evolutions, **not
 delegated bounded teardown (stronger than the inline pseudocode — eliminates the 90 s hang).
 
 **No source files were modified.** The only artifact produced by this subtask is this report.
+
+---
+
+# §2 — Graceful Drain (P1.M2.T1.S2): stop during in-flight utterance, drain watchdog, abort-on-idle
+
+**Date:** 2025-01 (audit re-verified against the live tree)
+**Scope:** Audit `voice_typing/daemon.py`'s **graceful-drain state machine** against **PRD §4.2 #2**
+("Stop is graceful (drain)") on the **6 drain properties (a)-(f)**. The state machine comprises:
+`_request_stop` (L1053) / `_begin_drain` (L1073) / `_complete_drain` (L1084) / `_drain_timeout`
+(L1104) / `_safe_abort` (L1335) + the `run()` drain branch (L850-854) + the `on_final` listen-flag
+gate (L945) + the `_final_pending`/`_text_in_flight` tracking (`_text_in_flight` set/cleared around
+`text()` @865/869; `_final_pending` set by `_touch_speech` @1040, cleared in `on_final` @954).
+Subtask **P1.M2.T1.S2** of verification round `006_862ee9d6ef41` — **appended** to this report (§1
+above is P1.M2.T1.S1's main-loop audit; this §2 owns the drain 6 properties, a different contract).
+**Audited artifacts (all read-only):**
+- `voice_typing/daemon.py` — `_request_stop()` (L1053, predicate @1065, branch @1066/1067-1069);
+  `_begin_drain()` (L1073; `_drain=True` @1078, watchdog `Timer` @1079-1081, idempotent @1076-1077);
+  `_complete_drain()` (L1084; `_drain=False` @1096, `_disarm()` @1097, cancel timer @1098-1101);
+  `_drain_timeout()` (L1104, runs on the Timer thread; guard @1112, `_safe_abort` @1117);
+  `_safe_abort()` (L1335; `_text_in_flight` gate @1358); `run()` drain branch (L850-854, BEFORE the
+  `_listening` re-entry @858); `on_final()` (L942; gate @945-946, `_final_pending=False` @954);
+  `_touch_speech()` (L1029; `_final_pending=True` @1040); `_DRAIN_TIMEOUT_S = 5.0` (@138); entry points
+  `stop()` (L1388 → `_request_stop` @1391), `toggle()`-off (L1393 → `_request_stop` @1410),
+  `toggle_lite()`-off (L1426 → `_request_stop` @1438); `_maybe_auto_stop()` (L1119 → `_disarm()`
+  @1139 directly, NOT `_request_stop` — by design).
+- `tests/test_daemon.py` — the `-k 'drain or stop or abort or graceful'` slice (the contract's run
+  target; 29 tests; the fakes inject a `_LegacyRecorderHostAdapter` whose `text()`/`abort()` are
+  controllable, so the drain branches are exercised directly without CUDA).
+
+**Bottom line:** ✅ All 6 PRD §4.2 #2 drain properties are **compliant** (each with file:line
+evidence below). The `-k 'drain or stop or abort or graceful'` slice is **29 passed, 164 deselected
+in 0.55s** (re-ran live; matches the verified baseline of 29 passed, 0.54s). Six **non-blocking**
+nuances are recorded so they are not mistaken for defects (§4). **No source files were modified**
+(this is a read-only audit — the drain is PRD §4.2 #2-compliant per the re-verification).
+
+---
+
+## §2.1 Method
+
+Each of the 6 drain properties was mapped to **specific `voice_typing/daemon.py` file:line** via
+`grep -nE`, then re-verified by reading `_request_stop` (L1053-1071), `_begin_drain` (L1073-1082),
+`_complete_drain` (L1084-1102), `_drain_timeout` (L1104-1118), `_safe_abort` (L1335-1363), the
+`run()` drain branch (L850-854), `on_final` (L942-954), and the entry points `stop()`/`toggle()`/
+`toggle_lite()` (L1388/1393/1426) + `_maybe_auto_stop()` (L1119). The contract's test target was
+then re-run live (`tests/test_daemon.py -k 'drain or stop or abort or graceful'`, §2.3). The 3-way
+in-flight predicate + the `_safe_abort` gate + the run-loop ordering were cross-checked against the
+method docstrings (daemon.py:1056 "utterance is in flight … blocked inside text() AND speech has
+occurred since the last final"; daemon.py:1336 "validation Issue 1"; daemon.py:850 "Checked BEFORE
+the _listening re-entry").
+
+### Commands run (re-verification)
+
+```bash
+# locate every drain site + the entry points + the watchdog bound
+ grep -nE 'def _request_stop|def _begin_drain|def _complete_drain|def _drain_timeout|def _safe_abort|def on_final|def _touch_speech|def stop|def toggle|_DRAIN_TIMEOUT_S|self\._drain|self\._text_in_flight|self\._final_pending' voice_typing/daemon.py
+# the contract's run target (re-ran live)
+timeout 150 .venv/bin/python -m pytest tests/test_daemon.py -q -k 'drain or stop or abort or graceful'
+# scope guard — no source modified
+git status --short
+```
+
+---
+
+## §2.2 The 6 drain properties — per-property compliance table
+
+| # | Property (PRD §4.2 #2 / item) | Code actual (`voice_typing/daemon.py`) | Verdict |
+|---|---|---|---|
+| (a) | `_request_stop` checks if an utterance is **in flight** before choosing drain vs immediate disarm | `_request_stop()` **L1065** `if self._host is not None and self._text_in_flight.is_set() and self._final_pending:` (3-way AND: host live + run loop blocked in `text()` + speech occurred since the last final) | ✅ **COMPLIANT** (the precise realization of PRD §4.2 #2's "utterance is in flight" wording; see nuance §4.i) |
+| (b) | in flight → `_begin_drain` sets the flag; the run loop **lets `text()` return the natural final** (no mid-final abort) | **L1066** `self._begin_drain()`; `_begin_drain` **L1078** `self._drain = True` + arms watchdog `Timer(_DRAIN_TIMEOUT_S, self._drain_timeout)` **L1079-1081**; run loop **L850-854** `if self._drain: self._complete_drain(); continue` — checked BEFORE the `_listening` re-entry (@858) | ✅ **COMPLIANT** |
+| (c) | `_complete_drain` **disarms after** the final lands | `_complete_drain()` **L1084**: **L1096** `self._drain = False` → **L1097** `self._disarm()` (mic off, listen gate cleared, phase idle) → **L1098-1101** cancel the watchdog `Timer` | ✅ **COMPLIANT** |
+| (d) | bounded watchdog **aborts** if no final fires ("a few seconds") | `_drain_timeout()` **L1104** on the Timer thread (`Timer(_DRAIN_TIMEOUT_S=5.0, …)` @1079/138): **L1112** `if self._drain and self._host is not None and self._text_in_flight.is_set():` → **L1117** `self._safe_abort()` (breaks the blocked `text()`; the run loop then completes the drain) | ✅ **COMPLIANT** (`_DRAIN_TIMEOUT_S = 5.0`) |
+| (e) | NOT in flight → **immediate disarm + abort** | `_request_stop()` else **L1067-1069**: `with self._lock: self._disarm()` + **L1069** `if self._host is not None: self._safe_abort()` | ✅ **COMPLIANT** |
+| (f) | `on_final` checks the listen flag before typing ("gate inside on_final too") | `on_final()` **L945-946** `if not self._listening.is_set(): return` — the **first** thing `on_final` does, OUTSIDE the `_on_final_lock` (read-only race guard); then **L954** `self._final_pending = False` | ✅ **COMPLIANT** (PRD §4.2 #2 last sentence / §8 race row — a straggler final after disarm is dropped, not typed) |
+
+---
+
+## §2.3 Test result — the contract's run target (the evidence)
+
+```bash
+timeout 150 .venv/bin/python -m pytest tests/test_daemon.py -q -k 'drain or stop or abort or graceful'
+# → 29 passed, 164 deselected in 0.55s
+```
+
+**Recorded count: 29 passed, 164 deselected** (matches the verified baseline of 29 passed, 0.54s;
+re-ran live during this audit). The slice is CUDA-free — the fakes inject a
+`_LegacyRecorderHostAdapter` whose `text()` / `abort()` are controllable, so the drain branches are
+exercised directly (in-flight → drain; not-in-flight → immediate disarm; watchdog abort; on_final
+gate; stop-never-shuts-down-the-recorder).
+
+### Test → property mapping
+
+| Property | Covering test (`tests/test_daemon.py`) | What it asserts |
+|---|---|---|
+| (a)+(b) in-flight → drain (no mid-final abort) | `test_stop_drains_when_utterance_in_flight`; `test_toggle_off_drains_when_utterance_in_flight` | stop/toggle-off while speech in flight → `_drain` set, `text()` returns the final, THEN disarm (no abort mid-final) |
+| (c) `_complete_drain` disarm-after-final | `test_stop_drains_when_utterance_in_flight` (asserts disarm AFTER the drain completes) | the final lands + is typed, then mic off / listen clear |
+| (d) watchdog abort | `test_drain_timeout_aborts_blocked_text`; `test_request_shutdown_unblocks_loop_when_abort_does_not_fire_final` | no final within `_DRAIN_TIMEOUT_S` → `_safe_abort` breaks the blocked `text()` → loop completes the drain |
+| (e) immediate disarm+abort (idle) | `test_stop_disarms_immediately_when_idle`; `test_stop_aborts_immediately_when_text_idle_no_speech`; `test_stop_skips_abort_when_no_text_in_flight`; `test_stop_while_run_loop_idle_does_not_abort_and_does_not_hang` | not in flight → disarm now; `abort()` only if `_text_in_flight` (never hangs when idle) |
+| (f) `on_final` gate | `test_on_final_gate_when_not_listening` (in the `-k 'loop…'` set — §1's §2.3 above) | a final arriving after `_listening` is cleared is dropped (not typed) |
+| stop never shuts down the recorder | `test_stop_never_calls_recorder_shutdown`; `test_stop_and_toggle_never_shutdown_but_request_shutdown_does` | stop = disarm/drain, NOT a recorder shutdown (only quit/shutdown tears down) |
+
+---
+
+## §2.4 Nuances (NON-blocking — recorded so they are not mistaken for defects)
+
+### (i) The "in flight" predicate is a 3-way AND, not just `_text_in_flight`
+
+`_request_stop` (L1065) checks `self._host is not None and self._text_in_flight.is_set() and
+self._final_pending`. The three terms:
+- `_text_in_flight` — the run loop is blocked **inside** `text()` (set @865, cleared @869).
+- `_final_pending` — **speech occurred since the last final** (set by `_touch_speech` @1040 on the
+  host's `'speech'` event; cleared in `on_final` @954).
+- `host is not None` — a recorder is actually loaded.
+
+This is the precise realization of PRD §4.2 #2's wording ("an utterance is in flight: speech
+occurred since the last final and the loop is blocked in `recorder.text()`"). The third term
+(`_final_pending`) is **not** "extra" — it prevents a 5 s drain wait when the loop is in `text()`
+but nothing was actually said (idle re-listen), so a stop stays responsive. Note: `_drain_timeout`
+(L1112) re-checks `_text_in_flight` before aborting, so a final that landed between the Timer firing
+and the abort is left alone.
+
+### (ii) `_DRAIN_TIMEOUT_S = 5.0` (daemon.py:138) is the bounded watchdog window
+
+PRD §4.2 #2 says "a bounded drain watchdog (a few seconds) aborts the rare case where no final ever
+fires, so a stop can never hang." `_DRAIN_TIMEOUT_S = 5.0` (daemon.py:138) is comfortably above the
+≤1.5 s final-latency target (PRD §6), so a normal final always lands before the watchdog fires,
+while still bounding the worst case so **a stop can never hang**. This is correct, not a defect — do
+**not** flag 5.0 s as "too long" or "too short."
+
+### (iii) `_safe_abort` is `_text_in_flight`-gated (daemon.py:1335/1358) — the validation Issue 1 fix
+
+`abort()` is invoked ONLY when a thread is blocked in `text()` (`if not self._text_in_flight.is_set():
+return`, L1358); when the loop is idle in `time.sleep(0.05)` it is **skipped** — it would block
+forever on `was_interrupted.wait()` (an event set only inside `text()`). This is **correct, not
+just safe**: correctness does NOT depend on `abort()` (the `_listening` Event gate in `on_final` +
+the run loop + `set_microphone(False)` already guarantee the instant disarm takes effect); `abort()`
+is merely a best-effort nudge to unblock a sleeping `text()`. `abort()` never re-raises either
+(wrapped in try/except @1360-1362). Recorded as a nuance — do **not** flag the gate as a defect.
+
+### (iv) Run-loop ordering: the drain check precedes the `_listening` re-entry
+
+`run()` checks `if self._drain:` (L850) BEFORE `if self._listening.is_set():` (L858), so a drained
+session **disarms** instead of re-listening — this IS the "lets `text()` return the natural final …
+after which the loop disarms" guarantee (property (b)+(c)). Do **not** flag the early drain check as
+"skipping the listen gate." (The dead-host check @840-846 precedes both; the host-None idle @847
+precedes the drain check — see §1's §4.iii for the full loop ordering.)
+
+### (v) `_begin_drain` is idempotent
+
+`_begin_drain` (L1073) guards with `if self._drain: return` (L1076-1077) — a re-press of the hotkey
+mid-drain starts no second watchdog `Timer`. Both `stop()` and `toggle()`-off route through
+`_request_stop` (L1391 / L1410 / L1438), so the drain applies uniformly to `voicectl stop` AND
+`voicectl toggle`-off (PRD §4.2 #2 "an explicit stop/toggle-off").
+
+### (vi) `_maybe_auto_stop` bypasses the drain BY DESIGN
+
+The 30 s idle auto-stop (`_maybe_auto_stop`, L1119) calls `_disarm()` **directly** (L1139), NOT
+`_request_stop()`. This is intentional: idle auto-stop only fires after
+`cfg.asr.auto_stop_idle_seconds` of NO recognized speech, so the last utterance finalized long ago —
+there is **never anything to drain**. An immediate disarm+abort is correct. This is NOT a
+missing-drain gap; the drain applies to explicit stop/toggle-off only.
+
+---
+
+## §2.5 Conclusion
+
+The graceful-drain state machine faithfully implements **PRD §4.2 #2** ("Stop is graceful
+(drain)") on all 6 properties (a)-(f): an explicit `stop`/`toggle`-off with an utterance in flight
+lets the final model finish + emit its text **before** disarming (property (b)+(c) — the §1 #1
+"pressing the hotkey mid-sentence does NOT drop the words already spoken" guarantee); a stop with
+nothing in flight disarms immediately + aborts (property (e)); a bounded **5 s watchdog** guarantees
+a stop can never hang (property (d)); and `on_final` is gated so a straggler final after disarm is
+dropped, not typed (property (f) — PRD §4.2 #2 last sentence / §8 race row).
+
+This underpins the project's acceptance criteria:
+- **#2 (a ≥3 s pause loses zero words)** — the drain means a mid-utterance stop still types the
+  in-flight final before disarming (the run loop's `if self._drain:` branch @850-854 lets `text()`
+  return its natural final, then `_complete_drain` disarms). Certified by (b)+(c).
+- **#4 (nothing is typed while toggled off)** — the `on_final` listen-flag gate (@945-946) drops any
+  straggler final that arrives after disarm; the not-in-flight path (@1067-1069) disarms + aborts
+  immediately. Certified by (e)+(f).
+
+**Verdict: COMPLIANT on all 6 properties — no fix needed.** **No source files were modified**
+(this is a read-only audit). The only artifact produced by this subtask is this appended §2 section.
