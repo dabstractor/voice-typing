@@ -183,7 +183,7 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Lazy-load model lifecycle & recorder-host subprocess (§4.2bis)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Verify the lazy-load lifecycle (unloaded→loading→loaded→listening) and the recorder-host subprocess architecture against PRD §4.2bis. The daemon spawns a child subprocess (recorder_host.py RecorderHost) that owns ALL CUDA contexts. Arm/disarm/text/abort/shutdown proxied over multiprocessing queues. Teardown = proc.join(5s) + SIGKILL the group (bounded, avoids 90s hang). Single-flight lock prevents concurrent loads. Idle-unload after auto_unload_idle_seconds.",
               "subtasks": [
                 {
@@ -237,7 +237,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S4",
                   "title": "Audit idle auto-stop watchdog (§4.5 auto_stop_idle_seconds)",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S3"
@@ -261,7 +261,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Audit lite recorder construction: single model, silence gate override",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S2",
