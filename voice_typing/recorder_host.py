@@ -508,12 +508,18 @@ def _worker_main(
         _safe_put(evt_q, ("final", {"text": text}))
 
     stop_abort_thread = threading.Event()
+    # VT-007: a flag the abort handler sets when it processes an abort, so _run_text_and_emit_final
+    # can emit the unblock sentinel keyed on OUR abort signal (robust against a future RealtimeSTT
+    # that returns None on the abort path) instead of relying on recorder.text()'s version-specific
+    # non-None return value. Cleared at the top of each 'text' command below.
+    aborted = threading.Event()
 
     def _abort_handler() -> None:
         """Watch abort_event; call recorder.abort() to unblock a sleeping text()."""
         while not stop_abort_thread.is_set():
             if abort_event.wait(timeout=0.2):
                 abort_event.clear()
+                aborted.set()  # VT-007: mark so _run_text_and_emit_final emits the sentinel
                 try:
                     recorder.abort()
                 except Exception:
@@ -534,12 +540,13 @@ def _worker_main(
                     # Clear any stale abort before entering text() so a leftover set from a previous
                     # session does not immediately abort this utterance.
                     abort_event.clear()
+                    aborted.clear()  # VT-007: fresh per-utterance abort marker
                     # blocks until a final (or an abort). _run_text_and_emit_final GUARANTEES a
                     # ('final', ...) event on BOTH paths (real final via on_final, OR abort via the
                     # sentinel) so the daemon's host.text() always unblocks — without it an abort
                     # (stop/toggle-off/auto-stop) leaves host.text() blocked forever (the child is
                     # still alive), wedging the run() loop so no further utterance transcribes.
-                    _run_text_and_emit_final(recorder, evt_q, _child_on_final)
+                    _run_text_and_emit_final(recorder, evt_q, _child_on_final, aborted)
                 elif kind == "arm":
                     recorder.set_microphone(True)
                 elif kind == "disarm":
@@ -620,7 +627,12 @@ def _clear_recorder_audio(recorder: Any) -> None:
         logger.debug("child: clearing recorder.audio raised (ignored)", exc_info=True)
 
 
-def _run_text_and_emit_final(recorder: Any, evt_q: Any, on_final: "Callable[[str], None]") -> None:
+def _run_text_and_emit_final(
+    recorder: Any,
+    evt_q: Any,
+    on_final: "Callable[[str], None]",
+    aborted: "threading.Event | None" = None,
+) -> None:
     """Child: run ONE recorder.text(on_final) call AND guarantee a ('final', ...) event when it ends.
 
     This is the fix for the run()-loop wedge (regression: stop / toggle-off / auto-stop wedged the
@@ -638,23 +650,30 @@ def _run_text_and_emit_final(recorder: Any, evt_q: Any, on_final: "Callable[[str
     child death), but stop()/toggle()/auto-stop keep the child resident and relied on _safe_abort()
     alone, which 'leaves the loop stranded' (its own docstring) 100% of the time on the abort path.
 
-    FIX: detect the no-callback abort path by the non-None return value (the normal path returns
-    None because on_final is always provided) and emit a ('final', {text:''}) sentinel so host.text()
-    unblocks. The daemon's on_final handles the empty text safely: a disarm has already cleared
-    _listening (the on_final gate returns early) and textproc.clean('') rejects it regardless, so
-    nothing is ever typed from the sentinel — it is purely an unblock signal. This restores the
-    in-process semantics (where abort simply made recorder.text() return and the run() loop
-    re-checked _listening) now that text() lives behind IPC.
+    FIX: emit a ('final', {text:''}) sentinel on the abort path so host.text() unblocks. The daemon's
+    on_final handles the empty text safely: a disarm has already cleared _listening (the on_final
+    gate returns early) and textproc.clean('') rejects it regardless, so nothing is ever typed from
+    the sentinel — it is purely an unblock signal. This restores the in-process semantics (where
+    abort simply made recorder.text() return and the run() loop re-checked _listening) now that
+    text() lives behind IPC.
 
-    API-drift note: the non-None return as the abort marker is verified against RealtimeSTT v1.0.2
-    (core/transcription_api.py). If a future version returns None on the abort path this helper would
-    stop emitting the sentinel and the wedge would recur; the recorder-host integration test
-    (tests/test_idle_and_gpu.sh) + the abort-path unit test guard that contract.
+    VT-007 (API-drift robustness): the abort path is detected via TWO independent signals (belt and
+    suspenders) so the unblock guarantee NO LONGER depends on a RealtimeSTT-version-specific return
+    value:
+      (1) `aborted` — a threading.Event the child's _abort_handler sets around recorder.abort()
+          (the abort signal WE control). This is the primary, version-independent signal. A future
+          RealtimeSTT that returns None on the abort path still trips it.
+      (2) the legacy non-None return marker (text() returns '' on abort in v1.0.2). Retained as a
+          backstop for callers that do not pass `aborted` (the existing unit tests, which mimic the
+          v1.0.2 return semantics exactly).
+    Either signal fires the sentinel. The recorder-host integration test (tests/test_idle_and_gpu.sh)
+    + the abort-path unit tests (incl. a fake text() returning None on abort) guard this contract.
     """
     result = recorder.text(on_final)
-    if result is not None:
-        # Abort/shutdown path: text() returned '' and did NOT invoke on_final. Emit the sentinel so
-        # the daemon's host.text() unblocks instead of wedging the run() loop forever.
+    if (aborted is not None and aborted.is_set()) or result is not None:
+        # Abort/shutdown path: emit the ('final', {text:''}) sentinel so the daemon's host.text()
+        # unblocks instead of wedging the run() loop forever. See the VT-007 note above for why we
+        # key on the `aborted` flag (our signal) OR the legacy non-None return (v1.0.2 contract).
         _safe_put(evt_q, ("final", {"text": ""}))
 
 

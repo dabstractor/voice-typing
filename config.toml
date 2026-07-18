@@ -62,10 +62,9 @@ min_chars = 2           # finals shorter than this many characters are dropped (
 blocklist = [           # EXACT, case-insensitive matches that are dropped instead of typed. These are the classic Whisper silence hallucinations. Add your own; remove any you actually say.
   "thank you.",                   # most common hallucination
   "thanks for watching.",         # YouTube-style filler
-  "you",                          # single-word false positive
   "bye.",                         # sign-off hallucination
   "thank you for watching",       # long-form filler
-]
+]                              # NOTE (VT-006): the bare "you" entry was removed — it is a common word users want to type, not a hallucination.
 
 
 [log]   # daemon logging verbosity (PRD §4.2)

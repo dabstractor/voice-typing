@@ -90,14 +90,20 @@ def test_blocklist_matches_with_or_without_trailing_punct():
 
 
 def test_blocklist_entry_without_punctuation_matches():
-    # "you" is in the default blocklist with no trailing punctuation
-    assert clean("you", FilterConfig()) is None
-    assert clean("You.", FilterConfig()) is None
+    # A blocklist entry with NO trailing punctuation still matches (case-insensitively, with or
+    # without trailing punct on the input). VT-006 removed the bare "you" from the DEFAULTS, so
+    # exercise this with an explicit no-punctuation entry instead.
+    cfg = FilterConfig(min_chars=2, blocklist=["you"])
+    assert clean("you", cfg) is None
+    assert clean("You.", cfg) is None
 
 
 def test_blocklist_is_exact_not_substring():
-    # "you" is blocked, but "yourself" must NOT be dropped (exact normalized match)
-    assert clean("yourself", FilterConfig()) == "yourself"
+    # An exact blocklist entry does NOT substring-match: "you" is blocked, but "yourself" must NOT
+    # be dropped. Uses an explicit blocklist (VT-006 dropped "you" from the defaults).
+    cfg = FilterConfig(min_chars=2, blocklist=["you"])
+    assert clean("yourself", cfg) == "yourself"
+    assert clean("you", cfg) is None
 
 
 def test_empty_blocklist_never_rejects():

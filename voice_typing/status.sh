@@ -12,7 +12,7 @@
 #  tmux.conf for you). Point the path at where this script lives:
 #
 #      set -g status-interval 1
-#      set -g status-right "#(/home/dustin/projects/voice-typing/voice_typing/status.sh)"
+#      set -g status-right "#(/home/<you>/projects/voice-typing/voice_typing/status.sh)"
 #
 #  Result: while listening, status-right shows "🎤 <current text>" — live partials as you
 #  speak, then the finalized text once it is typed (record_final writes the final back into

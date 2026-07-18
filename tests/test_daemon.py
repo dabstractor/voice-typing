@@ -1593,6 +1593,16 @@ def _make_daemon_with_feedback(tmp_path, monkeypatch, *, cuda=True):
 
 
 def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
+    # VT-001: the daemon must NEVER call cuda_check.resolve_device_and_models for status (that
+    # would import ctranslate2/torch + touch the CUDA driver in the DAEMON process, breaking the
+    # recorder-host subprocess architecture's core invariant). Assert it is not invoked.
+    calls = {"n": 0}
+
+    def _resolve(defaults=None):
+        calls["n"] += 1
+        return dict(daemon.cuda_check.CUDA_DEFAULTS)
+
+    monkeypatch.setattr(daemon.cuda_check, "resolve_device_and_models", _resolve)
     d, fb = _make_daemon_with_feedback(tmp_path, monkeypatch, cuda=True)
     fb.update_partial("hello")
     fb.record_final("world")
@@ -1602,9 +1612,13 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
                       "mic_ok", "mic_error"}                     # P1.M2.T2.S1: +phase/models_loaded/load_error; §4.2ter: +mode
     assert s["listening"] is False and s["partial"] == "world" and s["last_final"] == "world"   # record_final writes the final into partial so the status matches the screen
     assert s["phase"] == "idle" and s["models_loaded"] is True and s["load_error"] == ""  # P1.M2.T2.S1: injected recorder -> loaded
+    # device/compute_type/models come from the UN-PROBED config (VT-001) until the child reports
+    # its actual resolved device on arm. The defaults happen to equal CUDA_DEFAULTS, so this also
+    # pins that the config<->cuda_check defaults have not drifted.
     assert s["device"] == "cuda" and s["compute_type"] == "float16"
     assert s["final_model"] == "distil-large-v3" and s["realtime_model"] == "small.en"
     assert s["mic_ok"] is True and s["mic_error"] == ""          # S1's _ok_probe via _make_daemon_with_feedback
+    assert calls["n"] == 0, "status_snapshot must NOT call cuda_check.resolve_device_and_models (VT-001)"
 
 
 def test_status_snapshot_reflects_listening_toggle(tmp_path, monkeypatch):
@@ -1614,10 +1628,30 @@ def test_status_snapshot_reflects_listening_toggle(tmp_path, monkeypatch):
     assert d.status_snapshot()["listening"] is True
 
 
-def test_status_snapshot_cpu_fallback_models(tmp_path, monkeypatch):
-    d, _fb = _make_daemon_with_feedback(tmp_path, monkeypatch, cuda=False)
+def test_status_snapshot_reports_configured_device_when_not_loaded(tmp_path, monkeypatch):
+    """VT-001: before a child reports its resolved device, status reflects the CONFIGURED asr.device
+    (here cpu) — NOT a cuda_check probe. The daemon must stay CUDA-free; the authoritative
+    cuda-vs-cpu-fallback decision is made by the CHILD on arm (see
+    test_load_recorder_cpu_fallback_on_cuda_failure). compute_type is derived from the configured
+    device (int8 for cpu). Models are the CONFIGURED final/realtime models, not CPU_FALLBACK's.
+    """
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        daemon.cuda_check, "resolve_device_and_models",
+        lambda defaults=None: calls.__setitem__("n", calls["n"] + 1) or dict(daemon.cuda_check.CPU_FALLBACK),
+    )
+    cfg = VoiceTypingConfig(
+        asr=AsrConfig(device="cpu"),
+        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")),
+    )
+    fb = Feedback(cfg.feedback)
+    d = daemon.VoiceTypingDaemon(
+        cfg, fb, recorder=_StubRecorder(), backend=_FakeBackend(), mic_prober=_ok_probe,
+    )
     s = d.status_snapshot()
-    assert s["device"] == "cpu" and s["final_model"] == "small.en" and s["realtime_model"] == "tiny.en"
+    assert s["device"] == "cpu" and s["compute_type"] == "int8"   # UN-PROBED configured values
+    assert s["final_model"] == "distil-large-v3" and s["realtime_model"] == "small.en"  # configured, NOT cpu-fallback
+    assert calls["n"] == 0, "status_snapshot must NOT call cuda_check (VT-001)"
 
 
 def test_status_snapshot_reflects_mic_health(tmp_path, monkeypatch):
@@ -1641,7 +1675,11 @@ def test_status_snapshot_reflects_mic_health(tmp_path, monkeypatch):
     assert d.status_snapshot()["mic_error"] == ""
 
 
-def test_resolved_device_caches_resolve_called_once(tmp_path, monkeypatch):
+def test_resolved_device_never_calls_cuda_check(tmp_path, monkeypatch):
+    """VT-001: status_snapshot() must NEVER call cuda_check.resolve_device_and_models — not once,
+    not ever (the daemon process must stay CUDA-free). Previously this probed + cached; now the
+    cache is seeded in __init__ from the un-probed config and replaced only by the child on arm.
+    """
     calls = {"n": 0}
 
     def _resolve(defaults=None):
@@ -1656,10 +1694,14 @@ def test_resolved_device_caches_resolve_called_once(tmp_path, monkeypatch):
     )
     d.status_snapshot()
     d.status_snapshot()
-    assert calls["n"] == 1                      # cached after the first call
+    assert calls["n"] == 0                      # NEVER probed (the cache is seeded from config in __init__)
 
 
-def test_resolved_device_failure_degrades_to_unknown(tmp_path, monkeypatch):
+def test_resolved_device_unaffected_by_cuda_check_failure(tmp_path, monkeypatch):
+    """VT-001: a cuda_check failure must have NO effect on status — the daemon never invokes it, so
+    it cannot raise into status. Status reports the configured device; it does not degrade to
+    'unknown' (that fallback was part of the now-removed probe path).
+    """
     def boom(defaults=None):
         raise RuntimeError("cuda exploded")
 
@@ -1670,7 +1712,38 @@ def test_resolved_device_failure_degrades_to_unknown(tmp_path, monkeypatch):
         mic_prober=_ok_probe,
     )
     s = d.status_snapshot()
-    assert s["device"] == "unknown"             # never raises; degrades gracefully
+    assert s["device"] == "cuda"             # configured value; cuda_check never called, so no 'unknown'
+    assert s["compute_type"] == "float16"
+
+
+def test_status_snapshot_does_not_import_cuda_stack(tmp_path, monkeypatch):
+    """VT-008: the daemon process must NEVER import ctranslate2/torch (or otherwise touch the CUDA
+    driver) on a status query — the recorder-host subprocess architecture's core invariant
+    (recorder_host.py: "the daemon process NEVER imports RealtimeSTT/torch/ctranslate2").
+    status_snapshot() on a never-armed daemon must not ADD either to sys.modules. This is the
+    automated guard VT-001 added so the invariant cannot regress (a future status field /
+    diagnostic / logging path that re-introduces a CUDA import would fail here).
+    """
+    import sys  # noqa: E402 (local; test lives above the mid-file `import sys` in the T3 section)
+    # The daemon may legitimately resolve its device cache from the config, but it must NEVER go
+    # through cuda_check (which imports ctranslate2 + calls get_cuda_device_count()).
+    monkeypatch.setattr(
+        daemon.cuda_check, "resolve_device_and_models",
+        lambda defaults=None: (_ for _ in ()).throw(AssertionError(
+            "status_snapshot must NOT call cuda_check.resolve_device_and_models (VT-001/VT-008)")),
+    )
+    before = {m for m in ("ctranslate2", "torch") if m in sys.modules}
+    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    d = daemon.VoiceTypingDaemon(
+        cfg, Feedback(cfg.feedback), backend=_FakeBackend(), mic_prober=_ok_probe,
+    )  # never-armed: recorder=None (lazy boot, the cold-cache path VT-001 reproduced)
+    snap = d.status_snapshot()
+    assert snap["device"] in ("cuda", "cpu")   # a non-probing value (the configured device)
+    added = {m for m in ("ctranslate2", "torch") if m in sys.modules} - before
+    assert not added, (
+        f"status_snapshot imported the CUDA stack into the daemon process: {added} "
+        "(VT-001/VT-008: the daemon must stay CUDA-free)"
+    )
 
 
 # ===========================================================================
@@ -3531,6 +3604,78 @@ def test_status_reports_unloaded_after_child_death(tmp_path, monkeypatch):
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
     t.join(timeout=2.0)
+
+
+def test_status_device_reseeded_not_stale_after_child_death(tmp_path, monkeypatch):
+    """VT-002: after the recorder-host child dies, the resolved-device cache must NOT retain the
+    dead child's device. _handle_dead_host reseeds _resolved_device_cache to the UN-PROBED config,
+    so status reports the CONFIGURED device (not a stale cuda/cpu-fallback for a recorder that no
+    longer exists) alongside models_loaded=False / phase=unloaded / load_error.
+
+    Setup: a child that reports device=cpu (it "fell back"), armed on a default device=cuda cfg
+    (so the cache was seeded cpu from the child). Kill the child -> the cache must reseed to the
+    configured cuda, NOT stay stale at cpu.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    fb = Feedback(cfg.feedback)
+    cpu_device = {"device": "cpu", "compute_type": "int8",
+                  "final_model": "small.en", "realtime_model": "tiny.en"}
+    factory = _fake_host_factory(spawn_result=True, device=cpu_device)
+    d = daemon.VoiceTypingDaemon(
+        cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
+    )
+    t = threading.Thread(target=d.run, daemon=True)
+    t.start()
+    try:
+        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)
+        d.start()
+        assert _wait_for(lambda: d._models_loaded, timeout=2.0)
+        assert d.status_snapshot()["device"] == "cpu"   # cache seeded from the child's 'ready'
+        d._host._alive = False                           # child crashes
+        assert _wait_for(lambda: d._host is None, timeout=2.0), "dead host not cleaned up"
+        # VT-002: reseeded to the CONFIGURED device (cuda), not stale at the dead child's cpu.
+        snap = d.status_snapshot()
+        assert snap["device"] == "cuda" and snap["compute_type"] == "float16"
+        assert snap["phase"] == "unloaded" and snap["models_loaded"] is False
+    finally:
+        d.request_shutdown()
+    assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
+    t.join(timeout=2.0)
+
+
+def test_status_device_reseeded_not_stale_after_idle_unload(tmp_path, monkeypatch):
+    """VT-002: after idle-unload tears the host down, the resolved-device cache is reseeded to the
+    UN-PROBED config (not the torn-down child's device). Same setup as the death test but via
+    _unload_host (the idle-unload path). Status then reports the configured device with
+    models_loaded=False / phase=unloaded.
+    """
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    cfg = VoiceTypingConfig(
+        asr=AsrConfig(auto_unload_idle_seconds=0.001),  # fire immediately once disarmed
+        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")),
+    )
+    fb = Feedback(cfg.feedback)
+    cpu_device = {"device": "cpu", "compute_type": "int8",
+                  "final_model": "small.en", "realtime_model": "tiny.en"}
+    factory = _fake_host_factory(spawn_result=True, device=cpu_device)
+    d = daemon.VoiceTypingDaemon(
+        cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
+    )
+    d.start()                                       # arm -> _load_host seeds cache=cpu from child
+    assert d._models_loaded is True
+    assert d.status_snapshot()["device"] == "cpu"   # seeded from the child
+    d.stop()                                        # disarm -> _disarmed_monotonic set
+    # Force the idle-UNLOAD condition deterministically (the _idle_unload_watchdog thread only
+    # starts in run(), which this test skips) — mirror the existing idle-unload tests' past-clock
+    # trick instead of relying on real time elapsing past a 0.001s threshold.
+    d._disarmed_monotonic = _time.monotonic() - 9999.0
+    d._maybe_idle_unload()
+    assert d._host is None and d._models_loaded is False, "idle-unload did not tear the host down"
+    # VT-002: reseeded to the CONFIGURED device (cuda), not stale at the unloaded child's cpu.
+    snap = d.status_snapshot()
+    assert snap["device"] == "cuda" and snap["compute_type"] == "float16"
+    assert snap["phase"] == "unloaded" and snap["models_loaded"] is False
 
 
 # ===========================================================================

@@ -22,10 +22,11 @@ from voice_typing.config import (
 )
 
 # PRD §4.5 authoritative blocklist (pinned verbatim, incl. trailing periods).
+# VT-006: the bare "you" entry was removed from the defaults — it is a common word users want to
+# type as a standalone utterance, not a Whisper silence hallucination.
 _PRD_BLOCKLIST = [
     "thank you.",
     "thanks for watching.",
-    "you",
     "bye.",
     "thank you for watching",
 ]
@@ -157,6 +158,30 @@ def test_int_for_string_field_raises():
     """An int where a str is expected raises TypeError naming the field."""
     with pytest.raises(TypeError, match="device"):
         VoiceTypingConfig.from_toml({"asr": {"device": 123}})
+
+
+# ---------------------------------------------------------------------------
+# asr.device enum validation (VT-005): only "cuda" | "cpu" are valid. A value typo such as
+# "gpu" or "cud" is a valid str (passes the type guard above) but would otherwise flow into
+# _resolve_device_config -> AudioToTextRecorder(device=…) and fail noisily at construction
+# (force-CPU retry) FAR from the config mistake. Reject it at load time with a clear ValueError.
+# ValueError (not TypeError): the TYPE is correct, the VALUE is not.
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_device_value_raises():
+    """VT-005: a device value outside {cuda, cpu} is rejected at load with a ValueError naming it."""
+    for bad in ("gpu", "cud", "CUDA", "cuda ", "auto", ""):
+        with pytest.raises(ValueError, match="device"):
+            VoiceTypingConfig.from_toml({"asr": {"device": bad}})
+
+
+def test_valid_device_values_load():
+    """VT-005: 'cuda' and 'cpu' are the accepted device values and round-trip through TOML."""
+    for good in ("cuda", "cpu"):
+        cfg = VoiceTypingConfig.from_toml({"asr": {"device": good}})
+        assert cfg.asr.device == good
+
 
 
 # ---------------------------------------------------------------------------

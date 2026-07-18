@@ -1,6 +1,13 @@
 [Unit]
 Description=Local voice typing daemon (RealtimeSTT)
-After=pipewire.service ydotool.service
+# VT-004: order AFTER graphical-session.target + bind its lifecycle to it (PartOf/WantedBy). The
+# compositor (Hyprland) exports WAYLAND_DISPLAY/DISPLAY into the user manager AT graphical-session
+# startup; ordering after it makes the ExecStartPre=import-environment below MEANINGFUL (on a cold
+# boot that used to win the default.target race the import was a silent no-op because the manager
+# env did not yet hold the vars). pipewire/ydotool are also kept as ordering dependencies. launch_daemon.sh
+# STILL re-fetches the vars from `systemctl --user show-environment` as belt-and-suspenders.
+After=pipewire.service ydotool.service graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 # Import the Wayland/X display variables from the systemd USER manager environment into THIS
@@ -36,7 +43,11 @@ ExecStartPre=/usr/bin/systemctl --user import-environment WAYLAND_DISPLAY DISPLA
 # The daemon boots NOT-LISTENING — it never hot-mics on boot / restart. `voicectl start` or
 # `voicectl toggle` arms the mic over the control socket ($XDG_RUNTIME_DIR/voice-typing/control.sock).
 # (PRD §4.9.) Verify with: voicectl status   ->   listening: off
-ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh
+#
+# VT-003: __REPO__ is a PLACEHOLDER. install.sh substitutes the actual repo path (sed __REPO__ ->
+# $REPO) when it copies this unit into ~/.config/systemd/user/, so the installed ExecStart is
+# portable across users / repo locations (the source unit is NOT directly runnable until then).
+ExecStart=__REPO__/voice_typing/launch_daemon.sh
 Restart=on-failure
 RestartSec=2
 # KillMode=mixed (bugfix Issue 1 / PRD §4.2bis,§8,§7.9): systemd's DEFAULT is control-group, which
@@ -67,4 +78,9 @@ KillMode=mixed
 TimeoutStopSec=15
 
 [Install]
-WantedBy=default.target
+# VT-004: WantedBy=graphical-session.target (was default.target). A Wayland client daemon should
+# start with the graphical session (after the compositor seeded WAYLAND_DISPLAY) and stop with it;
+# default.target starts it at user-session boot, BEFORE the compositor exports the display vars
+# (the cold-boot race VT-004 fixes). install.sh removes a stale default.target.wants symlink from
+# prior installs when it enables the unit.
+WantedBy=graphical-session.target

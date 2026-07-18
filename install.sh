@@ -25,7 +25,10 @@
 set -euo pipefail
 
 # --- explicit tool paths (zsh-alias hazard; PRD §2) ---
-UV="/home/dustin/.local/bin/uv"
+# VT-003: do NOT hardcode /home/<user>. Honor an explicit UV= override (e.g. UV=/opt/uv ./install.sh),
+# else look uv up on PATH, else fall back to the conventional ~/.local/bin/uv. This script runs
+# under bash (shebang), so zsh aliases never apply; `command -v` returns the real binary path.
+UV="${UV:-$(command -v uv || echo "$HOME/.local/bin/uv")}"
 
 # --- repo root, CWD-independent (launch_daemon.sh SCRIPT_DIR idiom) ---
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -110,7 +113,15 @@ fi
 USER_UNIT_DIR="$XDG_CONFIG_HOME/systemd/user"
 mkdir -p "$USER_UNIT_DIR"
 cp "$SRC_UNIT" "$USER_UNIT_DIR/voice-typing.service"
+# VT-003: substitute the __REPO__ placeholder in the copied unit with the actual repo path so the
+# installed ExecStart is portable across users / repo locations (the source unit is a template —
+# sed on the COPY, never the repo file, so the template stays generic in git).
+sed -i "s#__REPO__#$REPO#g" "$USER_UNIT_DIR/voice-typing.service"
 systemctl --user daemon-reload
+# VT-004: the unit's WantedBy moved from default.target to graphical-session.target. Remove a
+# stale default.target.wants symlink left by a prior install (systemctl enable/disable key off the
+# CURRENT unit's [Install], so they will not clean up the old default.target symlink on their own).
+rm -f "$USER_UNIT_DIR/default.target.wants/voice-typing.service" 2>/dev/null || true
 systemctl --user enable voice-typing.service
 # restart (not start): starts a stopped unit AND applies a freshly-copied unit to a running one.
 # timestamp captured BEFORE restart so the offline journal grep below sees only this run
@@ -158,6 +169,26 @@ if [ ! -f "$CFG_DIR/config.toml" ]; then
   echo "    installed $CFG_DIR/config.toml"
 else
   echo "    kept existing $CFG_DIR/config.toml (not overwritten)"
+fi
+
+# --- (6b) install the stable voicectl launcher (VT-003) ---------------------------
+# hypr-binds.conf invokes voicectl via $HOME/.local/bin/voicectl (Hyprland runs `bind exec` through
+# /bin/sh -c, which expands $HOME). Maintain a symlink there -> $REPO/.venv/bin/voicectl so the
+# binds work regardless of which user runs it or where the repo was cloned, with NO hardcoded
+# /home/<user> path. Safe: only create when absent, or refresh when it already points here; never
+# clobber a foreign file the user may have at that path.
+LAUNCHER="$HOME/.local/bin/voicectl"
+mkdir -p "$HOME/.local/bin"
+if [ -e "$LAUNCHER" ] || [ -L "$LAUNCHER" ]; then
+  if [ "$(readlink -f "$LAUNCHER" 2>/dev/null || true)" = "$REPO/.venv/bin/voicectl" ]; then
+    : # already correct (re-install / idempotent)
+  else
+    echo "install.sh: WARNING — $LAUNCHER already exists and is not this repo's voicectl;" \
+         "leaving it in place. hypr-binds.conf will use it; remove it or edit hypr-binds.conf if unintended." >&2
+  fi
+else
+  ln -s "$REPO/.venv/bin/voicectl" "$LAUNCHER"
+  echo "    installed launcher $LAUNCHER -> $REPO/.venv/bin/voicectl"
 fi
 
 # --- (7) print usage + tmux snippet + hypr instruction --------------------------------

@@ -563,6 +563,14 @@ class VoiceTypingDaemon:
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
+        # VT-001: seed the status device cache with the UN-PROBED config values so the first
+        # `voicectl status` (and install.sh's readiness poll) NEVER calls into cuda_check -> the
+        # daemon process NEVER imports ctranslate2/torch/creates a CUDA context (the
+        # recorder-host subprocess architecture's core invariant, recorder_host.py). The cache is
+        # REPLACED by the child's actual resolved device on every successful _load_host() and
+        # RESEEDED to these un-probed values on host death / idle-unload (VT-002). Never None after
+        # __init__, so _resolved_device() never probes.
+        self._resolved_device_cache: dict[str, str] = self._unprobed_device_config()
         # P1.M3.T2.S2 (re-plan): the recorder now lives in a CHILD subprocess owned by a
         # RecorderHost. self._host replaces self._recorder. The daemon process NEVER imports
         # RealtimeSTT/torch/ctranslate2 and NEVER creates a CUDA context (all of that lives in
@@ -888,6 +896,12 @@ class VoiceTypingDaemon:
             self._load_error = "recorder-host child died unexpectedly"
             self._disarmed_monotonic = None
             self._last_speech_monotonic = None
+            # VT-002: the dead child's resolved device is now stale (no recorder exists). Reseed
+            # the cache to the UN-PROBED config (NOT None — that would make the next status call
+            # probe CUDA, reintroducing VT-001). Combined with the VT-001 seed, status now reports
+            # the configured device with models_loaded=False / phase=unloaded / load_error set
+            # until the next successful arm re-seeds the cache from the child.
+            self._resolved_device_cache = self._unprobed_device_config()
 
     def _configure_log_level(self) -> None:
         """Apply cfg.log.level to the `voice_typing` namespace logger (PRD §4.2 'DEBUG via config').
@@ -1227,6 +1241,11 @@ class VoiceTypingDaemon:
             self._models_loaded = False
             self._feedback.set_phase("unloaded")          # P1.M2.T2.S1 surface (CONSUME, don't re-add)
             self._feedback.set_models_loaded(False)       # P1.M2.T2.S1 surface
+            # VT-002: the torn-down child's resolved device is now stale. Reseed the cache to the
+            # UN-PROBED config (NOT None — that would make the next status call probe CUDA,
+            # reintroducing VT-001). status now reports the configured device with models_loaded=
+            # False / phase=unloaded until the next arm re-seeds it from the child.
+            self._resolved_device_cache = self._unprobed_device_config()
 
     def _refresh_mic_status(self, *, force: bool = False) -> None:
         """Run the mic probe (real or injected) and store ok/error. NEVER raises.
@@ -1561,27 +1580,42 @@ class VoiceTypingDaemon:
         }
 
     def _resolved_device(self) -> dict[str, str]:
-        """Resolved {device,compute_type,final_model,realtime_model}, cached on first call.
+        """Resolved {device,compute_type,final_model,realtime_model}, cached.
 
-        Lazily cached via getattr (no __init__ edit) so S1/S3's __init__ is untouched. The
-        cuda_check probe (inside _resolve_device_config) imports ctranslate2 + calls
-        get_cuda_device_count() — run AT MOST ONCE. Any failure degrades to 'unknown' (a status
-        call must never crash the daemon). In tests, monkeypatch daemon._resolve_device_config.
+        VT-001: the daemon process MUST NEVER probe CUDA (import ctranslate2 / torch / create a
+        CUDA context) — that is the recorder-host subprocess architecture's core invariant. So
+        this method ONLY returns the cache; it NEVER calls _resolve_device_config / cuda_check.
+        The cache is seeded in __init__ to the UN-PROBED config values, replaced by the child's
+        actual resolved device on every successful _load_host(), and reseeded to the un-probed
+        config on host death / idle-unload (VT-002). The authoritative resolved device (cuda vs
+        cpu-fallback) is reported by the CHILD on arm; until then status reflects the configured
+        intent (e.g. device="cuda"), which models_loaded=False / phase=unloaded clearly qualify.
+        Never raises. In tests that previously monkeypatched cuda_check.resolve_device_and_models
+        to force a status device, assert on the cache / _load_host seeding instead.
         """
         resolved = getattr(self, "_resolved_device_cache", None)
         if resolved is None:
-            try:
-                resolved = _resolve_device_config(self._cfg)
-            except Exception as exc:
-                logger.warning("status: device resolution failed (%s); reporting 'unknown'", exc)
-                resolved = {
-                    "device": "unknown",
-                    "compute_type": "unknown",
-                    "final_model": "unknown",
-                    "realtime_model": "unknown",
-                }
+            # Defensive: __init__ seeds the cache so this branch is unreachable. If something
+            # clears it to None, fall back to the UN-PROBED config — NEVER cuda_check (VT-001).
+            resolved = self._unprobed_device_config()
             self._resolved_device_cache = resolved
         return resolved
+
+    def _unprobed_device_config(self) -> dict[str, str]:
+        """Config-derived {device,compute_type,final_model,realtime_model} WITHOUT probing CUDA.
+
+        compute_type is derived from cfg.asr.device the SAME way _resolve_device_config does, but
+        cuda_check.resolve_device_and_models() is NEVER called — the daemon must stay CUDA-free
+        (VT-001). This is the value status_snapshot reports before the child reports its actual
+        resolved device (and after a death / idle-unload). The child's _child_resolved_device()
+        performs the real cuda_check resolution and seeds the cache on arm.
+        """
+        return {
+            "device": self._cfg.asr.device,
+            "compute_type": "float16" if self._cfg.asr.device == "cuda" else "int8",
+            "final_model": self._cfg.asr.final_model,
+            "realtime_model": self._cfg.asr.realtime_model,
+        }
 
     def _bounded_shutdown(self, timeout: float = 5.0) -> None:
         """Tear down the recorder-host child with a hard timeout (PRD §4.2; §8 risk row).

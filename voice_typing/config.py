@@ -102,6 +102,17 @@ class AsrConfig:
                 raise TypeError(
                     f"[asr] {_name} expects str, got {type(_v).__name__}: {_v!r}"
                 )
+        # device VALUE validation (VT-005): only "cuda" | "cpu" are valid. A typo such as
+        # device="cud" or device="gpu" is a valid str so it passed the type guard above, but it
+        # would then flow into _resolve_device_config -> AudioToTextRecorder(device=…) and fail
+        # noisily at construction (force-CPU retry) FAR from the config mistake. Reject it here at
+        # load time with a clear ValueError, mirroring the fast-fail posture for bad types.
+        # (cuda_check already auto-falls-back from "cuda" when no GPU is visible, so no "auto"
+        # sentinel is needed.) ValueError (not TypeError): the TYPE is correct, the VALUE is not.
+        if self.device not in ("cuda", "cpu"):
+            raise ValueError(
+                f'[asr] device must be "cuda" or "cpu", got {self.device!r}'
+            )
 
 
 @dataclass
@@ -174,10 +185,17 @@ class FilterConfig:
         default_factory=lambda: [
             "thank you.",
             "thanks for watching.",
-            "you",
             "bye.",
             "thank you for watching",
         ]
+        # NOTE (VT-006): the bare "you" entry was REMOVED from the defaults. "you" is a common
+        # English word a user frequently wants to type as a standalone utterance, and the
+        # blocklist matches on the punctuation/case-normalized form (textproc.clean), so it
+        # silently dropped dictating the single word "you" with no feedback. The blocklist's
+        # purpose is suppressing Whisper silence hallucinations (the other entries are genuine
+        # hallucinations); a single-word "you" is not. If a lone "you" hallucination is observed,
+        # filter it with a hallucination-pattern heuristic (e.g. drop a lone word only when VAD
+        # saw no real speech) rather than blanket-suppressing the word for all dictation.
     )
 
 

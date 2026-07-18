@@ -306,19 +306,25 @@ Unit-test this module (pure python, fast).
 ```ini
 [Unit]
 Description=Local voice typing daemon (RealtimeSTT)
-After=pipewire.service ydotool.service
+# VT-004: order after + bind the lifecycle to graphical-session.target so the daemon starts AFTER
+# the compositor exported WAYLAND_DISPLAY/DISPLAY (making the ExecStartPre import meaningful, not a
+# cold-boot no-op). launch_daemon.sh still re-fetches the vars as belt-and-suspenders.
+After=pipewire.service ydotool.service graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 # wtype (default backend) is a Wayland client and needs WAYLAND_DISPLAY/DISPLAY; import them
-# from the user manager (populated at graphical-session launch). NOTE: this ExecStartPre is a
-# no-op on a cold boot that wins the compositor race (the vars aren't in the manager yet);
-# launch_daemon.sh re-fetches them as the real workaround. See BUGS.md VT-004.
+# from the user manager (populated at graphical-session launch). Ordering after
+# graphical-session.target (VT-004) makes this meaningful instead of a cold-boot no-op;
+# launch_daemon.sh re-fetches the vars as the real workaround regardless.
 ExecStartPre=/usr/bin/systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
 # ExecStart is the LD_LIBRARY_PATH wrapper (voice_typing/launch_daemon.sh), NOT python directly.
 # The wrapper recomputes the cuBLAS/cuDNN 9 lib dirs from the LIVE installed nvidia wheels on every
 # launch, so this unit survives `uv sync` reinstalls without edits. Do NOT bake
 # Environment=LD_LIBRARY_PATH= here (it goes stale). The wrapper also sets HF_HUB_OFFLINE=1.
-ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh
+# VT-003: __REPO__ is a PLACEHOLDER install.sh substitutes with the actual repo path when it
+# copies the unit into ~/.config/systemd/user/ (portable across users / repo locations).
+ExecStart=__REPO__/voice_typing/launch_daemon.sh
 Restart=on-failure
 RestartSec=2
 # KillMode=mixed: deliver SIGTERM to the MAIN daemon only (let its single-flight host.stop()
@@ -327,7 +333,10 @@ KillMode=mixed
 TimeoutStopSec=15
 
 [Install]
-WantedBy=default.target
+# VT-004: a Wayland client daemon starts/stops with the graphical session (not default.target,
+# which raced the compositor on cold boot). install.sh removes a stale default.target.wants
+# symlink from prior installs when it enables the unit.
+WantedBy=graphical-session.target
 ```
 `install.sh`: `uv sync`, prefetch models, run a 5-second CUDA smoke test, install+`daemon-reload`+enable+start the unit, print tmux snippet and usage. Idempotent. The daemon starts **not-listening** and **not-loaded** — it must never hot-mic on boot and loads no models until the first arm (§4.2bis, ~0 VRAM at idle); `voicectl start`/`toggle` arms it (the first arm each session also loads the models, ~1–3 s).
 
@@ -335,8 +344,8 @@ WantedBy=default.target
 
 Hyprland keybinding: append to nothing — instead create `hypr-binds.conf` in the repo containing
 ```
-bind = CTRL SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle
-bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle-lite
+bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle
+bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite
 ```
 (`Ctrl+Alt+Super+D` = big/normal model; `Alt+Super+D` = little/lite model, §4.2ter.) Print an instruction to `source` it from `~/.config/hypr/hyprland.conf`. Do NOT modify the user's Hyprland config automatically. (Richer overlay UI is out of scope; state file + tmux status is the UI for now.)
 

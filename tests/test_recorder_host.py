@@ -490,6 +490,73 @@ def test_run_text_does_not_double_emit_on_normal_path():
     )
 
 
+class _AbortReturnsNoneFakeRecorder:
+    """VT-007: mimics a HYPOTHETICAL future RealtimeSTT whose ABORT path returns None (not '').
+
+    The v1.0.2 contract the OLD code depended on: abort -> text() returns '' (non-None) and never
+    calls the callback. A future version that returns None on abort too would break the
+    `result is not None` marker and re-wedge the run loop. This fake returns None on abort AND
+    never calls the callback, so the sentinel can ONLY come from the `aborted` flag we pass.
+    """
+
+    def __init__(self) -> None:
+        self.text_calls = 0
+
+    def text(self, callback):
+        self.text_calls += 1
+        return None   # future-version abort: None return, callback never invoked
+
+
+def test_run_text_emits_sentinel_when_abort_flag_set_even_if_return_is_none():
+    """VT-007 regression: the unblock sentinel must NOT depend on recorder.text()'s version-specific
+    return value. With a fake whose abort path returns None (not ''), the helper must STILL emit the
+    ('final', {text:''}) sentinel because the `aborted` flag is set — the abort signal WE control,
+    independent of the return contract. Without this, a future RealtimeSTT version returning None on
+    abort re-wedges the run loop after the first disarm (no further utterance transcribes).
+    """
+    import queue as _queue
+
+    evt_q: Any = _queue.Queue()
+    rec = _AbortReturnsNoneFakeRecorder()
+    aborted = threading.Event()
+    aborted.set()   # an abort was requested during this text() call
+    recorder_host._run_text_and_emit_final(rec, evt_q, lambda _t: None, aborted)
+
+    assert rec.text_calls == 1
+    events = _drain(evt_q)
+    assert events == [("final", {"text": ""})], (
+        f"abort path with return=None must STILL emit the sentinel via the `aborted` flag "
+        f"(VT-007); got {events!r}"
+    )
+
+
+def test_run_text_no_sentinel_on_normal_path_when_abort_flag_unset():
+    """VT-007 complement: when the abort flag is NOT set (the normal path), the helper must not emit
+    a spurious sentinel EVEN IF a caller passes the flag (it would otherwise double-fire a final).
+    The normal-path callback is responsible for the real final; the flag being clear suppresses the
+    sentinel regardless of the return value (here None).
+    """
+    import queue as _queue
+
+    evt_q: Any = _queue.Queue()
+
+    def _child_on_final(text: str) -> None:
+        recorder_host._safe_put(evt_q, ("final", {"text": text}))
+
+    rec = _NormalFakeRecorder()   # calls cb in a thread, returns None
+    aborted = threading.Event()    # NOT set
+    recorder_host._run_text_and_emit_final(rec, evt_q, _child_on_final, aborted)
+
+    # the callback runs in a thread; give it a beat to enqueue its real final, then drain ONCE
+    # (draining in a loop condition would consume+discard the item).
+    import time as _t
+    _t.sleep(0.2)
+    events = _drain(evt_q)
+    assert events == [("final", {"text": "hello world"})], (
+        f"normal path (abort flag unset) must emit ONLY the real final, no sentinel; got {events!r}"
+    )
+
+
 def test_abort_sentinel_unblocks_blocked_host_text():
     """END-TO-END of the fix at the host layer: host.text() blocks on _final_evt; feeding the
     ('final', {text:''}) sentinel that _run_text_and_emit_final emits on the abort path MUST unblock

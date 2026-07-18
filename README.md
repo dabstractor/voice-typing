@@ -59,11 +59,11 @@ disarmed; see [Model lifecycle & VRAM](#model-lifecycle--vram)).
 
 ```
 systemctl --user start voice-typing
-/home/dustin/projects/voice-typing/.venv/bin/voicectl toggle   # arms the mic
+/home/<you>/projects/voice-typing/.venv/bin/voicectl toggle   # arms the mic
 # speak. Watch the tmux status line for live partials, or the hyprctl toasts:
 #   the first arm shows "Loading…" then "Recording"; later arms just "Recording";
 #   disarming shows "Recording Stopped" (the ✔ final popup is optional — see feedback.notify_on_final).
-/home/dustin/projects/voice-typing/.venv/bin/voicectl toggle   # disarms
+/home/<you>/projects/voice-typing/.venv/bin/voicectl toggle   # disarms
 ```
 
 Expected behavior while listening: live partial words appear in the tmux status
@@ -84,7 +84,7 @@ Bind **Ctrl+Alt+Super+D** for the big model (normal mode) and **Alt+Super+D** fo
 hyprland.conf):
 
 ```
-source = /home/dustin/projects/voice-typing/hypr-binds.conf
+source = /home/<you>/projects/voice-typing/hypr-binds.conf
 ```
 
 Then reload:
@@ -93,11 +93,13 @@ Then reload:
 hyprctl reload
 ```
 
-The sourced file is `hypr-binds.conf` at the repo root. Its binds are:
+The sourced file is `hypr-binds.conf` at the repo root. Its binds invoke voicectl via the
+`$HOME/.local/bin/voicectl` launcher that `install.sh` maintains (Hyprland runs every `bind exec`
+through `/bin/sh -c`, so `$HOME` expands), so they work regardless of user / repo location:
 
 ```
-bind = CTRL SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle
-bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl toggle-lite
+bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle
+bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite
 ```
 
 **Normal / big mode** (`Ctrl+Alt+Super+D`) loads `distil-large-v3` + `small.en` — high accuracy,
@@ -137,7 +139,7 @@ your tmux.conf):
 
 ```
 set -g status-interval 1
-set -g status-right "#(/home/dustin/projects/voice-typing/voice_typing/status.sh)"
+set -g status-right "#(/home/<you>/projects/voice-typing/voice_typing/status.sh)"
 ```
 
 Result: while listening, `status-right` shows the current text (live partials while you
@@ -221,7 +223,7 @@ There are three ways the daemon ends up on CPU.
 can tell which path you are on:
 
 ```
-/home/dustin/projects/voice-typing/.venv/bin/voicectl status
+/home/<you>/projects/voice-typing/.venv/bin/voicectl status
 ```
 
 ## Troubleshooting
@@ -239,8 +241,8 @@ Triage, fastest first:
 
 ```
 journalctl --user -u voice-typing -e
-LD_DEBUG=libs /home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh 2>&1 | grep -i cudnn
-ldd /home/dustin/projects/voice-typing/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib/libcudnn.so.9
+LD_DEBUG=libs /home/<you>/projects/voice-typing/voice_typing/launch_daemon.sh 2>&1 | grep -i cudnn
+ldd /home/<you>/projects/voice-typing/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib/libcudnn.so.9
 systemctl --user restart voice-typing
 ```
 
@@ -302,7 +304,7 @@ still happens; only the repeated traceback log line is throttled. See
 Check live state and the resolved device:
 
 ```
-/home/dustin/projects/voice-typing/.venv/bin/voicectl status
+/home/<you>/projects/voice-typing/.venv/bin/voicectl status
 ```
 
 Typical CUDA output:
