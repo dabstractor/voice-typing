@@ -403,3 +403,227 @@ concerns are correctly deferred: the **lazy-load state machine** is §1 above (P
 **bounded teardown TIMING** (join(5s)+killpg budget, idle-unload watchdog) is S3; the **phase
 lifecycle** (the vad `is_listening` gate's home) is P1.M2.T1; **lite/mode-switch** is M2.T3;
 **status** (VT-001/VT-002) is M3.
+
+---
+
+# §3 — Bounded Teardown (P1.M2.T2.S3) vs PRD §4.2bis Idle-unload (resolved) + §8 risk row
+
+**Date:** 2026-07-18 (audit re-verified against the live tree)
+**Scope:** Audit the teardown **TIMING/orchestration** against **PRD §4.2bis's "Hard requirement —
+bounded teardown"** (resolved paragraph: *the daemon `killpg`s the child group after a 5 s join, so
+VRAM is force-released regardless of `recorder.shutdown()`'s behavior*) + the **§8 risk row**
+("`recorder.shutdown()` hangs ~90 s" → mitigate with a hard timeout + force-cleanup). §3 owns: the
+**daemon-side single-flight lock** around teardown, the **bounded join(5 s)+killpg budget** that
+SUPERSEDES the ~90 s RealtimeSTT wedge, the **idle-unload watchdog** that triggers it, and the
+**`request_shutdown` BUG-1 fix** that unblocks a wedged `host.text()` on the SIGTERM path. §1 above
+is P1.M2.T2.S1's lazy-load **state machine**; §2 is P1.M2.T2.S2's recorder-host **IPC MECHANISM**
+(stop@272-329 + `_terminate_group`@394-413 + `killpg`@407 — the primitive this §3 certifies the
+TIMING of). **§3 references §2's stop/killpg; it does NOT re-audit the IPC vocabulary** (S2) or the
+lazy-load states (S1). Subtask **P1.M2.T2.S3** of verification round `006_862ee9d6ef41`.
+
+**Audited artifacts (all read-only):**
+- `voice_typing/recorder_host.py` — `_STOP_JOIN_TIMEOUT_S: float = 5.0` (**L87**); `stop(timeout=…)`
+  (**L272**, the bounded teardown primitive): abort_event.set @300-302, detached `"shutdown"` cmd
+  thread @311-316 (never waited on), `self._proc.join(timeout=timeout)` **@318**, `_terminate_group()`
+  @323 + `join(timeout=2.0)` @325 on still-alive, `_dead=True`@327 + `_proc=None`@328; SINGLE-FLIGHT
+  under `self._stop_lock` @297; `_terminate_group` (**L394**): `os.getpgid(pid)` **@406** +
+  `os.killpg(pgid, SIGKILL)` **@407** (best-effort catch @409); child `os.setsid()` (**L446**, makes
+  the child its own group leader so `getpgid(pid)==pid` and killpg reaches the RealtimeSTT
+  grandchildren).
+- `voice_typing/daemon.py` — `_idle_unload_watchdog` (**L1160**, ticks `self._shutdown.wait(1.0)`
+  @1168 → `_maybe_idle_unload` @1170); `_maybe_idle_unload` (**L1172**, **lock-free** pre-check @1181-
+  1187, short-circuits `threshold<=0` @1182, returns if `not _models_loaded` / `_listening.is_set()` /
+  `_disarmed_monotonic is None` / `elapsed < threshold` @1183-1187 → `_unload_recorder` @1188);
+  `_unload_recorder` (**L1197**, back-compat alias → `_unload_host` @1201); `_unload_host` (**L1204**,
+  the idle-unload teardown): `with self._lock` **@1222** (the SAME lock `_load_host` takes @714 —
+  single-flight), full-condition re-check UNDER the lock @1224-1231 (a racing arm ABORTS the unload),
+  `_bounded_shutdown(timeout=5.0)` **@1240**, reset `_host=None`/`_models_loaded=False`/
+  `set_phase("unloaded")`/`set_models_loaded(False)` + device-cache reseed @1243-1247; `_bounded_shutdown`
+  (**L1620**, → `self._host.stop(timeout=timeout)` **@1643**, None-host no-op @1632, best-effort try/
+  except @1644-1645); `shutdown` (**L1647**, idempotent + single-flight via `_shutdown_done` under
+  `_lock` @1684-1686 + `_teardown_done` Event coordination on the SIGTERM path @1689/1709);
+  `request_shutdown` (**L1454**, the BUG-1 fix): `_shutdown.set()` @1486, drain-timer cancel @1489-1492,
+  None-host early-return @1494-1495, CLAIMs `_shutdown_done` under `_lock` @1498-1503,
+  `_safe_abort()` @1505 (OUTSIDE `_lock`), `_bounded_shutdown()` @1510 (kills the child group →
+  `host.text()`'s wait-loop detects child death → unblocks `run()`), `_teardown_done.set()` @1514 in
+  try/finally.
+- `tests/test_daemon.py` + `tests/test_recorder_host.py` — the
+  `-k 'unload or teardown or shutdown or killpg or terminate or bounded'` slice (the contract's run
+  target; the daemon fakes inject a `_LegacyRecorderHostAdapter` so the teardown branches are
+  exercised directly without a model load).
+
+**Bottom line:** ✅ All 5 properties (a)-(e) are **COMPLIANT** (each with file:line evidence below).
+The `-k` slice is **42 passed, 177 deselected in 2.12s** (re-ran live; matches the verified
+baseline of 42 passed, 2.12s). The teardown is **bounded**: `host.stop(timeout=5)` → `join(5)` +
+`_terminate_group()` (killpg) + `join(2)` = ~7 s max per call, plus `ControlServer.stop()` join(2)
+≈ ~2 s, and with daemon single-flight exactly ONE `_bounded_shutdown()` runs on the SIGTERM path
+→ ≤ ~9 s total — comfortable headroom under systemd `TimeoutStopSec=15`. It therefore **CANNOT
+reproduce** RealtimeSTT's ~90 s `recorder.shutdown()` wedge. **No source/test files were modified**
+(the teardown is PRD §4.2bis + §8-compliant per this re-verification; no defect surfaced). The only
+new artifact is this appended §3 report.
+
+---
+
+## §3.1 Method
+
+Each of the 5 item properties was mapped to **specific `voice_typing/recorder_host.py` /
+`voice_typing/daemon.py` file:line** via `grep -nE`, then re-verified by reading `stop` (L272-329),
+`_terminate_group` (L394-413), `_STOP_JOIN_TIMEOUT_S` (L87), the child `os.setsid` (L446); and
+`_idle_unload_watchdog` (L1160), `_maybe_idle_unload` (L1172), `_unload_recorder` (L1197),
+`_unload_host` (L1204-1247), `_bounded_shutdown` (L1620-1646), `shutdown` (L1647-1711), and
+`request_shutdown` (L1454-1514) against the **PRD §4.2bis resolved-paragraph wording** (killpg
+after a 5 s join) + the **§8 risk-row** mitigation (hard timeout + force-cleanup of the recorder's
+worker threads / `transcript_process` so VRAM is released). The contract's test target was then
+re-run live (`tests/test_daemon.py tests/test_recorder_host.py -k 'unload or teardown or shutdown
+or killpg or terminate or bounded'`, §3.3). The 7 non-defect nuances (§3.4) were cross-checked
+against the code/docstring evidence (recorder_host.py:282-289 "cannot reproduce the ~90 s wedge";
+L311-316 detached-cmd rationale; daemon.py:1210-1213 `_unload_host` under-`_lock` rationale;
+daemon.py:1628-1635 budget math; daemon.py:1463-1476 BUG-1 + single-flight rationale).
+
+### Commands run (re-verification)
+
+```bash
+# locate every teardown site (join budget, stop, killpg, setsid, the daemon orchestration)
+grep -nE '_STOP_JOIN_TIMEOUT_S|def stop\b|def _terminate_group|os\.killpg|os\.getpgid|os\.setsid|\
+def _idle_unload_watchdog|def _maybe_idle_unload|def _unload_recorder|def _unload_host|\
+def _bounded_shutdown|def shutdown\b|def request_shutdown|host\.stop\(|_teardown_done|_shutdown_done' \
+voice_typing/recorder_host.py voice_typing/daemon.py
+# the contract's run target (re-ran live)
+timeout 300 .venv/bin/python -m pytest tests/test_daemon.py tests/test_recorder_host.py \
+    -q -k 'unload or teardown or shutdown or killpg or terminate or bounded'
+# scope guard — no source modified
+git status --short
+```
+
+---
+
+## §3.2 The 5 teardown properties — per-property compliance table
+
+| # | item property | PRD §4.2bis / §8 expected | code actual (`voice_typing/*.py`) | verdict |
+|---|---|---|---|---|
+| (a) | **`stop()` joins child w/ timeout, then `_terminate_group()` (killpg)** | "killpg's the child group after a 5 s join" (§4.2bis resolved ¶); "hard timeout + force-cleanup" (§8) | recorder_host.py: `_STOP_JOIN_TIMEOUT_S = 5.0` **@87**; `stop(timeout=…)` **@272**; `self._proc.join(timeout=timeout)` **@318**; `if self._proc.is_alive(): logger.warning(…); self._terminate_group(); self._proc.join(timeout=2.0)` **@319-325**; `_terminate_group` (L394): `pgid = os.getpgid(pid)` **@406** + `os.killpg(pgid, signal.SIGKILL)` **@407** (best-effort catch @409); child `os.setsid()` **@446** (own group leader → killpg reaches grandchildren) | ✅ **COMPLIANT** |
+| (b) | **`_unload_host` acquires the SAME single-flight lock as load** | "Teardown runs under the SAME single-flight lock as load" (§4.2bis) | daemon.py: `_unload_host` `with self._lock:` **@1222** == `_load_host` `with self._lock:` **@714** (same `threading.Lock` instantiated **@591**; `_load_cond = threading.Condition(self._lock)` **@665** uses the same lock); full-condition re-check UNDER the lock @1224-1231 incl. `self._listening.is_set()` (a racing arm ABORTS the unload) | ✅ **COMPLIANT** |
+| (c) | **idle-unload watchdog tears down after `auto_unload_idle_seconds` of loaded+not-listening** | "after `auto_unload_idle_seconds` (default 1800) of loaded/not-listening" (§4.2bis Idle unload) | daemon.py: `_idle_unload_watchdog` ticks `self._shutdown.wait(1.0)` **@1168** → `_maybe_idle_unload` @1170; pre-check `threshold = self._cfg.asr.auto_unload_idle_seconds` **@1181**, short-circuit `threshold <= 0` @1182, return if `not self._models_loaded` / `self._listening.is_set()` / `self._disarmed_monotonic is None` / `elapsed < threshold` @1183-1187 → `_unload_recorder()` @1188 → `_unload_host()` @1201 | ✅ **COMPLIANT** |
+| (d) | **teardown is bounded (seconds), NEVER 90 s** | "MUST NOT reproduce the ~90 s teardown hang" (§8 risk row; §4.2bis hard req) | recorder_host.py: `stop()` join(5)+killpg+join(2)=~7 s max @318-325 (killpg is UNCONDITIONAL after the join budget — cannot wedge); daemon.py: `_bounded_shutdown(timeout=5.0)`@1620 → `self._host.stop(timeout=timeout)` **@1643**; `stop()` docstring @282-289 "cannot reproduce RealtimeSTT's ~90 s shutdown wedge; we do NOT wait on its unbounded thread joins"; `shutdown()` docstring @1657-1666 confirms the wedge is superseded; budget math @1628-1635 (~7 s/call + ~2 s ControlServer, single-flight → ≤~9 s < `TimeoutStopSec=15`) | ✅ **COMPLIANT** |
+| (e) | **`request_shutdown` kills the child group so a blocked `text()` unblocks (BUG-1 fix)** | "Killing the child guarantees `host.text()` returns" (BUG-1; §4.2) | daemon.py: `request_shutdown` **@1454**: `_shutdown.set()` @1486 → drain-timer cancel @1489-1492 → CLAIMs `_shutdown_done` under `_lock` @1498-1503 → `_safe_abort()` @1505 (outside `_lock`) → `_bounded_shutdown()` **@1510** (kills the group) → `_teardown_done.set()` @1514 (try/finally); docstring @1463-1472 "Killing the child (`host.stop()`) guarantees `host.text()`'s loop sees a dead child and returns within ~0.5 s"; git: `84f03e8 P1.M4.BUG1: tear down child on shutdown to fix SIGTERM hang` + `4526870 P1.M1.T2.S3: end-to-end SIGTERM race regression test` | ✅ **COMPLIANT** |
+
+---
+
+## §3.3 Test result — the contract's run target (the evidence)
+
+```bash
+timeout 300 .venv/bin/python -m pytest tests/test_daemon.py tests/test_recorder_host.py \
+    -q -k 'unload or teardown or shutdown or killpg or terminate or bounded'
+# → 42 passed, 177 deselected in 2.12s
+```
+
+**Recorded count: 42 passed, 177 deselected** (matches the verified baseline of 42 passed, 2.12s;
+re-ran live during this audit). The slice is CUDA-free (the daemon fakes inject a
+`_LegacyRecorderHostAdapter`; the recorder-host tests drive `stop`/`_terminate_group` directly) →
+fast (~2 s), but the `timeout 300` inner + bash-tool outer wrap are mandatory (AGENTS.md Rule 1).
+
+### Test → property mapping
+
+| Property | Covering test(s) (`tests/test_daemon.py` unless noted) | What it asserts |
+|---|---|---|
+| (a) stop join+killpg | `test_concurrent_stop_calls_share_one_teardown`; `test_stop_is_noop_when_no_process`; `test_stop_with_dead_process_is_noop` (`tests/test_recorder_host.py`); `test_terminate_group_sigkills_process_group`; `test_terminate_group_uses_getpgid_for_pid` | `stop()` joins up to the timeout, then SIGKILLs the process group; idempotent; no-op when no/dead process; `_terminate_group` uses `getpgid` + `killpg` |
+| (b) `_unload_host` same lock as load | `test_load_and_unload_serialize_on_the_same_single_flight_lock`; `test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded`; `test_armed_state_aborts_unload_via_listening_recheck` | unload acquires the same `_lock` as load (a racing arm waits); teardown routes through `_bounded_shutdown` (the arm's wait is bounded); an armed state aborts the unload via the under-lock re-check |
+| (c) idle-unload watchdog | `test_idle_unload_fires_when_disarmed_beyond_threshold`; `test_idle_unload_keeps_resident_within_threshold`; `test_idle_unload_noop_when_listening`; `test_idle_unload_noop_when_not_loaded`; `test_idle_unload_noop_when_never_disarmed`; `test_idle_unload_disabled_when_threshold_zero`; `test_arm_resets_idle_unload_clock`; `test_cold_arm_after_idle_unload_refires_loading_toast` | the watchdog fires after the threshold, noops within threshold / while listening / when not loaded / never disarmed, disables at threshold<=0; the clock resets on arm; a post-unload arm is cold (reloads) |
+| (d) bounded (never 90 s) | `test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded`; `test_bounded_shutdown_best_effort_never_raises`; the idle-unload + SIGTERM-race tests above | teardown routes through the bounded `host.stop(timeout=5)`; `_bounded_shutdown` is best-effort + never re-raises; the SIGTERM-race concurrent teardown fits ONE bounded `_bounded_shutdown` under `TimeoutStopSec` |
+| (e) BUG-1 SIGTERM path | `test_request_shutdown_aborts_and_tears_down_child`; `test_shutdown_is_idempotent_and_single_flight`; `test_sigterm_concurrent_teardown_shares_one_bounded_shutdown` (`4526870` e2e regression) | `request_shutdown` sets `_shutdown` + aborts + calls `_bounded_shutdown` (kills the group); `shutdown` is idempotent + single-flight (`_shutdown_done` + `_teardown_done`); concurrent teardown shares ONE bounded teardown |
+
+---
+
+## §3.4 Non-defect nuances (NON-blocking — recorded so they are NOT mistaken for gaps)
+
+### (i) Two single-flight layers (both intentional, neither redundant)
+The daemon `self._lock` (daemon.py:591) serializes **arm-vs-teardown** (`_load_host`@714 vs
+`_unload_host`@1222) — a racing arm blocks on this lock, waits for teardown, then spawns fresh (it
+never sees a half-torn-down host). `RecorderHost._stop_lock` (recorder_host.py) serializes
+**concurrent `stop()` calls** — on the SIGTERM path `request_shutdown()` (signal thread) +
+`shutdown()` (main-thread finally) BOTH reach `host.stop()`; under `_stop_lock` the second caller
+blocks until the first sets `_proc=None`, then returns immediately (bugfix Issue 1 / P1.M1.T1.S1) —
+exactly ONE process-group teardown runs. Both layers are needed; neither is redundant.
+
+### (ii) `_unload_host` calls `_bounded_shutdown(timeout=5.0)`, NOT `host.stop()` directly
+`_unload_host`@1240 routes through `_bounded_shutdown`@1620 (a thin router → `host.stop(timeout=5)`
+@1643 + a None-host no-op guard @1632 + best-effort try/except @1644-1645). The indirection is
+PINNED by `test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded` (so a future
+refactor that calls `host.stop()` directly fails the test). Net effect == `host.stop(timeout=5)`.
+
+### (iii) The graceful `"shutdown"` cmd is sent on a DETACHED daemon thread and NEVER waited on
+`stop()` puts `("shutdown", {})` on a SEPARATE daemon thread @311-316 (never joined). The child's
+command loop BLOCKS in `recorder.text()` while listening, so it does NOT drain `cmd_q` until an
+abort unblocks it; and an `mp.Queue.put` could block indefinitely on a wedged child's feeder
+thread. The detached thread swallows all errors and dies with the daemon; the `join`+`killpg` is
+the ACTUAL teardown. This is WHY teardown is bounded — we never block on the queue.
+
+### (iv) `abort_event.set()` is called BEFORE the join
+`stop()`@300-302 sets the abort event BEFORE `proc.join(timeout)`@318 so a child blocked in
+`text()` unblocks COOPERATIVELY and the join can complete fast (often << 5 s). The killpg is the
+belt-and-suspenders for a child that ignores the abort — both the cooperative nudge AND the hard
+kill are deliberate.
+
+### (v) The idle-unload watchdog pre-check is LOCK-FREE
+`_maybe_idle_unload`@1181-1187 reads `self._models_loaded` / `self._listening.is_set()` /
+`self._disarmed_monotonic` / `time.monotonic()` WITHOUT acquiring `_lock` (atomic CPython reads)
+so the common "not time yet" path does NOT contend `_lock` every 1 s tick.
+`_unload_host`@1224-1231 does the authoritative re-check UNDER `_lock`. This is a performance design
+(don't hammer `_lock` from a background thread every second), not a gap.
+
+### (vi) `request_shutdown` runs abort + `_bounded_shutdown` OUTSIDE `_lock`
+`request_shutdown` calls `_safe_abort()`@1505 and `_bounded_shutdown()`@1510 OUTSIDE `_lock`; only
+the `_shutdown_done` CLAIM @1498-1503 is under `_lock` (a short critical section). So a slow
+teardown cannot wedge the shutdown signal or block concurrent `start`/`stop`/`toggle` (validation
+NEW-2).
+
+### (vii) The budget math (~9 s < `TimeoutStopSec=15`)
+`host.stop(timeout=5)` → `proc.join(5)` + `_terminate_group()` (killpg) + `join(2)` = ~7 s max per
+call (only if the child wedges the FULL join budget; normally far less); + `ControlServer.stop()`
+`join(2)` ≈ ~2 s. With daemon single-flight (exactly ONE `_bounded_shutdown` on the SIGTERM path)
+the total is ≤ ~9 s — comfortable headroom under systemd `TimeoutStopSec=15`. The default was 10.0
+(→ ~12 s/call, ~14 s total, no margin); `5.0` makes the single-teardown path fit (bugfix Issue 1 /
+Fix 1C, P1.M1.T2.S2).
+
+---
+
+## §3.5 Conclusion
+
+The bounded teardown faithfully implements **PRD §4.2bis's "Hard requirement — bounded teardown"**
+(resolved paragraph) on all 5 properties (a)-(e): `stop()` joins the child for 5 s then SIGKILLs its
+process group via `_terminate_group()`/`os.killpg` (a); `_unload_host` tears the resident child down
+under the **SAME single-flight lock as load** so a racing arm waits then loads fresh (b); the
+`_idle_unload_watchdog` fires `_unload_host` after `auto_unload_idle_seconds` of loaded+not-listening
+(c); the teardown is **bounded** (`join(5)`+`killpg`+`join(2)` ≈ ~7 s/call, ≤~9 s total single-flight
+< `TimeoutStopSec=15`) so it **CANNOT reproduce RealtimeSTT's ~90 s `recorder.shutdown()` wedge** (d);
+and `request_shutdown` kills the child group so a run() loop blocked in `host.text()` returns within
+~0.5 s on the SIGTERM path — the BUG-1 fix (e). All with `voice_typing/recorder_host.py` +
+`voice_typing/daemon.py` file:line evidence; the `-k` slice is **42 passed, 177 deselected**.
+
+This is the spine the **Idle unload** feature (PRD §4.2bis) depends on: because teardown is bounded
+(killpg after a 5 s join — VRAM is force-released regardless of `recorder.shutdown()`'s behavior),
+the idle-unload watchdog can fire every 30 min WITHOUT re-triggering the ~90 s wedge AND without
+blocking a racing arm under the single-flight lock. The §8 risk row's mitigation (hard timeout +
+force-cleanup of the recorder's worker threads / `transcript_process`) is satisfied by the
+`setsid`+`killpg` group teardown, which reaches the RealtimeSTT-spawned grandchildren directly.
+
+This certifies the project's acceptance criteria:
+- **#9 (idle-unload → reload, bounded teardown)** — "the recorder unloads (~0 VRAM) and a later arm
+  reloads it; the teardown is bounded (completes in seconds, no 90 s hang)." Certified by (a)+(b)+
+  (c)+(d): the watchdog fires after the threshold (c), teardown shares the load single-flight lock
+  so a racing arm waits then loads fresh (b), the join(5)+killpg budget keeps it bounded (a)+(d), and
+  the next arm reloads via `_load_host` (~1–3 s, same as a session's first arm).
+- **BUG-1 (SIGTERM/systemctl-stop exit)** — "a clean, prompt SIGTERM exit (no SIGKILL after
+  `TimeoutStopSec`)." Certified by (e): `request_shutdown` kills the child group so `host.text()`'s
+  wait-loop detects child death and returns within ~0.5 s → `run()` exits → `main()`'s finally runs
+  → clean exit. The `setsid`+`killpg` group teardown guarantees the VRAM release the §8 risk row
+demands.
+
+**Verdict: ✅ COMPLIANT on all 5 properties — no fix needed.** **No source/test files were
+modified** (this is a read-only audit — the teardown is PRD §4.2bis + §8-compliant per this
+re-verification; no defect was found). The only artifact produced by this subtask is this appended
+§3 section. Adjacent concerns are correctly deferred: the **lazy-load state machine** is §1 above
+(P1.M2.T2.S1); the **recorder-host IPC mechanism** (incl. the `stop`/`_terminate_group`/`killpg`/
+`setsid` primitives this §3 certifies the timing of) is §2 (P1.M2.T2.S2); the **graceful drain** is
+P1.M2.T1.S2; the **phase lifecycle** is P1.M2.T1; **lite/mode-switch** is M2.T3; **status** (VT-001/
+VT-002) is M3.
