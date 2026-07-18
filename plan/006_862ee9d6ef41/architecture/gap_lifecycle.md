@@ -195,3 +195,211 @@ re-verification). The only artifact produced by this subtask is this report. Adj
 correctly deferred: the **graceful drain** is P1.M2.T1.S2 (§2 of `gap_daemon_loop.md`); the
 **recorder-host IPC** is S2; the **bounded teardown** detail is S3; **lite/mode-switch** is M2.T3;
 **status/feedback** (incl. VT-001/VT-002) is M3.
+
+---
+
+# §2 — Recorder-Host IPC (P1.M2.T2.S2) vs PRD §4.2bis
+
+**Date:** 2026-07-18 (audit re-verified against the live tree)
+**Scope:** Audit `voice_typing/recorder_host.py`'s **IPC mechanism** against **PRD §4.2bis** (the
+recorder-host subprocess model) on the **6 item properties (a)-(f)**. The mechanism comprises:
+`RecorderHost.spawn` / `set_microphone` / `abort` / `text` / `stop` (L181-329) + the two
+multiprocessing queues + the abort `mp.Event` (L135-160) + the child `_worker_main` (L421-575,
+incl. `os.setsid` @446 + the command loop @533-571 + `_run_text_and_emit_final` @630-677) + the
+daemon reader thread `_read_loop` (L331-353) + `_dispatch` (L354-392) + `_terminate_group`
+(L394-413, `os.killpg` @407) + the child-local `_RelayFeedback` (L718-750) / `_RelayLatency`
+(L760-774) relay stand-ins. Subtask **P1.M2.T2.S2** of verification round `006_862ee9d6ef41` —
+**appended** to this report (§1 above is P1.M2.T2.S1's lazy-load state-machine audit; this §2 owns
+the IPC 6 properties, a different contract — queues/commands/events/relay/abort, not load states).
+**Audited artifacts (all read-only):**
+- `voice_typing/recorder_host.py` — `__init__` queues+Event (L139/140/146); `spawn()` (L181-228,
+  `ctx.Process(target=_worker_main,…)` @193-200); `set_microphone()` (L230-235, `cmd_q.put` @233);
+  `abort()` (L237-248, `_abort_event.set()` @246); `text()` (L250-271, `cmd_q.put` @261,
+  `_final_evt.wait` loop @264-268); `stop()` (L272-329, shutdown best-effort @309, `join` @315,
+  `_terminate_group` @321); `_read_loop()` (L331-353); `_dispatch()` (L354-392); `_terminate_group()`
+  (L394-413, `os.killpg` @407); `_worker_main()` (L421-575, `os.setsid` @446, relay stand-ins
+  @464-465, `_abort_handler` @517-531, command loop @533-571, belt+suspenders `("abort",{})` @564);
+  `_run_text_and_emit_final()` (L630-677, VT-007 sentinel `("final",{text:""})` @677);
+  `_RelayFeedback` (L718-750, partial relay @733, vad relay @737, no-ops @735/738/741);
+  `_RelayLatency` (L760-774, `speech_end` relay @768, no-ops @759/772/774). Also the module docstring's
+  IPC PROTOCOL block (L18-31) + CALLBACK RELAY block (L33-43).
+- `tests/test_recorder_host.py` + `tests/test_daemon.py` — the
+  `-k 'host or relay or queue or ipc or worker'` slice (the contract's run target; 30 tests; the
+  fakes mock CUDA so the slice is fast and exercises the IPC directly without a model load).
+
+**Bottom line:** ✅ All 6 PRD §4.2bis IPC properties are **compliant** (each with file:line evidence
+below). The `-k 'host or relay or queue or ipc or worker'` slice is **30 passed, 189 deselected in
+1.66s** (re-ran live; matches the verified baseline of 30 passed, 1.65s). Five **non-blocking**
+nuances are recorded so they are not mistaken for defects (§4): the IPC vocabulary is
+richer/safer than the item's shorthand but fully satisfies PRD §4.2bis's intent
+("arm/disarm/text/abort/shutdown proxied; partials/finals/VAD streamed back; setsid+killpg for
+VRAM release"). **No source files were modified** (this is a read-only audit — the IPC is
+PRD §4.2bis-compliant per the re-verification; no defect was found).
+
+---
+
+## §2.1 Method
+
+Each of the 6 IPC properties was mapped to **specific `voice_typing/recorder_host.py` file:line**
+via `grep -nE`, then re-verified by reading `__init__` (L135-160), `spawn` (L181-228),
+`set_microphone`/`abort`/`text`/`stop` (L230-329), `_read_loop` (L331-353), `_dispatch` (L354-392),
+`_terminate_group` (L394-413), `_worker_main` (L421-575, incl. `os.setsid` @446 + the command loop
+@533-571 + the relay stand-ins @464-465 + `_abort_handler` @517-531), `_run_text_and_emit_final`
+(L630-677), `_RelayFeedback` (L718-750), and `_RelayLatency` (L760-774). The contract's test target
+was then re-run live (`tests/test_recorder_host.py tests/test_daemon.py -k 'host or relay or queue
+or ipc or worker'`, §2.3). The module docstring's IPC PROTOCOL (L18-31) + CALLBACK RELAY (L33-43)
+blocks were cross-checked against the code's actual vocabulary. The 5 non-defect nuances
+(abort-via-Event; richer vocabulary; intentional no-op relays; VT-007 sentinel; vad is_listening
+gate) were confirmed against the code comments (recorder_host.py:141-145 abort-Event rationale;
+L96-100 killpg rationale; L735/738/741 daemon-owned no-ops; L630-676 VT-007 sentinel; L380-388
+Issue-2 residual gate).
+
+### Commands run (re-verification)
+
+```bash
+# locate every IPC site (queues, commands, events, relay, abort, setsid/killpg, the VT-007 sentinel)
+grep -nE 'def spawn|def set_microphone|def abort|def text|def stop|def _read_loop|def _dispatch|\
+def _terminate_group|def _worker_main|def _run_text_and_emit_final|os\.setsid|os\.killpg|_cmd_q\.put|\
+_abort_event|class _RelayFeedback|class _RelayLatency|_safe_put' voice_typing/recorder_host.py
+# the contract's run target (re-ran live)
+timeout 300 .venv/bin/python -m pytest tests/test_recorder_host.py tests/test_daemon.py \
+    -q -k 'host or relay or queue or ipc or worker'
+# scope guard — no source modified
+git status --short
+```
+
+---
+
+## §2.2 The 6 IPC properties — per-property compliance table
+
+| # | Property (PRD §4.2bis) | Code actual (`voice_typing/recorder_host.py`) | Verdict |
+|---|---|---|---|
+| (a) | daemon **spawns a managed child** (`Process(target=_worker_main)`) that owns the recorder; model load happens IN THE CHILD (daemon stays CUDA-free) | `spawn()` **L193-200**: `self._proc = ctx.Process(target=_worker_main, args=(self._cfg, self._cmd_q, self._evt_q, self._abort_event, self._force_cpu, self._mode), name=…, daemon=True)` then `self._proc.start()` (**L201**). Reader thread started @203-205 BEFORE the `_ready_evt` wait @207-213 so load-time events drain. The heavy load is in `_worker_main` (build_recorder @473/483) | ✅ **COMPLIANT** |
+| (b) | child calls `os.setsid()` (own process group) + daemon `os.killpg` releases ALL VRAM incl. grandchildren | `_worker_main` **L446**: `os.setsid()` (first syscall; comment L443-445). Daemon `_terminate_group()` **L394-413**: `os.killpg(os.getpgid(pid), signal.SIGKILL)` (**L407**) — the child is its own group leader → killpg reaches its RealtimeSTT-spawned grandchildren (transcript_process/reader_process). `stop()` calls it @321 after a bounded `join(timeout)` @315 | ✅ **COMPLIANT** (the VRAM-release mechanism PRD §4.2bis mandates) |
+| (c) | arm/disarm/text/shutdown **proxied over a command queue**; abort interrupts a blocked text() | `cmd_q` = `ctx.Queue()` (**L139**). `set_microphone(on)` **L233** puts `("arm"/"disarm", {})`; `text()` **L261** puts `("text", {})`; `stop()` **L309** best-effort puts `("shutdown", {})`. **abort is primarily a dedicated `mp.Event`** (`_abort_event` @142/146; `abort()` sets it @246), polled by a SEPARATE child thread `_abort_handler` @517-531 that calls `recorder.abort()`. `("abort",{})` IS still handled on cmd_q (**L564**) as belt-and-suspenders (see nuance §4.1) | ✅ **COMPLIANT** (abort-via-Event nuance — STRONGER than a plain cmd_q abort) |
+| (d) | partials/finals/VAD (and load/error) **events stream back to a daemon reader thread** | `evt_q` = `ctx.Queue()` (**L140**). Child emits via `_safe_put`: `("ready",{device,…})` @499, `("error",{msg})` @479/501, `("final",{text})` @508 + VT-007 sentinel @677, `("partial",{text})` @733, `("speech",{})` @468, `("vad",{phase})` @737, `("speech_end",{})` @768, `("gone",{})` @575. Daemon `_read_loop` (L331-353) drains → `_dispatch` (L354-392) handles every kind; unknown WARN-logged @391 | ✅ **COMPLIANT** (vocabulary richer than shorthand — see nuance §4.2) |
+| (e) | `text(on_final)` puts the text command + **blocks until a final event** arrives (unblocked by the reader thread) | `text()` **L250-271**: sets `_on_final` @255, clears `_final_evt` @256, puts `("text",{})` @261, then BLOCKS in `while not self._final_evt.wait(timeout=0.5):` (**L264-268**) — the loop also detects child death (`_dead or not _proc.is_alive()` → return @267-268). Reader `_dispatch` on `"final"` (L369-377) invokes `self._on_final(text)` @374 + sets `_final_evt` @377 → unblocks `text()`. Dead-child: `_read_loop` finally (L351-353) sets `_dead=True` + `_final_evt.set()` | ✅ **COMPLIANT** (the VT-007 sentinel @677 GUARANTEES a final even on the abort path — nuance §4.4) |
+| (f) | child callbacks **relay** partials/VAD/speech_end to the daemon (daemon drives Feedback/LatencyLog/on_final) | `_RelayFeedback` (L718-750): `update_partial` @725-728 → `("partial",{text})`; `set_phase` @730-733 → `("vad",{phase})` (listening/speaking only); `set_models_loaded` @735 / `record_final` @738 / `set_listening` @741 are INTENTIONAL no-ops. `_RelayLatency` (L760-774): `note_speech_end` @755/768 → `("speech_end",{})`; `note_partial` @749 / `finalize_utterance` @772 / `snapshot` @774 are no-ops | ✅ **COMPLIANT** (relay covers only child-unique observations; daemon-owned transitions are correctly no-ops — nuance §4.3) |
+
+---
+
+## §2.3 Test result — the contract's run target (the evidence)
+
+```bash
+timeout 300 .venv/bin/python -m pytest tests/test_recorder_host.py tests/test_daemon.py \
+    -q -k 'host or relay or queue or ipc or worker'
+# → 30 passed, 189 deselected in 1.66s
+```
+
+**Recorded count: 30 passed, 189 deselected** (matches the verified baseline of 30 passed, 1.65s;
+re-ran live during this audit). The slice is CUDA-free (the fakes mock the recorder) → fast (~1.7s),
+but the `timeout 300` inner + bash-tool outer wrap are mandatory (AGENTS.md Rule 1).
+
+### Test → property mapping
+
+| Property | Covering test(s) | What it asserts |
+|---|---|---|
+| (a) spawn → Process + ready/error | `test_spawn_ready_seeds_device_via_dispatch`; `test_spawn_error_sets_error_via_dispatch` | `ctx.Process(target=_worker_main)` built + started; the 'ready'/'error' event seeds `_device`/`_error` via `_dispatch` |
+| (b) setsid + killpg teardown | `test_concurrent_stop_calls_share_one_teardown`; `test_stop_is_noop_when_no_process`; `test_stop_with_dead_process_is_noop` | `stop()` SIGKILLs the process group under single-flight; idempotent; no-op when no/dead process |
+| (c) cmd_q commands + abort-Event | `test_set_microphone_puts_arm_or_disarm_command`; `test_abort_sets_abort_event`; `test_text_blocks_until_final_event_then_returns` | arm/disarm/text put commands; abort sets the dedicated `_abort_event` (not a cmd_q put) |
+| (d) evt_q events dispatched | `test_dispatch_partial_calls_on_partial`; `test_dispatch_speech_calls_on_speech`; `test_dispatch_speech_end_stamps_latency`; `test_dispatch_vad_drives_feedback_phase`; `test_dispatch_final_calls_on_final_and_sets_final_event`; `test_dispatch_ready_seeds_device_and_sets_ready_event`; `test_dispatch_error_sets_error_and_ready_event`; `test_dispatch_unknown_event_is_ignored`; `test_read_loop_drains_events_until_gone`; `test_read_loop_eof_marks_dead_and_unblocks_waiters` | every event kind (ready/error/final/partial/vad/speech/speech_end/gone) is handled by `_dispatch`; unknown is ignored; `_read_loop` drains until 'gone'/EOF |
+| (e) text blocks on final + dead-child + abort-sentinel | `test_text_blocks_until_final_event_then_returns`; `test_text_returns_promptly_if_child_already_dead`; `test_abort_sentinel_unblocks_blocked_host_text` | `text()` blocks until the reader sets `_final_evt`; returns promptly on child death; the VT-007 sentinel unblocks it on abort |
+| (f) relay + VT-007 sentinel | `test_run_text_emits_sentinel_final_on_abort_path`; `test_run_text_does_not_double_emit_on_normal_path`; `test_run_text_emits_sentinel_when_abort_flag_set_even_if_return_is_none`; `test_run_text_no_sentinel_on_normal_path_when_abort_flag_unset` | `_run_text_and_emit_final` emits exactly one `("final",…)` (sentinel on abort, real on normal) — never double, never missing, robust to `text()` returning None |
+
+---
+
+## §2.4 Non-defect nuances (NON-blocking — recorded so they are NOT mistaken for gaps)
+
+### (i) abort is a dedicated `mp.Event`, not (primarily) a cmd_q command
+
+The child's command loop BLOCKS in `recorder.text()` while listening, so a `("abort", {})`
+command queued on `cmd_q` would NOT be read until `text()` returns (too late). The dedicated
+`_abort_event` (`mp.Event`, L142/146) is polled by a SEPARATE child thread (`_abort_handler`
+L517-531) that calls `recorder.abort()` the instant it is set — this is how `stop()` /
+`toggle(off)` / idle-auto-stop interrupt a blocked `text()`. `("abort", {})` IS still handled on
+cmd_q (L564-565) as belt-and-suspenders. The item listing "abort" among the cmd_q commands is
+TECHNICALLY satisfied (belt-and-suspenders) but the PRIMARY path is the Event — a STRONGER design,
+**not** a defect. (recorder_host.py:141-145 documents this rationale.)
+
+### (ii) the evt_q vocabulary is richer than the item's shorthand
+
+The item lists "partial, final, vad_start, vad_stop, device, loaded, error". The actual vocabulary
+(module docstring L23-31; `_dispatch` L354-392):
+- `"ready"` (combines device + loaded into one event carrying `{device,compute_type,final_model,
+  realtime_model}` — L499) sets `_ready_evt` (the `spawn()` load-completion gate).
+- `"vad"{phase}` (a SINGLE event keyed on a `phase` field ∈ {"listening","speaking"} — L737)
+collapses vad_start + vad_stop.
+- EXTRA events beyond the item's list: `"speech"` (on_speech → idle-auto-stop reset, L468),
+  `"speech_end"` (on_vad_stop latency stamp, L768), `"gone"` (clean shutdown ack, L575).
+
+PRD §4.2bis only requires "partials/finals/VAD events stream back to a daemon reader thread" — the
+actual vocabulary fully satisfies this (and adds latency/speech/shutdown-ack signals the PRD's
+lifecycle + latency logging needs). Naming drift, **not** a defect.
+
+### (iii) `_RelayFeedback.set_models_loaded`/`record_final`/`set_listening` are INTENTIONAL no-ops
+
+The child does NOT own the `models_loaded` / `listening` / lifecycle-phase / `record_final` /
+`finalize` transitions — those live in the DAEMON (which has the real Feedback/LatencyLog objects).
+The relay stand-ins only relay what the CHILD uniquely observes: partials (realtime transcription)
++ VAD phase + speech_end. Everything else is correctly a no-op (L735/738/741; L749/772/774) so the
+daemon remains the single source of truth for lifecycle state. This is the RIGHT design (the child
+can't drive daemon-owned transitions), **not** a missing relay. (recorder_host.py:721-724 + 751-754
+document this.)
+
+### (iv) VT-007 abort-sentinel — the unblock guarantee (do NOT "simplify" it away)
+
+`_run_text_and_emit_final` (L630-677) GUARANTEES a `("final", {text:""})` event on the abort path
+(L677). Without it, an abort (stop / toggle-off / auto-stop) leaves `host.text()` blocked forever
+(the child is still alive), wedging the run() loop so no further utterance transcribes. The empty
+text is handled safely by the daemon (a disarm already cleared `_listening` → the `on_final` gate
+returns early; textproc.clean('') rejects it regardless → nothing is typed). Detected via TWO
+independent signals (the `aborted` Event WE control @L509/676 + the legacy non-None return marker
+@L676) so it survives RealtimeSTT API drift (a future `text()` returning None on abort still trips
+it). Guarded by 4 unit tests. This is a critical IPC robustness detail that EXCEEDS the item's
+shorthand — record it so a maintainer doesn't "simplify" it away.
+
+### (v) the "vad" event is gated by an `is_listening` predicate (Issue 2 residual)
+
+`_dispatch`'s `"vad"` branch (L380-388): if the daemon provided an `is_listening` predicate and the
+daemon is NOT listening, the stray VAD event (a late `on_vad_stop`/`on_vad_start` racing a disarm)
+is DROPPED so phase doesn't flip to listening/speaking while `listening: off`. This is P1.M2.T1's
+phase-lifecycle concern; recorded here only because it lives on the IPC dispatch path. **Not** a
+gap in the IPC mechanism.
+
+---
+
+## §2.5 Conclusion
+
+The recorder-host IPC faithfully implements **PRD §4.2bis's recorder-host subprocess model** on all
+6 properties (a)-(f): the daemon spawns a managed child (`Process(target=_worker_main)`, property
+(a)); the child calls `os.setsid()` and the daemon `os.killpg`s the child's process group — the
+**VRAM-release mechanism** that lets the idle-unload teardown reach ~0 VRAM incl. the realtime-model
+context (property (b)); arm/disarm/text/shutdown are proxied over `cmd_q` and abort is a dedicated
+`mp.Event` polled by a separate child thread — STRONGER than a plain cmd_q abort (property (c));
+partials/finals/VAD/load/error events stream back over `evt_q` to a daemon reader thread that
+dispatches them to the real Feedback/LatencyLog/on_final (property (d)); `text()` puts the command
+and blocks on a `threading.Event` set by the reader on the "final" event, with the VT-007 sentinel
+guaranteeing an unblock even on the abort path (property (e)); and the child callbacks relay only
+the child-unique observations while leaving daemon-owned transitions as no-ops (property (f)).
+
+This is the spine the entire GPU-VRAM-reclamation model (PRD §4.2bis) depends on: lazy load
+(§1) arms the child; idle-unload / quit (S3) SIGKILLs its process group; the bounded teardown + the
+abort path + the VT-007 sentinel together guarantee the run() loop never wedges on a blocked
+`text()`. The IPC is richer/safer than the item's shorthand (nuances §4.1-4.4) but fully satisfies
+PRD §4.2bis's intent.
+
+This certifies the project's acceptance criteria:
+- **#6 (starts un-loaded, ~0 VRAM until first arm)** — depends on the daemon NEVER touching CUDA;
+  property (a) confirms the recorder loads in the CHILD, and property (b) confirms `setsid`+
+  `killpg` is wired so the child's CUDA context is releasable on teardown.
+- **#9 (idle-unload → reload)** — depends on a clean teardown + a re-armable child; property (b)'s
+  `killpg` + property (a)'s `spawn` are the mechanism, and property (e)'s VT-007 sentinel ensures
+  the run() loop isn't wedged across the unload/reload cycle.
+
+**Verdict: ✅ COMPLIANT on all 6 properties — no fix needed.** **No source files were modified**
+(this is a read-only audit — the IPC is PRD §4.2bis-compliant per the re-verification; no defect
+was found). The only artifact produced by this subtask is this appended §2 section. Adjacent
+concerns are correctly deferred: the **lazy-load state machine** is §1 above (P1.M2.T2.S1); the
+**bounded teardown TIMING** (join(5s)+killpg budget, idle-unload watchdog) is S3; the **phase
+lifecycle** (the vad `is_listening` gate's home) is P1.M2.T1; **lite/mode-switch** is M2.T3;
+**status** (VT-001/VT-002) is M3.
