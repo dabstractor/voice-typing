@@ -261,7 +261,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Audit lite recorder construction: single model, silence gate override",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S2",
@@ -278,7 +278,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S2",
                   "title": "Audit mode-switch reload & self._mode tracking",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T3.S1"
