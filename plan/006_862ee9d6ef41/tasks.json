@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "PRD Compliance Verification & Remediation",
-      "status": "Researching",
+      "status": "Planned",
       "description": "The voice-typing codebase is ALREADY substantially implemented (50+ commits, all modules and tests present — see plan/006_862ee9d6ef41/architecture/system_context.md). The PRD §2 states 'empty git repo' but reality is a mature project. This phase verifies every PRD requirement against the actual codebase, validates test coverage matches T1–T7 and acceptance criteria §7, identifies and closes any gaps (stale docs, missing assertions, drift, latent bugs), runs the full test suite, and syncs all changeset-level documentation. The goal is a fully PRD-compliant, tested, and documented voice-typing daemon.",
       "milestones": [
         {
@@ -25,21 +25,28 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S1",
                   "title": "Audit config dataclass fields & defaults against PRD §4.5 schema",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3/h3.6", "h2.1"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: config.py already has AsrConfig, OutputConfig, FeedbackConfig, FilterConfig, LogConfig dataclasses (plan/006_862ee9d6ef41/architecture/system_context.md). The PRD §4.5 specifies exact field names and defaults. Cross-check EVERY field: final_model='distil-large-v3', realtime_model='small.en', lite_model='small.en', language='en', device='cuda', post_speech_silence_duration=0.6, lite_post_speech_silence_duration=0.5, realtime_processing_pause=0.15, auto_stop_idle_seconds=30.0, auto_unload_idle_seconds=1800.0, backend='wtype', tmux_target='', append_space=true, state_file='', hypr_notify=true, notify_on_final=true, notify_ms=2500, min_chars=2, blocklist=[...], level='INFO'.\n2. INPUT: Read voice_typing/config.py for the current dataclass definitions.\n3. LOGIC: Compare each field name, type annotation, and default value against PRD §4.5 config.toml block. Report ANY missing field, wrong default, or wrong type. If config.py has __post_init__ type validation (it does per git history: 'fail fast on wrong-typed config values'), verify it rejects bool for numeric fields and unknown keys. Run: .venv/bin/python -m pytest tests/test_config.py tests/test_config_repo_default.py -q.\n4. OUTPUT: A gap report (written to plan/006_862ee9d6ef41/architecture/gap_config.md) listing: confirmed-compliant fields, any mismatches, and test pass/fail counts. If mismatches exist, FIX them in config.py AND config.toml so both agree.\n5. DOCS: [Mode A] If any default changes, update config.toml comments to match. If all compliant, note 'none — config.toml already mirrors config.py per audit'."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: config.py already has AsrConfig, OutputConfig, FeedbackConfig, FilterConfig, LogConfig dataclasses (plan/006_862ee9d6ef41/architecture/system_context.md). The PRD §4.5 specifies exact field names and defaults. Cross-check EVERY field: final_model='distil-large-v3', realtime_model='small.en', lite_model='small.en', language='en', device='cuda', post_speech_silence_duration=0.6, lite_post_speech_silence_duration=0.5, realtime_processing_pause=0.15, auto_stop_idle_seconds=30.0, auto_unload_idle_seconds=1800.0, backend='wtype', tmux_target='', append_space=true, state_file='', hypr_notify=true, notify_on_final=true, notify_ms=2500, min_chars=2, blocklist=[...], level='INFO'.\n2. INPUT: Read voice_typing/config.py for the current dataclass definitions.\n3. LOGIC: Compare each field name, type annotation, and default value against PRD §4.5 config.toml block. Report ANY missing field, wrong default, or wrong type. If config.py has __post_init__ type validation (it does per git history: 'fail fast on wrong-typed config values'), verify it rejects bool for numeric fields and unknown keys. Run: .venv/bin/python -m pytest tests/test_config.py tests/test_config_repo_default.py -q.\n4. OUTPUT: A gap report (written to plan/006_862ee9d6ef41/architecture/gap_config.md) listing: confirmed-compliant fields, any mismatches, and test pass/fail counts. If mismatches exist, FIX them in config.py AND config.toml so both agree.\n5. DOCS: [Mode A] If any default changes, update config.toml comments to match. If all compliant, note 'none — config.toml already mirrors config.py per audit'.",
+                  "prd_selectors": [
+                    "h2.3/h3.6",
+                    "h2.1"
+                  ]
                 },
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Verify config.toml ↔ config.py schema lockstep & blocklist correctness",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: config.toml is documented as 'both the daemon runtime default AND the user-facing config reference' (Mode A doc). It MUST mirror config.py defaults exactly. The blocklist in the PRD §4.5 code block contains 'you' but VT-006 removed it (config.toml comment documents the removal). Verify the config.toml blocklist matches the actual config.py FilterConfig.blocklist default.\n2. INPUT: config.py FilterConfig dataclass from P1.M1.T1.S1.\n3. LOGIC: Parse config.toml with tomllib, compare every value to VoiceTypingConfig() defaults from config.py. Run test_config_repo_default.py which asserts this lockstep. Check blocklist entries: must include 'thank you.', 'thanks for watching.', 'bye.', 'thank you for watching' and MUST NOT include bare 'you' (VT-006).\n4. OUTPUT: Updated gap_config.md with lockstep verification result. Fix any drift between config.toml and config.py.\n5. DOCS: [Mode A] config.toml is the user-facing reference — ensure its comments accurately describe every field per PRD §4.5. The file already has extensive comments; verify none reference stale behavior."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: config.toml is documented as 'both the daemon runtime default AND the user-facing config reference' (Mode A doc). It MUST mirror config.py defaults exactly. The blocklist in the PRD §4.5 code block contains 'you' but VT-006 removed it (config.toml comment documents the removal). Verify the config.toml blocklist matches the actual config.py FilterConfig.blocklist default.\n2. INPUT: config.py FilterConfig dataclass from P1.M1.T1.S1.\n3. LOGIC: Parse config.toml with tomllib, compare every value to VoiceTypingConfig() defaults from config.py. Run test_config_repo_default.py which asserts this lockstep. Check blocklist entries: must include 'thank you.', 'thanks for watching.', 'bye.', 'thank you for watching' and MUST NOT include bare 'you' (VT-006).\n4. OUTPUT: Updated gap_config.md with lockstep verification result. Fix any drift between config.toml and config.py.\n5. DOCS: [Mode A] config.toml is the user-facing reference — ensure its comments accurately describe every field per PRD §4.5. The file already has extensive comments; verify none reference stale behavior.",
+                  "prd_selectors": [
+                    "h2.3/h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -47,9 +54,13 @@
                   "title": "Verify config search-order & XDG resolution path",
                   "status": "Planned",
                   "story_points": 0.5,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: config.py has _xdg_config_path(), _repo_config_path(), _candidate_paths(), and VoiceTypingConfig.load(). The PRD §4.5 specifies search order: $XDG_CONFIG_HOME/voice-typing/config.toml → repo config.toml → built-in defaults.\n2. INPUT: config.py load() method.\n3. LOGIC: Trace the candidate_paths() list order. Verify _xdg_config_path() resolves to $XDG_CONFIG_HOME/voice-typing/config.toml (or ~/.config/voice-typing/config.toml if XDG unset). Verify load() returns dataclass defaults when no file exists. Run test_config.py which covers load paths.\n4. OUTPUT: Append to gap_config.md: search-order verification (pass/fail). If any path logic is wrong, fix it.\n5. DOCS: none — internal resolution logic, no user-facing surface change."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: config.py has _xdg_config_path(), _repo_config_path(), _candidate_paths(), and VoiceTypingConfig.load(). The PRD §4.5 specifies search order: $XDG_CONFIG_HOME/voice-typing/config.toml → repo config.toml → built-in defaults.\n2. INPUT: config.py load() method.\n3. LOGIC: Trace the candidate_paths() list order. Verify _xdg_config_path() resolves to $XDG_CONFIG_HOME/voice-typing/config.toml (or ~/.config/voice-typing/config.toml if XDG unset). Verify load() returns dataclass defaults when no file exists. Run test_config.py which covers load paths.\n4. OUTPUT: Append to gap_config.md: search-order verification (pass/fail). If any path logic is wrong, fix it.\n5. DOCS: none — internal resolution logic, no user-facing surface change.",
+                  "prd_selectors": [
+                    "h2.3/h3.6"
+                  ]
                 }
               ]
             },
@@ -67,8 +78,11 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3/h3.8", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: textproc.py clean() does: (1) ' '.join(text.split()) for strip+collapse, (2) len < min_chars reject, (3) blocklist check via lowercase + rstrip(trailing_punct), (4) return cleaned text. The VT-006 fix removed 'you' from the default blocklist.\n2. INPUT: Read voice_typing/textproc.py.\n3. LOGIC: Verify the 4 steps match PRD §4.7 exactly. Check: trailing newlines stripped (PRD §4.3 'strip trailing newlines in textproc'), blocklist normalization handles 'Thank you.', 'BYE!', 'bye' all matching 'bye.' entry. Run: .venv/bin/python -m pytest tests/test_textproc.py -q.\n4. OUTPUT: gap_textproc.md with pass/fail + any drift. Fix issues if found.\n5. DOCS: none — pure internal module, no user-facing surface."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: textproc.py clean() does: (1) ' '.join(text.split()) for strip+collapse, (2) len < min_chars reject, (3) blocklist check via lowercase + rstrip(trailing_punct), (4) return cleaned text. The VT-006 fix removed 'you' from the default blocklist.\n2. INPUT: Read voice_typing/textproc.py.\n3. LOGIC: Verify the 4 steps match PRD §4.7 exactly. Check: trailing newlines stripped (PRD §4.3 'strip trailing newlines in textproc'), blocklist normalization handles 'Thank you.', 'BYE!', 'bye' all matching 'bye.' entry. Run: .venv/bin/python -m pytest tests/test_textproc.py -q.\n4. OUTPUT: gap_textproc.md with pass/fail + any drift. Fix issues if found.\n5. DOCS: none — pure internal module, no user-facing surface.",
+                  "prd_selectors": [
+                    "h2.3/h3.8",
+                    "h2.5"
+                  ]
                 }
               ]
             },
@@ -86,8 +100,11 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3/h3.4", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: typing_backends.py has TypingBackend ABC, WtypeBackend (subprocess.run(['wtype','--',text])), YdotoolBackend (subprocess.run(['ydotool','type','--key-delay','2','--',text])), TmuxBackend (subprocess.run(['/usr/bin/tmux','send-keys','-t',target,'-l','--',text])). A make_backend() factory wraps wtype with auto-fallback to ydotool. _TMUX='/usr/bin/tmux' constant avoids the zsh alias.\n2. INPUT: Read voice_typing/typing_backends.py.\n3. LOGIC: Verify: (a) type_text interface matches PRD §4.3; (b) wtype auto-fallback logs WARNING and retries via ydotool on nonzero exit or FileNotFoundError; (c) tmux uses /usr/bin/tmux (not bare tmux); (d) ydotool uses --key-delay 2 per PRD; (e) no Enter/newline sent (PRD §4.3 'Never send Enter/newline'). Run: .venv/bin/python -m pytest tests/test_typing_backends.py -q.\n4. OUTPUT: gap_typing.md with pass/fail. Fix issues if found.\n5. DOCS: none — internal module; backend selection is documented in config.toml [output] comments (Mode A already handled)."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: typing_backends.py has TypingBackend ABC, WtypeBackend (subprocess.run(['wtype','--',text])), YdotoolBackend (subprocess.run(['ydotool','type','--key-delay','2','--',text])), TmuxBackend (subprocess.run(['/usr/bin/tmux','send-keys','-t',target,'-l','--',text])). A make_backend() factory wraps wtype with auto-fallback to ydotool. _TMUX='/usr/bin/tmux' constant avoids the zsh alias.\n2. INPUT: Read voice_typing/typing_backends.py.\n3. LOGIC: Verify: (a) type_text interface matches PRD §4.3; (b) wtype auto-fallback logs WARNING and retries via ydotool on nonzero exit or FileNotFoundError; (c) tmux uses /usr/bin/tmux (not bare tmux); (d) ydotool uses --key-delay 2 per PRD; (e) no Enter/newline sent (PRD §4.3 'Never send Enter/newline'). Run: .venv/bin/python -m pytest tests/test_typing_backends.py -q.\n4. OUTPUT: gap_typing.md with pass/fail. Fix issues if found.\n5. DOCS: none — internal module; backend selection is documented in config.toml [output] comments (Mode A already handled).",
+                  "prd_selectors": [
+                    "h2.3/h3.4",
+                    "h2.7"
+                  ]
                 }
               ]
             },
@@ -105,8 +122,11 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3/h3.5", "h2.1"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: cuda_check.py probes ctranslate2.get_cuda_device_count(). PRD §4.4 requires: if CUDA init fails entirely, fall back to device='cpu', compute_type='int8', realtime_model_type='tiny.en', model='small.en'. Lite mode CPU substitute is tiny.en. The daemon must 'say so in status'. Machine: RTX 3080 Ti, driver 610.43.02, cuda 13.3 — ctranslate2 CUDA count should be ≥1.\n2. INPUT: Read voice_typing/cuda_check.py.\n3. LOGIC: Verify the probe function returns a dict with device + compute_type + (if CPU) downgraded model names. Verify lite CPU fallback uses tiny.en. Verify the daemon's _resolve_device_config / cfg_to_kwargs (in daemon.py) consume cuda_check output. Check that daemon logs the resolved device at startup (PRD §4.4 'log clearly and fall back').\n4. OUTPUT: gap_cuda_check.md. Verify with: .venv/bin/python -c 'import ctranslate2; print(ctranslate2.get_cuda_device_count())' → should be ≥1.\n5. DOCS: none — internal module. CPU-only mode instructions are in README (Mode A in the README task)."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: cuda_check.py probes ctranslate2.get_cuda_device_count(). PRD §4.4 requires: if CUDA init fails entirely, fall back to device='cpu', compute_type='int8', realtime_model_type='tiny.en', model='small.en'. Lite mode CPU substitute is tiny.en. The daemon must 'say so in status'. Machine: RTX 3080 Ti, driver 610.43.02, cuda 13.3 — ctranslate2 CUDA count should be ≥1.\n2. INPUT: Read voice_typing/cuda_check.py.\n3. LOGIC: Verify the probe function returns a dict with device + compute_type + (if CPU) downgraded model names. Verify lite CPU fallback uses tiny.en. Verify the daemon's _resolve_device_config / cfg_to_kwargs (in daemon.py) consume cuda_check output. Check that daemon logs the resolved device at startup (PRD §4.4 'log clearly and fall back').\n4. OUTPUT: gap_cuda_check.md. Verify with: .venv/bin/python -c 'import ctranslate2; print(ctranslate2.get_cuda_device_count())' → should be ≥1.\n5. DOCS: none — internal module. CPU-only mode instructions are in README (Mode A in the README task).",
+                  "prd_selectors": [
+                    "h2.3/h3.5",
+                    "h2.1"
+                  ]
                 }
               ]
             }
@@ -132,9 +152,14 @@
                   "title": "Audit main loop: recorder is None idle, listening gate, text() blocking semantics",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.1", "h2.0"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py VoiceTypingDaemon.run() contains the main loop. When recorder is None (no models loaded), it sleeps 0.05s and continues (PRD §4.2 #1). When listening.is_set(), it calls self._recorder.text(on_final) which blocks until one utterance finalizes. on_final → textproc.clean → typing backend → feedback.record_final. CRITICAL: text() returning is normal segmentation, NOT session end.\n2. INPUT: voice_typing/daemon.py VoiceTypingDaemon class (run method, on_final method, _arm, _disarm).\n3. LOGIC: Trace the run() loop. Verify: (a) recorder is None → sleep+continue; (b) listening set → text(on_final) blocks; (c) listening clear → sleep; (d) on_final gated on self._listening (PRD §4.2 #2 'gate inside on_final too'); (e) shutdown_requested breaks loop; (f) recorder.shutdown() called on exit if not None. Run: .venv/bin/python -m pytest tests/test_daemon.py -q -k 'loop or idle or run or main'.\n4. OUTPUT: gap_daemon_loop.md with audit results + test pass/fail.\n5. DOCS: none — internal lifecycle logic."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py VoiceTypingDaemon.run() contains the main loop. When recorder is None (no models loaded), it sleeps 0.05s and continues (PRD §4.2 #1). When listening.is_set(), it calls self._recorder.text(on_final) which blocks until one utterance finalizes. on_final → textproc.clean → typing backend → feedback.record_final. CRITICAL: text() returning is normal segmentation, NOT session end.\n2. INPUT: voice_typing/daemon.py VoiceTypingDaemon class (run method, on_final method, _arm, _disarm).\n3. LOGIC: Trace the run() loop. Verify: (a) recorder is None → sleep+continue; (b) listening set → text(on_final) blocks; (c) listening clear → sleep; (d) on_final gated on self._listening (PRD §4.2 #2 'gate inside on_final too'); (e) shutdown_requested breaks loop; (f) recorder.shutdown() called on exit if not None. Run: .venv/bin/python -m pytest tests/test_daemon.py -q -k 'loop or idle or run or main'.\n4. OUTPUT: gap_daemon_loop.md with audit results + test pass/fail.\n5. DOCS: none — internal lifecycle logic.",
+                  "prd_selectors": [
+                    "h2.3/h3.1",
+                    "h2.0"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -142,9 +167,15 @@
                   "title": "Audit graceful drain: stop during in-flight utterance, drain watchdog, abort-on-idle",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.1", "h2.0", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py has _request_stop, _begin_drain, _complete_drain, _drain_timeout methods. PRD §4.2 #2: if speech is in flight (blocked in text()), stop sets drain flag, lets text() return natural final (on_final types it), then disarms. If nothing in flight, disarms immediately + aborts. A bounded drain watchdog aborts if no final fires. on_final is gated so finals after disarm are dropped.\n2. INPUT: VoiceTypingDaemon._request_stop, _begin_drain, _complete_drain, _drain_timeout, _safe_abort from daemon.py.\n3. LOGIC: Verify the drain state machine: (a) _request_stop checks if speech in flight (self._speech_in_flight or similar); (b) if in flight → _begin_drain sets flag, loop lets text() return; (c) _complete_drain disarms after final; (d) _drain_timeout fires if no final within bounded window (few seconds) → aborts; (e) if NOT in flight → immediate disarm + abort; (f) on_final checks listening flag before typing (PRD §4.2 #2 last sentence). Run: .venv/bin/python -m pytest tests/test_daemon.py -q -k 'drain or stop or abort or graceful'.\n4. OUTPUT: Append to gap_daemon_loop.md: drain audit results. Acceptance criteria #2 (≥3s pause loses zero words) and #4 (nothing typed while toggled off) depend on this.\n5. DOCS: none — internal lifecycle."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py has _request_stop, _begin_drain, _complete_drain, _drain_timeout methods. PRD §4.2 #2: if speech is in flight (blocked in text()), stop sets drain flag, lets text() return natural final (on_final types it), then disarms. If nothing in flight, disarms immediately + aborts. A bounded drain watchdog aborts if no final fires. on_final is gated so finals after disarm are dropped.\n2. INPUT: VoiceTypingDaemon._request_stop, _begin_drain, _complete_drain, _drain_timeout, _safe_abort from daemon.py.\n3. LOGIC: Verify the drain state machine: (a) _request_stop checks if speech in flight (self._speech_in_flight or similar); (b) if in flight → _begin_drain sets flag, loop lets text() return; (c) _complete_drain disarms after final; (d) _drain_timeout fires if no final within bounded window (few seconds) → aborts; (e) if NOT in flight → immediate disarm + abort; (f) on_final checks listening flag before typing (PRD §4.2 #2 last sentence). Run: .venv/bin/python -m pytest tests/test_daemon.py -q -k 'drain or stop or abort or graceful'.\n4. OUTPUT: Append to gap_daemon_loop.md: drain audit results. Acceptance criteria #2 (≥3s pause loses zero words) and #4 (nothing typed while toggled off) depend on this.\n5. DOCS: none — internal lifecycle.",
+                  "prd_selectors": [
+                    "h2.3/h3.1",
+                    "h2.0",
+                    "h2.6"
+                  ]
                 }
               ]
             },
@@ -161,9 +192,15 @@
                   "title": "Audit lazy-load states: unloaded→loading→loaded, single-flight lock, boot=~0 VRAM",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.2", "h2.3/h3.1", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py _load_host(mode), _load_recorder, _handle_dead_host. The daemon starts with recorder=None (unloaded, ~0 VRAM). First arm calls _load_host which spawns the child. PRD §4.2bis: boot state is 'unloaded'; first arm = 'loading' (blocks ~1-3s); after load = 'loaded/not listening'; arm = 'loaded/listening'. Single-flight: a second arm while loading MUST wait on the in-flight load (lock). If load fails → return to unloaded, arm returns {ok:false,error}, NO half-built recorder.\n2. INPUT: daemon.py _load_host, _load_recorder, VoiceTypingDaemon.__init__ (initial state), feedback set_models_loaded/set_phase transitions.\n3. LOGIC: Verify: (a) __init__ sets recorder=None, phase='unloaded', models_loaded=False; (b) _load_host acquires single-flight lock; (c) on success: feedback.set_models_loaded(True), set_phase('loading' then 'idle'); (d) on failure: cleanup, return False, feedback stays unloaded, status shows error; (e) dead-child detection (_handle_dead_host) resets to unloaded. Run: .venv/bin/python -m pytest tests/test_daemon.py tests/test_recorder_host.py -q -k 'load or spawn or dead or unload or boot or unloaded'.\n4. OUTPUT: gap_lifecycle.md with lifecycle state audit.\n5. DOCS: none — internal lifecycle (status reporting is covered in M3)."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py _load_host(mode), _load_recorder, _handle_dead_host. The daemon starts with recorder=None (unloaded, ~0 VRAM). First arm calls _load_host which spawns the child. PRD §4.2bis: boot state is 'unloaded'; first arm = 'loading' (blocks ~1-3s); after load = 'loaded/not listening'; arm = 'loaded/listening'. Single-flight: a second arm while loading MUST wait on the in-flight load (lock). If load fails → return to unloaded, arm returns {ok:false,error}, NO half-built recorder.\n2. INPUT: daemon.py _load_host, _load_recorder, VoiceTypingDaemon.__init__ (initial state), feedback set_models_loaded/set_phase transitions.\n3. LOGIC: Verify: (a) __init__ sets recorder=None, phase='unloaded', models_loaded=False; (b) _load_host acquires single-flight lock; (c) on success: feedback.set_models_loaded(True), set_phase('loading' then 'idle'); (d) on failure: cleanup, return False, feedback stays unloaded, status shows error; (e) dead-child detection (_handle_dead_host) resets to unloaded. Run: .venv/bin/python -m pytest tests/test_daemon.py tests/test_recorder_host.py -q -k 'load or spawn or dead or unload or boot or unloaded'.\n4. OUTPUT: gap_lifecycle.md with lifecycle state audit.\n5. DOCS: none — internal lifecycle (status reporting is covered in M3).",
+                  "prd_selectors": [
+                    "h2.3/h3.2",
+                    "h2.3/h3.1",
+                    "h2.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -171,9 +208,14 @@
                   "title": "Audit recorder-host IPC: queues, arm/disarm/text/abort/shutdown proxy, event stream",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T2.S1"],
-                  "prd_selectors": ["h2.3/h3.2", "h2.3/h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: recorder_host.py RecorderHost class (774 lines). Uses multiprocessing queues: a cmd_q (daemon→child: arm/disarm/text/abort/shutdown) and an evt_q (child→daemon: partials/finals/vad events/device/loaded). The child runs _worker_main which constructs AudioToTextRecorder, wires callbacks to _RelayFeedback/_RelayLatency that put events on evt_q. The daemon's _read_loop thread consumes evt_q and dispatches via _dispatch.\n2. INPUT: recorder_host.py RecorderHost.spawn/set_microphone/abort/text/stop, _worker_main, _read_loop, _dispatch, _RelayFeedback, _RelayLatency.\n3. LOGIC: Verify: (a) spawn() creates child via multiprocessing.Process with target=_worker_main; (b) child calls os.setsid() for process group isolation; (c) cmd_q commands: arm, disarm, text, abort, shutdown; (d) evt_q events: partial, final, vad_start, vad_stop, device, loaded, error; (e) text(on_final) puts text cmd, waits for final event on evt_q; (f) _RelayFeedback.update_partial/set_phase/set_models_loaded/record_final relay to daemon. Run: .venv/bin/python -m pytest tests/test_recorder_host.py tests/test_daemon.py -q -k 'host or relay or queue or ipc or worker'.\n4. OUTPUT: Append to gap_lifecycle.md: IPC audit results.\n5. DOCS: none — internal IPC."
+                  "dependencies": [
+                    "P1.M2.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: recorder_host.py RecorderHost class (774 lines). Uses multiprocessing queues: a cmd_q (daemon→child: arm/disarm/text/abort/shutdown) and an evt_q (child→daemon: partials/finals/vad events/device/loaded). The child runs _worker_main which constructs AudioToTextRecorder, wires callbacks to _RelayFeedback/_RelayLatency that put events on evt_q. The daemon's _read_loop thread consumes evt_q and dispatches via _dispatch.\n2. INPUT: recorder_host.py RecorderHost.spawn/set_microphone/abort/text/stop, _worker_main, _read_loop, _dispatch, _RelayFeedback, _RelayLatency.\n3. LOGIC: Verify: (a) spawn() creates child via multiprocessing.Process with target=_worker_main; (b) child calls os.setsid() for process group isolation; (c) cmd_q commands: arm, disarm, text, abort, shutdown; (d) evt_q events: partial, final, vad_start, vad_stop, device, loaded, error; (e) text(on_final) puts text cmd, waits for final event on evt_q; (f) _RelayFeedback.update_partial/set_phase/set_models_loaded/record_final relay to daemon. Run: .venv/bin/python -m pytest tests/test_recorder_host.py tests/test_daemon.py -q -k 'host or relay or queue or ipc or worker'.\n4. OUTPUT: Append to gap_lifecycle.md: IPC audit results.\n5. DOCS: none — internal IPC.",
+                  "prd_selectors": [
+                    "h2.3/h3.2",
+                    "h2.3/h3.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -181,9 +223,15 @@
                   "title": "Audit bounded teardown: killpg after join(5s), idle-unload watchdog, no 90s hang",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T2.S2"],
-                  "prd_selectors": ["h2.3/h3.2", "h2.7", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2bis Idle unload + §8 risk row 'recorder.shutdown() hangs ~90s'. The resolution (PRD §4.2bis resolved paragraph): the daemon killpg's the child group after a 5s join, so VRAM is force-released regardless of recorder.shutdown(). daemon.py _unload_host, _unload_recorder, _bounded_shutdown. recorder_host.py stop(timeout) + _terminate_group.\n2. INPUT: daemon.py _unload_host/_unload_recorder/_bounded_shutdown/shutdown/request_shutdown; recorder_host.py stop/_terminate_group.\n3. LOGIC: Verify: (a) stop() joins child with timeout (default _STOP_JOIN_TIMEOUT_S), then _terminate_group() calls os.killpg(os.getpgid(pid), SIGKILL); (b) _unload_host acquires single-flight lock (same as load — PRD §4.2bis 'SAME single-flight lock as load'); (c) idle-unload watchdog (_idle_unload_watchdog, _maybe_idle_unload) tears down after auto_unload_idle_seconds of loaded+not-listening; (d) teardown completes in seconds (bounded), never 90s; (e) request_shutdown kills child group so blocked text() unblocks (BUG-1 fix in git history). Run: .venv/bin/python -m pytest tests/test_daemon.py tests/test_recorder_host.py -q -k 'unload or teardown or shutdown or killpg or terminate or bounded'.\n4. OUTPUT: Append to gap_lifecycle.md: teardown audit. Acceptance #9 (unload completes in seconds) depends on this.\n5. DOCS: none — internal lifecycle."
+                  "dependencies": [
+                    "P1.M2.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2bis Idle unload + §8 risk row 'recorder.shutdown() hangs ~90s'. The resolution (PRD §4.2bis resolved paragraph): the daemon killpg's the child group after a 5s join, so VRAM is force-released regardless of recorder.shutdown(). daemon.py _unload_host, _unload_recorder, _bounded_shutdown. recorder_host.py stop(timeout) + _terminate_group.\n2. INPUT: daemon.py _unload_host/_unload_recorder/_bounded_shutdown/shutdown/request_shutdown; recorder_host.py stop/_terminate_group.\n3. LOGIC: Verify: (a) stop() joins child with timeout (default _STOP_JOIN_TIMEOUT_S), then _terminate_group() calls os.killpg(os.getpgid(pid), SIGKILL); (b) _unload_host acquires single-flight lock (same as load — PRD §4.2bis 'SAME single-flight lock as load'); (c) idle-unload watchdog (_idle_unload_watchdog, _maybe_idle_unload) tears down after auto_unload_idle_seconds of loaded+not-listening; (d) teardown completes in seconds (bounded), never 90s; (e) request_shutdown kills child group so blocked text() unblocks (BUG-1 fix in git history). Run: .venv/bin/python -m pytest tests/test_daemon.py tests/test_recorder_host.py -q -k 'unload or teardown or shutdown or killpg or terminate or bounded'.\n4. OUTPUT: Append to gap_lifecycle.md: teardown audit. Acceptance #9 (unload completes in seconds) depends on this.\n5. DOCS: none — internal lifecycle.",
+                  "prd_selectors": [
+                    "h2.3/h3.2",
+                    "h2.7",
+                    "h2.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -191,9 +239,14 @@
                   "title": "Audit idle auto-stop watchdog (§4.5 auto_stop_idle_seconds)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T2.S3"],
-                  "prd_selectors": ["h2.3/h3.6", "h2.3/h3.1"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py _idle_watchdog, _maybe_auto_stop. PRD §4.5: while listening, if no recognized speech (realtime partial) arrives for auto_stop_idle_seconds (default 30), auto-disarm immediately (no drain — nothing in flight after that long silent). Fires 'Recording Stopped' toast + journal INFO line 'voice-typing auto-stop: 30.0s of no recognized speech; disarming'. Partials reset the clock. 0 disables. Auto-stop disarms but does NOT unload — starts the idle-unload clock.\n2. INPUT: daemon.py _idle_watchdog, _maybe_auto_stop, _touch_speech (partial resets clock).\n3. LOGIC: Verify: (a) _idle_watchdog ticks ~1s; (b) checks deadline under listen lock so late partial cancels stop; (c) _maybe_auto_stop disarms (not drain — immediate); (d) writes journal INFO line; (e) starts idle-unload clock (hands off to _idle_unload_watchdog); (f) 0 disables (watchdog skips). Run: .venv/bin/python -m pytest tests/test_daemon.py -q -k 'idle or auto_stop or watchdog'.\n4. OUTPUT: Append to gap_lifecycle.md: idle auto-stop audit. Acceptance #5 (survives 2min silence, no hallucination) relates.\n5. DOCS: none — internal lifecycle."
+                  "dependencies": [
+                    "P1.M2.T2.S3"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py _idle_watchdog, _maybe_auto_stop. PRD §4.5: while listening, if no recognized speech (realtime partial) arrives for auto_stop_idle_seconds (default 30), auto-disarm immediately (no drain — nothing in flight after that long silent). Fires 'Recording Stopped' toast + journal INFO line 'voice-typing auto-stop: 30.0s of no recognized speech; disarming'. Partials reset the clock. 0 disables. Auto-stop disarms but does NOT unload — starts the idle-unload clock.\n2. INPUT: daemon.py _idle_watchdog, _maybe_auto_stop, _touch_speech (partial resets clock).\n3. LOGIC: Verify: (a) _idle_watchdog ticks ~1s; (b) checks deadline under listen lock so late partial cancels stop; (c) _maybe_auto_stop disarms (not drain — immediate); (d) writes journal INFO line; (e) starts idle-unload clock (hands off to _idle_unload_watchdog); (f) 0 disables (watchdog skips). Run: .venv/bin/python -m pytest tests/test_daemon.py -q -k 'idle or auto_stop or watchdog'.\n4. OUTPUT: Append to gap_lifecycle.md: idle auto-stop audit. Acceptance #5 (survives 2min silence, no hallucination) relates.\n5. DOCS: none — internal lifecycle.",
+                  "prd_selectors": [
+                    "h2.3/h3.6",
+                    "h2.3/h3.1"
+                  ]
                 }
               ]
             },
@@ -210,9 +263,16 @@
                   "title": "Audit lite recorder construction: single model, silence gate override",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T2.S2", "P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.3", "h2.3/h3.5", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: recorder_host.py _worker_main builds the recorder. In lite mode: model=lite_model ('small.en'), realtime_model_type=lite_model, use_main_model_for_realtime=True (so only ONE model initializes; large final model never constructed), post_speech_silence_duration=lite_post_speech_silence_duration (0.5, NOT the normal 0.6). daemon.py _load_host(mode='lite'), cfg_to_kwargs, _child_resolved_device (recorder_host.py has lite param). The silence gate (not the model) is the perceived-latency bottleneck — without the shorter threshold lite feels no faster than normal.\n2. INPUT: daemon.py cfg_to_kwargs, _build_callbacks, _load_host; recorder_host.py _worker_main, _child_resolved_device(lite=...).\n3. LOGIC: Verify: (a) _load_host('lite') passes lite=True to child; (b) _worker_main with lite=True sets model=lite_model, realtime_model_type=lite_model, use_main_model_for_realtime=True; (c) post_speech_silence_duration overridden to lite_post_speech_silence_duration; (d) _child_resolved_device handles lite CPU fallback (tiny.en). Run: .venv/bin/python -m pytest tests/test_recorder_host.py tests/test_daemon.py -q -k 'lite'.\n4. OUTPUT: gap_lite.md with lite construction audit. Acceptance #10 depends on this.\n5. DOCS: none — internal construction (config.toml already documents lite_post_speech_silence_duration)."
+                  "dependencies": [
+                    "P1.M2.T2.S2",
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: recorder_host.py _worker_main builds the recorder. In lite mode: model=lite_model ('small.en'), realtime_model_type=lite_model, use_main_model_for_realtime=True (so only ONE model initializes; large final model never constructed), post_speech_silence_duration=lite_post_speech_silence_duration (0.5, NOT the normal 0.6). daemon.py _load_host(mode='lite'), cfg_to_kwargs, _child_resolved_device (recorder_host.py has lite param). The silence gate (not the model) is the perceived-latency bottleneck — without the shorter threshold lite feels no faster than normal.\n2. INPUT: daemon.py cfg_to_kwargs, _build_callbacks, _load_host; recorder_host.py _worker_main, _child_resolved_device(lite=...).\n3. LOGIC: Verify: (a) _load_host('lite') passes lite=True to child; (b) _worker_main with lite=True sets model=lite_model, realtime_model_type=lite_model, use_main_model_for_realtime=True; (c) post_speech_silence_duration overridden to lite_post_speech_silence_duration; (d) _child_resolved_device handles lite CPU fallback (tiny.en). Run: .venv/bin/python -m pytest tests/test_recorder_host.py tests/test_daemon.py -q -k 'lite'.\n4. OUTPUT: gap_lite.md with lite construction audit. Acceptance #10 depends on this.\n5. DOCS: none — internal construction (config.toml already documents lite_post_speech_silence_duration).",
+                  "prd_selectors": [
+                    "h2.3/h3.3",
+                    "h2.3/h3.5",
+                    "h2.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -220,9 +280,14 @@
                   "title": "Audit mode-switch reload & self._mode tracking",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T3.S1"],
-                  "prd_selectors": ["h2.3/h3.3", "h2.3/h3.1"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py VoiceTypingDaemon tracks self._mode ('normal'|'lite'). PRD §4.2ter arming rules: arm mode X while resident=X → instant arm; arm mode X while resident=OTHER → tear down + respawn in X (~1-3s reload); arm mode X while unloaded → spawn in X. toggle_lite/toggle/start_lite/start commands. stop disarms either mode.\n2. INPUT: daemon.py toggle_lite, start_lite, toggle, start, _load_host (mode param), _mode property.\n3. LOGIC: Verify: (a) toggle/start call _load_host('normal'); toggle_lite/start_lite call _load_host('lite'); (b) _load_host checks if resident child is same mode → instant arm; (c) different mode → _unload_host then _load_host in new mode; (d) self._mode updated on arm; (e) feedback.set_mode written on arm/disarm; (f) stop disarms regardless of mode. Run: .venv/bin/python -m pytest tests/test_daemon.py -q -k 'mode or toggle_lite or start_lite or switch'.\n4. OUTPUT: Append to gap_lite.md: mode-switch audit. Acceptance #10 (switching costs one bounded reload).\n5. DOCS: none — internal lifecycle."
+                  "dependencies": [
+                    "P1.M2.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py VoiceTypingDaemon tracks self._mode ('normal'|'lite'). PRD §4.2ter arming rules: arm mode X while resident=X → instant arm; arm mode X while resident=OTHER → tear down + respawn in X (~1-3s reload); arm mode X while unloaded → spawn in X. toggle_lite/toggle/start_lite/start commands. stop disarms either mode.\n2. INPUT: daemon.py toggle_lite, start_lite, toggle, start, _load_host (mode param), _mode property.\n3. LOGIC: Verify: (a) toggle/start call _load_host('normal'); toggle_lite/start_lite call _load_host('lite'); (b) _load_host checks if resident child is same mode → instant arm; (c) different mode → _unload_host then _load_host in new mode; (d) self._mode updated on arm; (e) feedback.set_mode written on arm/disarm; (f) stop disarms regardless of mode. Run: .venv/bin/python -m pytest tests/test_daemon.py -q -k 'mode or toggle_lite or start_lite or switch'.\n4. OUTPUT: Append to gap_lite.md: mode-switch audit. Acceptance #10 (switching costs one bounded reload).\n5. DOCS: none — internal lifecycle.",
+                  "prd_selectors": [
+                    "h2.3/h3.3",
+                    "h2.3/h3.1"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -230,9 +295,15 @@
                   "title": "Verify T7 lite test coverage: single model resident, ≥70% accuracy, snappier latency",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T3.S1"],
-                  "prd_selectors": ["h2.3/h3.3", "h2.5", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T7 requires a lite variant in test_feed_audio.py. Asserts: (a) exactly ONE model resident (no distil-large-v3 worker, ~half VRAM); (b) finals arrive over clean→type path, fuzzy-accuracy ≥70%; (c) shorter post_speech_silence_duration carried, e2e latency materially lower than normal. Over socket: toggle-lite arms with mode:'lite', toggle-lite again disarms, toggle reloads to mode:'normal' (one reload), status reports mode.\n2. INPUT: tests/test_feed_audio.py (check for lite variant), tests/test_daemon.py (lite socket tests).\n3. LOGIC: Verify T7 test coverage exists. If gaps: add tests asserting lite construction kwargs (single model, shorter silence), lite socket protocol (mode in response), mode-switch reload. Run: .venv/bin/python -m pytest tests/ -q -k 'lite'.\n4. OUTPUT: Append to gap_lite.md: T7 coverage status. If gaps found, write the missing tests (TDD per §3 of SOW — test first, then verify).\n5. DOCS: none — test-only work."
+                  "dependencies": [
+                    "P1.M2.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T7 requires a lite variant in test_feed_audio.py. Asserts: (a) exactly ONE model resident (no distil-large-v3 worker, ~half VRAM); (b) finals arrive over clean→type path, fuzzy-accuracy ≥70%; (c) shorter post_speech_silence_duration carried, e2e latency materially lower than normal. Over socket: toggle-lite arms with mode:'lite', toggle-lite again disarms, toggle reloads to mode:'normal' (one reload), status reports mode.\n2. INPUT: tests/test_feed_audio.py (check for lite variant), tests/test_daemon.py (lite socket tests).\n3. LOGIC: Verify T7 test coverage exists. If gaps: add tests asserting lite construction kwargs (single model, shorter silence), lite socket protocol (mode in response), mode-switch reload. Run: .venv/bin/python -m pytest tests/ -q -k 'lite'.\n4. OUTPUT: Append to gap_lite.md: T7 coverage status. If gaps found, write the missing tests (TDD per §3 of SOW — test first, then verify).\n5. DOCS: none — test-only work.",
+                  "prd_selectors": [
+                    "h2.3/h3.3",
+                    "h2.5",
+                    "h2.6"
+                  ]
                 }
               ]
             },
@@ -249,9 +320,15 @@
                   "title": "Audit recorder kwargs: all PRD §4.4 params, silero_backend, no_log_file, kwarg filtering",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T2.S2", "P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.5", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py cfg_to_kwargs builds the kwargs dict from config. _filter_kwargs_to_signature inspects the AudioToTextRecorder constructor signature and drops unknown kwargs (logs WARNING). _construct calls AudioToTextRecorder(**filtered_kwargs). PRD §4.4 lists: model, realtime_model_type, language, device, compute_type, enable_realtime_transcription, realtime_processing_pause, use_main_model_for_realtime, post_speech_silence_duration, min_length_of_recording, min_gap_between_recordings, silero_sensitivity, webrtc_sensitivity, silero_backend='auto', spinner=False, use_microphone, ensure_sentence_starting_uppercase=False, ensure_sentence_ends_with_period=False, no_log_file=True, on_realtime_transcription_stabilized=callback.\n2. INPUT: daemon.py cfg_to_kwargs, _filter_kwargs_to_signature, _construct, build_recorder, _build_callbacks.\n3. LOGIC: Verify: (a) cfg_to_kwargs produces all PRD §4.4 kwargs from config fields; (b) silero_backend='auto' (modern control, supersedes legacy silero_use_onnx=True); (c) no_log_file=True (suppress realtimesst.log); (d) ensure_sentence_starting_uppercase=False, ensure_sentence_ends_with_period=False (textproc owns casing); (e) _filter_kwargs_to_signature handles API drift safely; (f) callbacks wired: on_realtime_transcription_stabilized→_partial, on_vad_stop→_vad_stop, etc. Check installed RealtimeSTT version for signature compatibility.\n4. OUTPUT: gap_recorder_kwargs.md with kwargs audit.\n5. DOCS: none — internal construction."
+                  "dependencies": [
+                    "P1.M2.T2.S2",
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py cfg_to_kwargs builds the kwargs dict from config. _filter_kwargs_to_signature inspects the AudioToTextRecorder constructor signature and drops unknown kwargs (logs WARNING). _construct calls AudioToTextRecorder(**filtered_kwargs). PRD §4.4 lists: model, realtime_model_type, language, device, compute_type, enable_realtime_transcription, realtime_processing_pause, use_main_model_for_realtime, post_speech_silence_duration, min_length_of_recording, min_gap_between_recordings, silero_sensitivity, webrtc_sensitivity, silero_backend='auto', spinner=False, use_microphone, ensure_sentence_starting_uppercase=False, ensure_sentence_ends_with_period=False, no_log_file=True, on_realtime_transcription_stabilized=callback.\n2. INPUT: daemon.py cfg_to_kwargs, _filter_kwargs_to_signature, _construct, build_recorder, _build_callbacks.\n3. LOGIC: Verify: (a) cfg_to_kwargs produces all PRD §4.4 kwargs from config fields; (b) silero_backend='auto' (modern control, supersedes legacy silero_use_onnx=True); (c) no_log_file=True (suppress realtimesst.log); (d) ensure_sentence_starting_uppercase=False, ensure_sentence_ends_with_period=False (textproc owns casing); (e) _filter_kwargs_to_signature handles API drift safely; (f) callbacks wired: on_realtime_transcription_stabilized→_partial, on_vad_stop→_vad_stop, etc. Check installed RealtimeSTT version for signature compatibility.\n4. OUTPUT: gap_recorder_kwargs.md with kwargs audit.\n5. DOCS: none — internal construction.",
+                  "prd_selectors": [
+                    "h2.3/h3.5",
+                    "h2.7"
+                  ]
                 }
               ]
             }
@@ -277,9 +354,15 @@
                   "title": "Audit state.json schema: all fields, phase lifecycle, mode field",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T2.S1"],
-                  "prd_selectors": ["h2.3/h3.7", "h2.3/h3.2", "h2.3/h3.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: feedback.py Feedback class has self._state dict with keys: listening, phase, models_loaded, mode, partial, last_final, ts. Boot state: phase='unloaded', models_loaded=False, mode='normal'. Phase transitions driven by daemon: unloaded→loading→idle→listening→speaking→idle. mode written on every arm/disarm.\n2. INPUT: feedback.py Feedback.__init__ (initial _state), update_partial, set_phase, set_models_loaded, record_final, set_listening, set_mode.\n3. LOGIC: Verify: (a) _state has all 7 PRD fields; (b) boot phase='unloaded', models_loaded=False; (c) set_phase accepts unloaded/loading/idle/listening/speaking; (d) mode='normal'|'lite' written on arm/disarm; (e) record_final writes to BOTH last_final AND partial (PRD §4.6 'record_final ALSO writes the finalized text back into the partial field'); (f) ts uses time.time() (wall epoch). Run: .venv/bin/python -m pytest tests/test_feedback.py -q.\n4. OUTPUT: gap_feedback.md with schema audit.\n5. DOCS: none — internal schema (status.sh and README document the external format)."
+                  "dependencies": [
+                    "P1.M2.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: feedback.py Feedback class has self._state dict with keys: listening, phase, models_loaded, mode, partial, last_final, ts. Boot state: phase='unloaded', models_loaded=False, mode='normal'. Phase transitions driven by daemon: unloaded→loading→idle→listening→speaking→idle. mode written on every arm/disarm.\n2. INPUT: feedback.py Feedback.__init__ (initial _state), update_partial, set_phase, set_models_loaded, record_final, set_listening, set_mode.\n3. LOGIC: Verify: (a) _state has all 7 PRD fields; (b) boot phase='unloaded', models_loaded=False; (c) set_phase accepts unloaded/loading/idle/listening/speaking; (d) mode='normal'|'lite' written on arm/disarm; (e) record_final writes to BOTH last_final AND partial (PRD §4.6 'record_final ALSO writes the finalized text back into the partial field'); (f) ts uses time.time() (wall epoch). Run: .venv/bin/python -m pytest tests/test_feedback.py -q.\n4. OUTPUT: gap_feedback.md with schema audit.\n5. DOCS: none — internal schema (status.sh and README document the external format).",
+                  "prd_selectors": [
+                    "h2.3/h3.7",
+                    "h2.3/h3.2",
+                    "h2.3/h3.3"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -287,9 +370,14 @@
                   "title": "Audit atomic writes, throttling, hyprctl notify events & run tests",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M3.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.7", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: feedback.py uses tempfile+os.rename for atomic writes (PRD §4.6 'atomic write via tempfile+rename'). File mode 0600, dir 0700. Throttle: update_partial disk writes capped at ≥10Hz (min 0.1s between writes); in-memory partial ALWAYS updated. hyprctl notify only on: start ('Recording'), cold load ('Loading…'), final ('✔ <text>' gated by notify_on_final), stop ('Recording Stopped'). NEVER on partial updates. NEVER on phase changes.\n2. INPUT: feedback.py _write (atomic), update_partial (throttle logic), notify method, record_final.\n3. LOGIC: Verify: (a) _write uses tempfile.NamedTemporaryFile + os.replace (atomic); (b) throttle: _PARTIAL_WRITE_MIN_INTERVAL_S = 0.1; (c) in-memory update before throttle check; (d) notify fires subprocess.run(['hyprctl','notify','-1',str(notify_ms),'rgb(88c0d0)',msg]) fire-and-forget; (e) notify gated by hypr_notify config; (f) final notify gated by notify_on_final; (g) no notify on update_partial or set_phase. Run: .venv/bin/python -m pytest tests/test_feedback.py -q.\n4. OUTPUT: Append to gap_feedback.md: atomic/throttle/notify audit.\n5. DOCS: none — internal implementation."
+                  "dependencies": [
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: feedback.py uses tempfile+os.rename for atomic writes (PRD §4.6 'atomic write via tempfile+rename'). File mode 0600, dir 0700. Throttle: update_partial disk writes capped at ≥10Hz (min 0.1s between writes); in-memory partial ALWAYS updated. hyprctl notify only on: start ('Recording'), cold load ('Loading…'), final ('✔ <text>' gated by notify_on_final), stop ('Recording Stopped'). NEVER on partial updates. NEVER on phase changes.\n2. INPUT: feedback.py _write (atomic), update_partial (throttle logic), notify method, record_final.\n3. LOGIC: Verify: (a) _write uses tempfile.NamedTemporaryFile + os.replace (atomic); (b) throttle: _PARTIAL_WRITE_MIN_INTERVAL_S = 0.1; (c) in-memory update before throttle check; (d) notify fires subprocess.run(['hyprctl','notify','-1',str(notify_ms),'rgb(88c0d0)',msg]) fire-and-forget; (e) notify gated by hypr_notify config; (f) final notify gated by notify_on_final; (g) no notify on update_partial or set_phase. Run: .venv/bin/python -m pytest tests/test_feedback.py -q.\n4. OUTPUT: Append to gap_feedback.md: atomic/throttle/notify audit.\n5. DOCS: none — internal implementation.",
+                  "prd_selectors": [
+                    "h2.3/h3.7",
+                    "h2.7"
+                  ]
                 }
               ]
             },
@@ -306,9 +394,15 @@
                   "title": "Audit control socket: path, protocol, all commands, error handling",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.1", "h2.3/h3.9", "h2.3/h3.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py has _default_control_socket_path() → $XDG_RUNTIME_DIR/voice-typing/control.sock. Control thread accepts SOCK_STREAM connections, reads JSON lines, dispatches commands. PRD §4.2 #3 protocol: {cmd:toggle}→{ok:true,listening:true}; start/stop/status→{ok:true,listening:...,partial:...,uptime_s:...,mode:...}; toggle-lite/start-lite→arm in lite mode, mode in response; quit→clean shutdown; unknown→{ok:false,error:...}. Stale socket removed on startup.\n2. INPUT: daemon.py control socket handler methods (dispatch_cmd or similar), status_snapshot.\n3. LOGIC: Verify: (a) socket path resolves to $XDG_RUNTIME_DIR/voice-typing/control.sock; (b) mkdir 0700; (c) stale socket unlinked before bind; (d) all 7 commands produce correct JSON responses; (e) status includes phase, models_loaded, mode, partial, uptime_s; (f) unknown cmd → {ok:false,error}; (g) start/toggle block during load (single-flight), response includes listening after arm. Run: .venv/bin/python -m pytest tests/test_control_socket.py tests/test_daemon.py -q -k 'socket or control or cmd or dispatch or status'.\n4. OUTPUT: gap_socket.md with protocol audit. Acceptance #6 (all commands work).\n5. DOCS: none — internal protocol."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon.py has _default_control_socket_path() → $XDG_RUNTIME_DIR/voice-typing/control.sock. Control thread accepts SOCK_STREAM connections, reads JSON lines, dispatches commands. PRD §4.2 #3 protocol: {cmd:toggle}→{ok:true,listening:true}; start/stop/status→{ok:true,listening:...,partial:...,uptime_s:...,mode:...}; toggle-lite/start-lite→arm in lite mode, mode in response; quit→clean shutdown; unknown→{ok:false,error:...}. Stale socket removed on startup.\n2. INPUT: daemon.py control socket handler methods (dispatch_cmd or similar), status_snapshot.\n3. LOGIC: Verify: (a) socket path resolves to $XDG_RUNTIME_DIR/voice-typing/control.sock; (b) mkdir 0700; (c) stale socket unlinked before bind; (d) all 7 commands produce correct JSON responses; (e) status includes phase, models_loaded, mode, partial, uptime_s; (f) unknown cmd → {ok:false,error}; (g) start/toggle block during load (single-flight), response includes listening after arm. Run: .venv/bin/python -m pytest tests/test_control_socket.py tests/test_daemon.py -q -k 'socket or control or cmd or dispatch or status'.\n4. OUTPUT: gap_socket.md with protocol audit. Acceptance #6 (all commands work).\n5. DOCS: none — internal protocol.",
+                  "prd_selectors": [
+                    "h2.3/h3.1",
+                    "h2.3/h3.9",
+                    "h2.3/h3.3"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -316,9 +410,14 @@
                   "title": "Audit voicectl CLI: all commands, formatting, loading hint, exit codes & run tests",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M3.T2.S1"],
-                  "prd_selectors": ["h2.3/h3.9", "h2.3/h3.2"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: ctl.py (219 lines) has _COMMANDS tuple with all 7 commands. format_result() formats responses: toggle/start/stop→'listening: on/off'; status→multi-line with listening, partial, last_final, uptime, phase, models_loaded, mode; quit→'shutting down'. send_command() connects to socket, sends JSON line, reads response. _send_command_with_loading_hint() prints 'loading models…' to stderr if daemon doesn't reply quickly (arm commands block during load). Exit codes: 0 success, 1 error, 2 daemon not running.\n2. INPUT: ctl.py main(), format_result(), send_command(), _send_command_with_loading_hint(), _build_parser().\n3. LOGIC: Verify: (a) all 7 commands in _COMMANDS; (b) status pretty-prints phase/models_loaded/mode (PRD §4.8); (c) loading hint prints for start/toggle/start-lite/toggle-lite; (d) exit 2 when daemon not running (socket connection refused); (e) console-script entry point: [project.scripts] voicectl='voice_typing.ctl:main'. Run: .venv/bin/python -m pytest tests/test_voicectl.py -q.\n4. OUTPUT: gap_voicectl.md with CLI audit. Acceptance #6.\n5. DOCS: [Mode A] ctl.py __doc__ and help text should list all 7 commands — verify they do."
+                  "dependencies": [
+                    "P1.M3.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: ctl.py (219 lines) has _COMMANDS tuple with all 7 commands. format_result() formats responses: toggle/start/stop→'listening: on/off'; status→multi-line with listening, partial, last_final, uptime, phase, models_loaded, mode; quit→'shutting down'. send_command() connects to socket, sends JSON line, reads response. _send_command_with_loading_hint() prints 'loading models…' to stderr if daemon doesn't reply quickly (arm commands block during load). Exit codes: 0 success, 1 error, 2 daemon not running.\n2. INPUT: ctl.py main(), format_result(), send_command(), _send_command_with_loading_hint(), _build_parser().\n3. LOGIC: Verify: (a) all 7 commands in _COMMANDS; (b) status pretty-prints phase/models_loaded/mode (PRD §4.8); (c) loading hint prints for start/toggle/start-lite/toggle-lite; (d) exit 2 when daemon not running (socket connection refused); (e) console-script entry point: [project.scripts] voicectl='voice_typing.ctl:main'. Run: .venv/bin/python -m pytest tests/test_voicectl.py -q.\n4. OUTPUT: gap_voicectl.md with CLI audit. Acceptance #6.\n5. DOCS: [Mode A] ctl.py __doc__ and help text should list all 7 commands — verify they do.",
+                  "prd_selectors": [
+                    "h2.3/h3.9",
+                    "h2.3/h3.2"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -326,9 +425,13 @@
                   "title": "Audit status.sh tmux helper (§4.6)",
                   "status": "Planned",
                   "story_points": 0.5,
-                  "dependencies": ["P1.M3.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/status.sh is the tmux status-right helper. PRD §4.6: reads state.json via jq, shows '🎤 <partial>' when listening (cut to 60 chars), empty when not. Lite mode prefixed with ⚡ (PRD §4.2ter 'tmux status line prefixes lite with ⚡').\n2. INPUT: voice_typing/status.sh.\n3. LOGIC: Verify: (a) reads $XDG_RUNTIME_DIR/voice-typing/state.json; (b) jq filter: if .listening then 🎤 + partial else empty; (c) cut -c1-60 truncation; (d) lite mode ⚡ prefix when mode=lite; (e) handles missing file gracefully (2>/dev/null). Run: .venv/bin/python -m pytest tests/test_status_sh.py -q.\n4. OUTPUT: gap_status_sh.md.\n5. DOCS: none — status.sh is self-documenting; README covers tmux integration snippet."
+                  "dependencies": [
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: voice_typing/status.sh is the tmux status-right helper. PRD §4.6: reads state.json via jq, shows '🎤 <partial>' when listening (cut to 60 chars), empty when not. Lite mode prefixed with ⚡ (PRD §4.2ter 'tmux status line prefixes lite with ⚡').\n2. INPUT: voice_typing/status.sh.\n3. LOGIC: Verify: (a) reads $XDG_RUNTIME_DIR/voice-typing/state.json; (b) jq filter: if .listening then 🎤 + partial else empty; (c) cut -c1-60 truncation; (d) lite mode ⚡ prefix when mode=lite; (e) handles missing file gracefully (2>/dev/null). Run: .venv/bin/python -m pytest tests/test_status_sh.py -q.\n4. OUTPUT: gap_status_sh.md.\n5. DOCS: none — status.sh is self-documenting; README covers tmux integration snippet.",
+                  "prd_selectors": [
+                    "h2.3/h3.7"
+                  ]
                 }
               ]
             }
@@ -355,8 +458,11 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3/h3.10", "h2.3/h3.2"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: systemd/voice-typing.service has __REPO__ placeholder (VT-003: install.sh substitutes actual repo path). VT-004: WantedBy=graphical-session.target (not default.target which raced compositor on cold boot). KillMode=mixed (SIGTERM to main daemon only, lets it killpg its child, then SIGKILL group after TimeoutStopSec). ExecStartPre imports WAYLAND_DISPLAY DISPLAY.\n2. INPUT: systemd/voice-typing.service.\n3. LOGIC: Verify ALL directives match PRD §4.9: Description, After=pipewire.service ydotool.service graphical-session.target, PartOf=graphical-session.target, ExecStartPre=import-environment, ExecStart=__REPO__/voice_typing/launch_daemon.sh, Restart=on-failure, RestartSec=2, KillMode=mixed, TimeoutStopSec=15, WantedBy=graphical-session.target. Run: .venv/bin/python -m pytest tests/test_systemd_unit.py -q.\n4. OUTPUT: gap_systemd.md with directive audit. Acceptance #6 (daemon runs as systemd service, auto-restarts).\n5. DOCS: none — the unit file is self-documenting with inline comments."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: systemd/voice-typing.service has __REPO__ placeholder (VT-003: install.sh substitutes actual repo path). VT-004: WantedBy=graphical-session.target (not default.target which raced compositor on cold boot). KillMode=mixed (SIGTERM to main daemon only, lets it killpg its child, then SIGKILL group after TimeoutStopSec). ExecStartPre imports WAYLAND_DISPLAY DISPLAY.\n2. INPUT: systemd/voice-typing.service.\n3. LOGIC: Verify ALL directives match PRD §4.9: Description, After=pipewire.service ydotool.service graphical-session.target, PartOf=graphical-session.target, ExecStartPre=import-environment, ExecStart=__REPO__/voice_typing/launch_daemon.sh, Restart=on-failure, RestartSec=2, KillMode=mixed, TimeoutStopSec=15, WantedBy=graphical-session.target. Run: .venv/bin/python -m pytest tests/test_systemd_unit.py -q.\n4. OUTPUT: gap_systemd.md with directive audit. Acceptance #6 (daemon runs as systemd service, auto-restarts).\n5. DOCS: none — the unit file is self-documenting with inline comments.",
+                  "prd_selectors": [
+                    "h2.3/h3.10",
+                    "h2.3/h3.2"
+                  ]
                 }
               ]
             },
@@ -373,9 +479,15 @@
                   "title": "Audit launch_daemon.sh: lib discovery, HF_HUB_OFFLINE, WAYLAND_DISPLAY import",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M4.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.5", "h2.3/h3.10", "h2.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: launch_daemon.sh is the ExecStart wrapper. PRD §4.4: it MUST recompute cuBLAS/cuDNN lib dirs from the live installed nvidia-*-cu12 wheels (not baked — would go stale on uv sync). Standard trick: python -c 'import nvidia.cublas.lib, nvidia.cudnn.lib; ...' to get lib dir paths, prepend to LD_LIBRARY_PATH. Also exports HF_HUB_OFFLINE=1 (no network at runtime). Also re-fetches WAYLAND_DISPLAY/DISPLAY from systemctl --user show-environment.\n2. INPUT: voice_typing/launch_daemon.sh.\n3. LOGIC: Verify: (a) discovers nvidia.cublas.lib and nvidia.cudnn.lib paths dynamically; (b) exports LD_LIBRARY_PATH with those dirs prepended; (c) exports HF_HUB_OFFLINE=1; (d) re-fetches WAYLAND_DISPLAY DISPLAY from systemctl --user show-environment or similar; (e) exec's python -m voice_typing.daemon (or the console script). Verify it does NOT have a baked/stale LD_LIBRARY_PATH.\n4. OUTPUT: gap_launch_daemon.md. Acceptance #8 (no network at runtime).\n5. DOCS: none — internal wrapper."
+                  "dependencies": [
+                    "P1.M4.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: launch_daemon.sh is the ExecStart wrapper. PRD §4.4: it MUST recompute cuBLAS/cuDNN lib dirs from the live installed nvidia-*-cu12 wheels (not baked — would go stale on uv sync). Standard trick: python -c 'import nvidia.cublas.lib, nvidia.cudnn.lib; ...' to get lib dir paths, prepend to LD_LIBRARY_PATH. Also exports HF_HUB_OFFLINE=1 (no network at runtime). Also re-fetches WAYLAND_DISPLAY/DISPLAY from systemctl --user show-environment.\n2. INPUT: voice_typing/launch_daemon.sh.\n3. LOGIC: Verify: (a) discovers nvidia.cublas.lib and nvidia.cudnn.lib paths dynamically; (b) exports LD_LIBRARY_PATH with those dirs prepended; (c) exports HF_HUB_OFFLINE=1; (d) re-fetches WAYLAND_DISPLAY DISPLAY from systemctl --user show-environment or similar; (e) exec's python -m voice_typing.daemon (or the console script). Verify it does NOT have a baked/stale LD_LIBRARY_PATH.\n4. OUTPUT: gap_launch_daemon.md. Acceptance #8 (no network at runtime).\n5. DOCS: none — internal wrapper.",
+                  "prd_selectors": [
+                    "h2.3/h3.5",
+                    "h2.3/h3.10",
+                    "h2.4"
+                  ]
                 }
               ]
             },
@@ -392,9 +504,16 @@
                   "title": "Audit install.sh: all steps, __REPO__ substitution, idempotency, stale symlink cleanup",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T1.S1", "P1.M4.T2.S1"],
-                  "prd_selectors": ["h2.4", "h2.3/h3.10", "h2.3/h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: install.sh (12KB). PRD §5 steps: (1) cd project, (2) ensure portaudio, (3) uv init (already done), (4) uv add deps (already in pyproject.toml), (5) prefetch models, (6) run tests, (7) install service. VT-003: substitute __REPO__ in the unit with actual repo path when copying to ~/.config/systemd/user/. VT-004: remove stale default.target.wants symlink from prior installs. Idempotent: running twice should be safe.\n2. INPUT: install.sh.\n3. LOGIC: Verify: (a) uv sync step; (b) prefetch.py called or huggingface_hub.snapshot_download for both models; (c) CUDA smoke test (ctranslate2.get_cuda_device_count()); (d) sed -e 's|__REPO__|<actual_path>|' on the unit; (e) cp to ~/.config/systemd/user/voice-typing.service; (f) systemctl --user daemon-reload + enable + start; (g) removes stale default.target.wants symlink (VT-004); (h) copies config.toml to $XDG_CONFIG_HOME/voice-typing/ if absent; (i) prints tmux snippet + usage instructions; (j) idempotent (safe to re-run).\n4. OUTPUT: gap_install.md with audit.\n5. DOCS: [Mode A] install.sh prints the tmux status snippet and usage instructions — verify the printed snippets are current and match status.sh and PRD §4.6."
+                  "dependencies": [
+                    "P1.M4.T1.S1",
+                    "P1.M4.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: install.sh (12KB). PRD §5 steps: (1) cd project, (2) ensure portaudio, (3) uv init (already done), (4) uv add deps (already in pyproject.toml), (5) prefetch models, (6) run tests, (7) install service. VT-003: substitute __REPO__ in the unit with actual repo path when copying to ~/.config/systemd/user/. VT-004: remove stale default.target.wants symlink from prior installs. Idempotent: running twice should be safe.\n2. INPUT: install.sh.\n3. LOGIC: Verify: (a) uv sync step; (b) prefetch.py called or huggingface_hub.snapshot_download for both models; (c) CUDA smoke test (ctranslate2.get_cuda_device_count()); (d) sed -e 's|__REPO__|<actual_path>|' on the unit; (e) cp to ~/.config/systemd/user/voice-typing.service; (f) systemctl --user daemon-reload + enable + start; (g) removes stale default.target.wants symlink (VT-004); (h) copies config.toml to $XDG_CONFIG_HOME/voice-typing/ if absent; (i) prints tmux snippet + usage instructions; (j) idempotent (safe to re-run).\n4. OUTPUT: gap_install.md with audit.\n5. DOCS: [Mode A] install.sh prints the tmux status snippet and usage instructions — verify the printed snippets are current and match status.sh and PRD §4.6.",
+                  "prd_selectors": [
+                    "h2.4",
+                    "h2.3/h3.10",
+                    "h2.3/h3.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -402,9 +521,14 @@
                   "title": "Audit prefetch.py model download logic (§4.4)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M4.T3.S1"],
-                  "prd_selectors": ["h2.3/h3.5", "h2.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: prefetch.py (168 lines) uses huggingface_hub.snapshot_download to cache models at install time so the first arm never does a network download. Models: Systran/faster-distil-whisper-large-v3 (final), Systran/faster-whisper-small.en (realtime + lite). PRD §4.4: 'install.sh MUST prefetch (construct recorder once, or huggingface_hub.snapshot_download)'.\n2. INPUT: voice_typing/prefetch.py.\n3. LOGIC: Verify: (a) downloads both model repos via snapshot_download; (b) models land in ~/.cache/huggingface; (c) called by install.sh; (d) handles already-cached models gracefully (idempotent); (e) if distil-large-v3 fails, note the approved substitute large-v3-turbo (PRD §3).\n4. OUTPUT: gap_prefetch.md. Acceptance #8 (no network at runtime, models cached by install).\n5. DOCS: none — internal install step."
+                  "dependencies": [
+                    "P1.M4.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: prefetch.py (168 lines) uses huggingface_hub.snapshot_download to cache models at install time so the first arm never does a network download. Models: Systran/faster-distil-whisper-large-v3 (final), Systran/faster-whisper-small.en (realtime + lite). PRD §4.4: 'install.sh MUST prefetch (construct recorder once, or huggingface_hub.snapshot_download)'.\n2. INPUT: voice_typing/prefetch.py.\n3. LOGIC: Verify: (a) downloads both model repos via snapshot_download; (b) models land in ~/.cache/huggingface; (c) called by install.sh; (d) handles already-cached models gracefully (idempotent); (e) if distil-large-v3 fails, note the approved substitute large-v3-turbo (PRD §3).\n4. OUTPUT: gap_prefetch.md. Acceptance #8 (no network at runtime, models cached by install).\n5. DOCS: none — internal install step.",
+                  "prd_selectors": [
+                    "h2.3/h3.5",
+                    "h2.4"
+                  ]
                 }
               ]
             },
@@ -422,8 +546,11 @@
                   "status": "Planned",
                   "story_points": 0.5,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3/h3.11", "h2.3/h3.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: hypr-binds.conf (3KB). PRD §4.10: 'bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle' and 'bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite'. Must print instruction to source from ~/.config/hypr/hyprland.conf. Must NOT auto-modify user config.\n2. INPUT: hypr-binds.conf.\n3. LOGIC: Verify: (a) bind CTRL SUPER ALT, D → voicectl toggle (normal mode); (b) bind SUPER ALT, D → voicectl toggle-lite (lite mode); (c) uses $HOME/.local/bin/voicectl (installed console script path); (d) contains source instruction comment; (e) does not modify user's hyprland.conf.\n4. OUTPUT: gap_hypr_binds.md. Acceptance #7 (README documents hotkey snippet).\n5. DOCS: [Mode A] hypr-binds.conf comments should explain the source instruction and the two modes — verify they do."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: hypr-binds.conf (3KB). PRD §4.10: 'bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle' and 'bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite'. Must print instruction to source from ~/.config/hypr/hyprland.conf. Must NOT auto-modify user config.\n2. INPUT: hypr-binds.conf.\n3. LOGIC: Verify: (a) bind CTRL SUPER ALT, D → voicectl toggle (normal mode); (b) bind SUPER ALT, D → voicectl toggle-lite (lite mode); (c) uses $HOME/.local/bin/voicectl (installed console script path); (d) contains source instruction comment; (e) does not modify user's hyprland.conf.\n4. OUTPUT: gap_hypr_binds.md. Acceptance #7 (README documents hotkey snippet).\n5. DOCS: [Mode A] hypr-binds.conf comments should explain the source instruction and the two modes — verify they do.",
+                  "prd_selectors": [
+                    "h2.3/h3.11",
+                    "h2.3/h3.3"
+                  ]
                 }
               ]
             }
@@ -449,9 +576,20 @@
                   "title": "Run pure-python unit tests (no CUDA): config, textproc, typing_backends, feedback, ctl, socket, status_sh, systemd",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1", "P1.M1.T3.S1", "P1.M3.T1.S2", "P1.M3.T2.S2", "P1.M3.T2.S3", "P1.M4.T1.S1"],
-                  "prd_selectors": ["h2.5", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: These test files are pure-python, fast, no CUDA: test_config.py (34), test_config_repo_default.py (3), test_textproc.py (21), test_typing_backends.py (27), test_feedback.py (38), test_voicectl.py (32), test_control_socket.py (21), test_status_sh.py (5), test_systemd_unit.py (15). Total ~196 tests. They mock subprocess calls and test logic in isolation.\n2. INPUT: All test_*.py files in tests/.\n3. LOGIC: Run: timeout 120 .venv/bin/python -m pytest tests/test_config.py tests/test_config_repo_default.py tests/test_textproc.py tests/test_typing_backends.py tests/test_feedback.py tests/test_voicectl.py tests/test_control_socket.py tests/test_status_sh.py tests/test_systemd_unit.py -q. Report pass/fail counts. If failures: diagnose root cause, fix in source or test, re-run until green.\n4. OUTPUT: test_results_unit.md with counts + any fixes applied.\n5. DOCS: none — test execution."
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M1.T2.S1",
+                    "P1.M1.T3.S1",
+                    "P1.M3.T1.S2",
+                    "P1.M3.T2.S2",
+                    "P1.M3.T2.S3",
+                    "P1.M4.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: These test files are pure-python, fast, no CUDA: test_config.py (34), test_config_repo_default.py (3), test_textproc.py (21), test_typing_backends.py (27), test_feedback.py (38), test_voicectl.py (32), test_control_socket.py (21), test_status_sh.py (5), test_systemd_unit.py (15). Total ~196 tests. They mock subprocess calls and test logic in isolation.\n2. INPUT: All test_*.py files in tests/.\n3. LOGIC: Run: timeout 120 .venv/bin/python -m pytest tests/test_config.py tests/test_config_repo_default.py tests/test_textproc.py tests/test_typing_backends.py tests/test_feedback.py tests/test_voicectl.py tests/test_control_socket.py tests/test_status_sh.py tests/test_systemd_unit.py -q. Report pass/fail counts. If failures: diagnose root cause, fix in source or test, re-run until green.\n4. OUTPUT: test_results_unit.md with counts + any fixes applied.\n5. DOCS: none — test execution.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -459,9 +597,15 @@
                   "title": "Run daemon + recorder_host unit tests (mocked CUDA): test_daemon.py, test_recorder_host.py",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M5.T1.S1"],
-                  "prd_selectors": ["h2.5", "h2.3/h3.1", "h2.3/h3.2"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test_daemon.py (191 tests) and test_recorder_host.py (26 tests) are the largest test files. They mock the recorder/recorder-host to test daemon lifecycle logic without loading real CUDA models. Cover: lazy load, drain, idle stop, idle unload, lite mode, mode-switch, dead-child recovery, control socket, status. Total ~217 tests.\n2. INPUT: tests/test_daemon.py, tests/test_recorder_host.py.\n3. LOGIC: Run: timeout 300 .venv/bin/python -m pytest tests/test_daemon.py tests/test_recorder_host.py -q. These should be fast (mocked). Report pass/fail. Fix any failures. These tests are the primary coverage for acceptance criteria #2, #4, #5, #6, #9, #10.\n4. OUTPUT: test_results_daemon.md with counts + fixes.\n5. DOCS: none — test execution."
+                  "dependencies": [
+                    "P1.M5.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: test_daemon.py (191 tests) and test_recorder_host.py (26 tests) are the largest test files. They mock the recorder/recorder-host to test daemon lifecycle logic without loading real CUDA models. Cover: lazy load, drain, idle stop, idle unload, lite mode, mode-switch, dead-child recovery, control socket, status. Total ~217 tests.\n2. INPUT: tests/test_daemon.py, tests/test_recorder_host.py.\n3. LOGIC: Run: timeout 300 .venv/bin/python -m pytest tests/test_daemon.py tests/test_recorder_host.py -q. These should be fast (mocked). Report pass/fail. Fix any failures. These tests are the primary coverage for acceptance criteria #2, #4, #5, #6, #9, #10.\n4. OUTPUT: test_results_daemon.md with counts + fixes.\n5. DOCS: none — test execution.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.3/h3.1",
+                    "h2.3/h3.2"
+                  ]
                 }
               ]
             },
@@ -478,9 +622,14 @@
                   "title": "Audit T1 test coverage & verify test audio assets exist",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M5.T1.S1"],
-                  "prd_selectors": ["h2.5", "h2.3/h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/test_feed_audio.py (8 tests) and tests/make_test_audio.sh exist. Test WAVs in tests/out/: utt_simple.wav, utt_pause.wav, utt_punct.wav, utt_multi.wav. PRD §6 T1 asserts: (a) partials start <1.5s after speech onset, update ≥500ms; (b) utt_pause.wav yields words AFTER 3s pause (the whisperx failure); (c) utt_multi.wav=3 finals; (d) ≥80% fuzzy accuracy; (e) final ≤1.5s after last sample.\n2. INPUT: tests/test_feed_audio.py, tests/make_test_audio.sh, tests/out/*.wav.\n3. LOGIC: Verify: (a) make_test_audio.sh generates all 4 WAVs with correct content (espeak-ng 150wpm, 16kHz mono); (b) test_feed_audio.py uses use_microphone=False + feed_audio(); (c) assertions cover T1(a)-(e); (d) fuzzy matching ≥80% token overlap implemented. Check if test_feed_audio_debug.py exists (seen in __pycache__). If WAVs missing: run make_test_audio.sh. Run: timeout 600 .venv/bin/python -m pytest tests/test_feed_audio.py -q (HEAVY — loads CUDA models).\n4. OUTPUT: test_results_t1.md with coverage assessment + pass/fail.\n5. DOCS: none — test execution."
+                  "dependencies": [
+                    "P1.M5.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/test_feed_audio.py (8 tests) and tests/make_test_audio.sh exist. Test WAVs in tests/out/: utt_simple.wav, utt_pause.wav, utt_punct.wav, utt_multi.wav. PRD §6 T1 asserts: (a) partials start <1.5s after speech onset, update ≥500ms; (b) utt_pause.wav yields words AFTER 3s pause (the whisperx failure); (c) utt_multi.wav=3 finals; (d) ≥80% fuzzy accuracy; (e) final ≤1.5s after last sample.\n2. INPUT: tests/test_feed_audio.py, tests/make_test_audio.sh, tests/out/*.wav.\n3. LOGIC: Verify: (a) make_test_audio.sh generates all 4 WAVs with correct content (espeak-ng 150wpm, 16kHz mono); (b) test_feed_audio.py uses use_microphone=False + feed_audio(); (c) assertions cover T1(a)-(e); (d) fuzzy matching ≥80% token overlap implemented. Check if test_feed_audio_debug.py exists (seen in __pycache__). If WAVs missing: run make_test_audio.sh. Run: timeout 600 .venv/bin/python -m pytest tests/test_feed_audio.py -q (HEAVY — loads CUDA models).\n4. OUTPUT: test_results_t1.md with coverage assessment + pass/fail.\n5. DOCS: none — test execution.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.3/h3.5"
+                  ]
                 }
               ]
             },
@@ -497,9 +646,15 @@
                   "title": "Audit T3 E2E script: null-sink setup, daemon tmux backend, drain assertion, cleanup trap",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M5.T2.S1"],
-                  "prd_selectors": ["h2.5", "h2.3/h3.1", "h2.3/h3.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/e2e_virtual_mic.sh. PRD §6 T3: (1) pactl load-module module-null-sink vt_test; (2) daemon with backend=tmux, tmux_target=voicetest; (3) voicectl start, play WAVs, voicectl stop; (4) assert file/pane contains fuzzy-matched text incl post-pause; assert state.json showed partials; assert drain types in-flight final after stop; assert nothing typed after disarm; (5) cleanup trap: unload module, restore default source, kill tmux. CRITICAL: must NOT leave user's default source switched (trap-based cleanup).\n2. INPUT: tests/e2e_virtual_mic.sh.\n3. LOGIC: Audit the script logic (do NOT run it unless explicitly required — it rebinds global audio source per AGENTS.md). Verify: (a) records original default source before switching; (b) loads module-null-sink; (c) starts daemon with tmux backend; (d) creates tmux session running cat>file; (e) plays WAVs via pw-cat; (f) polls state.json for partials; (g) asserts drain (final typed after stop); (h) asserts nothing typed post-disarm; (i) EXIT trap restores source + unloads module + kills tmux. All voicectl calls wrapped in timeout.\n4. OUTPUT: gap_e2e.md with script audit. Note whether it's safe to run.\n5. DOCS: none — test script."
+                  "dependencies": [
+                    "P1.M5.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/e2e_virtual_mic.sh. PRD §6 T3: (1) pactl load-module module-null-sink vt_test; (2) daemon with backend=tmux, tmux_target=voicetest; (3) voicectl start, play WAVs, voicectl stop; (4) assert file/pane contains fuzzy-matched text incl post-pause; assert state.json showed partials; assert drain types in-flight final after stop; assert nothing typed after disarm; (5) cleanup trap: unload module, restore default source, kill tmux. CRITICAL: must NOT leave user's default source switched (trap-based cleanup).\n2. INPUT: tests/e2e_virtual_mic.sh.\n3. LOGIC: Audit the script logic (do NOT run it unless explicitly required — it rebinds global audio source per AGENTS.md). Verify: (a) records original default source before switching; (b) loads module-null-sink; (c) starts daemon with tmux backend; (d) creates tmux session running cat>file; (e) plays WAVs via pw-cat; (f) polls state.json for partials; (g) asserts drain (final typed after stop); (h) asserts nothing typed post-disarm; (i) EXIT trap restores source + unloads module + kills tmux. All voicectl calls wrapped in timeout.\n4. OUTPUT: gap_e2e.md with script audit. Note whether it's safe to run.\n5. DOCS: none — test script.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.3/h3.1",
+                    "h2.3/h3.4"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -507,9 +662,15 @@
                   "title": "Audit T6 GPU lifecycle script: nvidia-smi idle/armed/disarmed/unload assertions",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M5.T3.S1"],
-                  "prd_selectors": ["h2.5", "h2.3/h3.2", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/test_idle_and_gpu.sh. PRD §6 T6: (a) idle never armed → nvidia-smi does NOT list daemon PID (~0 VRAM); (b) armed → PID appears ~1-5GB; (c) disarmed not quit → PID+memory REMAIN; (d) disarmed ≥auto_unload_idle_seconds → PID disappears (~0 VRAM), later arm reloads. ~5-8 min run (two cold inits + 120s armed-idle + idle-unload wait). AGENTS.md: timeout 900, preflight refuses if unit already running.\n2. INPUT: tests/test_idle_and_gpu.sh.\n3. LOGIC: Audit the script. Verify: (a) checks nvidia-smi --query-compute-apps=pid,used_memory; (b) step (a) asserts daemon PID absent at boot; (c) step (b) asserts PID present after arm; (d) step (c) asserts PID remains after stop; (e) step (d) asserts PID gone after idle-unload wait; (f) asserts re-arm reloads; (g) VOICECTL_TIMEOUT=30 wrapping all voicectl calls; (h) preflight check for running unit. Do NOT run unless explicitly requested (5-8 min, heavy).\n4. OUTPUT: gap_gpu_test.md with script audit. Acceptance #9 depends on this.\n5. DOCS: none — test script."
+                  "dependencies": [
+                    "P1.M5.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/test_idle_and_gpu.sh. PRD §6 T6: (a) idle never armed → nvidia-smi does NOT list daemon PID (~0 VRAM); (b) armed → PID appears ~1-5GB; (c) disarmed not quit → PID+memory REMAIN; (d) disarmed ≥auto_unload_idle_seconds → PID disappears (~0 VRAM), later arm reloads. ~5-8 min run (two cold inits + 120s armed-idle + idle-unload wait). AGENTS.md: timeout 900, preflight refuses if unit already running.\n2. INPUT: tests/test_idle_and_gpu.sh.\n3. LOGIC: Audit the script. Verify: (a) checks nvidia-smi --query-compute-apps=pid,used_memory; (b) step (a) asserts daemon PID absent at boot; (c) step (b) asserts PID present after arm; (d) step (c) asserts PID remains after stop; (e) step (d) asserts PID gone after idle-unload wait; (f) asserts re-arm reloads; (g) VOICECTL_TIMEOUT=30 wrapping all voicectl calls; (h) preflight check for running unit. Do NOT run unless explicitly requested (5-8 min, heavy).\n4. OUTPUT: gap_gpu_test.md with script audit. Acceptance #9 depends on this.\n5. DOCS: none — test script.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.3/h3.2",
+                    "h2.6"
+                  ]
                 }
               ]
             },
@@ -526,9 +687,15 @@
                   "title": "Audit T4 coverage: idle hallucination guard, CPU sampling, crash detection",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M5.T3.S2"],
-                  "prd_selectors": ["h2.5", "h2.6", "h2.3/h3.8"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T4: 120s silence while listening → no finals typed (blocklist catches 'thank you.' etc.), no crash, CPU <25% one core. This may be in test_idle_and_gpu.sh or test_daemon.py (mocked). The blocklist (textproc) + VAD gating (RealtimeSTT silero/webrtc) are the mitigations.\n2. INPUT: tests/test_idle_and_gpu.sh, tests/test_daemon.py (idle/hallucination tests).\n3. LOGIC: Check if T4 is covered: (a) a 120s silence test asserting no finals; (b) CPU sampling via pidstat or /proc; (c) crash detection. If only mocked in test_daemon.py, note that the full 120s test is in the shell script. Run: timeout 300 .venv/bin/python -m pytest tests/test_daemon.py -q -k 'idle or hallucin or silence or cpu'.\n4. OUTPUT: test_results_t4.md with coverage assessment. Acceptance #5.\n5. DOCS: none — test validation."
+                  "dependencies": [
+                    "P1.M5.T3.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T4: 120s silence while listening → no finals typed (blocklist catches 'thank you.' etc.), no crash, CPU <25% one core. This may be in test_idle_and_gpu.sh or test_daemon.py (mocked). The blocklist (textproc) + VAD gating (RealtimeSTT silero/webrtc) are the mitigations.\n2. INPUT: tests/test_idle_and_gpu.sh, tests/test_daemon.py (idle/hallucination tests).\n3. LOGIC: Check if T4 is covered: (a) a 120s silence test asserting no finals; (b) CPU sampling via pidstat or /proc; (c) crash detection. If only mocked in test_daemon.py, note that the full 120s test is in the shell script. Run: timeout 300 .venv/bin/python -m pytest tests/test_daemon.py -q -k 'idle or hallucin or silence or cpu'.\n4. OUTPUT: test_results_t4.md with coverage assessment. Acceptance #5.\n5. DOCS: none — test validation.",
+                  "prd_selectors": [
+                    "h2.5",
+                    "h2.6",
+                    "h2.3/h3.8"
+                  ]
                 }
               ]
             },
@@ -545,9 +712,20 @@
                   "title": "Map each acceptance criterion (#1-#10) to test evidence & audit findings",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M5.T1.S2", "P1.M5.T2.S1", "P1.M5.T3.S2", "P1.M5.T4.S1", "P1.M2.T3.S3"],
-                  "prd_selectors": ["h2.6", "h2.5", "h2.3/h3.2", "h2.3/h3.3"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §7 has 10 acceptance criteria. tests/ACCEPTANCE.md may track these (seen in tests/ dir). Each criterion maps to specific tests: #1→T1-T4,T6; #2→T1b,T3 (pause); #3→T3 (partials in state.json); #4→T3 (nothing typed off); #5→T4 (2min silence); #6→socket tests (all commands); #7→README task; #8→prefetch + HF_HUB_OFFLINE; #9→T6 (idle-unload); #10→T7 (lite mode).\n2. INPUT: All gap_*.md and test_results_*.md files from previous subtasks. tests/ACCEPTANCE.md.\n3. LOGIC: For each of the 10 criteria: state PASS/PARTIAL/FAIL with evidence (test names, code paths, command output). If any PARTIAL/FAIL: identify the gap, create a remediation note, and either fix it or flag it for the implementation agent. Update tests/ACCEPTANCE.md with current status.\n4. OUTPUT: acceptance_gate.md — the final evidence dossier. This is the go/no-go gate.\n5. DOCS: [Mode A] Update tests/ACCEPTANCE.md to reflect the verified status of each criterion."
+                  "dependencies": [
+                    "P1.M5.T1.S2",
+                    "P1.M5.T2.S1",
+                    "P1.M5.T3.S2",
+                    "P1.M5.T4.S1",
+                    "P1.M2.T3.S3"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §7 has 10 acceptance criteria. tests/ACCEPTANCE.md may track these (seen in tests/ dir). Each criterion maps to specific tests: #1→T1-T4,T6; #2→T1b,T3 (pause); #3→T3 (partials in state.json); #4→T3 (nothing typed off); #5→T4 (2min silence); #6→socket tests (all commands); #7→README task; #8→prefetch + HF_HUB_OFFLINE; #9→T6 (idle-unload); #10→T7 (lite mode).\n2. INPUT: All gap_*.md and test_results_*.md files from previous subtasks. tests/ACCEPTANCE.md.\n3. LOGIC: For each of the 10 criteria: state PASS/PARTIAL/FAIL with evidence (test names, code paths, command output). If any PARTIAL/FAIL: identify the gap, create a remediation note, and either fix it or flag it for the implementation agent. Update tests/ACCEPTANCE.md with current status.\n4. OUTPUT: acceptance_gate.md — the final evidence dossier. This is the go/no-go gate.\n5. DOCS: [Mode A] Update tests/ACCEPTANCE.md to reflect the verified status of each criterion.",
+                  "prd_selectors": [
+                    "h2.6",
+                    "h2.5",
+                    "h2.3/h3.2",
+                    "h2.3/h3.3"
+                  ]
                 }
               ]
             }
@@ -573,9 +751,22 @@
                   "title": "Audit README.md completeness against PRD §7 #7 acceptance criteria",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M5.T5.S1", "P1.M4.T3.S1", "P1.M4.T4.S1", "P1.M3.T2.S3", "P1.M1.T4.S1"],
-                  "prd_selectors": ["h2.6", "h2.5", "h2.3/h3.6", "h2.3/h3.10", "h2.3/h3.11", "h2.3/h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md (20KB) exists and is comprehensive. PRD §7 #7 requires README to document: install steps, hotkey snippet (hypr-binds.conf source instruction), tmux status snippet (status.sh), config tuning table (post_speech_silence_duration, silero_sensitivity, lite thresholds), troubleshooting (cuDNN libs/LD_LIBRARY_PATH, PyAudio device resolution, wtype vs ydotool fallback), CPU-only mode switch, first-run guide (T5: systemctl start, voicectl toggle, speak, watch tmux, voicectl toggle, tunables).\n2. INPUT: README.md, all gap_*.md and acceptance_gate.md.\n3. LOGIC: Verify README covers ALL required sections. Check: (a) install instructions (portaudio, uv sync, install.sh); (b) hotkey snippet (source hypr-binds.conf); (c) tmux status snippet (status.sh or inline jq); (d) config tuning table with key knobs; (e) troubleshooting: cuDNN libs (LD_LIBRARY_PATH wrapper), PyAudio device (input_device_index), wtype vs ydotool; (f) CPU-only mode (device=cpu in config); (g) first-run guide matching T5; (h) lite mode documentation (toggle-lite, Alt+Super+D). Fix any gaps.\n4. OUTPUT: Updated README.md if needed. gap_readme.md with audit.\n5. DOCS: [Mode B] This IS the changeset-level documentation sync task. README.md is the primary target."
+                  "dependencies": [
+                    "P1.M5.T5.S1",
+                    "P1.M4.T3.S1",
+                    "P1.M4.T4.S1",
+                    "P1.M3.T2.S3",
+                    "P1.M1.T4.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md (20KB) exists and is comprehensive. PRD §7 #7 requires README to document: install steps, hotkey snippet (hypr-binds.conf source instruction), tmux status snippet (status.sh), config tuning table (post_speech_silence_duration, silero_sensitivity, lite thresholds), troubleshooting (cuDNN libs/LD_LIBRARY_PATH, PyAudio device resolution, wtype vs ydotool fallback), CPU-only mode switch, first-run guide (T5: systemctl start, voicectl toggle, speak, watch tmux, voicectl toggle, tunables).\n2. INPUT: README.md, all gap_*.md and acceptance_gate.md.\n3. LOGIC: Verify README covers ALL required sections. Check: (a) install instructions (portaudio, uv sync, install.sh); (b) hotkey snippet (source hypr-binds.conf); (c) tmux status snippet (status.sh or inline jq); (d) config tuning table with key knobs; (e) troubleshooting: cuDNN libs (LD_LIBRARY_PATH wrapper), PyAudio device (input_device_index), wtype vs ydotool; (f) CPU-only mode (device=cpu in config); (g) first-run guide matching T5; (h) lite mode documentation (toggle-lite, Alt+Super+D). Fix any gaps.\n4. OUTPUT: Updated README.md if needed. gap_readme.md with audit.\n5. DOCS: [Mode B] This IS the changeset-level documentation sync task. README.md is the primary target.",
+                  "prd_selectors": [
+                    "h2.6",
+                    "h2.5",
+                    "h2.3/h3.6",
+                    "h2.3/h3.10",
+                    "h2.3/h3.11",
+                    "h2.3/h3.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -583,9 +774,15 @@
                   "title": "Verify no stale BUGS.md/VT-* references & resolve doc drift",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M6.T1.S1"],
-                  "prd_selectors": ["h2.3/h3.2", "h2.3/h3.10", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2bis references 'see BUGS.md VT-001' (voicectl status importing CUDA in daemon process). PRD §4.9 references VT-003 (__REPO__ placeholder), VT-004 (graphical-session.target), VT-006 (blocklist 'you' removal). BUGS.md does NOT exist in the repo. These VT-* references are inline in the PRD itself (which is read-only). Check if any source code, README, or tests reference BUGS.md or unresolved VT-* issues.\n2. INPUT: All source files, README, tests.\n3. LOGIC: grep -rn 'BUGS.md\\|VT-00' voice_typing/ tests/ README.md config.toml install.sh systemd/ hypr-binds.conf. For each hit: determine if it's a resolved issue (comment/doc only) or an unresolved bug. If VT-001 (status importing CUDA) is still present in code, flag it. All VT-* issues should be either resolved in code (with comments explaining the fix) or documented in README troubleshooting.\n4. OUTPUT: gap_stale_refs.md with findings. If any unresolved VT-* issues found, create remediation tasks.\n5. DOCS: [Mode B] Resolve any stale documentation references as part of the changeset-level sweep."
+                  "dependencies": [
+                    "P1.M6.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §4.2bis references 'see BUGS.md VT-001' (voicectl status importing CUDA in daemon process). PRD §4.9 references VT-003 (__REPO__ placeholder), VT-004 (graphical-session.target), VT-006 (blocklist 'you' removal). BUGS.md does NOT exist in the repo. These VT-* references are inline in the PRD itself (which is read-only). Check if any source code, README, or tests reference BUGS.md or unresolved VT-* issues.\n2. INPUT: All source files, README, tests.\n3. LOGIC: grep -rn 'BUGS.md\\|VT-00' voice_typing/ tests/ README.md config.toml install.sh systemd/ hypr-binds.conf. For each hit: determine if it's a resolved issue (comment/doc only) or an unresolved bug. If VT-001 (status importing CUDA) is still present in code, flag it. All VT-* issues should be either resolved in code (with comments explaining the fix) or documented in README troubleshooting.\n4. OUTPUT: gap_stale_refs.md with findings. If any unresolved VT-* issues found, create remediation tasks.\n5. DOCS: [Mode B] Resolve any stale documentation references as part of the changeset-level sweep.",
+                  "prd_selectors": [
+                    "h2.3/h3.2",
+                    "h2.3/h3.10",
+                    "h2.7"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -593,9 +790,14 @@
                   "title": "Final git status check & commit readiness verification",
                   "status": "Planned",
                   "story_points": 0.5,
-                  "dependencies": ["P1.M6.T1.S2"],
-                  "prd_selectors": ["h2.4", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: The repo is on branch main, 1 commit ahead of origin/main. PRD §5 step 7: 'Commit everything to git on main with a sensible message.' The stash entries (0f314c8, 64d3a04) suggest WIP work. plan/006_862ee9d6ef41/ is untracked.\n2. INPUT: git status, git stash list.\n3. LOGIC: Run: git status (check for uncommitted changes), git stash list (check for stashed WIP). Verify: (a) all source changes from this verification cycle are staged/committed; (b) .gitignore covers .venv, __pycache__, tests/out/*.wav, .pi-subagents; (c) pyproject.toml and uv.lock are committed; (d) no stray debug files. If changes exist from this cycle, they should be committed with a clear message.\n4. OUTPUT: git_status_final.md with commit readiness assessment.\n5. DOCS: none — this is a process check, not documentation."
+                  "dependencies": [
+                    "P1.M6.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: The repo is on branch main, 1 commit ahead of origin/main. PRD §5 step 7: 'Commit everything to git on main with a sensible message.' The stash entries (0f314c8, 64d3a04) suggest WIP work. plan/006_862ee9d6ef41/ is untracked.\n2. INPUT: git status, git stash list.\n3. LOGIC: Run: git status (check for uncommitted changes), git stash list (check for stashed WIP). Verify: (a) all source changes from this verification cycle are staged/committed; (b) .gitignore covers .venv, __pycache__, tests/out/*.wav, .pi-subagents; (c) pyproject.toml and uv.lock are committed; (d) no stray debug files. If changes exist from this cycle, they should be committed with a clear message.\n4. OUTPUT: git_status_final.md with commit readiness assessment.\n5. DOCS: none — this is a process check, not documentation.",
+                  "prd_selectors": [
+                    "h2.4",
+                    "h2.6"
+                  ]
                 }
               ]
             }
