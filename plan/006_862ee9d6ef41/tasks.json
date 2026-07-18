@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Core Engine & Data Layer Audit",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Verify the foundational data/config layer and text/typing modules against PRD §4.3–§4.7. These modules are the contract foundation every other layer consumes: config drives recorder construction, textproc gates all output, typing_backends delivers text to the screen, cuda_check resolves device strategy. Each subtask audits the existing implementation against its PRD spec, runs the existing unit tests, and remediates any drift or missing coverage.",
           "tasks": [
             {
@@ -90,14 +90,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Typing backends compliance (§4.3)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Verify voice_typing/typing_backends.py (164 lines) against PRD §4.3. Three backends (WtypeBackend, YdotoolBackend, TmuxBackend) behind TypingBackend ABC with type_text(text) interface. wtype→ydotool auto-fallback on nonzero exit. Existing tests: test_typing_backends.py (27 tests).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Audit typing backends interface, auto-fallback & tmux path & run tests",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: typing_backends.py has TypingBackend ABC, WtypeBackend (subprocess.run(['wtype','--',text])), YdotoolBackend (subprocess.run(['ydotool','type','--key-delay','2','--',text])), TmuxBackend (subprocess.run(['/usr/bin/tmux','send-keys','-t',target,'-l','--',text])). A make_backend() factory wraps wtype with auto-fallback to ydotool. _TMUX='/usr/bin/tmux' constant avoids the zsh alias.\n2. INPUT: Read voice_typing/typing_backends.py.\n3. LOGIC: Verify: (a) type_text interface matches PRD §4.3; (b) wtype auto-fallback logs WARNING and retries via ydotool on nonzero exit or FileNotFoundError; (c) tmux uses /usr/bin/tmux (not bare tmux); (d) ydotool uses --key-delay 2 per PRD; (e) no Enter/newline sent (PRD §4.3 'Never send Enter/newline'). Run: .venv/bin/python -m pytest tests/test_typing_backends.py -q.\n4. OUTPUT: gap_typing.md with pass/fail. Fix issues if found.\n5. DOCS: none — internal module; backend selection is documented in config.toml [output] comments (Mode A already handled).",
@@ -112,14 +112,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "CUDA check & device fallback logic compliance (§4.4)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify voice_typing/cuda_check.py (168 lines) against PRD §4.4. Must probe ctranslate2 CUDA device count; if 0, resolve CPU fallback (device='cpu', compute_type='int8', realtime→tiny.en, final→small.en, lite→tiny.en). The daemon MUST report the fallback in status. No half-built recorder on failure.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Audit cuda_check probe & CPU fallback resolution against PRD §4.4",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: cuda_check.py probes ctranslate2.get_cuda_device_count(). PRD §4.4 requires: if CUDA init fails entirely, fall back to device='cpu', compute_type='int8', realtime_model_type='tiny.en', model='small.en'. Lite mode CPU substitute is tiny.en. The daemon must 'say so in status'. Machine: RTX 3080 Ti, driver 610.43.02, cuda 13.3 — ctranslate2 CUDA count should be ≥1.\n2. INPUT: Read voice_typing/cuda_check.py.\n3. LOGIC: Verify the probe function returns a dict with device + compute_type + (if CPU) downgraded model names. Verify lite CPU fallback uses tiny.en. Verify the daemon's _resolve_device_config / cfg_to_kwargs (in daemon.py) consume cuda_check output. Check that daemon logs the resolved device at startup (PRD §4.4 'log clearly and fall back').\n4. OUTPUT: gap_cuda_check.md. Verify with: .venv/bin/python -c 'import ctranslate2; print(ctranslate2.get_cuda_device_count())' → should be ≥1.\n5. DOCS: none — internal module. CPU-only mode instructions are in README (Mode A in the README task).",
