@@ -68,14 +68,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Text processor compliance (§4.7)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Verify voice_typing/textproc.py (70 lines) against PRD §4.7. clean(text, cfg) must: strip+collapse whitespace, reject len < min_chars, reject blocklist (case-insensitive, trailing-punct-insensitive), return cleaned text. Existing tests: test_textproc.py (21 tests). This is pure-python and fast — all tests should pass.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Audit clean() against PRD §4.7 4-step spec & run unit tests",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: textproc.py clean() does: (1) ' '.join(text.split()) for strip+collapse, (2) len < min_chars reject, (3) blocklist check via lowercase + rstrip(trailing_punct), (4) return cleaned text. The VT-006 fix removed 'you' from the default blocklist.\n2. INPUT: Read voice_typing/textproc.py.\n3. LOGIC: Verify the 4 steps match PRD §4.7 exactly. Check: trailing newlines stripped (PRD §4.3 'strip trailing newlines in textproc'), blocklist normalization handles 'Thank you.', 'BYE!', 'bye' all matching 'bye.' entry. Run: .venv/bin/python -m pytest tests/test_textproc.py -q.\n4. OUTPUT: gap_textproc.md with pass/fail + any drift. Fix issues if found.\n5. DOCS: none — pure internal module, no user-facing surface.",
@@ -90,14 +90,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Typing backends compliance (§4.3)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify voice_typing/typing_backends.py (164 lines) against PRD §4.3. Three backends (WtypeBackend, YdotoolBackend, TmuxBackend) behind TypingBackend ABC with type_text(text) interface. wtype→ydotool auto-fallback on nonzero exit. Existing tests: test_typing_backends.py (27 tests).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Audit typing backends interface, auto-fallback & tmux path & run tests",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: typing_backends.py has TypingBackend ABC, WtypeBackend (subprocess.run(['wtype','--',text])), YdotoolBackend (subprocess.run(['ydotool','type','--key-delay','2','--',text])), TmuxBackend (subprocess.run(['/usr/bin/tmux','send-keys','-t',target,'-l','--',text])). A make_backend() factory wraps wtype with auto-fallback to ydotool. _TMUX='/usr/bin/tmux' constant avoids the zsh alias.\n2. INPUT: Read voice_typing/typing_backends.py.\n3. LOGIC: Verify: (a) type_text interface matches PRD §4.3; (b) wtype auto-fallback logs WARNING and retries via ydotool on nonzero exit or FileNotFoundError; (c) tmux uses /usr/bin/tmux (not bare tmux); (d) ydotool uses --key-delay 2 per PRD; (e) no Enter/newline sent (PRD §4.3 'Never send Enter/newline'). Run: .venv/bin/python -m pytest tests/test_typing_backends.py -q.\n4. OUTPUT: gap_typing.md with pass/fail. Fix issues if found.\n5. DOCS: none — internal module; backend selection is documented in config.toml [output] comments (Mode A already handled).",
