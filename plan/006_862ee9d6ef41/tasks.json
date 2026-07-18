@@ -261,7 +261,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Audit lite recorder construction: single model, silence gate override",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S2",
