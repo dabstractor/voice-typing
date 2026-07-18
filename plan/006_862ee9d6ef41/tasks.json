@@ -143,14 +143,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Main loop & listening gate — never-exit-on-silence & graceful drain (§4.2 #1-2)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify the daemon's main loop and listening gate match PRD §4.2 #1 (recorder loop never exits on silence, recorder.text() returns are normal segmentation) and §4.2 #2 (stop is graceful drain: in-flight utterance finishes before disarm; on_final gated on listen flag). The drain watchdog must be bounded. Existing tests in test_daemon.py cover these.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Audit main loop: recorder is None idle, listening gate, text() blocking semantics",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -165,7 +165,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Audit graceful drain: stop during in-flight utterance, drain watchdog, abort-on-idle",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"
