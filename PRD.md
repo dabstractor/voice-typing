@@ -81,13 +81,19 @@ A full survey of the 2026 ecosystem was done (RealtimeSTT, nerd-dictation, whisp
 ├── uv.lock
 ├── voice_typing/
 │   ├── __init__.py
-│   ├── daemon.py               # main loop, recorder wiring, socket server
+│   ├── daemon.py               # main loop, control socket, lifecycle orchestration
+│   ├── recorder_host.py        # owns AudioToTextRecorder in a spawn child subprocess (VRAM reclamation, §4.2bis)
+│   ├── cuda_check.py           # ctranslate2 CUDA probe + CPU-fallback resolution (§4.4)
 │   ├── config.py               # dataclass + TOML loader (see §4.5)
 │   ├── typing_backends.py      # wtype / ydotool / tmux implementations
 │   ├── feedback.py             # state file writer + hyprctl notify
 │   ├── textproc.py             # normalization + hallucination filter
-│   └── ctl.py                  # voicectl client CLI
+│   ├── ctl.py                  # voicectl client CLI
+│   ├── prefetch.py             # install-time model prefetch into the HF cache
+│   ├── launch_daemon.sh        # ExecStart wrapper: LD_LIBRARY_PATH + HF_HUB_OFFLINE + WAYLAND_DISPLAY import
+│   └── status.sh               # tmux status-right helper (jq over state.json)
 ├── config.toml                 # default config, self-documenting comments
+├── hypr-binds.conf             # Hyprland keybinds, sourced from hyprland.conf (§4.10)
 ├── systemd/voice-typing.service# user service (installed by install.sh)
 ├── install.sh                  # idempotent: uv sync, model prefetch, service install
 ├── tests/
@@ -135,6 +141,8 @@ Logging: python `logging` to stderr (journald picks it up under systemd) at INFO
 
 Models MUST NOT load at daemon boot. The daemon starts with no recorder, no CUDA context, and ~0 VRAM. Construction of the `AudioToTextRecorder` — which loads `small.en` + `distil-large-v3` onto the GPU (§4.4 kwargs; ~1–3 s, ~1.5–3 GB VRAM in float16) — is deferred to the **first** `start`/`toggle` that arms the mic. After that first arm the recorder stays resident so the *second* and later arms are instant. It is torn down on `quit` / daemon shutdown, AND after `auto_unload_idle_seconds` (default 30 min) of sitting disarmed (see **Idle unload** below) — so the load cost is paid once per ~30 min of *actual use*, not once per boot. The goal: stop taxing the GPU both on boots where the feature is never used AND after a one-off use.
 
+**Implementation note (recorder-host subprocess):** the `AudioToTextRecorder` is NOT constructed in the daemon process. On the first arm the daemon spawns a managed **child subprocess** (`voice_typing/recorder_host.py`, `RecorderHost`); that child owns the recorder and ALL CUDA contexts. Arm/disarm/text/abort/shutdown are proxied over multiprocessing queues, and partials/finals/VAD events stream back to a daemon reader thread. Rationale: RealtimeSTT's realtime model runs on an in-process thread whose CUDA primary context is unreleasable until the owning process exits, so idle-unload (below) and `quit` can only reach ~0 VRAM by **terminating the child's process group** (`os.setsid` in the child + `os.killpg` in the daemon). The daemon process is therefore *intended* to never import `RealtimeSTT`/`torch`/`ctranslate2` and never create a CUDA context — **caveat: `voicectl status` currently violates this; see BUGS.md VT-001.** RealtimeSTT's ~90 s `recorder.shutdown()` wedge is sidestepped entirely: teardown = `proc.join(5s)` then `SIGKILL` the group.
+
 Lifecycle states (surfaced via `voicectl status` and the state file, §4.6/§4.8):
 - `unloaded` — daemon up, no recorder, ~0 VRAM. This is the boot state.
 - `loading` — first arm in progress; constructing recorder + loading models. The arm command blocks here; `voicectl` prints a `loading models…` hint.
@@ -148,7 +156,7 @@ Concurrency & failure rules:
 - The idle auto-stop (§4.5) disarms the mic but does NOT itself unload — it hands off to the slower idle-unload timer (below), which is what eventually frees VRAM.
 - Teardown (idle-unload and `quit`) runs under the SAME single-flight lock as load, so an arm that races an in-flight teardown waits for it, then loads fresh — an arm can never see a half-torn-down recorder.
 
-**Idle unload.** A background watchdog reclaims VRAM after a one-off use: when the recorder has sat in `loaded / not listening` for `asr.auto_unload_idle_seconds` (default `1800.0` = 30 min; `0` disables), it tears the recorder down, logs `voice-typing idle-unload: 1800.0s disarmed; unloading models`, transitions to `unloaded`, and frees the ~1.5–3 GB VRAM. The clock starts when the mic disarms (manual stop, toggle-off, or the §4.5 idle auto-stop) and resets on any arm; time spent listening does not count. The next arm then pays the ~1–3 s reload, same as a session's first arm. **Hard requirement — bounded teardown:** the `recorder.shutdown()` call invoked here MUST be non-blocking and complete in well under the arm-latency budget. It MUST NOT reproduce the ~90 s teardown hang currently seen on every `quit` (journal: `run() loop exiting` → 90 s → systemd `SIGKILL` / `Failed with result 'timeout'`), because idle-unload would trigger that hang every 30 min AND block any re-arm that races it under the single-flight lock. If `recorder.shutdown()` cannot be made to complete promptly, guard it with a hard timeout plus force-cleanup of the recorder's worker threads / `transcript_process` so VRAM is actually released. Making teardown bounded is therefore a **prerequisite** for this feature (risk row, §8).
+**Idle unload.** A background watchdog reclaims VRAM after a one-off use: when the recorder has sat in `loaded / not listening` for `asr.auto_unload_idle_seconds` (default `1800.0` = 30 min; `0` disables), it tears the recorder down, logs `voice-typing idle-unload: 1800.0s disarmed; unloading models`, transitions to `unloaded`, and frees the ~1.5–3 GB VRAM. The clock starts when the mic disarms (manual stop, toggle-off, or the §4.5 idle auto-stop) and resets on any arm; time spent listening does not count. The next arm then pays the ~1–3 s reload, same as a session's first arm. **Hard requirement — bounded teardown:** the `recorder.shutdown()` call invoked here MUST be non-blocking and complete in well under the arm-latency budget. It MUST NOT reproduce the ~90 s teardown hang currently seen on every `quit` (journal: `run() loop exiting` → 90 s → systemd `SIGKILL` / `Failed with result 'timeout'`), because idle-unload would trigger that hang every 30 min AND block any re-arm that races it under the single-flight lock. If `recorder.shutdown()` cannot be made to complete promptly, guard it with a hard timeout plus force-cleanup of the recorder's worker threads / `transcript_process` so VRAM is actually released. Making teardown bounded is therefore a **prerequisite** for this feature (risk row, §8). **(Resolved by the recorder-host subprocess model above: the daemon `killpg`s the child group after a 5 s join, so VRAM is force-released regardless of `recorder.shutdown()`'s behavior.)**
 
 ### 4.2ter Lite mode — small-model-only quick dictation
 
@@ -199,9 +207,12 @@ AudioToTextRecorder(
     min_gap_between_recordings=0.0,     # resume listening immediately
     silero_sensitivity=0.4,
     webrtc_sensitivity=3,
-    silero_use_onnx=True,               # avoids torch-hub download at runtime if supported
+    silero_backend="auto",              # item correction: modern control (prefers bundled CPU ONNX → avoids the torch-hub download). Supersedes the legacy silero_use_onnx=True.
     spinner=False,
     use_microphone=True,                # False + feed_audio() in tests
+    ensure_sentence_starting_uppercase=False,  # item correction: textproc owns casing/punctuation cleanup
+    ensure_sentence_ends_with_period=False,    # item correction (same reason)
+    no_log_file=True,                   # suppress RealtimeSTT's unbounded realtimesst.log (sole log path = stderr → journald)
     # input_device_index: leave unset → PipeWire default source
     on_realtime_transcription_stabilized=...,  # → feedback
 )
@@ -215,7 +226,7 @@ Notes:
   libs = os.pathsep.join(str(pathlib.Path(m.__file__).parent) for m in (nvidia.cublas.lib, nvidia.cudnn.lib))
   os.environ["LD_LIBRARY_PATH"] = libs + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
   ```
-  must happen via os.execv re-exec or in a launcher wrapper, because LD_LIBRARY_PATH is read at process start — simplest robust approach: the systemd unit / launcher script sets `Environment=LD_LIBRARY_PATH=...` computed by `install.sh`, OR use `ctranslate2`'s ability to dlopen from `site-packages/nvidia/...` (recent faster-whisper handles this automatically — TEST IT; if `libcudnn_ops*.so` errors appear, apply the wrapper).
+  must happen via os.execv re-exec or in a launcher wrapper, because LD_LIBRARY_PATH is read at process start. **Realized approach:** `voice_typing/launch_daemon.sh` (the ExecStart, §4.9) recomputes the cuBLAS/cuDNN lib dirs from the *live installed* `nvidia-*-cu12` wheels on every launch and exports `LD_LIBRARY_PATH` before exec'ing python — so no baked `Environment=LD_LIBRARY_PATH=` is used in the unit (it would go stale on `uv sync`). If `libcudnn_ops*.so` errors still appear, check the wrapper (`LD_DEBUG=libs launch_daemon.sh`).
 - If CUDA init fails entirely, daemon MUST log clearly and fall back to `device="cpu", compute_type="int8"` with `realtime_model_type="tiny.en"`, model `small.en` — degraded but functional — and say so in `status`.
 - **Lite mode (§4.2ter):** the lite recorder is constructed with `model = lite_model`, `realtime_model_type = lite_model`, `use_main_model_for_realtime = True` (verified: only ONE model initializes; the large final model is never constructed), AND a snugger `post_speech_silence_duration = lite_post_speech_silence_duration` — the silence gate, not the model, is the perceived-latency bottleneck, so lite MUST shorten it to actually feel faster (see §4.2ter).
 
@@ -248,6 +259,11 @@ notify_ms = 2500
 [filter]
 min_chars = 2
 blocklist = ["thank you.", "thanks for watching.", "you", "bye.", "thank you for watching"]  # case-insensitive exact matches — classic whisper silence hallucinations
+
+
+[log]   # daemon logging verbosity (stderr → journald under systemd)
+
+level = "INFO"            # "INFO" = one structured per-utterance latency line + the startup device/models line; "DEBUG" = also the raw monotonic timestamps. Read live with `journalctl --user -u voice-typing -f`.
 ```
 
 Config file search order: `$XDG_CONFIG_HOME/voice-typing/config.toml`, then repo `config.toml`, then built-in defaults. `install.sh` copies the repo default to XDG if absent.
@@ -291,11 +307,25 @@ Unit-test this module (pure python, fast).
 [Unit]
 Description=Local voice typing daemon (RealtimeSTT)
 After=pipewire.service ydotool.service
+
 [Service]
-ExecStart=/home/dustin/projects/voice-typing/.venv/bin/python -m voice_typing.daemon
+# wtype (default backend) is a Wayland client and needs WAYLAND_DISPLAY/DISPLAY; import them
+# from the user manager (populated at graphical-session launch). NOTE: this ExecStartPre is a
+# no-op on a cold boot that wins the compositor race (the vars aren't in the manager yet);
+# launch_daemon.sh re-fetches them as the real workaround. See BUGS.md VT-004.
+ExecStartPre=/usr/bin/systemctl --user import-environment WAYLAND_DISPLAY DISPLAY
+# ExecStart is the LD_LIBRARY_PATH wrapper (voice_typing/launch_daemon.sh), NOT python directly.
+# The wrapper recomputes the cuBLAS/cuDNN 9 lib dirs from the LIVE installed nvidia wheels on every
+# launch, so this unit survives `uv sync` reinstalls without edits. Do NOT bake
+# Environment=LD_LIBRARY_PATH= here (it goes stale). The wrapper also sets HF_HUB_OFFLINE=1.
+ExecStart=/home/dustin/projects/voice-typing/voice_typing/launch_daemon.sh
 Restart=on-failure
 RestartSec=2
-# Environment=LD_LIBRARY_PATH=...   ← install.sh fills this in if the cudnn dlopen test requires it
+# KillMode=mixed: deliver SIGTERM to the MAIN daemon only (let its single-flight host.stop()
+# killpg its own recorder-host child), then SIGKILL the whole group only after TimeoutStopSec.
+KillMode=mixed
+TimeoutStopSec=15
+
 [Install]
 WantedBy=default.target
 ```
@@ -317,7 +347,7 @@ bind = SUPER ALT, D, exec, /home/dustin/projects/voice-typing/.venv/bin/voicectl
 1. `cd /home/dustin/projects/voice-typing`
 2. Ensure portaudio: `pacman -Q portaudio || sudo pacman -S --noconfirm portaudio` (PyAudio dep of RealtimeSTT).
 3. `/home/dustin/.local/bin/uv init --bare --python 3.12` (already a git repo; keep name `voice-typing`).
-4. `uv add realtimestt nvidia-cublas-cu12 nvidia-cudnn-cu12` — RealtimeSTT pulls torch, faster-whisper, pyaudio, webrtcvad, etc. If torch arrives CPU-only, add the CUDA wheel explicitly (`uv add torch --index https://download.pytorch.org/whl/cu126` or current cu12x index) — verify with `python -c "import torch; print(torch.cuda.is_available())"` → MUST print True. Torch is needed for Silero VAD, not the whisper inference itself (that's CTranslate2), so `torch.cuda` availability is nice-to-have; **`ctranslate2` CUDA is the must-have**: `python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"` → ≥1.
+4. `uv add "realtimestt[faster-whisper,silero-vad]" nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" "huggingface_hub>=0.23"` — the extras pull torch, faster-whisper, pyaudio, webrtcvad, and Silero; the `nvidia-*-cu12` wheels provide the cuBLAS/cuDNN 9 shared objects CTranslate2 loads; `huggingface_hub` is used by `prefetch.py`. If torch arrives CPU-only, add the CUDA wheel explicitly (`uv add torch --index https://download.pytorch.org/whl/cu126` or current cu12x index). Torch is needed for Silero VAD, not the whisper inference itself (that's CTranslate2), so `torch.cuda` availability is nice-to-have; **`ctranslate2` CUDA is the must-have**: `python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"` → ≥1.
 5. Write all source files per §4.
 6. Prefetch models; run tests (§6); install service.
 7. Commit everything to git on `main` with a sensible message. (User's git identity is already configured.)
