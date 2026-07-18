@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Core Engine & Data Layer Audit",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Verify the foundational data/config layer and text/typing modules against PRD §4.3–§4.7. These modules are the contract foundation every other layer consumes: config drives recorder construction, textproc gates all output, typing_backends delivers text to the screen, cuda_check resolves device strategy. Each subtask audits the existing implementation against its PRD spec, runs the existing unit tests, and remediates any drift or missing coverage.",
           "tasks": [
             {
@@ -112,14 +112,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "CUDA check & device fallback logic compliance (§4.4)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Verify voice_typing/cuda_check.py (168 lines) against PRD §4.4. Must probe ctranslate2 CUDA device count; if 0, resolve CPU fallback (device='cpu', compute_type='int8', realtime→tiny.en, final→small.en, lite→tiny.en). The daemon MUST report the fallback in status. No half-built recorder on failure.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Audit cuda_check probe & CPU fallback resolution against PRD §4.4",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: cuda_check.py probes ctranslate2.get_cuda_device_count(). PRD §4.4 requires: if CUDA init fails entirely, fall back to device='cpu', compute_type='int8', realtime_model_type='tiny.en', model='small.en'. Lite mode CPU substitute is tiny.en. The daemon must 'say so in status'. Machine: RTX 3080 Ti, driver 610.43.02, cuda 13.3 — ctranslate2 CUDA count should be ≥1.\n2. INPUT: Read voice_typing/cuda_check.py.\n3. LOGIC: Verify the probe function returns a dict with device + compute_type + (if CPU) downgraded model names. Verify lite CPU fallback uses tiny.en. Verify the daemon's _resolve_device_config / cfg_to_kwargs (in daemon.py) consume cuda_check output. Check that daemon logs the resolved device at startup (PRD §4.4 'log clearly and fall back').\n4. OUTPUT: gap_cuda_check.md. Verify with: .venv/bin/python -c 'import ctranslate2; print(ctranslate2.get_cuda_device_count())' → should be ≥1.\n5. DOCS: none — internal module. CPU-only mode instructions are in README (Mode A in the README task).",
@@ -150,7 +150,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Audit main loop: recorder is None idle, listening gate, text() blocking semantics",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
