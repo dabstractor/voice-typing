@@ -627,3 +627,177 @@ re-verification; no defect was found). The only artifact produced by this subtas
 `setsid` primitives this §3 certifies the timing of) is §2 (P1.M2.T2.S2); the **graceful drain** is
 P1.M2.T1.S2; the **phase lifecycle** is P1.M2.T1; **lite/mode-switch** is M2.T3; **status** (VT-001/
 VT-002) is M3.
+
+---
+
+# §4 — Idle Auto-Stop Watchdog (P1.M2.T2.S4) vs PRD §4.5 `auto_stop_idle_seconds`
+
+**Date:** 2026-07-18 (audit re-verified against the live tree)
+**Scope:** Audit `voice_typing/daemon.py`'s **idle AUTO-STOP watchdog**
+(`_idle_watchdog` → `_maybe_auto_stop` → `_disarm`) against **PRD §4.5** (`asr.auto_stop_idle_seconds`,
+default `30.0`) on the **6 item properties (a)-(f) + the partial-reset hook**. Subtask
+**P1.M2.T2.S4** of verification round `006_862ee9d6ef41` — **appended** to this report. §1 above is
+P1.M2.T2.S1's lazy-load **state machine**; §2 is S2's recorder-host **IPC mechanism**; §3 is S3's
+idle-**UNLOAD** watchdog + bounded teardown (the clock §4 STARTS, §3 READS). This §4 owns the
+**auto-stop watchdog** only: disarms the **MIC** after `auto_stop_idle_seconds` (30s) of no recognized
+speech **while LISTENING** — it does NOT tear down models (that is §3's job).
+
+**Two-watchdog table (do not confuse §3 and §4):**
+
+| | idle AUTO-STOP (§4, THIS) | idle UNLOAD (§3, S3) |
+|---|---|---|
+| PRD clause | §4.5 `auto_stop_idle_seconds` (30.0) | §4.2bis Idle-unload `auto_unload_idle_seconds` (1800.0) |
+| Fires when | LISTENING, no partial for 30s | DISARMED, no re-arm for 30min |
+| Action | `_disarm()` (mic off; models STAY) | `_unload_host()` (models torn DOWN; VRAM freed) |
+| Thread | `_idle_watchdog` (daemon.py L1148) | `_idle_unload_watchdog` (daemon.py L1160) |
+| Method | `_maybe_auto_stop` (daemon.py L1119) | `_maybe_idle_unload` (daemon.py L1176) |
+| Clock | `_last_speech_monotonic` (daemon.py L621) | `_disarmed_monotonic` (daemon.py L626) |
+| Composition | auto-stop's `_disarm` stamps `_disarmed_monotonic` (L1022) → starts unload clock for FREE | unload reads `_disarmed_monotonic` |
+
+They COMPOSE: auto-stop's `_disarm` stamps `_disarmed_monotonic`, starting the 30min unload clock
+for free. They do NOT overlap — re-auditing the unload watchdog / bounded teardown is §3's job.
+
+**Audited artifacts (all read-only):**
+- `voice_typing/daemon.py` — `_idle_watchdog` (L1148-1157, `while not self._shutdown.wait(1.0)` @L1154,
+  `try/except` swallow @L1155-1156); `_maybe_auto_stop` (L1119-1147, threshold≤0 return @L1127-1128
+  BEFORE lock, `with self._lock` @L1129, not-listening/clock-None guard @L1131, deadline re-check
+  @L1133, `logger.info` journal line @L1134-1137, `_disarm` @L1139, `_safe_abort` @L1147 OUT of lock);
+  `_disarm` (L1002-1027, `_last_speech_monotonic = None` @L1021, `_disarmed_monotonic =
+  time.monotonic()` @L1022 the HAND-OFF, `_feedback.set_listening(False)` @L1026 the toast); `_arm`
+  (L987-1000, `_last_speech_monotonic = time.monotonic()` @L994, `_disarmed_monotonic = None` @L995);
+  `_touch_speech` (L1029-1040, `_last_speech_monotonic = time.monotonic()` @L1039,
+  `_final_pending = True` @L1040); `_build_callbacks._partial` (L217-239, `on_speech` param @L219,
+  `on_speech()` call @L237-238); `_load_host` wiring (L751/L757 — `self._touch_speech` as the 5th
+  positional `on_speech` arg to the RecorderHost factory, real + fake); `_safe_abort` (L1335-1362,
+  gated on `_text_in_flight` @L1355 — returns if not in flight). Also the clock comments @L616-625
+  (`_last_speech_monotonic`@L621 + `_disarmed_monotonic`@L626 documenting the atomic-CPython-float
+  rationale + the hand-off).
+- `voice_typing/config.py` — `auto_stop_idle_seconds: float = 30.0` (L65, the default — PRD §4.5
+  match); strict-loader guard @L76 (rejects e.g. string `"thirty"`); in validated-keys list @L89.
+- `tests/test_daemon.py` — the `-k 'idle or auto_stop or watchdog'` slice (the contract's run target;
+  the 7 auto-stop tests mock CUDA so the slice is fast (~1s) and exercises the watchdog directly).
+
+**Bottom line:** ✅ All 6 item properties (a)-(f) **+ the partial-reset hook** are **COMPLIANT**
+(each with file:line evidence in §4.2 below). The `-k 'idle or auto_stop or watchdog'` slice is
+**27 passed, 166 deselected in 1.08s** (re-ran live; matches the verified baseline of 27 passed,
+1.07s). Seven **non-defect nuances** are recorded in §4.4 so they are not mistaken for gaps (two
+watchdogs/two clocks; atomic float store not lock-guarded; `_shutdown.wait(1.0)` not `time.sleep`;
+watchdog swallows its own exceptions; abort-after-autostop effectively skipped; INFO line + toast
+via `_disarm`; 0-disable before lock). **No source or test files were modified** (this is a
+read-only audit — the auto-stop watchdog is PRD §4.5-compliant per the re-verification; no defect
+was found). The only artifact produced by this subtask is this appended §4 section.
+
+## §4.1 Method
+
+The audit re-verified each property by:
+1. Re-locating the ~6 auto-stop regions (grep, to catch line-number drift — none found; line
+   numbers match the research note exactly):
+   ```bash
+   grep -nE 'def _idle_watchdog|def _maybe_auto_stop|def _disarm|def _arm\b|def _touch_speech|\
+   def _build_callbacks|on_speech|def _safe_abort|_last_speech_monotonic|_disarmed_monotonic|\
+   auto_stop_idle_seconds|_shutdown\.wait' voice_typing/daemon.py voice_typing/config.py
+   ```
+2. Reading each region (`_idle_watchdog`@1148, `_maybe_auto_stop`@1119, `_disarm`@1002,
+   `_arm`@987, `_touch_speech`@1029, `_build_callbacks`@219/237-238, `_load_host` wiring@751/757,
+   `_safe_abort`@1335 in daemon.py; `auto_stop_idle_seconds=30.0`@65 in config.py) and confirming
+   the behavior matches PRD §4.5's wording.
+3. Re-running the auto-stop test slice (§4.3) and recording the live count.
+
+## §4.2 The 6 auto-stop properties + partial-reset hook — per-point compliance table
+
+| # | item property (LOGIC a-f) | PRD §4.5 expected | code actual (`daemon.py` unless noted) | test (§4.3) | verdict |
+|---|---|---|---|---|---|
+| (a) | `_idle_watchdog` ticks ~1s | "a background `_idle_watchdog` thread ticks ~1s" | `_idle_watchdog` **L1148-1157**: `while not self._shutdown.wait(1.0):` (**L1154**) → sleeps ~1s PER tick AND returns the instant `_shutdown` is set (no `time.sleep`). `try/except` @L1155-1156 swallows so a transient error never kills the watchdog. | `test_idle_watchdog_actually_disarms_in_background` | ✅ COMPLIANT |
+| (b) | deadline re-check under listen lock (late partial cancels stop) | "re-checks the deadline under the listen lock so a late partial cancels the stop" | `_maybe_auto_stop` **L1129** `with self._lock:` → re-reads `self._last_speech_monotonic` under the lock at **L1131** (`is None` guard) + **L1133** (`time.monotonic() - self._last_speech_monotonic < threshold` → return, no disarm). A partial landing between the 1s tick and lock-acq updates `_last_speech_monotonic` (atomic float store via `_touch_speech`@1039); the lock-gated re-read sees the fresh value → stop cancelled. | `test_auto_stop_keeps_alive_with_recent_speech`, `test_auto_stop_noop_when_not_listening`, `test_disarm_clears_the_idle_clock` | ✅ COMPLIANT |
+| (c) | `_maybe_auto_stop` disarms IMMEDIATE (not drain) | "auto-disarms immediately (no drain — by definition no utterance is in flight after this long silent)" | **L1139** `self._disarm()` (immediate). Comment **L1142-1145**: "Auto-stop fires only after `auto_stop_idle_seconds` of NO speech, so the last utterance finalized long ago — nothing to drain, an immediate disarm+abort is correct." (Contrast with `_request_stop`'s graceful-drain path — `_drain`/`_final_pending` never set here.) | `test_auto_stop_disarms_when_idle_beyond_threshold`, `test_idle_watchdog_actually_disarms_in_background` | ✅ COMPLIANT |
+| (d) | writes journal INFO line | "writes a journal INFO line (`voice-typing auto-stop: 30.0s of no recognized speech; disarming`)" | **L1134-1137** `logger.info("voice-typing auto-stop: %.1fs of no recognized speech; disarming (set [asr] auto_stop_idle_seconds=0 to disable)", threshold)` — emitted UNDER `_lock` (before `_disarm`), so the line precedes the disarm's state changes. `%.1f` formats the configured threshold (30.0). | (covered by the auto-stop tests asserting the disarm) | ✅ COMPLIANT |
+| (e) | starts idle-unload clock (hands off to `_idle_unload_watchdog`) | "Auto-stop disarms the mic but does NOT unload models by itself — it starts the slower idle-unload clock" | `_disarm()` **L1022** `self._disarmed_monotonic = time.monotonic()` — stamps the clock that `_idle_unload_watchdog`/`_maybe_idle_unload` reads (§3 @L1191-1192). So 30s auto-stop → 30min idle-unload composes for FREE. Comment @L622-625 documents the hand-off. | `test_disarm_clears_the_idle_clock` | ✅ COMPLIANT |
+| (f) | 0 disables (watchdog skips) | "`0` disables" | `_maybe_auto_stop` **L1127-1128** `threshold = self._cfg.asr.auto_stop_idle_seconds; if threshold <= 0: return` — short-circuits BEFORE acquiring `_lock`, so the watchdog's 1s tick is a cheap no-op when disabled (no lock contention). (`auto_stop_idle_seconds` default = `30.0`, config.py L65.) | `test_auto_stop_disabled_when_threshold_zero` | ✅ COMPLIANT |
+| (+) | **partial-reset hook** ("Partials reset the clock") | "Partials reset the clock" | `_touch_speech` @**L1039** (`self._last_speech_monotonic = time.monotonic()`) ← `on_speech` param ← `_build_callbacks._partial` @**L237-238** (`on_speech()` after `update_partial`) ← `_load_host` @**L751/L757** (`self._touch_speech` as 5th positional arg to the RecorderHost factory, real + fake) ← child's `('speech', {})` event ← RealtimeSTT realtime partial callback. Finals are always preceded by partials, so this single hook covers all active speech. | `test_touch_speech_resets_the_idle_clock` | ✅ COMPLIANT |
+
+## §4.3 Test evidence
+
+Re-ran the contract's run target live (AGENTS.md Rule 1: inner `timeout 300` + outer harness timeout;
+mocked CUDA so the slice is fast):
+
+```bash
+$ timeout 300 .venv/bin/python -m pytest tests/test_daemon.py -q -k 'idle or auto_stop or watchdog'
+...........................                                              [100%]
+27 passed, 166 deselected in 1.08s
+```
+
+Key evidence tests (`tests/test_daemon.py`):
+- `test_auto_stop_disarms_when_idle_beyond_threshold` — 31s silent (> 30.0) → `is_listening()` False. **(c)**
+- `test_auto_stop_keeps_alive_with_recent_speech` — 5s silent → stays armed. **(b)/(partial)**
+- `test_touch_speech_resets_the_idle_clock` — 60s idle, `_touch_speech()` → stays armed. **(partial reset)**
+- `test_auto_stop_disabled_when_threshold_zero` — threshold 0, 9999s idle → stays armed. **(f)**
+- `test_auto_stop_noop_when_not_listening` — boot (not listening, clock None) → clean no-op. **(b) guard**
+- `test_disarm_clears_the_idle_clock` — `_disarm` clears `_last_speech_monotonic` → stale tick is no-op. **(b)/(e)**
+- `test_idle_watchdog_actually_disarms_in_background` — REAL thread, 1.0s threshold, disarms within 4s. **(a)+(c)**
+
+## §4.4 Non-defect nuances (recorded so they are not mistaken for gaps)
+
+1. **Two watchdogs, two clocks.** `_idle_watchdog` (auto-stop, fires while LISTENING) and
+   `_idle_unload_watchdog` (idle-unload, fires while DISARMED) are SEPARATE threads with SEPARATE
+   clocks (`_last_speech_monotonic` @L621 vs `_disarmed_monotonic` @L626). §3 owns the unload
+   watchdog; §4 owns the auto-stop watchdog. They COMPOSE (auto-stop's `_disarm` stamps
+   `_disarmed_monotonic` @L1022 → unload reads it @L1191-1192); they do not overlap. (See the
+   two-watchdog table at the top of this section.)
+2. **`_last_speech_monotonic` is an atomic float store, NOT lock-guarded.** `_touch_speech`@1029
+   writes it from the host reader thread WITHOUT `_lock`; `_arm`@994 and `_disarm`@1021 write it
+   under `_lock`. The watchdog re-reads it UNDER `_lock` (L1131/L1133). CPython float stores are
+   atomic → the watchdog always sees a complete value; the lock serializes the DISARM decision
+   against concurrent start/stop/toggle, guaranteeing a partial that landed just before
+   lock-acquisition cancels the stop. **This IS the PRD §4.5 "re-check under the listen lock"
+   mechanism** — not a missing-lock bug.
+3. **`_idle_watchdog` uses `_shutdown.wait(1.0)`, not `time.sleep(1.0)`.** So it both ticks ~1s AND
+   exits promptly on shutdown (no orphan thread lingering past `quit`). Mirrors
+   `_idle_unload_watchdog`'s tick (§3 @L1166).
+4. **The watchdog swallows its own exceptions** (L1155-1156 `except Exception: logger.exception(...)`).
+   A transient error in `_maybe_auto_stop` never kills the watchdog — it logs and ticks again next
+   second.
+5. **abort() after auto-stop is effectively always SKIPPED.** `_maybe_auto_stop` calls
+   `_safe_abort()`@1147 ONLY `if disarmed and self._host is not None`, and `_safe_abort`@L1355
+   returns immediately `if not self._text_in_flight.is_set()`. After 30s of silence the run() loop
+   is in `time.sleep(0.05)` (idle), so `_text_in_flight` is clear → abort() is skipped (correct:
+   nothing to wake). The path exists for symmetry with stop/toggle; for auto-stop it is a no-op.
+   This is NOT a defect — abort() is "best-effort nudge" per `_safe_abort`'s docstring.
+6. **The INFO line + the "Recording Stopped" toast.** `logger.info(...)`@L1134-1137 is the journal
+   INFO line (property d). The "Recording Stopped" toast fires via `_disarm()`@L1026 →
+   `_feedback.set_listening(False)` → feedback.py fires "Recording Stopped" on the True→False
+   transition. This is the SAME disarm path as stop/toggle — the toast wiring itself is a P1.M3.T1
+   (feedback) concern, not §4's. §4 certifies only that auto-stop REACHES `_disarm`.
+7. **The 0-disable check is BEFORE the lock** (L1127-1128 `if threshold <= 0: return`, before
+   `with self._lock`). So a disabled auto-stop never acquires `_lock` on its 1s tick — a cheap
+   no-op, no contention with arm/stop/toggle.
+
+## §4.5 Conclusion
+
+**Verdict: ✅ COMPLIANT — all 6 item properties (a)-(f) + the partial-reset hook pass** (daemon.py +
+config.py file:line in §4.2). Test slice = **27 passed, 166 deselected in 1.08s**. No defect found →
+**NO source or test changes.** The only artifact produced by this subtask is this appended §4 section.
+
+This certifies **PRD §4.5** (Idle auto-stop) in full: the watchdog ticks ~1s (a), re-checks the
+deadline under the listen lock so a late partial cancels the stop (b), disarms IMMEDIATELY rather
+than draining (c — by definition nothing is in flight after 30s of silence), writes the journal
+INFO line (d), starts the slower idle-unload clock via `_disarm` stamping `_disarmed_monotonic` (e —
+§3 reads it), and respects `0`-disable as a cheap no-op before the lock (f). Partials reset the
+clock via the `_touch_speech` ← `on_speech` ← `_partial` ← `_load_host` hook.
+
+**Acceptance #5 linkage:** PRD §7 #5 = "Daemon survives ≥2 min of silence with no hallucinated output
+and trivial CPU use." The idle auto-stop watchdog is the **forgotten-hot-mic guard**: after 30s of
+no recognized speech it DISARMS (mic off, models stay), capping the hot-mic exposure window so a mic
+left armed cannot hallucinate for minutes (the blocklist filter §4.5/§4.7 catches the classic
+hallucinations; auto-stop removes the exposure). Trivial CPU: when disarmed the run() loop is in
+`time.sleep(0.05)`; the watchdog itself is a 1s-tick thread. The 2min silence test (T4) exceeds the
+30s auto-stop threshold, so it also EXERCISES the armed→auto-stopped disarm transition as a side
+effect — §4 certifies that transition is correct (mic disarmed, no hallucination typed, daemon
+stable across armed→auto-stopped→unload-clock-running for the full 2min).
+
+Adjacent concerns are correctly deferred: the **lazy-load state machine** is §1 above (P1.M2.T2.S1);
+the **recorder-host IPC mechanism** (incl. the `('speech', {})` event that drives `_touch_speech`) is
+§2 (P1.M2.T2.S2); the **idle-UNLOAD watchdog + bounded teardown** (the clock §4 STARTS, §3 READS)
+is §3 (P1.M2.T2.S3); the **graceful drain** (contrast: stop-with-in-flight drains; auto-stop never
+has in-flight → immediate) is P1.M2.T1.S2; the **phase lifecycle** is P1.M2.T1; **lite/mode-switch**
+is M2.T3; the **toast wiring** (feedback.py's "Recording Stopped" on the True→False transition) is
+M3.
