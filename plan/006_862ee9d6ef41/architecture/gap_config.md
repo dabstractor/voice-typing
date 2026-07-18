@@ -383,3 +383,150 @@ dead key / confuses them. The scan:
 `hypr-binds.conf` are all **unchanged** — the verification confirms they are already in lockstep.
 (This is the expected outcome: the contract's "fix any drift" branch is **not** taken because no
 non-VT-006 drift exists.) This closes P1.M1.T1.S2.
+
+---
+
+## Search-Order & XDG Resolution Verification (P1.M1.T1.S3)
+
+**Scope.** Verify that `VoiceTypingConfig.load()` + `_candidate_paths()` + `_xdg_config_path()` +
+`_repo_config_path()` implement the **PRD §4.5** config-file search order **exactly**:
+`$XDG_CONFIG_HOME/voice-typing/config.toml` → repo `config.toml` → built-in dataclass defaults
+(first EXISTING file wins; an explicit `path=` bypasses the search). This section is **distinct from
+S1** (field/default PRD §4.5 compliance) and **S2** (config.toml↔config.py lockstep + blocklist +
+Mode A): S3 covers **path resolution** — *which* file is found, in *what* order, and what happens
+when none exists.
+
+### S3.1 `_candidate_paths()` order = [XDG, repo] — PASS
+
+`voice_typing/config.py:301-303`:
+
+```python
+def _candidate_paths() -> list[str]:
+    """Ordered search candidates: XDG first, then repo. Defaults are the fallback."""
+    return [_xdg_config_path(), _repo_config_path()]
+```
+
+Live dump (re-verified this round):
+
+```
+candidate order: ['/home/dustin/.config/voice-typing/config.toml',
+                 '/home/dustin/projects/voice-typing/config.toml']
+  repo candidate exists: True
+```
+
+`[0]` is the XDG-derived path; `[1]` is the repo `config.toml`, which `os.path.isfile` → **True**.
+This matches **PRD §4.5 precedence: XDG first, repo second.** **PASS.**
+
+### S3.2 `_xdg_config_path()` resolution — PASS
+
+`voice_typing/config.py:283-288`:
+
+```python
+def _xdg_config_path() -> str:
+    xdg_config = os.environ.get("XDG_CONFIG_HOME", "").strip()   # :285 — .strip() collapses whitespace
+    if not xdg_config:                                            # :286
+        xdg_config = os.path.expanduser("~/.config")             # :287
+    return os.path.join(xdg_config, "voice-typing", "config.toml")  # :288
+```
+
+Re-verified across all four input classes:
+
+| `XDG_CONFIG_HOME` | resolved path |
+|---|---|
+| set `/custom/xdg` | `/custom/xdg/voice-typing/config.toml` |
+| unset             | `/home/dustin/.config/voice-typing/config.toml` |
+| empty `""`        | `/home/dustin/.config/voice-typing/config.toml` |
+| whitespace `"   "`| `/home/dustin/.config/voice-typing/config.toml` |
+
+Matches **PRD §4.5**: `$XDG_CONFIG_HOME/voice-typing/config.toml`, or `~/.config/voice-typing/config.toml`
+when unset/empty. **Robust-by-design (not a defect):** the `.strip()` at `config.py:285` collapses a
+whitespace-only value to `""` → falls back to `~/.config`. This is *more* robust than PRD §4.5's
+literal "unset/empty" wording and is correct per the **XDG Base Directory Specification's intent**
+(an invalid/whitespace value should default to `$HOME/.config`). Recorded as compliant, not flagged.
+**PASS.**
+
+### S3.3 `_repo_config_path()` — module-relative, exists — PASS
+
+`voice_typing/config.py:291-298`:
+
+```python
+def _repo_config_path() -> str:
+    # voice_typing/config.py → parent = voice_typing/ → parent = repo root.
+    return str(Path(__file__).resolve().parent.parent / "config.toml")   # :298
+```
+
+Resolves to `/home/dustin/projects/voice-typing/config.toml`; `os.path.isfile` → **True** (re-verified).
+**Module-relative (`Path(__file__)`) → CWD-independent:** systemd `ExecStart`, a manual run, and
+pytest all resolve the candidate identically regardless of working directory.
+
+**Robust-by-design (not a defect):** `config.toml` is **NOT packaged in the wheel**
+(`packages=["voice_typing"]`), so for pip-installed runs this candidate won't exist — `install.sh`
+copies it to XDG (candidate #1) instead. This is the documented design (`config.py:292-297`); a
+configless pip boot simply falls through to the tier-3 defaults (see S3.4). **PASS.**
+
+### S3.4 `load()` defaults fallback — PASS
+
+`voice_typing/config.py:262-281` (`return cls()` at `:276`):
+
+```python
+@classmethod
+def load(cls, path: str | os.PathLike[str] | None = None) -> VoiceTypingConfig:
+    if path is not None:
+        return cls.from_toml_file(path)        # explicit path bypasses the search
+    for candidate in _candidate_paths():        # first EXISTING file wins
+        if os.path.isfile(candidate):
+            return cls.from_toml_file(candidate)
+    return cls()  # built-in defaults           # :276 — tier 3 fallback
+```
+
+Re-verified by pointing both candidates at nonexistent paths and calling `load(None)`:
+`VoiceTypingConfig.load(None) == VoiceTypingConfig()` → **True**, **no exception raised**.
+This is the **PRD §4.5 tier-3 "built-in dataclass defaults" safety guarantee** — a configless boot
+(fresh checkout, no XDG copy, test context) must NOT crash. The module-level convenience wrapper at
+`config.py:306` delegates to this classmethod. **PASS.**
+
+### S3.5 Test coverage — 7 dedicated search-order tests, all PASS
+
+`tests/test_config.py` (7 tests directly covering path resolution):
+
+| Test | line | Asserts |
+|---|---|---|
+| `test_load_with_explicit_path_bypasses_search` | 280 | explicit `path=` skips the search |
+| `test_search_order_xdg_wins_over_repo` | 289 | XDG wins when BOTH exist (precedence) |
+| `test_search_order_repo_used_when_xdg_absent` | 301 | repo used when XDG file missing |
+| `test_search_order_missing_file_falls_back_to_defaults` | 311 | no candidate → dataclass defaults |
+| `test_xdg_config_path_falls_back_to_home_when_unset` | 319 | XDG unset → `~/.config/voice-typing/config.toml` (real env + real fn) |
+| `test_xdg_config_path_respects_env` | 326 | XDG set → used verbatim + suffix |
+| `test_module_level_load_matches_classmethod` | 359 | module-level `load()` == classmethod |
+
+**Re-run this round (live):**
+
+- Search-order subset (`-k "search_order or load_with_explicit or xdg_config_path or module_level_load
+  or missing_file_falls"`): **7 passed, 27 deselected** in 0.01s.
+- Full config suite (`tests/test_config.py tests/test_config_repo_default.py`): **37 passed** in 0.02s.
+
+The tests use `monkeypatch.setattr(cfgmod, "_xdg_config_path", ...)` / `"_repo_config_path"` for
+hermeticity — exactly why the helpers are **module-level functions, not methods**
+(`test_config.py:295-297`). The two real-env tests (`:319`, `:326`) exercise the actual
+`_xdg_config_path()` with real environment manipulation, providing direct proof of the XDG
+resolution contract (not just a monkeypatched stub).
+
+### S3.6 Conclusion
+
+The search-order & XDG-resolution logic is **fully PRD §4.5-compliant and well-tested**:
+
+- **Order** (`config.py:301-303`): `_candidate_paths()` returns `[_xdg_config_path(),
+  _repo_config_path()]` — XDG first, repo second.
+- **XDG resolution** (`config.py:283-288`): set → `$XDG/voice-typing/config.toml`; unset/empty/
+  whitespace → `~/.config/voice-typing/config.toml` (the `.strip()` is robust-by-design).
+- **Repo path** (`config.py:291-298`): module-relative, CWD-independent, exists for git checkouts;
+  absent for pip installs by design (`config.py:292-297`, `install.sh` copies it to XDG).
+- **Defaults fallback** (`config.py:276`): `load(None)` with no candidate → `VoiceTypingConfig()` with
+  no exception — the tier-3 configless-boot safety guarantee.
+- **Tests:** 7 dedicated search-order tests pass; 37 full-suite pass.
+
+**No defects found. NO code changes required and none made.** `config.py`, `config.toml`, and the
+test files are **unchanged**. The two robust-by-design behaviors (`.strip()` whitespace fallback;
+repo-candidate-absent-for-pip-installs) are recorded as compliant design choices, **not** gaps.
+This closes P1.M1.T1.S3 and completes the config audit (S1 field compliance + S2 lockstep + S3 path
+resolution).
