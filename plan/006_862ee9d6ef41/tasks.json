@@ -338,7 +338,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Feedback, Control Plane & voicectl Verification",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Verify the feedback system (state.json + hyprctl notify), the control socket protocol, and the voicectl CLI against PRD §4.6, §4.8, §4.2 #3. These are the user-facing interfaces: state.json drives the tmux status line and any future UI; hyprctl notify provides visual feedback; voicectl is the primary control mechanism. Existing tests: test_feedback.py (38 tests), test_control_socket.py (21 tests), test_voicectl.py (32 tests), test_status_sh.py (5 tests).",
           "tasks": [
             {
@@ -385,7 +385,7 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Control socket protocol & voicectl CLI (§4.2 #3, §4.8)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify the control socket (daemon side) and voicectl (client side) against PRD §4.2 #3 and §4.8. Socket at $XDG_RUNTIME_DIR/voice-typing/control.sock (SOCK_STREAM, JSON lines). Commands: toggle/start/stop/status/quit/toggle-lite/start-lite. voicectl prints human-readable results, exit 0/1, exit 2 if daemon not running. Loading hint for arm commands. status reports phase, models_loaded, mode, partial, uptime.",
               "subtasks": [
                 {
@@ -408,7 +408,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Audit voicectl CLI: all commands, formatting, loading hint, exit codes & run tests",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T2.S1"
@@ -423,7 +423,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S3",
                   "title": "Audit status.sh tmux helper (§4.6)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M3.T1.S1"
