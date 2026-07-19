@@ -3679,6 +3679,74 @@ def test_status_device_reseeded_not_stale_after_idle_unload(tmp_path, monkeypatc
 
 
 # ===========================================================================
+# Regression for validation Issue 1 — the idle-unload / dead-host-detector race.
+#
+# In production, _idle_unload_watchdog -> _unload_host() holds self._lock ACROSS
+# _bounded_shutdown() while it kills the child (os.killpg). During that ~120-200ms
+# window the run() loop's 50ms liveness check sees self._host still set (nulled only
+# AFTER the shutdown returns) AND not host.is_alive (the child just died) -> it
+# calls _handle_dead_host(), which blocks on the lock, then unconditionally set
+# _load_error = "recorder-host child died unexpectedly" -> voicectl status shows a
+# scary "load error" after ordinary idle behavior (every 30 min of idle). The mock
+# _FakeHost.is_alive does not flip during _bounded_shutdown the way the real proc
+# does, so the race never opens under the test harness — these tests pin the FIX
+# INVARIANTS directly instead of reproducing the timing:
+#   (1) _unload_host() clears _load_error on its successful path (an unload is not
+#       a load failure).
+#   (2) _handle_dead_host() is a NO-OP when another path already cleared the host
+#       (host is None and not _models_loaded) -> a racing handler cannot clobber a
+#       clean teardown.
+# ===========================================================================
+
+
+def test_idle_unload_clears_load_error():
+    """Validation Issue 1 (fix 1): a successful idle-unload clears any stale _load_error.
+
+    An idle-unload is NOT a load failure — voicectl status must NOT show a scary
+    "load error" after ordinary idle behavior. Seeds a _load_error (as a failed arm
+    would), then runs _maybe_idle_unload past the threshold and asserts the error is
+    cleared alongside the teardown (host None, models_loaded False, phase unloaded).
+    """
+    d, fb, _rec, _be = _make_daemon()                       # injected _StubRecorder -> loaded
+    d.start()                                              # arm
+    d.stop()                                               # disarm -> _disarmed_monotonic set
+    d._load_error = "recorder host spawn failed"           # simulate a PRIOR failed arm's error
+    assert d._load_error is not None
+    d._disarmed_monotonic = _time.monotonic() - 1801.0     # past the 1800s default threshold
+    d._maybe_idle_unload()
+    assert d._host is None                                 # torn down
+    assert d._models_loaded is False
+    assert fb.phases[-1] == "unloaded"
+    assert d._load_error is None, "idle-unload did not clear the stale _load_error"
+
+
+def test_handle_dead_host_noop_when_host_already_cleared():
+    """Validation Issue 1 (fix 2): _handle_dead_host() is a NO-OP if the host was already
+    cleared by another path (a concurrent idle-unload, or a prior dead-host handling).
+
+    Simulates the losing side of the race: _unload_host() has ALREADY run (host None,
+    models_loaded False, _load_error cleared) and THEN the racing _handle_dead_host()
+    fires. It must NOT clobber the clean teardown's state with the "died" message.
+    """
+    d, fb, _rec, _be = _make_daemon()
+    d.start()
+    d.stop()
+    # Simulate the idle-unload path having already won the race: host torn down + error cleared.
+    d._host = None
+    d._models_loaded = False
+    d._load_error = None
+    fb.set_phase("unloaded")
+    fb.set_models_loaded(False)
+    d._handle_dead_host()                                  # the racing (losing) dead-host call
+    assert d._host is None
+    assert d._models_loaded is False
+    assert d._load_error is None, (
+        "racing _handle_dead_host clobbered a clean teardown with the 'died' error"
+    )
+    assert fb.phases[-1] == "unloaded"
+
+
+# ===========================================================================
 # P1.M1.T2.S1 — toggle/toggle_lite mode-specific arming (delta §3.4 / BUG-B)
 # (Each key toggles its own mode; cross-mode press switches = one reload.)
 # ===========================================================================

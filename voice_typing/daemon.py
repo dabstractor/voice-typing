@@ -885,8 +885,27 @@ class VoiceTypingDaemon:
         _load_host()'s `if self._models_loaded: return True` guard does NOT short-circuit). Composes
         with idle-unload: _unload_host() re-checks `not self._models_loaded` first -> no-op if this
         ran first. Mirrors the cleanup half of _unload_host() (without the host.stop() teardown).
+
+        Race guard (validation Issue 1): _idle_unload_watchdog -> _unload_host() holds self._lock
+        ACROSS _bounded_shutdown() while it kills the child (os.killpg). During that window the run()
+        loop's 50 ms liveness check still sees self._host set (it is only nulled AFTER the shutdown
+        returns) AND not host.is_alive (the child just died from killpg) -> calls THIS method, which
+        blocks on the lock until _unload_host() finishes, then runs and would clobber the clean
+        teardown's state with _load_error="recorder-host child died unexpectedly". That makes
+        voicectl status show a scary "load error" after ordinary idle-unload (every 30 min of idle).
+        Fix: if another path already transitioned us to unloaded (self._host is None and not
+        _models_loaded), this racing call is a NO-OP — a clean unload is not a child death. The
+        explicit condition also documents why: the dead-host detection is only meaningful when the
+        host reference is STILL live (host died but nobody cleaned it up yet).
         """
         with self._lock:
+            # Race guard (validation Issue 1): a concurrent _unload_host() (or a prior dead-host
+            # handling) already dropped the host + cleared _models_loaded. Re-running here would
+            # (a) be a no-op on state and (b) clobber _load_error with the "died" message even
+            # though _unload_host() cleared it on its clean teardown path. Early-return keeps a
+            # successful idle-unload from being misreported as a crash.
+            if self._host is None and not self._models_loaded:
+                return
             self._host = None
             self._models_loaded = False
             self._listening.clear()
@@ -1241,6 +1260,13 @@ class VoiceTypingDaemon:
             self._models_loaded = False
             self._feedback.set_phase("unloaded")          # P1.M2.T2.S1 surface (CONSUME, don't re-add)
             self._feedback.set_models_loaded(False)       # P1.M2.T2.S1 surface
+            # Validation Issue 1: a successful idle-unload is NOT a load failure. Clear any stale
+            # _load_error so voicectl status does not surface a scary "load error" after ordinary
+            # idle behavior. (A racing _handle_dead_host() — invoked from run()'s liveness check
+            # while this method held the lock across _bounded_shutdown killing the child — is also
+            # short-circuited by its own host-already-cleared guard, so the two fixes are
+            # belt-and-suspenders: this one ensures a clean unload publishes clean error state.)
+            self._load_error = None
             # VT-002: the torn-down child's resolved device is now stale. Reseed the cache to the
             # UN-PROBED config (NOT None — that would make the next status call probe CUDA,
             # reintroducing VT-001). status now reports the configured device with models_loaded=
