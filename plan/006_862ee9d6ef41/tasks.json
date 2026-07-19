@@ -613,14 +613,14 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "Validate T1 offline pipeline test coverage (feed_audio, no mic)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Verify tests/test_feed_audio.py covers PRD §6 T1: construct recorder use_microphone=False, feed WAV chunks via feed_audio(), collect partials and finals. Assert partials <1.5s onset, utt_pause yields post-pause words, utt_multi=3 finals, ≥80% fuzzy accuracy, final ≤1.5s after last sample. This test loads real CUDA models (heavy — timeout 600 per AGENTS.md).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "Audit T1 test coverage & verify test audio assets exist",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T1.S1"
@@ -644,7 +644,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "Audit T3 E2E script: null-sink setup, daemon tmux backend, drain assertion, cleanup trap",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T2.S1"
