@@ -172,3 +172,112 @@ a read-only audit — the schema is PRD §4.6-compliant per this re-verification
 The only artifact produced by this subtask is this report. Adjacent concerns are correctly deferred:
 **atomic-write / throttle / hyprctl-notify** is P1.M3.T1.S2; **daemon call sites** (phase/mode
 orchestration) are P1.M2.\* (Complete).
+
+---
+
+# Gap Report — P1.M3.T1.S2: Feedback atomic writes, throttling, hyprctl notify vs PRD §4.6
+
+**Date:** 2026-07-18 (audit re-verified against the live tree)
+**Scope:** Appended to `gap_feedback.md` (the state.json-SCHEMA audit above is **P1.M3.T1.S1**; this
+section is **P1.M3.T1.S2**). Audit `voice_typing/feedback.py`'s **atomic-write**, **partial-write
+throttling (≥10 Hz)**, and **hyprctl-notify discipline** against PRD §4.6 on the 7 item checks (a)-(g).
+Audited regions: `_write` (atomic tempfile+rename, mode 0600 / dir 0700), `update_partial` (throttle:
+in-memory update BEFORE the disk-write gate), `_notify` + every caller (notify fires only on
+listening-start / cold-load / final / listening-stop, gated by `hypr_notify`, the final popup also by
+`notify_on_final`, and NEVER on `update_partial`/`set_phase`). Audited artifacts (all read-only):
+`voice_typing/feedback.py` + `tests/test_feedback.py`.
+**Bottom line:** ✅ `feedback.py` is **COMPLIANT** with PRD §4.6 on all 7 checks — each mapped to a
+`feedback.py` file:line + a pinning `tests/test_feedback.py` test, and the 38-test suite is green
+(`subprocess.run` + `time.monotonic` mocked). **No source files were modified.** Two non-blocking
+observations (the `mkstemp`-vs-`NamedTemporaryFile` primitive; the throttle-constant naming) are
+recorded in §4 so they are not mistaken for defects.
+
+## 1. Method
+
+Each of the 7 checks was mapped 1:1 to its `feedback.py` implementation by `grep -n` (the file:line
+evidence), the "no `_notify` in `update_partial`/`set_phase`" anti-spam invariant was checked directly
+by enumerating every `_notify(` call site, and the full `tests/test_feedback.py` suite was **re-run
+live** to record the actual pass count. Nothing was assumed from the PRP's embedded numbers — every
+figure + line below was re-verified this round (pure stdlib: `json`/`os`/`subprocess`/`tempfile`/
+`time`; no GPU/daemon required).
+
+### Commands run (re-verification)
+
+```bash
+# (a) atomic write; (b) throttle constant + clock; (c) in-memory-before-throttle;
+# (d) notify argv; (e)/(f) the hypr_notify + notify_on_final gates; (g) the no-notify-on-partial/phase invariant
+grep -nE 'tempfile\.mkstemp|os\.replace\(tmp, path\)|os\.makedirs\(directory' voice_typing/feedback.py
+grep -nE '_PARTIAL_WRITE_MIN_INTERVAL = 0\.1|time\.monotonic\(\)' voice_typing/feedback.py
+grep -nE 'self\._state\["partial"\] = text|if now - self\._last_partial_write' voice_typing/feedback.py
+grep -nE 'subprocess\.run\(\s*\["hyprctl"|_HYPR_ICON|_HYPR_COLOR' voice_typing/feedback.py
+grep -nE 'if self\._cfg\.hypr_notify|notify_on_final' voice_typing/feedback.py
+grep -nE '_notify\(' voice_typing/feedback.py   # enumerate the callers (anti-spam check (g))
+
+# the contract's run command, LIVE
+.venv/bin/python -m pytest tests/test_feedback.py -q
+```
+
+## 2. Per-check compliance table (PRD §4.6 vs `feedback.py`)
+
+| # | PRD §4.6 requirement | `feedback.py` actual | file:line | Pinning tests (`tests/test_feedback.py`) | Verdict |
+|---|---|---|---|---|---|
+| **(a)** | state file written atomically (tempfile + rename); mode 0600, dir 0700 | `_write` does `os.makedirs(dir, exist_ok=True, mode=0o700)` → `tempfile.mkstemp(dir=<state dir>, prefix=".state.", suffix=".tmp")` (mode 0o600 by mkstemp default) → `json.dump` → `os.replace(tmp, path)` (same-filesystem POSIX-atomic rename); the orphan temp is `os.unlink`'d on ANY failure (`except BaseException`) | `_write` `:218`; `makedirs 0o700` `:230`; `mkstemp` `:231`; `os.replace` `:235`; docstring `:34` | `test_atomic_write_leaves_no_tmp_files` `:164`; `test_state_file_mode_0600` `:172`; `test_state_dir_mode_0700` `:179` | ✅ |
+| **(b)** | partial DISK writes throttled ≥10 Hz (min 0.1 s) | `_PARTIAL_WRITE_MIN_INTERVAL = 0.1` (module constant); the throttle clock is `time.monotonic()` (never `time.time()` — wall clock can jump backward on NTP and freeze the partial forever) | `_PARTIAL_WRITE_MIN_INTERVAL = 0.1` `:77`; monotonic clock `:116` | `test_first_partial_always_writes` `:194`; `test_throttle_skips_write_within_0_1s` `:200`; `test_throttle_releases_after_0_1s` `:208` | ✅ |
+| **(c)** | in-memory partial ALWAYS updated (before the throttle gate) | `update_partial` sets `self._state["partial"] = text` FIRST, THEN checks `if now - self._last_partial_write < _PARTIAL_WRITE_MIN_INTERVAL: return` — so a throttled call still captures the latest words and the next non-throttled flush writes them | `update_partial` `:109`; `partial = text` `:115` (BEFORE); throttle gate `:117` | `test_in_memory_partial_updated_even_when_throttled` `:216` | ✅ |
+| **(d)** | `hyprctl notify` fires fire-and-forget | `_notify` runs `subprocess.run(["hyprctl", "notify", _HYPR_ICON, str(notify_ms), _HYPR_COLOR, msg], check=False, stdout=DEVNULL, stderr=DEVNULL)`; icon `-1` (no icon) + Nord frost `rgb(88c0d0)`; catches `(OSError, SubprocessError)` and logs at DEBUG so a notify failure never crashes the daemon | `_notify` `:245`; argv `:254`; `_HYPR_ICON = "-1"` `:82`; `_HYPR_COLOR` `:83` | `test_hyprctl_argv_exact_on_listening_start` `:246`; `test_hyprctl_passes_check_false_and_devnull` `:254` | ✅ |
+| **(e)** | notify gated by `hypr_notify` (master switch) | EVERY notify call site checks `self._cfg.hypr_notify`: `record_final` (`:168`), `set_listening` (`:190`), ad-hoc `notify()` (`:213`) — `hypr_notify=False` suppresses ALL popups | `:168`, `:190`, `:213` | `test_no_notify_when_hypr_notify_false` `:340` (asserts `rec.argvs == []` `:345`) | ✅ |
+| **(f)** | final popup gated by `notify_on_final` | `record_final` gates on BOTH: `if self._cfg.hypr_notify and self._cfg.notify_on_final: self._notify("✔ " + text)` — `notify_on_final=False` suppresses ONLY the final popup (start/stop still fire) | `record_final` `:153`; gate `:168`; `_notify("✔ " + text)` `:169` | `test_record_final_notifies_with_check_glyph` `:263`; `test_record_final_silent_when_notify_on_final_false` `:285`; `test_record_final_updates_partial_so_status_matches_screen` `:269` | ✅ |
+| **(g)** | NEVER notify on `update_partial` or `set_phase` (anti-spam) | `update_partial` (`:109-120`) and `set_phase` (`:122`) contain NO `_notify` call. `grep -nE '_notify\('` lists exactly THREE call sites — `record_final:169`, `set_listening:191`, ad-hoc `notify():214` — none in `update_partial`/`set_phase`/`set_models_loaded`/`set_mode` | callers enumerated via `grep _notify` | `test_update_partial_never_invokes_hyprctl` `:308`; `test_set_phase_never_invokes_hyprctl` `:316`; `test_no_notify_on_noop_listening_transition` `:322`; `test_no_double_notify_when_set_true_twice` `:329` | ✅ |
+
+> All 7 checks **PASS**. The file:line numbers above are `grep -n`-verified against the live tree this
+> round. The anti-spam invariant (check (g)) holds literally: `grep -nE '_notify\(' voice_typing/feedback.py`
+> returns exactly three call sites, none of which are `update_partial`/`set_phase`.
+
+## 3. Test results
+
+```
+.venv/bin/python -m pytest tests/test_feedback.py -q
+......................................                                   [100%]
+38 passed in 0.04s
+```
+
+**38 passed, 0 failed, 0 errors.** Coverage by concern: atomic write (`:164`/`:172`/`:179`); throttle
+(`:194`/`:200`/`:208`/`:216` + the not-throttled `set_phase`/`record_final` `:225`/`:233`); hyprctl argv
++ `check=False`/DEVNULL (`:246`/`:254`); the `✔`-glyph final + `notify_on_final=False` suppression
+(`:263`/`:285`); start/stop transitions (`:301`); the anti-spam "never per partial / never per phase"
+contract (`:308`/`:316`); the no-op-transition + no-double-notify guards (`:322`/`:329`); the
+`hypr_notify=False` master gate (`:340`). Every one of the 7 checks has at least one dedicated pinning test.
+
+## 4. Non-defect nuances (recorded so they are not mistaken for code gaps)
+
+### 4.1 (a) `mkstemp`, not `NamedTemporaryFile` — atomic intent met, arguably stronger
+
+The item's check (a) wording names `tempfile.NamedTemporaryFile`; the code uses **`tempfile.mkstemp`**
+(`feedback.py:231`) + `os.replace` (`:235`). Both achieve the same-filesystem POSIX-atomic rename PRD
+§4.6 requires ("atomic write via tempfile+rename"). `mkstemp` is the **stronger** primitive: it returns
+a raw file descriptor + path (mode `0o600` by Python's default), avoids `NamedTemporaryFile`'s
+close-vs-delete dance, and makes the `0o600`-mode inheritance + the `except BaseException: os.unlink(tmp)`
+cleanup deterministic. **The atomic-write contract is MET** — this is a wording mismatch in the audit
+checklist, not a code gap. Do NOT "migrate" to `NamedTemporaryFile` (it would weaken the cleanup + mode
+guarantees). This mirrors the "compliant-by-design" recording convention used in `gap_typing.md` §4.1.
+
+### 4.2 (b) constant is `_PARTIAL_WRITE_MIN_INTERVAL`, not `_PARTIAL_WRITE_MIN_INTERVAL_S`
+
+The item's check (b) names `_PARTIAL_WRITE_MIN_INTERVAL_S`; the code names it `_PARTIAL_WRITE_MIN_INTERVAL`
+(`feedback.py:77`). Same value (`0.1` = ≥10 Hz), same intent. The unit (seconds) is documented at the
+declaration (`# Minimum seconds between update_partial DISK writes`). NON-DEFECT — naming only.
+
+## 5. Conclusion
+
+**PASS — no fix required.** `voice_typing/feedback.py` is PRD §4.6-compliant on all 7 atomic-write /
+throttle / hyprctl-notify checks: atomic `mkstemp`+`os.replace` (`:231`/`:235`) with `0o600` file +
+`0o700` dir modes; ≥10 Hz throttle (`_PARTIAL_WRITE_MIN_INTERVAL = 0.1` `:77`) with the in-memory
+partial updated BEFORE the disk-write gate (`:115` before `:117`); fire-and-forget `hyprctl notify`
+(`:245`) gated everywhere by `hypr_notify` (`:168`/`:190`/`:213`), the final popup additionally by
+`notify_on_final` (`:168`), and `_notify` invoked ONLY from `record_final`/`set_listening`/`notify()`
+— never from `update_partial`/`set_phase`. The 38-test suite pins every check.
+
+**No source changes were required and none were made.** This section appends to the state.json-schema
+audit (**P1.M3.T1.S1**) above; together they close **P1.M3.T1** (the full `feedback.py` vs PRD §4.6
+audit). Downstream **P1.M5.T5** (acceptance cross-check) can consume this section as the evidence that
+the atomic-write + throttle + notify discipline matches PRD §4.6.

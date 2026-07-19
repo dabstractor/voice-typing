@@ -345,7 +345,7 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Feedback: state file schema, atomic writes, hyprctl notify, throttling (§4.6)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Verify voice_typing/feedback.py (262 lines) against PRD §4.6. State.json must have: listening, phase (unloaded/loading/idle/listening/speaking), models_loaded, mode (normal/lite), partial, last_final, ts. Atomic write (tempfile+rename, mode 0600, dir 0700). Throttle partial disk writes to ≥10Hz max. hyprctl notify only on start/final/stop (not partials). record_final writes text back to partial field.",
               "subtasks": [
                 {
@@ -368,7 +368,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Audit atomic writes, throttling, hyprctl notify events & run tests",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
