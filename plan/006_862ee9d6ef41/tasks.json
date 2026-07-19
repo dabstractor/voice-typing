@@ -470,14 +470,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "launch_daemon.sh LD_LIBRARY_PATH wrapper & cuDNN discovery (§4.4)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Verify voice_typing/launch_daemon.sh recomputes cuBLAS/cuDNN lib dirs from live nvidia-*-cu12 wheels on every launch, exports LD_LIBRARY_PATH before exec'ing python. Also sets HF_HUB_OFFLINE=1. Also re-fetches WAYLAND_DISPLAY/DISPLAY from the user manager (belt-and-suspenders with ExecStartPre).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "Audit launch_daemon.sh: lib discovery, HF_HUB_OFFLINE, WAYLAND_DISPLAY import",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T1.S1"
