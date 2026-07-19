@@ -392,7 +392,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "Audit control socket: path, protocol, all commands, error handling",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"
