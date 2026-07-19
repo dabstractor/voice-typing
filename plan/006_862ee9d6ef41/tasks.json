@@ -560,7 +560,7 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Test Suite Validation & Acceptance Gate",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Run the complete test suite and validate against PRD §6 test plan (T1–T7) and §7 acceptance criteria. This milestone covers running all unit tests, identifying and fixing any failures, validating heavy test coverage (feed_audio, E2E, GPU lifecycle), and producing the acceptance evidence. Per AGENTS.md: all commands under timeout; voicectl under timeout 30; pytest single-file with timeout 600 for CUDA tests.",
           "tasks": [
             {
@@ -703,14 +703,14 @@
               "type": "Task",
               "id": "P1.M5.T5",
               "title": "Acceptance criteria cross-check & evidence compilation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Cross-check ALL 10 PRD §7 acceptance criteria against the test results and codebase audit. Compile evidence (test output, code references) for each criterion. Update tests/ACCEPTANCE.md if it exists. This is the final gate before declaring the project complete.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T5.S1",
                   "title": "Map each acceptance criterion (#1-#10) to test evidence & audit findings",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S2",
@@ -749,7 +749,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Audit README.md completeness against PRD §7 #7 acceptance criteria",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T5.S1",
