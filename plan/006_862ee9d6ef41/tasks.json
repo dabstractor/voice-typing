@@ -136,7 +136,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Daemon Lifecycle & Recorder-Host Verification",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Verify the two largest and most complex modules — daemon.py (2221 lines) and recorder_host.py (774 lines) — against PRD §4.2, §4.2bis, §4.2ter. These cover: the main loop (never-exits-on-silence), the listening gate with graceful drain, the lazy-load model lifecycle (unloaded→loading→loaded→listening), the recorder-host subprocess IPC architecture, idle auto-stop, idle unload with bounded teardown, lite mode with mode-switch reload, and the control socket protocol. This is the highest-risk area — existing tests: test_daemon.py (191 tests), test_recorder_host.py (26 tests), test_control_socket.py (21 tests).",
           "tasks": [
             {
@@ -254,7 +254,7 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Lite mode: single-model arming, silence gate, mode-switch reload (§4.2ter)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Verify lite mode against PRD §4.2ter. Lite loads ONLY small.en (use_main_model_for_realtime=True), uses it for both partials and finals, large model never loads. Lite MUST use shorter post_speech_silence_duration (lite_post_speech_silence_duration=0.5). Mode-switch (normal↔lite) costs one bounded reload. Commands: toggle-lite/start-lite. Daemon tracks self._mode.",
               "subtasks": [
                 {
@@ -293,7 +293,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S3",
                   "title": "Verify T7 lite test coverage: single model resident, ≥70% accuracy, snappier latency",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T3.S1"
