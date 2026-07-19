@@ -3909,6 +3909,39 @@ def test_failed_cross_mode_toggle_status_snapshot_is_honest():
     assert snap["load_error"]                     # the failure reason is surfaced
 
 
+def test_dispatch_toggle_cross_mode_lite_to_normal_failure_returns_ok_false():
+    """Cross-mode toggle (armed-in-lite → normal reload fails) surfaces ok:false+error.
+
+    Regression for bugfix Issue 1: _dispatch's toggle branch returned {ok:true, listening:false}
+    (silent) when a cross-mode reload failed, because arm_attempted was False. The fix routes a
+    FRESH _load_error through _arm_response() so voicectl prints 'error: model load failed: ...'
+    (exit 1), matching start/start-lite.
+    """
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
+    d.start_lite()                                              # arm in lite (1st spawn succeeds)
+    assert d.is_listening() and d._mode == "lite"
+    srv = daemon.ControlServer(d)
+    resp = srv._dispatch(json.dumps({"cmd": "toggle"}))         # lite→normal, 2nd spawn FAILS
+    assert resp["ok"] is False
+    assert "model load failed" in resp["error"]
+
+
+def test_dispatch_toggle_lite_cross_mode_normal_to_lite_failure_returns_ok_false():
+    """Cross-mode toggle-lite (armed-in-normal → lite reload fails) surfaces ok:false+error.
+
+    The normal→lite mirror of the test above (bugfix Issue 1).
+    """
+    spawns: list = []
+    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
+    d.start()                                                   # arm in normal (1st spawn succeeds)
+    assert d.is_listening() and d._mode == "normal"
+    srv = daemon.ControlServer(d)
+    resp = srv._dispatch(json.dumps({"cmd": "toggle-lite"}))    # normal→lite, 2nd spawn FAILS
+    assert resp["ok"] is False
+    assert "model load failed" in resp["error"]
+
+
 # ===========================================================================
 # P1.M1.T4.S1 — toggle_lite docstring references the correct key D (bugfix Issue 4)
 # (the lite keybind is Alt+Super+D — key D, never F (hypr-binds.conf:44 / PRD §4.10). The

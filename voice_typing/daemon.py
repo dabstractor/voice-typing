@@ -1926,6 +1926,7 @@ class ControlServer:
         cmd = msg.get("cmd")
         if cmd == "toggle":
             was_listening = self._daemon.is_listening()
+            load_error_before = getattr(self._daemon, "_load_error", None)
             self._daemon.toggle()
             # A toggle arms UNLESS we were armed-in-THIS-mode (then it disarms). On the disarm path
             # nothing loaded; on every arm path a load may have failed — including a cross-mode
@@ -1934,6 +1935,13 @@ class ControlServer:
             # _load_error honestly). Route through _arm_response whenever an arm was ATTEMPTED.
             arm_attempted = not was_listening or self._daemon.is_listening()
             if arm_attempted:
+                return self._arm_response()
+            # Cross-mode toggle (was_listening True, now disarmed => arm_attempted False) may have
+            # FAILED its reload: _load_host resets _load_error=None per attempt, so (None before +
+            # truthy after) reliably means a failure DURING THIS toggle. Route it through
+            # _arm_response() so voicectl prints 'error: model load failed: ...' (exit 1) instead
+            # of a silent {ok:true, listening:false}. (bugfix Issue 1 / P1.M1.T1.S1)
+            if load_error_before is None and getattr(self._daemon, "_load_error", None):
                 return self._arm_response()
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "start":
@@ -1944,9 +1952,15 @@ class ControlServer:
             return self._arm_response()
         if cmd == "toggle-lite":             # PRD §4.2ter: lite-mode toggle (arms lite when idle)
             was_listening = self._daemon.is_listening()
+            load_error_before = getattr(self._daemon, "_load_error", None)
             self._daemon.toggle_lite()
             arm_attempted = not was_listening or self._daemon.is_listening()
             if arm_attempted:
+                return self._arm_response()
+            # Cross-mode toggle-lite mirror of the toggle branch above (bugfix Issue 1 / P1.M1.T1.S1):
+            # route a FRESH _load_error (None before + truthy after) through _arm_response() so a
+            # failed normal→lite reload surfaces as {ok:false, error:'model load failed: ...'}.
+            if load_error_before is None and getattr(self._daemon, "_load_error", None):
                 return self._arm_response()
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "stop":
