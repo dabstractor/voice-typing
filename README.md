@@ -176,7 +176,8 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `output.tmux_target` | `""` | pane target, used only when `backend="tmux"`, e.g. `"voicetest:0.0"`. |
 | `output.append_space` | `true` | append one trailing space after each final. |
 | `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each final's text (`✔ <text>`). Set `false` to keep only the brief `Recording` / `Recording Stopped` toasts — the text is already typed into the focused window and shown in the tmux status line, so the final popup is redundant. |
-| `feedback.notify_ms` | `2500` | how long hyprctl popups stay on screen (ms). Lower for a brief start/stop flash. `hypr_notify` is the master on/off switch. |
+| `feedback.notify_ms` | `2500` | how long hyprctl popups stay on screen (ms). Lower for a brief start/stop flash. |
+| `feedback.hypr_notify` | `true` | master on/off for ALL hyprctl popups. `false` suppresses the start/stop toasts too (`notify_on_final` only adds the per-final ✔ popup; this is the global kill switch). |
 | `filter.min_chars` | `2` | finals shorter than this are dropped. |
 | `filter.blocklist` | list | exact, case-insensitive phrases dropped (classic Whisper silence hallucinations). |
 | `log.level` | `"INFO"` | `"INFO"` (per-utterance latency line) or `"DEBUG"` (raw timestamps). |

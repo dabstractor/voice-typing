@@ -749,7 +749,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Audit README.md completeness against PRD §7 #7 acceptance criteria",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T5.S1",
@@ -772,7 +772,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T1.S2",
                   "title": "Verify no stale BUGS.md/VT-* references & resolve doc drift",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M6.T1.S1"
