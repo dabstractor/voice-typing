@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "PRD Compliance Verification & Remediation",
-      "status": "Planned",
+      "status": "Researching",
       "description": "The voice-typing codebase is ALREADY substantially implemented (50+ commits, all modules and tests present — see plan/006_862ee9d6ef41/architecture/system_context.md). The PRD §2 states 'empty git repo' but reality is a mature project. This phase verifies every PRD requirement against the actual codebase, validates test coverage matches T1–T7 and acceptance criteria §7, identifies and closes any gaps (stale docs, missing assertions, drift, latent bugs), runs the full test suite, and syncs all changeset-level documentation. The goal is a fully PRD-compliant, tested, and documented voice-typing daemon.",
       "milestones": [
         {
@@ -735,14 +735,14 @@
           "type": "Milestone",
           "id": "P1.M6",
           "title": "Documentation Sync & Changeset-Level Cleanup",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Final Mode B documentation task. Sweep all changeset-level docs (README.md, config.toml comments, hypr-binds.conf instructions, tests/ACCEPTANCE.md) to ensure they reflect the verified state of the project. This task runs LAST and depends on all implementing subtasks. Also verifies no stale BUGS.md references remain (PRD references VT-001/VT-003/VT-004/VT-006 but BUGS.md does not exist).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Final documentation sweep. README.md must cover: install, hotkey snippet, tmux status snippet, config tuning table, troubleshooting (cuDNN libs, PyAudio device, wtype vs ydotool), CPU-only mode, first-run guide (T5). config.toml comments must mirror config.py. Any stale references to BUGS.md/VT-* bugs must be resolved. PRD §2 'empty git repo' claim is stale — README should reflect the actual mature project.",
               "subtasks": [
                 {
@@ -772,7 +772,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T1.S2",
                   "title": "Verify no stale BUGS.md/VT-* references & resolve doc drift",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M6.T1.S1"
@@ -788,7 +788,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T1.S3",
                   "title": "Final git status check & commit readiness verification",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M6.T1.S2"
