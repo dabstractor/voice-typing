@@ -636,6 +636,18 @@ class VoiceTypingDaemon:
         # All bool/Timer-ref stores here are atomic in CPython (written by reader/control threads,
         # read by the run loop + watchdog).
         self._final_pending: bool = False
+        # validation Issue 2 (within-session residual): _final_pending alone is NOT a reliable
+        # "utterance in flight" signal — the realtime partial callback (_touch_speech) sets it on
+        # EVERY partial, and the run loop re-enters text() the instant a final returns, so a stray
+        # post-final partial re-sets it even though that utterance already landed. _utterance_finalized
+        # is the precise counter-signal: it is set True in on_final (this text() invocation's
+        # utterance is DONE) and reset False when the run loop (re-)enters text() for the next
+        # utterance. _touch_speech refuses to re-arm _final_pending once _utterance_finalized is True,
+        # so a stray late partial from the just-finished utterance cannot resurrect a ~5s drain.
+        # Idle-clock reset (_last_speech_monotonic) still happens on every partial (untouched). Stores
+        # are atomic in CPython (written by on_final/reader threads + the run loop, read by
+        # _request_stop on the control-socket thread).
+        self._utterance_finalized: bool = False
         self._drain: bool = False
         self._drain_timer: threading.Timer | None = None
         # PRD §4.2ter: the mode of the resident (or last) recorder-host child — "normal" (two models:
@@ -862,6 +874,13 @@ class VoiceTypingDaemon:
                 # instant it returns, so _safe_abort() (called by stop/toggle/quit) never invokes
                 # abort() when the loop is idle in time.sleep(0.05) — which would block forever on
                 # was_interrupted.wait() (set only inside text()). See _safe_abort().
+                #
+                # validation Issue 2 (within-session residual): reset _utterance_finalized here so the
+                # NEXT utterance's partials can re-arm _final_pending. Without this reset, the flag set
+                # by the previous utterance's on_final would suppress _touch_speech for all later
+                # utterances — breaking the drain for genuine new speech. text() returns after ONE
+                # final, so each (re-)entry here is exactly the start of a fresh utterance.
+                self._utterance_finalized = False
                 self._text_in_flight.set()
                 try:
                     self._host.text(self.on_final)
@@ -971,6 +990,7 @@ class VoiceTypingDaemon:
             if not cleaned:                    # rejected: blocklist hallucination / below min_chars
                 return
             self._final_pending = False  # the in-flight utterance is finalized; a pending drain can finish
+            self._utterance_finalized = True  # validation Issue 2: mark this text() invocation done
             payload = cleaned + (" " if self._cfg.output.append_space else "")
             try:
                 self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
@@ -1011,6 +1031,7 @@ class VoiceTypingDaemon:
         """
         self._listening.set()
         self._final_pending = False  # Issue 2: fresh arm = no utterance in flight (clear stale stray partials)
+        self._utterance_finalized = False  # validation Issue 2: fresh arm = no final yet for this session
         self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
         self._disarmed_monotonic = None                  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
         if self._host is not None:
@@ -1039,6 +1060,7 @@ class VoiceTypingDaemon:
         """
         self._listening.clear()
         self._final_pending = False  # Issue 2: disarm clears any stale stray-partial flag (defense in depth)
+        self._utterance_finalized = False  # validation Issue 2: session ends -> no final on record
         self._last_speech_monotonic = None  # not listening → idle clock is inactive
         self._disarmed_monotonic = time.monotonic()  # start the idle-UNLOAD clock (P1.M3.T1.S1)
         if self._host is not None:
@@ -1056,9 +1078,18 @@ class VoiceTypingDaemon:
         reader thread; the stores are atomic in CPython. Finals are always preceded by partials, so
         this single hook covers all active speech. _final_pending (cleared in on_final) lets
         _request_stop tell "an utterance is in flight" from "idle" so a premature stop can drain.
+
+        Validation Issue 2 (within-session residual): the idle-clock reset (_last_speech_monotonic)
+        fires on EVERY partial — correct, recognized words keep the auto-stop clock alive. But
+        _final_pending must NOT be re-armed by a stray post-final partial: once on_final set
+        _utterance_finalized for this text() invocation, further partials belong to the just-
+        finished utterance (the final is the LAST event of an utterance; the run loop re-enters
+        text() for the NEXT one). _utterance_finalized is reset False only when the run loop
+        (re-)enters text(), so a stray late partial cannot resurrect a ~5s drain.
         """
         self._last_speech_monotonic = time.monotonic()
-        self._final_pending = True
+        if not self._utterance_finalized:
+            self._final_pending = True
 
     def _on_partial(self, text: str) -> None:
         """Handle a realtime partial from the host's reader thread (P1.M3.T2.S2 re-plan).
@@ -1075,13 +1106,19 @@ class VoiceTypingDaemon:
         """Stop listening — gracefully: let the final model finish an in-flight utterance, then disarm.
 
         The user presses the hotkey (toggle-off) or `voicectl stop`. If an utterance is in flight
-        (the run loop is blocked inside text() AND speech has occurred since the last final) we do
-        NOT abort — aborting kills the large model mid-finalization and drops its text. Instead we
-        set a drain flag and let text() return the natural final (on_final types it), after which
-        the run loop completes the drain (disarms). A watchdog aborts the rare case where no final
-        ever fires so the drain can't hang. If NOTHING is in flight (idle, or the last utterance
-        already finalized) we disarm immediately + abort as before — responsive when there's
-        nothing to wait for. Routed by stop()/toggle()'s disarm branch.
+        (the run loop is blocked inside text() AND speech has occurred with no final yet for THIS
+        text() invocation) we do NOT abort — aborting kills the large model mid-finalization and
+        drops its text. Instead we set a drain flag and let text() return the natural final
+        (on_final types it), after which the run loop completes the drain (disarms). A watchdog
+        aborts the rare case where no final ever fires so the drain can't hang. If NOTHING is in
+        flight (idle, or the last utterance already finalized) we disarm immediately + abort as
+        before — responsive when there's nothing to wait for. Routed by stop()/toggle()'s disarm
+        branch.
+
+        _final_pending is a reliable "utterance in flight" signal because _touch_speech refuses to
+        re-arm it once on_final has set _utterance_finalized for this text() invocation (validation
+        Issue 2 within-session residual): a stray post-final realtime partial cannot resurrect a
+        ~5s drain the way it could when _final_pending was set on every partial.
         """
         if self._host is not None and self._text_in_flight.is_set() and self._final_pending:
             self._begin_drain()

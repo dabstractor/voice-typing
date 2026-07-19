@@ -759,18 +759,25 @@ def test_on_final_clears_final_pending():
 
 
 def test_arm_resets_stale_final_pending_from_prior_session():
-    """Issue 2: a fresh _arm() clears a stale _final_pending left by a stray/late partial from a prior session, so the
-    next stop disarms immediately (no spurious 5s drain). Before the fix _arm() never reset _final_pending."""
+    """Issue 2: a fresh _arm() clears stale speech state (_final_pending + _utterance_finalized) left
+    over from a prior session, so the next stop disarms immediately (no spurious 5s drain). Before
+    the fix _arm() never reset _final_pending.
+
+    (validation Issue 2 note: a stray post-final partial no longer re-arms _final_pending at all —
+    _touch_speech gates on _utterance_finalized — so the stale-True state this test originally
+    constructed can no longer arise from a partial. We force the stale state directly to keep
+    exercising the _arm() reset as defense-in-depth.)"""
     d, fb, rec, be = _make_daemon()
     d.start()
     d._touch_speech()                # speech -> _final_pending=True
-    d.on_final("hello world")        # final -> _final_pending=False, text typed
-    d._touch_speech()                # STRAY late partial -> _final_pending=True (stale)
-    assert d._final_pending is True  # the stale state the fix must clear
+    d.on_final("hello world")        # final -> _final_pending=False, _utterance_finalized=True, text typed
+    d._final_pending = True          # force the stale state (a stray partial can no longer produce it)
+    assert d._utterance_finalized is True
     d.stop()                         # disarm (ends the prior session)
-    # re-arm: _arm() must reset _final_pending=False (the fix) — no utterance is in flight yet
+    # re-arm: _arm() must reset both flags (the fix) — no utterance is in flight yet
     d.start()
-    assert d._final_pending is False  # CLEAN SLATE (fails before the fix: still True)
+    assert d._final_pending is False       # CLEAN SLATE (fails before the fix: still True)
+    assert d._utterance_finalized is False  # fresh session: no final yet
 
 
 def test_disarm_clears_final_pending():
@@ -799,6 +806,57 @@ def test_stop_after_stray_partial_in_fresh_session_disarms_immediately():
     assert d.is_listening() is False
     assert d._drain is False
     assert rec.aborts == 1           # immediate abort (before the fix: 0 — it drained instead)
+
+
+def test_stop_within_session_stray_partial_after_final_disarms_immediately():
+    """Validation Issue 2 (within-session residual): the PRD's own repro is WITHIN one armed session —
+    arm → speak → final lands & is typed → a STRAY post-final realtime partial fires (re-setting
+    _final_pending) → user presses stop, with NO intervening arm/disarm. The arm/disarm resets
+    cannot touch this. _touch_speech now refuses to re-arm _final_pending once on_final set
+    _utterance_finalized for this text() invocation, so the stop disarms immediately instead of
+    draining ~5s on the watchdog.
+
+    Before the within-session fix this drained 5.0s (the _DRAIN_TIMEOUT_S watchdog abort).
+    """
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()                # speech -> _final_pending=True (utterance not yet finalized)
+    assert d._final_pending is True
+    d._text_in_flight.set()          # run loop blocked inside text()
+    d.on_final("hello world")        # final lands + is typed; _final_pending=False, _utterance_finalized=True
+    assert be.typed == ["hello world "]
+    assert d._utterance_finalized is True
+    # run loop re-enters text() for the next utterance (still blocked inside text()); _utterance_finalized
+    # stays True until the loop resets it on the NEXT text() entry — but a stray partial fires FIRST:
+    d._text_in_flight.set()
+    d._touch_speech()                # STRAY in-session partial — must NOT re-arm _final_pending
+    assert d._final_pending is False  # the within-session fix: utterance already finalized
+    assert d._text_in_flight.is_set() is True
+    d.stop()
+    assert d.is_listening() is False  # immediate disarm (before the fix: stayed listening ~5s)
+    assert d._drain is False          # did NOT drain (before the fix: True)
+    assert rec.aborts == 1            # immediate abort (before the fix: 0)
+
+
+def test_stop_within_session_new_speech_after_final_drains():
+    """Validation Issue 2 regression guard: the within-session fix must NOT suppress a GENUINE new
+    utterance. arm → speak → final → run loop re-enters text() (resets _utterance_finalized) → a
+    NEW utterance's partial fires → stop must still drain so the second final isn't dropped.
+    """
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()
+    d._text_in_flight.set()
+    d.on_final("first phrase")        # final lands; _utterance_finalized=True
+    # run loop re-enters text() for the next utterance: resets _utterance_finalized=False
+    d._utterance_finalized = False
+    d._text_in_flight.set()
+    d._touch_speech()                 # NEW utterance's partial -> _final_pending re-armed (genuinely in flight)
+    assert d._final_pending is True
+    d.stop()
+    assert d._drain is True           # genuinely in flight -> drains (lets the 2nd final finish)
+    assert d.is_listening() is True
+    assert rec.aborts == 0
 
 
 # --- idle auto-stop (asr.auto_stop_idle_seconds) ---

@@ -206,6 +206,44 @@ def test_valid_backend_values_load():
         assert cfg.output.backend == good
 
 
+# ---------------------------------------------------------------------------
+# [filter] load-time validation (validation Issue 4 / PRD §4.5 robustness).
+# FilterConfig was the lone sub-config with no __post_init__; wrong-typed values crashed at runtime
+# inside textproc.clean (called from on_final) instead of at load. Mirrors device/backend guards.
+# ---------------------------------------------------------------------------
+
+
+def test_filter_min_chars_wrong_type_raises():
+    """validation Issue 4: a non-int [filter] min_chars is rejected at load with a TypeError naming it.
+
+    Before the fix, min_chars = "two" loaded silently and textproc.clean raised
+    TypeError: '<' not supported between 'int' and 'str' on EVERY final inside on_final.
+    """
+    for bad in ("two", 2.0, True, None, [2]):
+        with pytest.raises(TypeError, match="min_chars"):
+            VoiceTypingConfig.from_toml({"filter": {"min_chars": bad}})
+
+
+def test_filter_blocklist_wrong_element_type_raises():
+    """validation Issue 4: a non-str blocklist element is rejected at load with a TypeError naming the index.
+
+    Before the fix, blocklist = [123] loaded silently and textproc.clean raised
+    AttributeError: 'int' object has no attribute 'lower' on the blocklist check.
+    """
+    for bad in ([123], ["ok", 45], [True], [None]):
+        with pytest.raises(TypeError, match=r"blocklist\["):
+            VoiceTypingConfig.from_toml({"filter": {"blocklist": bad}})
+
+
+def test_filter_valid_values_load():
+    """validation Issue 4: valid [filter] values round-trip through TOML (regression guard for the new guard)."""
+    cfg = VoiceTypingConfig.from_toml(
+        {"filter": {"min_chars": 3, "blocklist": ["bye.", "thanks"]}}
+    )
+    assert cfg.filter.min_chars == 3
+    assert cfg.filter.blocklist == ["bye.", "thanks"]
+
+
 
 # ---------------------------------------------------------------------------
 # [asr] lite_model (PRD §4.2ter) — the single model loaded in lite mode.

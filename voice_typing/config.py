@@ -211,6 +211,34 @@ class FilterConfig:
         # saw no real speech) rather than blanket-suppressing the word for all dictation.
     )
 
+    def __post_init__(self) -> None:
+        """Validate field types at construction (validation Issue 4 / PRD §4.5 robustness).
+
+        FilterConfig was the lone sub-config with no load-time validation. A wrong-typed value
+        loaded via from_toml(**section) would pass silently and crash at RUNTIME inside
+        textproc.clean (called from on_final on every utterance): e.g. min_chars = "two" raises
+        TypeError on `len(cleaned) < cfg.min_chars`; blocklist = [123] raises AttributeError on
+        `b.lower()`. Both would silently drop EVERY final (on_final swallows textproc exceptions
+        are not the issue — clean() itself raises before typing). This raises TypeError at LOAD
+        time, mirroring AsrConfig/OutputConfig/FeedbackConfig + the unknown-key rejection.
+        bool is rejected for min_chars even though bool is an int subclass (a `min_chars = true`
+        config typo is not a meaningful threshold).
+        """
+        # min_chars: a non-bool int (a float threshold like 2.0 would technically compare but is
+        # not a meaningful char count and config.toml documents it as an int — accept int only).
+        _v = self.min_chars
+        if isinstance(_v, bool) or not isinstance(_v, int):
+            raise TypeError(
+                f"[filter] min_chars expects int, got {type(_v).__name__}: {_v!r}"
+            )
+        # blocklist: each element must be a str (textproc calls .lower() on every entry).
+        for _i, _entry in enumerate(self.blocklist):
+            if not isinstance(_entry, str):
+                raise TypeError(
+                    f"[filter] blocklist[{_i}] expects str, "
+                    f"got {type(_entry).__name__}: {_entry!r}"
+                )
+
 
 @dataclass
 class LogConfig:
