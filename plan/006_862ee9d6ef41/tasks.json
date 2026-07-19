@@ -637,14 +637,14 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "Validate T3 E2E virtual mic test & T6 GPU lifecycle test (shell scripts)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify tests/e2e_virtual_mic.sh (T3: PipeWire null-sink + pw-cat, daemon tmux backend, assert typed text + drain + partials) and tests/test_idle_and_gpu.sh (T6: nvidia-smi idle/armed/disarmed/unload lifecycle). These are the heavy shell tests (5-8 min, CUDA model loads, global audio source mutation for E2E). Per AGENTS.md: timeout 900, never interrupt mid-run.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "Audit T3 E2E script: null-sink setup, daemon tmux backend, drain assertion, cleanup trap",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T2.S1"
@@ -660,7 +660,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T3.S2",
                   "title": "Audit T6 GPU lifecycle script: nvidia-smi idle/armed/disarmed/unload assertions",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T3.S1"
