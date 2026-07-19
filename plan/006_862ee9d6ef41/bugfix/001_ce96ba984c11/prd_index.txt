@@ -1,0 +1,11 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: Cross-mode toggle failure silently returns ok:true instead of surfacing the error
+  h3.1 Issue 2: Stale _final_pending from realtime partials causes spurious 5-second drain on stop
+ h2.3 Minor Issues (Nice to Fix)
+  h3.2 Issue 3: Unknown output.backend value is not validated at config load time
+ h2.4 Testing Summary
+---
+code:6 para:32 list:1
