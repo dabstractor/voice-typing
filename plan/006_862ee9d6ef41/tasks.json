@@ -567,14 +567,14 @@
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "Run full unit test suite & fix failures",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Execute the complete pytest suite (all test_*.py files). Per AGENTS.md: use timeout 600 for the full run (some tests load CUDA models). Identify and fix any failures. Target: 0 failures, 0 errors across all ~421 test functions.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Run pure-python unit tests (no CUDA): config, textproc, typing_backends, feedback, ctl, socket, status_sh, systemd",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -595,7 +595,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S2",
                   "title": "Run daemon + recorder_host unit tests (mocked CUDA): test_daemon.py, test_recorder_host.py",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S1"
