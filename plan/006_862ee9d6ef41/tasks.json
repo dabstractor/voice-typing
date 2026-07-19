@@ -136,7 +136,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Daemon Lifecycle & Recorder-Host Verification",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Verify the two largest and most complex modules — daemon.py (2221 lines) and recorder_host.py (774 lines) — against PRD §4.2, §4.2bis, §4.2ter. These cover: the main loop (never-exits-on-silence), the listening gate with graceful drain, the lazy-load model lifecycle (unloaded→loading→loaded→listening), the recorder-host subprocess IPC architecture, idle auto-stop, idle unload with bounded teardown, lite mode with mode-switch reload, and the control socket protocol. This is the highest-risk area — existing tests: test_daemon.py (191 tests), test_recorder_host.py (26 tests), test_control_socket.py (21 tests).",
           "tasks": [
             {
@@ -311,14 +311,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "Recorder kwargs construction & RealtimeSTT API compliance (§4.4)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Verify the AudioToTextRecorder kwargs match PRD §4.4 exactly. The daemon's build_recorder/cfg_to_kwargs/_construct/_filter_kwargs_to_signature functions must produce the correct constructor call. Unknown kwargs must be dropped (not crash). Verify against installed RealtimeSTT version signature.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "Audit recorder kwargs: all PRD §4.4 params, silero_backend, no_log_file, kwarg filtering",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S2",
@@ -352,7 +352,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Audit state.json schema: all fields, phase lifecycle, mode field",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1"
