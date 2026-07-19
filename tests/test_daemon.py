@@ -758,6 +758,49 @@ def test_on_final_clears_final_pending():
     assert be.typed == ["hello world "]
 
 
+def test_arm_resets_stale_final_pending_from_prior_session():
+    """Issue 2: a fresh _arm() clears a stale _final_pending left by a stray/late partial from a prior session, so the
+    next stop disarms immediately (no spurious 5s drain). Before the fix _arm() never reset _final_pending."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()                # speech -> _final_pending=True
+    d.on_final("hello world")        # final -> _final_pending=False, text typed
+    d._touch_speech()                # STRAY late partial -> _final_pending=True (stale)
+    assert d._final_pending is True  # the stale state the fix must clear
+    d.stop()                         # disarm (ends the prior session)
+    # re-arm: _arm() must reset _final_pending=False (the fix) — no utterance is in flight yet
+    d.start()
+    assert d._final_pending is False  # CLEAN SLATE (fails before the fix: still True)
+
+
+def test_disarm_clears_final_pending():
+    """Issue 2 (defense in depth): _disarm() clears _final_pending so a stray partial around the disarm doesn't leave it
+    stale True into the next session/stop."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()                # _final_pending=True
+    assert d._final_pending is True
+    d.stop()                         # -> _disarm() (under _lock via stop)
+    assert d._final_pending is False  # the fix in _disarm cleared it
+
+
+def test_stop_after_stray_partial_in_fresh_session_disarms_immediately():
+    """Issue 2 end-to-end: after a re-arm (clean slate), a stop with text() idle but NO speech in THIS session disarms
+    immediately (no drain) — the stale flag from the prior session was cleared by _arm(). Before the fix this drained 5s."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()
+    d.on_final("hello world")
+    d._touch_speech()                # stray stale partial (prior session)
+    d.stop()                         # end prior session
+    d.start()                        # re-arm -> _arm() resets _final_pending=False (the fix)
+    d._text_in_flight.set()          # run loop blocked in text(), idle-waiting for the next utterance
+    d.stop()                         # no speech in THIS session -> immediate disarm + abort (NOT a drain)
+    assert d.is_listening() is False
+    assert d._drain is False
+    assert rec.aborts == 1           # immediate abort (before the fix: 0 — it drained instead)
+
+
 # --- idle auto-stop (asr.auto_stop_idle_seconds) ---
 # _idle_watchdog ticks ~1s and calls _maybe_auto_stop(); here we call it directly for deterministic
 # logic tests (no real timing). _touch_speech (wired into the partial callback via on_speech) and

@@ -1010,6 +1010,7 @@ class VoiceTypingDaemon:
         arm is preceded by a 'Loading…' toast from _load_host(); a warm arm fires only 'Recording'.
         """
         self._listening.set()
+        self._final_pending = False  # Issue 2: fresh arm = no utterance in flight (clear stale stray partials)
         self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
         self._disarmed_monotonic = None                  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
         if self._host is not None:
@@ -1037,6 +1038,7 @@ class VoiceTypingDaemon:
         (bugfix validation NEW-2)
         """
         self._listening.clear()
+        self._final_pending = False  # Issue 2: disarm clears any stale stray-partial flag (defense in depth)
         self._last_speech_monotonic = None  # not listening → idle clock is inactive
         self._disarmed_monotonic = time.monotonic()  # start the idle-UNLOAD clock (P1.M3.T1.S1)
         if self._host is not None:
