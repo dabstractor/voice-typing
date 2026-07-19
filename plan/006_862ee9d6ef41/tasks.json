@@ -637,7 +637,7 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "Validate T3 E2E virtual mic test & T6 GPU lifecycle test (shell scripts)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Verify tests/e2e_virtual_mic.sh (T3: PipeWire null-sink + pw-cat, daemon tmux backend, assert typed text + drain + partials) and tests/test_idle_and_gpu.sh (T6: nvidia-smi idle/armed/disarmed/unload lifecycle). These are the heavy shell tests (5-8 min, CUDA model loads, global audio source mutation for E2E). Per AGENTS.md: timeout 900, never interrupt mid-run.",
               "subtasks": [
                 {
@@ -660,7 +660,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T3.S2",
                   "title": "Audit T6 GPU lifecycle script: nvidia-smi idle/armed/disarmed/unload assertions",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T3.S1"
@@ -678,14 +678,14 @@
               "type": "Task",
               "id": "P1.M5.T4",
               "title": "Validate T4 idle stability (2-min silence, no hallucination, low CPU)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify T4 test coverage: daemon listening with 120s of silence → no finals typed (hallucination guard), no crash, CPU <25% of one core. This is the hallucination safety check (blocklist + VAD gating). May be covered by test_idle_and_gpu.sh or a dedicated test.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T4.S1",
                   "title": "Audit T4 coverage: idle hallucination guard, CPU sampling, crash detection",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T3.S2"
