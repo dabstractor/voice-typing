@@ -183,6 +183,29 @@ def test_valid_device_values_load():
         assert cfg.asr.device == good
 
 
+# ---------------------------------------------------------------------------
+# output.backend enum validation (bugfix Issue 3 / VT-005 precedent): only "wtype" |
+# "ydotool" | "tmux" are valid. A typo such as "wtyp" is a valid str but would otherwise
+# flow into typing_backends.make_backend() and raise there — under systemd a
+# Restart=on-failure crash-loop. Reject at load with a clear ValueError (TYPE correct,
+# VALUE not — mirrors asr.device). make_backend() keeps its own ValueError as a 2nd gate.
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_backend_value_raises():
+    """bugfix Issue 3: a backend value outside {wtype, ydotool, tmux} is rejected at load with a ValueError naming it."""
+    for bad in ("wtyp", "xterm", "WTYPE", "", "auto", "gpu"):
+        with pytest.raises(ValueError, match="backend"):
+            VoiceTypingConfig.from_toml({"output": {"backend": bad}})
+
+
+def test_valid_backend_values_load():
+    """bugfix Issue 3: 'wtype', 'ydotool', 'tmux' are the accepted backend values and round-trip through TOML."""
+    for good in ("wtype", "ydotool", "tmux"):
+        cfg = VoiceTypingConfig.from_toml({"output": {"backend": good}})
+        assert cfg.output.backend == good
+
+
 
 # ---------------------------------------------------------------------------
 # [asr] lite_model (PRD §4.2ter) — the single model loaded in lite mode.

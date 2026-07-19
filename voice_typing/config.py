@@ -123,6 +123,19 @@ class OutputConfig:
     tmux_target: str = ""      # used only when backend == "tmux", e.g. "voicetest:0.0"
     append_space: bool = True  # daemon appends one trailing space to each final
 
+    def __post_init__(self) -> None:
+        # backend VALUE validation (bugfix Issue 3 / VT-005 precedent): only "wtype" | "ydotool" |
+        # "tmux" are valid. A typo such as backend="wtyp" is a valid str, but it would otherwise flow
+        # into typing_backends.make_backend() -> VoiceTypingDaemon.__init__() and raise there — under
+        # systemd that is a Restart=on-failure crash-loop discoverable only via journalctl. Reject it
+        # here at load time with a clear ValueError (the TYPE is correct, the VALUE is not — mirrors
+        # AsrConfig's device validation). make_backend() retains its own ValueError as a defensive
+        # second gate.
+        if self.backend not in ("wtype", "ydotool", "tmux"):
+            raise ValueError(
+                f'[output] backend must be "wtype", "ydotool", or "tmux", got {self.backend!r}'
+            )
+
 
 @dataclass
 class FeedbackConfig:

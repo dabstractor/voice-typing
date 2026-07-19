@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Voice-Typing Bug Fix: Toggle Error Surfacing, Spurious Drain, and Config Validation",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Fix the three issues identified by adversarial end-to-end validation: (1) cross-mode toggle failure silently returns ok:true instead of surfacing the model-load error over the control socket; (2) stale _final_pending from late realtime partials causes a spurious 5-second drain on stop when nothing is in flight; (3) unknown output.backend value is not validated at config load time. All three are confirmed with executable reproductions; the 421-test suite passes without these fixes. The three issues are INDEPENDENT (different files/methods, no execution-order dependency) and may be implemented in parallel. All changes are correctness/UX fixes — no data-loss or availability-breaking bugs. Each subtask follows implicit TDD: write the failing test first, implement, pass.",
       "milestones": [
         {
@@ -81,21 +81,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Issue 3: Validate output.backend at config load time",
-          "status": "Researching",
+          "status": "Complete",
           "description": "An invalid output.backend value (e.g., a typo like 'wtyp') is currently accepted silently at config load time and only fails later when typing_backends.make_backend() raises ValueError during daemon init, causing a systemd crash-loop. Add __post_init__() validation to OutputConfig mirroring the existing AsrConfig.__post_init__() device validation (VT-005), so the user gets an immediate, actionable ValueError at load time.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Add OutputConfig.__post_init__() with backend value validation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add a __post_init__() method to the OutputConfig dataclass that validates backend is one of ('wtype', 'ydotool', 'tmux') and raises ValueError otherwise, mirroring the AsrConfig device validation pattern (VT-005). The runtime check in typing_backends.make_backend() stays as a defensive second gate.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Add backend value validation to OutputConfig.__post_init__() + load-time tests",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/006_862ee9d6ef41/bugfix/001_ce96ba984c11/architecture/system_context.md §Issue 3 and _scout_test_patterns.md §Issue 3. OutputConfig (config.py:119-125) currently has NO __post_init__. The precedent is AsrConfig.__post_init__ (config.py:72-118) which validates device with `if self.device not in ('cuda', 'cpu'): raise ValueError(...)`. The runtime validation in typing_backends.make_backend() (typing_backends.py:142-164) raises ValueError(f'unknown output.backend: {backend!r}') — this stays as-is (defensive second gate). The valid backend values are confirmed: 'wtype' (_WtypeWithFallback), 'ydotool' (YdotoolBackend), 'tmux' (TmuxBackend). Tests: VT-005 device tests are at test_config.py:172-183 (test_invalid_device_value_raises, test_valid_device_values_load) using `with pytest.raises(ValueError, match='device'): VoiceTypingConfig.from_toml({'asr': {'device': bad}})`. The config must remain stdlib-only (no cuda/torch imports). The README (line ~167) already documents the valid backend values, so no content change is needed there.\n2. INPUT: No upstream subtask dependency. OutputConfig is a standalone dataclass. VoiceTypingConfig.from_toml() calls OutputConfig(**section) via _overlay (config.py:248-254), so __post_init__ fires at load time. The make_backend() runtime check is downstream and unchanged.\n3. LOGIC:\n   A) TEST FIRST (failing test, RED): Add tests to tests/test_config.py near the VT-005 device tests (line ~172). Mirror the VT-005 pattern EXACTLY:\n      - test_invalid_backend_value_raises(): `for bad in ('wtyp', 'xterm', 'WTYPE', '', 'auto', 'gpu'): with pytest.raises(ValueError, match='backend'): VoiceTypingConfig.from_toml({'output': {'backend': bad}})` — each must raise ValueError naming 'backend'.\n      - test_valid_backend_values_load(): `for good in ('wtype', 'ydotool', 'tmux'): cfg = VoiceTypingConfig.from_toml({'output': {'backend': good}}); assert cfg.output.backend == good` — each must load OK.\n      The invalid-value test MUST FAIL (RED) before the fix because OutputConfig has no __post_init__.\n   B) IMPLEMENT (GREEN): Add a __post_init__(self) method to OutputConfig (config.py, after the field declarations, before any other method). The body: `if self.backend not in ('wtype', 'ydotool', 'tmux'): raise ValueError(f'[output] backend must be \"wtype\", \"ydotool\", or \"tmux\", got {self.backend!r}')`. Use ValueError (not TypeError) — the TYPE is correct (str), the VALUE is not, matching the device validation precedent. DO NOT modify make_backend() in typing_backends.py — it stays as the defensive runtime gate. DO NOT modify AsrConfig or any other dataclass.\n   C) VERIFY: Run `timeout 60 .venv/bin/pytest tests/test_config.py -q` and `timeout 60 .venv/bin/pytest tests/test_config_repo_default.py -q` and `timeout 60 .venv/bin/pytest tests/test_typing_backends.py -q`. All must pass. The repo-default test (test_repo_config_toml_equals_defaults) must still pass because config.toml uses backend='wtype' (a valid value). The existing test_make_backend_unknown_raises_value_error (test_typing_backends.py:236) must still pass (make_backend's own ValueError is unchanged — but note: with __post_init__ validation, OutputConfig(backend='bogus') now raises at CONSTRUCTION, so that test may need adjustment if it constructs OutputConfig directly; verify and adjust if needed — the test should still be valid because pytest.raises catches the ValueError regardless of where it fires).\n   Mocking: No external services — config.py is pure stdlib (os, tomllib, dataclasses, pathlib). No imports of cuda/torch/realtimestt.\n4. OUTPUT: VoiceTypingConfig.from_toml({'output': {'backend': 'wtyp'}}) raises ValueError at LOAD time (before the daemon starts), giving the user an immediate actionable error. Valid backends load normally. make_backend() retains its own ValueError as a defensive second gate. No new public API.\n5. DOCS: [Mode A] The README (line ~167) already documents output.backend valid values ('wtype', 'ydotool', 'tmux') — the content is already accurate, so no inline doc update is needed for the valid-values list. However, consider adding a brief note in the AsrConfig.device or output.backend README row that invalid values are rejected at load time (the README already says device is 'cuda or cpu' without mentioning validation, so this is consistent). The final changeset-level documentation task (P1.M4.T1) will verify README consistency.",
@@ -116,21 +116,21 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Sync changeset-level documentation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Final sweep of cross-cutting documentation (README.md feature tables, config tables, any overview docs) to ensure they are consistent with the three fixes. Per SOW §5 Mode B, this task depends on ALL implementing subtasks and runs last. The three fixes are primarily internal correctness/robustness improvements; the README already documents the relevant surfaces (valid backend values, voicectl exit codes), so this is expected to be a verification pass with minor touch-ups at most.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify README.md and any overview docs are consistent with the three bug fixes. The changeset adds load-time config validation for output.backend (Issue 3), makes toggle/toggle-lite failures surface as errors (Issue 1), and fixes a stale-state drain bug (Issue 2). The README already documents valid backend values and voicectl behavior, so this is a verification pass.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Verify and sync README.md + docs for the three-fix changeset",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
