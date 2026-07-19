@@ -441,7 +441,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Infrastructure & Deployment Verification",
-          "status": "Researching",
+          "status": "Ready",
           "description": "Verify the deployment infrastructure — install.sh, systemd unit, launch_daemon.sh wrapper, prefetch.py, hypr-binds.conf — against PRD §4.9, §4.10, §5. These are the install-time and runtime plumbing that makes the daemon a proper systemd user service with lazy model loading, cuDNN lib discovery, and Hyprland keybind integration. Existing tests: test_systemd_unit.py (15 tests).",
           "tasks": [
             {
@@ -536,14 +536,14 @@
               "type": "Task",
               "id": "P1.M4.T4",
               "title": "Hyprland keybinds (§4.10 Phase 2)",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Verify hypr-binds.conf against PRD §4.10. Two binds: Ctrl+Alt+Super+D→toggle (normal), Alt+Super+D→toggle-lite. Must instruct user to source from hyprland.conf, NOT auto-modify user config.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T4.S1",
                   "title": "Audit hypr-binds.conf: both keybinds, correct commands, source instructions",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: hypr-binds.conf (3KB). PRD §4.10: 'bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle' and 'bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite'. Must print instruction to source from ~/.config/hypr/hyprland.conf. Must NOT auto-modify user config.\n2. INPUT: hypr-binds.conf.\n3. LOGIC: Verify: (a) bind CTRL SUPER ALT, D → voicectl toggle (normal mode); (b) bind SUPER ALT, D → voicectl toggle-lite (lite mode); (c) uses $HOME/.local/bin/voicectl (installed console script path); (d) contains source instruction comment; (e) does not modify user's hyprland.conf.\n4. OUTPUT: gap_hypr_binds.md. Acceptance #7 (README documents hotkey snippet).\n5. DOCS: [Mode A] hypr-binds.conf comments should explain the source instruction and the two modes — verify they do.",
@@ -574,7 +574,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "Run pure-python unit tests (no CUDA): config, textproc, typing_backends, feedback, ctl, socket, status_sh, systemd",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
