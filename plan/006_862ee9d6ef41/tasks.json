@@ -495,14 +495,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "install.sh idempotency, model prefetch & service install (§5)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify install.sh against PRD §5. Must be idempotent: uv sync, prefetch models (HF snapshot_download of faster-distil-whisper-large-v3 + faster-whisper-small.en), CUDA smoke test (5s), install+daemon-reload+enable+start systemd unit (substituting __REPO__), copy config.toml to XDG if absent, print tmux snippet + usage. Must remove stale default.target.wants symlink (VT-004).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "Audit install.sh: all steps, __REPO__ substitution, idempotency, stale symlink cleanup",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1",
@@ -519,7 +519,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T3.S2",
                   "title": "Audit prefetch.py model download logic (§4.4)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T3.S1"
