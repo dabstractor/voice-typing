@@ -198,7 +198,10 @@ same way: `auto_stop_idle_seconds = "thirty"` (a string where a number is expect
 or `device = 123` (a number where a string is expected) raises `TypeError` at load
 with a message naming the field, rather than loading silently and breaking the
 feature at runtime. Bare integers are accepted for numeric fields; a `true`/`false`
-bool is not.
+bool is not. A value outside a field's allowed set is rejected the same way — for
+example `output.backend = "wtyp"` or `asr.device = "gpu"` raises `ValueError` at
+load (the type is valid, the value is not), so a typo fails fast at startup instead
+of crash-looping later.
 
 ## CPU-only mode
 

@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Voice-Typing Bug Fix: Toggle Error Surfacing, Spurious Drain, and Config Validation",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Fix the three issues identified by adversarial end-to-end validation: (1) cross-mode toggle failure silently returns ok:true instead of surfacing the model-load error over the control socket; (2) stale _final_pending from late realtime partials causes a spurious 5-second drain on stop when nothing is in flight; (3) unknown output.backend value is not validated at config load time. All three are confirmed with executable reproductions; the 421-test suite passes without these fixes. The three issues are INDEPENDENT (different files/methods, no execution-order dependency) and may be implemented in parallel. All changes are correctness/UX fixes — no data-loss or availability-breaking bugs. Each subtask follows implicit TDD: write the failing test first, implement, pass.",
       "milestones": [
         {
@@ -116,21 +116,21 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Sync changeset-level documentation",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Final sweep of cross-cutting documentation (README.md feature tables, config tables, any overview docs) to ensure they are consistent with the three fixes. Per SOW §5 Mode B, this task depends on ALL implementing subtasks and runs last. The three fixes are primarily internal correctness/robustness improvements; the README already documents the relevant surfaces (valid backend values, voicectl exit codes), so this is expected to be a verification pass with minor touch-ups at most.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Verify README.md and any overview docs are consistent with the three bug fixes. The changeset adds load-time config validation for output.backend (Issue 3), makes toggle/toggle-lite failures surface as errors (Issue 1), and fixes a stale-state drain bug (Issue 2). The README already documents valid backend values and voicectl behavior, so this is a verification pass.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Verify and sync README.md + docs for the three-fix changeset",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
