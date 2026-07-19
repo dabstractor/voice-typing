@@ -338,7 +338,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Feedback, Control Plane & voicectl Verification",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Verify the feedback system (state.json + hyprctl notify), the control socket protocol, and the voicectl CLI against PRD §4.6, §4.8, §4.2 #3. These are the user-facing interfaces: state.json drives the tmux status line and any future UI; hyprctl notify provides visual feedback; voicectl is the primary control mechanism. Existing tests: test_feedback.py (38 tests), test_control_socket.py (21 tests), test_voicectl.py (32 tests), test_status_sh.py (5 tests).",
           "tasks": [
             {
@@ -385,7 +385,7 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Control socket protocol & voicectl CLI (§4.2 #3, §4.8)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Verify the control socket (daemon side) and voicectl (client side) against PRD §4.2 #3 and §4.8. Socket at $XDG_RUNTIME_DIR/voice-typing/control.sock (SOCK_STREAM, JSON lines). Commands: toggle/start/stop/status/quit/toggle-lite/start-lite. voicectl prints human-readable results, exit 0/1, exit 2 if daemon not running. Loading hint for arm commands. status reports phase, models_loaded, mode, partial, uptime.",
               "subtasks": [
                 {
@@ -423,7 +423,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S3",
                   "title": "Audit status.sh tmux helper (§4.6)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -448,14 +448,14 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "systemd service unit compliance (§4.9)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify systemd/voice-typing.service against PRD §4.9. ExecStart=__REPO__/voice_typing/launch_daemon.sh (placeholder). After=pipewire+ydotoold+graphical-session.target. PartOf=graphical-session.target. WantedBy=graphical-session.target (VT-004). KillMode=mixed. TimeoutStopSec=15. ExecStartPre imports WAYLAND_DISPLAY/DISPLAY. Restart=on-failure.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Audit systemd unit: all directives, VT-003/VT-004 wiring & run tests",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: systemd/voice-typing.service has __REPO__ placeholder (VT-003: install.sh substitutes actual repo path). VT-004: WantedBy=graphical-session.target (not default.target which raced compositor on cold boot). KillMode=mixed (SIGTERM to main daemon only, lets it killpg its child, then SIGKILL group after TimeoutStopSec). ExecStartPre imports WAYLAND_DISPLAY DISPLAY.\n2. INPUT: systemd/voice-typing.service.\n3. LOGIC: Verify ALL directives match PRD §4.9: Description, After=pipewire.service ydotool.service graphical-session.target, PartOf=graphical-session.target, ExecStartPre=import-environment, ExecStart=__REPO__/voice_typing/launch_daemon.sh, Restart=on-failure, RestartSec=2, KillMode=mixed, TimeoutStopSec=15, WantedBy=graphical-session.target. Run: .venv/bin/python -m pytest tests/test_systemd_unit.py -q.\n4. OUTPUT: gap_systemd.md with directive audit. Acceptance #6 (daemon runs as systemd service, auto-restarts).\n5. DOCS: none — the unit file is self-documenting with inline comments.",
