@@ -408,7 +408,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Audit voicectl CLI: all commands, formatting, loading hint, exit codes & run tests",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T2.S1"
