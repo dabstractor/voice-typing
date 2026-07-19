@@ -278,7 +278,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S2",
                   "title": "Audit mode-switch reload & self._mode tracking",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T3.S1"
@@ -311,14 +311,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "Recorder kwargs construction & RealtimeSTT API compliance (§4.4)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verify the AudioToTextRecorder kwargs match PRD §4.4 exactly. The daemon's build_recorder/cfg_to_kwargs/_construct/_filter_kwargs_to_signature functions must produce the correct constructor call. Unknown kwargs must be dropped (not crash). Verify against installed RealtimeSTT version signature.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "Audit recorder kwargs: all PRD §4.4 params, silero_backend, no_log_file, kwarg filtering",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S2",

@@ -45,6 +45,44 @@ A command that "usually finishes" is not good enough. The whole point is the *on
 
 ---
 
+## Rule 3 — Logging & scratch files: bound them. And never read a giant file before deleting it.
+
+This rule is about *your* discipline as an agent working here, not about voice-typing code. A
+recent **25 GB** runaway file under `/tmp` — written by an **unrelated** project's debug shim,
+nothing to do with this repo — destabilized the whole machine, because `/tmp` here is a 32 GB
+**tmpfs** (= RAM): a multi-GB append loop consumes main memory, not just disk. This repo's own
+test scripts (`tests/*.sh`) create `mktemp -d` scratch in that same shared tmpfs, and any scratch
+you create does too, so the same discipline protects sessions in this directory:
+
+1. **`/tmp` is a RAM-backed tmpfs.** A runaway file there consumes main memory, not just disk —
+   a multi-GB append loop will make the entire computer go haywire, exactly as it did. Treat any
+   file you write under `/tmp` (or any `mktemp -d`) as spending RAM.
+
+2. **Every log/trace file you create MUST be bounded.** No unguarded `>> file` in a loop. Pick
+   one and say so in a comment: cap by size and truncate (`>> file` only when `stat -c%s < CAP`),
+   rotate, use a ring/fixed-line-count buffer, or write at most N samples then stop. "It's just a
+   debug log, I'll delete it after" is precisely the rationalization that produced the 25 GB file.
+
+3. **PATH shims recurse infinitely if you `exec` the bare name.** That 25 GB file came from a
+   shim like this: `echo "tmux-call: $*" >> calls.log; exec tmux -L sock "$@"` — bare `tmux`
+   resolved back to
+   **the shim itself**, so each call re-entered it and prepended another `-L sock` per level until
+   `ARG_MAX`, writing one growing line per recursion. If you wrap a command on `PATH`, **always
+   `exec` the real binary by absolute path** (`exec /usr/bin/tmux "$@"`), never the bare name. And
+   never re-feed a logged command line back into a command.
+
+4. **When you FIND a giant scratch/log file, delete it directly — do not read it first.** Do not
+   `cat`, `tail`-loop, `wc`, or pull it into context to "see what it is." Reading a multi-GB file
+   is itself catastrophic (and pointless — it's scratch). `rm -f` it, then `df -h /tmp` to confirm.
+   This is what "be careful not to dump too many logs before deleting" means: a 25 GB file should
+   be removed on sight, not inspected.
+
+5. **Tear down your own scratch on exit.** Every `mktemp -d`, PATH shim, and audit harness gets an
+   `EXIT`/`INT` trap that removes it (`trap 'rm -rf "$SHIM"' EXIT`), and you verify the teardown
+   ran. A leftover shim on `PATH` is worse than a leftover file — it keeps intercepting calls.
+
+---
+
 ## The actual hang vectors in THIS repo (learn them)
 
 | Command | Why it hangs | Safe form |
@@ -88,3 +126,8 @@ and a quick `pactl list short sources` before re-running anything.
 - **Prefer a single pytest file / `-k` filter over the whole suite;** prefer unit tests over the
   5–8-minute E2E shell scripts.
 - **When something wedges, clean up the daemon tree and the audio source before retrying.**
+- **Bound every scratch/log file you write** (under `/tmp` = tmpfs = RAM). Cap, rotate, or stop
+  after N lines — never bare `>>` in a loop.
+- **PATH shims `exec` the real binary by absolute path**, never the bare name (a bare name
+  recurses into the shim — that exact bug made a 25 GB file in `/tmp`).
+- **Giant scratch file found? `rm -f` it on sight** — don't `cat`/`tail`/`wc` it into context first.
