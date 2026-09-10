@@ -1,1 +1,1 @@
-"""voice-typing: fully-local voice typing for Linux (tmux/Wayland) via RealtimeSTT."""
+"""voice-typing: fully-local voice typing for Linux/Wayland via RealtimeSTT."""

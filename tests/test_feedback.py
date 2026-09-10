@@ -269,7 +269,7 @@ def test_record_final_notifies_with_check_glyph(feedback):
 def test_record_final_updates_partial_so_status_matches_screen(feedback, tmp_path):
     """record_final must write the FINAL text into partial, not leave the stale realtime partial.
 
-    Regression: the tmux status-right used to keep showing the last realtime partial, which
+    Regression: status consumers used to keep showing the last realtime partial, which
     trails the final by a word or two (final '...here today?' vs partial '...here?'). The
     status must match what was typed, so record_final overwrites partial with the final text.
     """
@@ -356,8 +356,8 @@ def test_notify_ms_from_config_in_argv(monkeypatch, tmp_path):
 def test_start_clears_stale_partial_so_status_does_not_flash_old_words(feedback, tmp_path):
     """Arming (False->True) must clear any leftover partial from the previous session.
 
-    Regression: status.sh renders '🎤 <partial>' the moment listening flips true, so a stale
-    partial made the OLD utterance flash in the tmux status-right on every re-arm until new
+    Regression: state.json carries the stale partial the moment listening flips true, so the
+    OLD utterance would flash in status consumers on every re-arm until new
     speech arrived. The partial must be blank on arm and repopulate only from the next
     realtime callback.
     """

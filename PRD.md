@@ -1,4 +1,4 @@
-# PRD: Fully-Local Voice Typing for Linux Terminal (tmux) — "voice-typing"
+# PRD: Fully-Local Voice Typing for Linux/Wayland — "voice-typing"
 
 **Status:** Approved for implementation. No further user input will be given — this document is the complete spec. Where it says MUST, do it; where it says SHOULD, do it unless it demonstrably fails on this machine; where a decision is left open, the default stated here is the decision.
 
@@ -6,7 +6,7 @@
 
 ## 1. Problem statement (user's own framing)
 
-The user wants to dictate text into their tmux terminal (and generally, any focused window) with a fully-local speech-to-text system. Previous attempt (WhisperX-based) failed in two specific ways that this project MUST fix:
+The user wants to dictate text into the focused window of their Wayland desktop with a fully-local speech-to-text system. Previous attempt (WhisperX-based) failed in two specific ways that this project MUST fix:
 
 1. **It stopped listening as soon as it thought the user was done talking.** A short pause in speech ended the session and the next few words were lost. → In this system, silence/VAD may only be used to *segment utterances*, never to *end the listening session*. The session ends only on explicit stop/toggle — and an explicit stop first lets the final model finish the in-flight utterance (drain) before disarming, so pressing the hotkey mid-sentence does NOT drop the words already spoken (§4.2 #2).
 2. **No feedback while speaking.** The user couldn't tell whether recognition was on track. → This system MUST surface live partial transcriptions (~phone-dictation feel) while only committing finalized text to the target window.
@@ -14,12 +14,12 @@ The user wants to dictate text into their tmux terminal (and generally, any focu
 Additional requirements:
 - 100% local. No network calls at runtime (model downloads at install time are fine).
 - Lag/stutter/buffering reduced to imperceptible levels: partials updating every ~200 ms; finalized text landing well under ~1.5 s after end of utterance.
-- Primary consumer is a tmux terminal, but typing should work into any focused Wayland window.
+- Primary consumer is the focused Wayland window (Hyprland); typing works into any focused window.
 
 Decisions already made with the user (do not revisit):
 - **Activation:** toggle (start/stop via a control command; hotkey binding is Phase 2). Never auto-stops on silence.
-- **Feedback:** live partials go to a status display (state file + `hyprctl notify`; tmux status integration provided). Only finalized text is typed. Do NOT backspace-correct inside the target window.
-- **Output scope:** type into whatever window has focus (uinput/virtual-keyboard), with an alternative explicit `tmux send-keys` backend.
+- **Feedback:** live partials go to a status display (state file + `hyprctl notify`). Only finalized text is typed. Do NOT backspace-correct inside the target window.
+- **Output scope:** type into whatever window has focus (uinput/virtual-keyboard), plus an inert `null` backend (types nothing) for headless tests.
 - **GPU:** models load **lazily on first arm** (`voicectl toggle`/`start`), NOT at daemon boot. A boot where voice typing is never armed consumes ~0 VRAM; after the first arm the models stay resident so re-arms are instant — until 30 min of disarmed idle, when they unload to reclaim VRAM (§4.2bis Idle unload); so the load cost is paid once per ~30 min of actual use, not once per boot. Trade-off accepted: the first arm each session blocks ~1–3 s while faster-whisper loads `distil-large-v3` + `small.en` into VRAM. Rationale: the daemon autostarts on every login but is used rarely — loading at boot parked ~2.8 GB on the GPU 24/7 for nothing. Full lifecycle in §4.2bis.
 
 ---
@@ -35,7 +35,7 @@ Decisions already made with the user (do not revisit):
 | Audio | PipeWire 1.6.6 (PulseAudio compat via pipewire-pulse). Default source: `alsa_input.usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera_SN0001-02.mono-fallback` ("Webcam Vitade AF Mono", s16le 1ch 48 kHz). Second source: onboard `alsa_input.pci-0000_00_1f.3.analog-stereo`. The webcam mic is the only real mic — it is the accuracy ceiling; do not fight it, just use the default source. |
 | Typing tools | `ydotool` 1.x installed, **ydotoold already running as an enabled user systemd service** (`systemctl --user status ydotool` → active). `/dev/uinput` is `crw-rw-rw-`, user is in `input` group. `wtype` and `xdotool` also installed. |
 | Notifications | **No notification daemon running** (no dunst/mako/swaync), no waybar/eww. Hyprland's built-in `hyprctl notify` works. |
-| Shell/tooling | zsh; **`python3` is aliased to `uv run` and `pip` is aliased in the interactive shell** — in scripts and in Bash tool calls always use explicit paths: `uv` at `/home/dustin/.local/bin/uv`, or `.venv/bin/python`. `tmux` is aliased through a zsh plugin (`_zsh_tmux_plugin_run`) — call `/usr/bin/tmux` explicitly in scripts. `cargo`, `go`, `ffmpeg`, `sox`, `espeak-ng`, `pw-cat`, `pw-loopback`, `jq` all present. |
+| Shell/tooling | zsh; **`python3` is aliased to `uv run` and `pip` is aliased in the interactive shell** — in scripts and in Bash tool calls always use explicit paths: `uv` at `/home/dustin/.local/bin/uv`, or `.venv/bin/python`. `cargo`, `go`, `ffmpeg`, `sox`, `espeak-ng`, `pw-cat`, `pw-loopback`, `jq` all present. |
 | Project dir | `/home/dustin/projects/voice-typing` — empty git repo (only `.git`), branch `main`, clean. |
 | Preinstalled related software | `epicenter-whispering-bin` (Whispering GUI app — ruled out: transcribes only after stop, clipboard-paste insertion, XWayland-only, its voice-activated mode has the exact auto-stop-on-pause flaw we're escaping. Leave it installed; ignore it.) `python-openai-whisper` pacman package (ignore). `vosk-api 0.3.50` in repos. |
 | Possibly missing | `portaudio` may not be installed system-wide (needed by PyAudio). Check `pacman -Q portaudio`; if missing install it (`sudo pacman -S --noconfirm portaudio`). If sudo is unavailable non-interactively, ask the user to run it via `! sudo pacman -S portaudio`. |
@@ -61,10 +61,10 @@ A full survey of the 2026 ecosystem was done (RealtimeSTT, nerd-dictation, whisp
                        │  voice-typing daemon (Python, uv project)  │
  PipeWire default mic ─►  RealtimeSTT AudioToTextRecorder           │
                        │   ├─ VAD (webrtc+silero): segments only    │
-                       │   ├─ realtime model small.en ──► partials ─┼──► state file (JSON) ──► tmux status / anything
+                       │   ├─ realtime model small.en ──► partials ─┼──► state file (JSON) ──► voicectl status / anything
                        │   │                                        ├──► hyprctl notify (replaceable one-liner)
                        │   └─ final model distil-large-v3 ─► final ─┼──► typing backend:
-                       │                                            │      wtype (default) | ydotool | tmux send-keys
+                       │                                            │      wtype (default) | ydotool | null
                        │  control: unix socket (JSON lines)         │
                        └────────────────▲───────────────────────────┘
                                         │
@@ -85,13 +85,12 @@ A full survey of the 2026 ecosystem was done (RealtimeSTT, nerd-dictation, whisp
 │   ├── recorder_host.py        # owns AudioToTextRecorder in a spawn child subprocess (VRAM reclamation, §4.2bis)
 │   ├── cuda_check.py           # ctranslate2 CUDA probe + CPU-fallback resolution (§4.4)
 │   ├── config.py               # dataclass + TOML loader (see §4.5)
-│   ├── typing_backends.py      # wtype / ydotool / tmux implementations
+│   ├── typing_backends.py      # wtype / ydotool / null implementations
 │   ├── feedback.py             # state file writer + hyprctl notify
 │   ├── textproc.py             # normalization + hallucination filter
 │   ├── ctl.py                  # voicectl client CLI
 │   ├── prefetch.py             # install-time model prefetch into the HF cache
 │   ├── launch_daemon.sh        # ExecStart wrapper: LD_LIBRARY_PATH + HF_HUB_OFFLINE + WAYLAND_DISPLAY import
-│   └── status.sh               # tmux status-right helper (jq over state.json)
 ├── config.toml                 # default config, self-documenting comments
 ├── hypr-binds.conf             # Hyprland keybinds, sourced from hyprland.conf (§4.10)
 ├── systemd/voice-typing.service# user service (installed by install.sh)
@@ -99,7 +98,7 @@ A full survey of the 2026 ecosystem was done (RealtimeSTT, nerd-dictation, whisp
 ├── tests/
 │   ├── make_test_audio.sh      # espeak-ng → WAVs incl. pause-laden ones
 │   ├── test_feed_audio.py      # offline pipeline test via feed_audio (no mic)
-│   ├── e2e_virtual_mic.sh      # PipeWire null-sink + pw-cat E2E, asserts tmux pane content
+│   ├── e2e_virtual_mic.sh      # PipeWire null-sink + pw-cat E2E, asserts finals via state.json
 │   └── test_textproc.py        # pure-python unit tests
 └── .gitignore                  # .venv, __pycache__, models/, *.wav under tests/out/
 ```
@@ -177,7 +176,7 @@ Idle-unload (§4.2bis) tears down whichever mode is resident; the next arm reloa
 
 **Commands / keybind:** `voicectl toggle-lite` / `voicectl start-lite` arm in lite mode (a clean toggle independent of the normal toggle, so each keybind is unambiguous); `voicectl toggle` / `start` arm in normal mode; `voicectl stop` disarms either. Two Hyprland binds (§4.10): `Ctrl+Alt+Super+D` → `toggle` (big/normal model) and `Alt+Super+D` → `toggle-lite` (little/lite model).
 
-**State / status:** `state.json` gains `"mode": "normal" | "lite"` (written on every arm/disarm alongside the existing fields); `voicectl status` reports `mode:`. The tmux status line prefixes lite with `⚡` so the user can see at a glance which mode is armed. Start/stop toasts stay `"Recording"` / `"Recording Stopped"` in either mode (the keybind itself disambiguates); finals still toast `✔ <text>` per `notify_on_final`.
+**State / status:** `state.json` gains `"mode": "normal" | "lite"` (written on every arm/disarm alongside the existing fields); `voicectl status` reports `mode:` and prefixes lite with `⚡` so the user can see at a glance which mode is armed. Start/stop toasts stay `"Recording"` / `"Recording Stopped"` in either mode (the keybind itself disambiguates); finals still toast `✔ <text>` per `notify_on_final`.
 
 **Why a reload on switch is accepted:** it is the same ~1–3 s cost already paid on first-arm and after idle-unload, and a user picks a mode for a stretch of use rather than toggling per utterance. A no-reload alternative — committing the realtime partial from the resident two-model recorder — was REJECTED: it keeps the large model loaded, still spins its final pass per utterance, and so delivers neither the VRAM nor the latency benefit that motivates lite mode.
 
@@ -185,9 +184,9 @@ Idle-unload (§4.2bis) tears down whichever mode is resident; the next arm reloa
 
 Interface: `type_text(text: str) -> None`. Selected by config `output.backend`, default **`wtype`**.
 
-- **wtype** (default): `subprocess.run(["wtype", "--", text])`. Uses Wayland `virtual-keyboard-v1` — supported by Hyprland, full Unicode, no layout issues. Types into the focused window (including terminals running tmux, so tmux "just works").
+- **wtype** (default): `subprocess.run(["wtype", "--", text])`. Uses Wayland `virtual-keyboard-v1` — supported by Hyprland, full Unicode, no layout issues. Types into the focused window.
 - **ydotool**: `subprocess.run(["ydotool", "type", "--key-delay", "2", "--", text])`. uinput-level, works even for XWayland apps; known weakness: non-ASCII/layout quirks. Keep as fallback; daemon MUST auto-fall-back to ydotool if a wtype call fails (nonzero exit), logging a warning.
-- **tmux**: `subprocess.run(["/usr/bin/tmux", "send-keys", "-t", cfg.output.tmux_target, "-l", "--", text])`. `tmux_target` default `""` (= active pane of most recently attached client... actually empty target means current pane only inside tmux; use explicit default target from config, and document `voicectl` usage `--target`). Used by the automated E2E test; also the right backend for SSH/detached use.
+- **null**: types NOTHING. For the headless E2E test (which asserts finals via the state file instead of real keystrokes, so an automated run can never type into the developer's focused window) and for output-disabled setups. No subprocess is spawned.
 
 Never send Enter/newline unless the utterance-final text itself demands it — it never should; strip trailing newlines in textproc.
 
@@ -246,14 +245,13 @@ auto_stop_idle_seconds = 30.0          # auto-disarm after this many seconds of 
 auto_unload_idle_seconds = 1800.0     # after this many seconds disarmed (loaded, not listening), tear down models to free VRAM; 0 disables (§4.2bis Idle unload)
 
 [output]
-backend = "wtype"                     # "wtype" | "ydotool" | "tmux"
-tmux_target = ""                      # used when backend = "tmux", e.g. "voicetest:0.0"
+backend = "wtype"                     # "wtype" | "ydotool" | "null"
 append_space = true
 
 [feedback]
 state_file = ""                       # empty → $XDG_RUNTIME_DIR/voice-typing/state.json
 hypr_notify = true                    # master switch for hyprctl popups (start/final/stop)
-notify_on_final = true                # also pop “✔ <text>” per final? (redundant: text is typed + in tmux)
+notify_on_final = true                # also pop “✔ <text>” per final? (redundant: text is typed into the focused window)
 notify_ms = 2500
 
 [filter]
@@ -279,13 +277,9 @@ Config file search order: `$XDG_CONFIG_HOME/voice-typing/config.toml`, then repo
   {"listening": true, "phase": "speaking", "models_loaded": true, "mode": "normal", "partial": "this is what i am say", "last_final": "Previous sentence.", "ts": 1783718400.123}
   ```
   `mode` is `"normal"` or `"lite"` (§4.2ter); it is written on every arm/disarm. Written on every partial update (throttle to ≥10 Hz max), phase change, final, and model-lifecycle transition. While models are not yet loaded (boot) or mid-load, `phase` is `unloaded` or `loading` and `models_loaded` is false (§4.2bis); once loaded, `phase` cycles `idle`/`listening`/`speaking`.
-- **hyprctl notify**: `hyprctl notify -1 <notify_ms> "rgb(88c0d0)" "<msg>"` — fire-and-forget, swallow errors. Hyprland notifications are not replaceable by ID; to avoid stacking spam, only notify on: listening-start ("Recording"; the FIRST arm of a session is preceded by a one-shot "Loading…" toast while the models load — §4.2bis), each *final* ("✔ <text>" — gated by `notify_on_final`, since the text is already typed and shown in the tmux status line), listening-stop ("Recording Stopped" — for ANY disarm: manual stop, toggle-off, idle auto-stop, or the drain completing). Partials go to the state file only (that's what the tmux status consumes). `record_final` ALSO writes the finalized text back into the `partial` field so the tmux status line matches the screen (otherwise it would keep showing the last trailing realtime partial, which usually drops the final word or two).
-- **tmux status integration** (document in README, and `install.sh` prints the snippet; do NOT edit the user's tmux.conf):
-  ```tmux
-  set -g status-interval 1
-  set -g status-right '#(jq -r "if .listening then \"🎤 \" + (.partial // \"…\") else \"\" end" $XDG_RUNTIME_DIR/voice-typing/state.json 2>/dev/null | cut -c1-60)'
-  ```
-  (Provide a small `voice_typing/status.sh` helper script instead of inline jq, and reference that — cleaner quoting.)
+- **hyprctl notify**: `hyprctl notify -1 <notify_ms> "rgb(88c0d0)" "<msg>"` — fire-and-forget, swallow errors. Hyprland notifications are not replaceable by ID; to avoid stacking spam, only notify on: listening-start ("Recording"; the FIRST arm of a session is preceded by a one-shot "Loading…" toast while the models load — §4.2bis), each *final* ("✔ <text>" — gated by `notify_on_final`, since the text is already typed into the focused window), listening-stop ("Recording Stopped" — for ANY disarm: manual stop, toggle-off, idle auto-stop, or the drain completing). Partials go to the state file only. `record_final` ALSO writes the finalized text back into the `partial` field so status consumers see what was actually typed (otherwise `voicectl status` would keep showing the last trailing realtime partial, which usually drops the final word or two).
+
+Status consumers (all read the state file above): `voicectl status`, the state-file fields themselves (`jq`-able for any custom UI), and the transient hyprctl toasts.
 
 ### 4.7 Text processing (`textproc.py`)
 
@@ -338,7 +332,7 @@ TimeoutStopSec=15
 # symlink from prior installs when it enables the unit.
 WantedBy=graphical-session.target
 ```
-`install.sh`: `uv sync`, prefetch models, run a 5-second CUDA smoke test, install+`daemon-reload`+enable+start the unit, print tmux snippet and usage. Idempotent. The daemon starts **not-listening** and **not-loaded** — it must never hot-mic on boot and loads no models until the first arm (§4.2bis, ~0 VRAM at idle); `voicectl start`/`toggle` arms it (the first arm each session also loads the models, ~1–3 s).
+`install.sh`: `uv sync`, prefetch models, run a 5-second CUDA smoke test, install+`daemon-reload`+enable+start the unit, print usage and the Hyprland keybind instruction. Idempotent. The daemon starts **not-listening** and **not-loaded** — it must never hot-mic on boot and loads no models until the first arm (§4.2bis, ~0 VRAM at idle); `voicectl start`/`toggle` arms it (the first arm each session also loads the models, ~1–3 s).
 
 ### 4.10 Phase 2 (implement after all tests pass — small, do it in the same run)
 
@@ -347,7 +341,7 @@ Hyprland keybinding: append to nothing — instead create `hypr-binds.conf` in t
 bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle
 bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite
 ```
-(`Ctrl+Alt+Super+D` = big/normal model; `Alt+Super+D` = little/lite model, §4.2ter.) Print an instruction to `source` it from `~/.config/hypr/hyprland.conf`. Do NOT modify the user's Hyprland config automatically. (Richer overlay UI is out of scope; state file + tmux status is the UI for now.)
+(`Ctrl+Alt+Super+D` = big/normal model; `Alt+Super+D` = little/lite model, §4.2ter.) Print an instruction to `source` it from `~/.config/hypr/hyprland.conf`. Do NOT modify the user's Hyprland config automatically. (Richer overlay UI is out of scope; state file + toasts are the UI for now.)
 
 ---
 
@@ -361,7 +355,7 @@ bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite
 6. Prefetch models; run tests (§6); install service.
 7. Commit everything to git on `main` with a sensible message. (User's git identity is already configured.)
 
-Beware the shell aliases (§2): always invoke `/home/dustin/.local/bin/uv`, `.venv/bin/python`, `/usr/bin/tmux` with full paths in Bash calls.
+Beware the shell aliases (§2): always invoke `/home/dustin/.local/bin/uv`, `.venv/bin/python` with full paths in Bash calls.
 
 ---
 
@@ -381,16 +375,16 @@ Assert: (a) partials start arriving < 1.5 s after speech onset and update at lea
 
 **T2 — textproc unit tests:** blocklist filtering, whitespace, min-length, punctuation preserved.
 
-**T3 — Full E2E with virtual mic and tmux (`e2e_virtual_mic.sh`):**
+**T3 — Full E2E with virtual mic (`e2e_virtual_mic.sh`):**
 1. `pactl load-module module-null-sink sink_name=vt_test media.class=Audio/Sink` → play into it with `pw-cat --playback --target vt_test`, and point the daemon at the monitor: run daemon with config override `input device = monitor of vt_test` (RealtimeSTT `input_device_index` — resolve the PyAudio index of `vt_test.monitor`; a helper that lists PyAudio devices and greps is required). Alternatively `pactl set-default-source vt_test.monitor` for the test and restore the original default after (record it first!).
-2. Start daemon with `backend="tmux"`, `tmux_target="voicetest:0.0"`; `/usr/bin/tmux new-session -d -s voicetest 'cat > /tmp/claude-1000/.../vt_out.txt'` — a pane running `cat` so typed keys land in a file (or just capture-pane; `cat >file` is more deterministic).
+2. Start daemon with `backend="null"` (types nothing, spawns no subprocess — an automated run can never keystroke into the developer's focused window); finals are verified through the state file instead.
 3. `voicectl start`; play `utt_pause.wav` then `utt_multi.wav`; wait; `voicectl stop`.
-4. Assert file/pane contains fuzzy-matched text of ALL segments incl. post-pause half; assert state.json showed partials (poll it during playback and record snapshots); assert the in-flight utterance's final IS typed after `voicectl stop` (the graceful drain lets the final model finish — §4.2 #2), then assert nothing FURTHER is typed while playing one more WAV after the drain completes (toggle-off gates output once disarmed).
-5. Cleanup: unload module, restore default source, kill tmux session. Use `trap` — the test MUST NOT leave the user's default source switched.
+4. Poll `state.json` (`last_final`) and fuzzy-match ALL segments incl. post-pause half; assert state.json showed partials (poll it during playback and record snapshots); assert the in-flight utterance's final IS recorded after `voicectl stop` (the graceful drain lets the final model finish — §4.2 #2), then assert no FURTHER final appears while playing one more WAV after the drain completes (toggle-off gates output once disarmed).
+5. Cleanup: unload module, restore default source. Use `trap` — the test MUST NOT leave the user's default source switched.
 
-**T4 — Idle stability:** with daemon listening and silence (no playback) for 120 s, assert: no finals typed (hallucination guard works — this catches Whisper's silence-hallucination), no crash, CPU of daemon process < 25% of one core on average (`pidstat` or /proc sampling).
+**T4 — Idle stability:** with daemon listening and silence (no playback) for 120 s, assert: no new final in `state.json` (hallucination guard works — this catches Whisper's silence-hallucination), no crash, CPU of daemon process < 25% of one core on average (`pidstat` or /proc sampling).
 
-**T5 — Real-hardware smoke (cannot be automated — leave to user):** README's "First run" section tells the user exactly: `systemctl --user start voice-typing`, `voicectl toggle`, speak, watch tmux status, `voicectl toggle`. List expected behavior and the two tunables that matter (`post_speech_silence_duration`, `silero_sensitivity`).
+**T5 — Real-hardware smoke (cannot be automated — leave to user):** README's "First run" section tells the user exactly: `systemctl --user start voice-typing`, `voicectl toggle`, speak (watch the hyprctl toasts / `voicectl status`), `voicectl toggle`. List expected behavior and the two tunables that matter (`post_speech_silence_duration`, `silero_sensitivity`).
 
 **T6 — GPU lifecycle (lazy load):** (a) **idle, never armed:** right after daemon boot with no arm, `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` MUST NOT list the daemon PID at all (~0 VRAM — the lazy-load guarantee of §4.2bis). (b) **armed:** after `voicectl start`, the daemon PID appears with used_memory ~1–5 GB. (c) **disarmed (not quit):** after `voicectl stop`, the PID + memory REMAIN resident (instant re-arm). (d) **disarmed then idle ≥ `auto_unload_idle_seconds`:** the PID disappears from `nvidia-smi` again (~0 VRAM reclaimed); a later `voicectl start` reloads (~1–3 s) and the PID reappears.
 
@@ -404,11 +398,11 @@ Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while spea
 
 1. T1–T4, T6 pass, demonstrated by actual command output (not claimed).
 2. A pause mid-dictation of ≥3 s loses zero words and does not end the session (T1b, T3).
-3. Live partials observable in `state.json` while audio plays (T3) and surfaced in the documented tmux status snippet.
+3. Live partials observable in `state.json` while audio plays (T3).
 4. Only finalized text reaches the target; nothing typed while toggled off.
 5. Daemon survives ≥2 min of silence with no hallucinated output and trivial CPU use.
 6. `voicectl toggle/start/stop/status/quit` all work; daemon runs as a systemd user service, starts un-armed (not listening) and **un-loaded** (~0 VRAM until first arm, §4.2bis), auto-restarts on failure.
-7. Everything committed to git; README documents: install, hotkey snippet, tmux status snippet, config tuning table, troubleshooting (cuDNN libs, PyAudio device, wtype vs ydotool), and how to switch to CPU-only mode.
+7. Everything committed to git; README documents: install, hotkey snippet, feedback surfaces, config tuning table, troubleshooting (cuDNN libs, PyAudio device, wtype vs ydotool), and how to switch to CPU-only mode.
 8. No network access needed at runtime (models cached by install).
 9. After `auto_unload_idle_seconds` of disarmed idle, the recorder unloads (~0 VRAM, verified via `nvidia-smi`) and a later arm reloads it; the teardown is bounded (completes in seconds, no 90 s hang).
 10. **Lite mode (§4.2ter):** `voicectl toggle-lite` arms in lite mode using ONLY `lite_model` (the large model never loads — verified ~half the VRAM of normal mode on `nvidia-smi`); `voicectl toggle` arms in normal mode; switching between them costs one bounded reload; `status` and `state.json` report `mode`; lite uses its own shorter `post_speech_silence_duration` (the silence gate is the perceived bottleneck — §4.2ter) so it is observably snappier end-to-end, not just faster at transcription; both modes honor the graceful drain (§4.2 #2).

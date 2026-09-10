@@ -119,21 +119,20 @@ class AsrConfig:
 class OutputConfig:
     """[output] — typing-output backend selection."""
 
-    backend: str = "wtype"     # "wtype" | "ydotool" | "tmux"
-    tmux_target: str = ""      # used only when backend == "tmux", e.g. "voicetest:0.0"
+    backend: str = "wtype"     # "wtype" | "ydotool" | "null" (types nothing)
     append_space: bool = True  # daemon appends one trailing space to each final
 
     def __post_init__(self) -> None:
         # backend VALUE validation (bugfix Issue 3 / VT-005 precedent): only "wtype" | "ydotool" |
-        # "tmux" are valid. A typo such as backend="wtyp" is a valid str, but it would otherwise flow
+        # "null" are valid. A typo such as backend="wtyp" is a valid str, but it would otherwise flow
         # into typing_backends.make_backend() -> VoiceTypingDaemon.__init__() and raise there — under
         # systemd that is a Restart=on-failure crash-loop discoverable only via journalctl. Reject it
         # here at load time with a clear ValueError (the TYPE is correct, the VALUE is not — mirrors
         # AsrConfig's device validation). make_backend() retains its own ValueError as a defensive
         # second gate.
-        if self.backend not in ("wtype", "ydotool", "tmux"):
+        if self.backend not in ("wtype", "ydotool", "null"):
             raise ValueError(
-                f'[output] backend must be "wtype", "ydotool", or "tmux", got {self.backend!r}'
+                f'[output] backend must be "wtype", "ydotool", or "null", got {self.backend!r}'
             )
 
 
@@ -145,7 +144,7 @@ class FeedbackConfig:
     hypr_notify: bool = True   # hyprctl notify one-liner for start/final/stop
     notify_ms: int = 2500      # hyprctl notify duration (ms)
     notify_on_final: bool = True  # also pop a hyprctl popup per final ("✔ <text>")? The text is
-                                  # already typed into the focused window + shown live in the tmux
+                                  # already typed into the focused window, so this popup is
                                   # status line, so this is redundant for most setups — set False to
                                   # keep only the brief Recording / Recording Stopped toasts.
                                   # hypr_notify=False still wins (suppresses ALL popups).

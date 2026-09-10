@@ -14,12 +14,12 @@
 #   (4) prefetch models                      -> ~/.cache/huggingface (idempotent; warn-only on fail)
 #   (5) install + daemon-reload + enable + restart the systemd user unit
 #   (6) copy config.toml to $XDG_CONFIG_HOME/voice-typing/ IF ABSENT
-#   (7) print usage + tmux status snippet + Hyprland source instruction
+#   (7) print usage + Hyprland keybind instruction
 #
 # The daemon starts NOT-listening (PRD §4.9) — it never hot-mics on boot; `voicectl toggle` arms it.
 #
 # This script's stdout IS the user-facing install/usage quick-start (Mode A docs). README (P2.M1.T2.S1)
-# copies the usage/tmux/hypr snippets verbatim — keep them stable.
+# copies the usage/hypr snippets verbatim — keep them stable.
 #
 # FULL PATHS are used for uv/python because the user's zsh aliases them (PRD §2). This is bash, not zsh.
 set -euo pipefail
@@ -191,7 +191,7 @@ else
   echo "    installed launcher $LAUNCHER -> $REPO/.venv/bin/voicectl"
 fi
 
-# --- (7) print usage + tmux snippet + hypr instruction --------------------------------
+# --- (7) print usage + hypr instruction ----------------------------------------------
 echo "==> [6/7] daemon status"
 # Give systemd a beat to mark the unit active, then report.
 if systemctl --user is-active --quiet voice-typing.service; then
@@ -209,11 +209,7 @@ echo
 echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|quit|toggle-lite|start-lite"
 echo "          (bind Ctrl+Alt+Super+D -> voicectl toggle;  Alt+Super+D -> voicectl toggle-lite; see the Hyprland note below)"
 echo
-echo "tmux status (add these TWO lines to ~/.tmux.conf — we never edit it for you):"
-echo '  set -g status-interval 1'
-echo "  set -g status-right \"#($REPO/voice_typing/status.sh)\""
-echo
-echo "Hyprland — source the repo's hypr-binds.conf from ~/.config/hypr/hyprland.conf (add this line):"
+ echo "Hyprland — source the repo's hypr-binds.conf from ~/.config/hypr/hyprland.conf (add this line):"
 echo "  source = $REPO/hypr-binds.conf"
 echo
 echo "logs   : journalctl --user -u voice-typing -f"

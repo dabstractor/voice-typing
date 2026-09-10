@@ -30,7 +30,7 @@
 [asr]   # speech recognition: models, device, voice-activity-detection timing
 
 final_model                  = "distil-large-v3"  # final, high-accuracy transcription model (faster-whisper). Sets the quality and latency of the text that actually gets typed.
-realtime_model               = "small.en"          # faster model used for live partial previews (shown in the tmux status line while you speak).
+realtime_model               = "small.en"          # faster model used for live partial previews (shown in voicectl status while you speak).
 lite_model                   = "small.en"          # PRD §4.2ter: the SINGLE model loaded in LITE mode (`voicectl toggle-lite` / SUPER+ALT+D) — used for both partials AND finals, so the large model never loads. ~half the VRAM + faster finals, lower accuracy. Good for short quips/prompts where the big model's latency isn't worth it.
 language                     = "en"                # ISO-639-1 code, e.g. "en", "es", "fr", "de".
 device                       = "cuda"              # "cuda" | "cpu". The daemon AUTO-FALLS-BACK to "cpu" (and smaller models) at startup if ctranslate2 finds no usable CUDA device; see voice_typing/cuda_check.py (PRD 4.4). Usually leave this as "cuda".
@@ -43,8 +43,7 @@ auto_unload_idle_seconds     = 1800.0              # after this many seconds DIS
 
 [output]   # how typed text leaves the daemon
 
-backend     = "wtype"   # "wtype" (Wayland virtual keyboard, default) | "ydotool" (kernel uinput, TTY/X fallback) | "tmux" (send-keys to a pane; used for tests and SSH). The daemon auto-falls-back from wtype to ydotool on failure.
-tmux_target = ""        # used ONLY when backend = "tmux". "" = the active pane. A bare session name (e.g. "voicetest") targets that session's active pane and is portable across tmux base-index settings; a full target like "session:window.pane" works too but window numbers depend on base-index (default 0; tmux's common base-index=1 makes window 0 invalid). Ignored for wtype/ydotool.
+backend     = "wtype"   # "wtype" (Wayland virtual keyboard, default) | "ydotool" (kernel uinput, TTY/X fallback) | "null" (types nothing; used by the headless E2E tests). The daemon auto-falls-back from wtype to ydotool on failure.
 append_space = true     # append one trailing space after each final so consecutive utterations flow as words. false = type text verbatim.
 
 
@@ -53,7 +52,7 @@ append_space = true     # append one trailing space after each final so consecut
 state_file  = ""        # "" (empty) -> resolved at runtime to $XDG_RUNTIME_DIR/voice-typing/state.json (set by systemd user sessions). Set an absolute path to override. If empty AND XDG_RUNTIME_DIR is unset, the daemon raises at write time (no silent fallback). Leave empty for normal use.
 hypr_notify = true      # show a hyprctl notify one-liner for start/final/stop. Requires Hyprland; harmless elsewhere (the notify call is skipped when false).
 notify_ms   = 2500      # how long the hyprctl notification stays on screen, in milliseconds.
-notify_on_final = true  # also pop a hyprctl popup for each FINALIZED utterance ("✔ <text>")? The text is already typed into the focused window + shown live in the tmux status line, so this is redundant for most setups — set false to keep only the brief Recording / Recording Stopped toasts. hypr_notify=false still suppresses EVERYTHING.
+notify_on_final = true  # also pop a hyprctl popup for each FINALIZED utterance ("✔ <text>")? The text is already typed into the focused window, so this is redundant for most setups — set false to keep only the brief Recording / Recording Stopped toasts. hypr_notify=false still suppresses EVERYTHING.
 
 
 [filter]   # post-recognition text cleanup (consumed by textproc.clean)

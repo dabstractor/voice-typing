@@ -11,8 +11,7 @@
 # mic (no null-sink — it listens to ambient room silence), and asserts the three T4 properties:
 #   (a) NO hallucinated finals typed — the P1.M2.T2.S1 blocklist + VAD gating suppress Whisper's
 #       silence-hallucination ("thank you." / "thanks for watching." / "you." / "bye."). Detected
-#       via the tmux backend UNCHANGED (capture-pane reads the tty echo; G-CAPTURE) AND the ISOLATED
-#       state.json `last_final` UNCHANGED from its initial "".
+#       via the ISOLATED state.json: `last_final` UNCHANGED from its initial "" and `partial` empty.
 #   (b) NO crash — `kill -0 $DAEMON_PID` after the 120 s window.
 #   (c) avg CPU < 25 % of ONE core — /proc/<pid>/stat utime+stime (fields 14/15 via the last-`)`
 #       split) summed over the daemon's PROCESS TREE at T0/T1, divided by elapsed wall-seconds.
@@ -66,7 +65,7 @@
 # all 4 T6 states, voicectl status, unit grep, per-criterion PASS/FAIL) — paste it verbatim into
 # tests/ACCEPTANCE.md (criteria 5/6/8/9). On FAIL it prints the daemon.log tail.
 #
-# Real stack: CUDA Whisper + tmux. Heavy (~5-8 min: 2 cold inits ~3-4 min each + the fixed 120 s
+# Real stack: CUDA Whisper. Heavy (~5-8 min: 2 cold inits ~3-4 min each + the fixed 120 s
 # T4 window + idle-unload waits). Run explicitly; NOT collected by the fast pytest suite.
 #   cd /home/dustin/projects/voice-typing
 #   systemctl --user stop voice-typing 2>/dev/null || true   # preflight will refuse if it's running
@@ -81,7 +80,7 @@
 # no pw-cat — G-NOSOURCE), so it listens to ambient silence on the real default mic. Ambient speech
 # could produce a REAL final and spuriously fail the "no finals" assertion.
 #
-# CLEANUP: a trap guarantees the daemon is gone, the `vtidle` tmux session is gone, and temp dirs
+# CLEANUP: a trap guarantees the daemon is gone and temp dirs
 # are removed on ANY exit (PASS, error, Ctrl-C). No audio-source restore is needed (this test never
 # swaps it).
 #
@@ -102,9 +101,8 @@
 #   G-OTHER-APPS:        the GPU hosts unrelated compute apps (Chrome, a parallel test daemon) →
 #                        filter strictly by the daemon tree.
 #   G-UNARMED:           assert `listening: off` right after ready, BEFORE voicectl start.
-#   G-CAPTURE / G-IDLE-NO-TYPING: read typed text via `tmux capture-pane -p -S -` (the daemon types
-#                        literal keys with NO newline → pty canonical-mode buffers `cat > file`);
-#                        snapshot capture-pane + state.json last_final before/after the 120 s window.
+#   G-IDLE-NO-TYPING:    finals are read from the isolated state.json `last_final` (record_final
+#                        writes it); snapshot before/after the 120 s window.
 #   G-RUNTIME:           keep the REAL XDG_RUNTIME_DIR (PyAudio + the control socket need it; moving
 #                        it to a temp dir breaks PulseAudio → ALSA fallback → silence). Isolate
 #                        state.json via the config override.
@@ -114,8 +112,6 @@
 #                        inherits the SAME dataclass defaults → identical ASR pipeline except the
 #                        threshold (the desired isolation).
 #   G-PREFLIGHT:         refuse if voicectl status answers / systemctl --user is-active voice-typing.
-#   G-TMUX-NAME:         distinct session name `vtidle` (NOT T3's `voicetest`) so the two heavy
-#                        parallel tests never collide. ALWAYS /usr/bin/tmux (zsh aliases it).
 #   G-NOSOURCE:          do NOT swap the default audio source — simpler trap (no source restore).
 #   G-TIMEOUTS:          180 s daemon-ready per run (cold init + model loads, OFFLINE); the idle
 #                        window is FIXED at exactly 120 s (PRD §6 T4 — do not shorten). T6(d) POLL
@@ -135,15 +131,7 @@ VOICECTL="$REPO/.venv/bin/voicectl"
 PY="$REPO/.venv/bin/python"
 LAUNCH="$REPO/voice_typing/launch_daemon.sh"
 UNIT="$REPO/systemd/voice-typing.service"
-TMUX_BIN=/usr/bin/tmux
 NVIDIA_SMI=/usr/bin/nvidia-smi
-TMUX_SESS=vtidle
-# Bare session name (NOT 'vtidle:0.0'): this machine's tmux has window base-index=1, so the first
-# window is 'vtidle:1.0', not ':0.0'. A bare session name targets the session's active pane
-# regardless of base-index (verified for send-keys/capture-pane/kill-session), which is what the
-# daemon's TmuxBackend needs (it passes cfg.output.tmux_target straight to 'send-keys -t'). Same
-# convention as e2e_virtual_mic.sh.
-TMUX_TARGET="vtidle"
 IDLE_SECS=120                     # PRD §6 T4: 'silence for 120 s' (FIXED — do not shorten)
 CPU_LIMIT_PCT=25                  # < 25% of ONE core (PRD §6 T4; do NOT divide by nproc)
 VRAM_MIN_MIB=1024                 # PRD §6 T6: '~1 GB'
@@ -154,13 +142,6 @@ VRAM_MAX_MIB=5120                 # PRD §6 T6: '~5 GB'
 # `timeout` so a hang fails LOUD (exit 124) instead of stalling the whole heavy test. 30s is far
 # above any legit arm/disarm (the cold first-arm load is ~1-3s; status is lock-free and fast).
 VOICECTL_TIMEOUT=30
-
-# If this script runs INSIDE an existing tmux session, the inherited TMUX/TMUX_PANE env vars make
-# 'tmux new-session' misbehave ('error connecting to /usr/bin/tmux' / 'Permission denied'). Unset
-# them so every tmux call below (and the daemon's send-keys, which inherits this env) talks to the
-# default server cleanly. The tmux binary PATH is held in TMUX_BIN — NOT the TMUX env var — so
-# unsetting the env var does not clobber the path. (Same fix as e2e_virtual_mic.sh.)
-unset TMUX TMUX_PANE TMUX_TMPDIR
 
 # --- state (populated by setup; used by the trap) ---
 WORK=""
@@ -340,8 +321,6 @@ cleanup() {
   echo "--- cleanup ---"
   stop_daemon_run
   [ -z "${DAEMON_PID:-}" ] || echo "daemon stopped (pid=$DAEMON_PID)"
-  # kill the tmux session.
-  "$TMUX_BIN" kill-session -t "$TMUX_SESS" 2>/dev/null && echo "killed tmux session $TMUX_SESS"
   # remove temp files.
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
 }
@@ -356,21 +335,15 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # directly (it never hangs). Usage: voicectl start|stop|toggle|quit.
 voicectl() { timeout "$VOICECTL_TIMEOUT" "$VOICECTL" "$@"; }
 
-# Read typed text from the tmux pane via capture-pane (reads the tty ECHO, live; G-CAPTURE).
-# Drop blank lines + join wrapped lines into one space-separated string (same filter as T3).
-# The `|| true` makes an EMPTY pane yield "" instead of aborting under `set -e` (grep exits 1 when
-# every captured line is blank — the normal state before any text is typed).
-capture_pane() {
-  "$TMUX_BIN" capture-pane -t "$TMUX_SESS" -p -S - \
-    | grep -v '^[[:space:]]*$' \
-    | paste -sd ' ' \
-    || true
+# Read the daemon's last final from the isolated state.json (record_final writes it; G-IDLE-NO-TYPING).
+# Empty string when unset. The `|| true` keeps a missing/corrupt file from aborting under `set -e`.
+state_final() {
+  jq -r '.last_final // ""' "$1" 2>/dev/null || true
 }
 
 # --- preflight (G-PREFLIGHT / G-DEPS) ---
 have jq           || die "missing jq"
 [ -x "$NVIDIA_SMI" ] || die "missing $NVIDIA_SMI"
-[ -x "$TMUX_BIN" ]   || die "missing $TMUX_BIN"
 [ -x "$VOICECTL" ]   || die "missing $VOICECTL (run install / uv sync)"
 [ -x "$PY" ]         || die "missing $PY"
 [ -x "$LAUNCH" ]     || die "missing $LAUNCH"
@@ -383,7 +356,7 @@ if systemctl --user is-active voice-typing >/dev/null 2>&1; then
   die "voice-typing systemd service is active; stop it first: systemctl --user stop voice-typing"
 fi
 
-# --- setup (G-CONFIG / G-RUNTIME / G-TMUX-NAME) ---
+# --- setup (G-CONFIG / G-RUNTIME) ---
 # G-CONFIG: temp XDG_CONFIG_HOME dirs with minimal config.toml overriding ONLY [output]+[feedback];
 # [asr]/[filter]/[log] inherit dataclass defaults (== repo config.toml) -> same production ASR.
 # Run 1: default auto_unload_idle_seconds (1800s inherited). Run 2: same + [asr] override to 5.0.
@@ -399,8 +372,7 @@ WORK="$(mktemp -d)"
 mkdir -p "$WORK/config/voice-typing"
 cat > "$WORK/config/voice-typing/config.toml" <<EOF
 [output]
-backend     = "tmux"
-tmux_target = "$TMUX_TARGET"
+backend     = "null"
 
 [feedback]
 state_file  = "$WORK/state.json"
@@ -412,8 +384,7 @@ EOF
 mkdir -p "$WORK/config_short/voice-typing"
 cat > "$WORK/config_short/voice-typing/config.toml" <<EOF
 [output]
-backend     = "tmux"
-tmux_target = "$TMUX_TARGET"
+backend     = "null"
 
 [feedback]
 state_file  = "$WORK/state_short.json"
@@ -422,13 +393,6 @@ hypr_notify = false
 [asr]
 auto_unload_idle_seconds = 5.0
 EOF
-CAPFILE="$WORK/vt_out.txt"
-rm -f "$CAPFILE"
-# The pane runs 'cat > file' (honoring the contract). capture-pane reads the tty echo mid-stream
-# (G-CAPTURE); the file is only an end-of-run cross-check after a C-d flush.
-"$TMUX_BIN" new-session -d -s "$TMUX_SESS" "cat > '$CAPFILE'" || die "tmux new-session failed"
-# Make the pane wide so typed text does not wrap.
-"$TMUX_BIN" resize-window -t "$TMUX_SESS" -x 1000 2>/dev/null || true
 
 # =====================================================================
 # RUN 1 — default config (auto_unload_idle_seconds=1800): T6(a) + criterion-8 + criterion-6 +
@@ -490,22 +454,18 @@ else
   T6_OK=1
 fi
 
-typed_before="$(capture_pane)"
-last_final_before="$(jq -r .last_final "$WORK/state.json" 2>/dev/null || true)"
+typed_before="$(state_final "$WORK/state.json")"
 sleep "$IDLE_SECS"
 cpu1="$(cpu_tree_seconds "$DAEMON_PID")"; wall1="$(date +%s)"
-typed_after="$(capture_pane)"
-last_final_after="$(jq -r .last_final "$WORK/state.json" 2>/dev/null || true)"
+typed_after="$(state_final "$WORK/state.json")"
 
-# (a) no hallucinated finals typed (capture-pane UNCHANGED AND state.json last_final UNCHANGED).
-if [ "$typed_before" = "$typed_after" ] && [ "$last_final_before" = "$last_final_after" ]; then
-  echo "[PASS] criterion 5 (no hallucination): no finals typed, last_final unchanged across ${IDLE_SECS}s"
+# (a) no hallucinated finals: state.json last_final UNCHANGED across the idle window.
+if [ "$typed_before" = "$typed_after" ]; then
+  echo "[PASS] criterion 5 (no hallucination): no finals, last_final unchanged across ${IDLE_SECS}s"
 else
-  echo "[FAIL] criterion 5 (hallucination guard): capture-pane or last_final CHANGED"
-  echo "  typed before: '$typed_before'"
-  echo "  typed after:  '$typed_after'"
-  echo "  last_final before: '$last_final_before'"
-  echo "  last_final after:  '$last_final_after'"
+  echo "[FAIL] criterion 5 (hallucination guard): last_final CHANGED"
+  echo "  before: '$typed_before'"
+  echo "  after:  '$typed_after'"
   IDLE_OK=1
 fi
 # (b) no crash.

@@ -43,7 +43,7 @@ def test_repo_config_toml_has_no_extra_keys():
             "auto_stop_idle_seconds",
             "auto_unload_idle_seconds",   # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)
         },
-        "output": {"backend", "tmux_target", "append_space"},
+        "output": {"backend", "append_space"},
         "feedback": {"state_file", "hypr_notify", "notify_ms", "notify_on_final"},
         "filter": {"min_chars", "blocklist"},
         "log": {"level"},

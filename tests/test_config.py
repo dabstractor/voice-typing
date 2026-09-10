@@ -52,7 +52,6 @@ def test_defaults_match_prd_4_5():
     assert cfg.asr.auto_unload_idle_seconds == 1800.0  # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)
     # [output]
     assert cfg.output.backend == "wtype"
-    assert cfg.output.tmux_target == ""
     assert cfg.output.append_space is True
     # [feedback]
     assert cfg.feedback.state_file == ""
@@ -120,7 +119,7 @@ def test_from_toml_empty_dict_is_all_defaults():
 def test_from_toml_unknown_key_raises():
     """A typo'd key must surface as a loud TypeError, not be silently ignored."""
     with pytest.raises(TypeError):
-        VoiceTypingConfig.from_toml({"output": {"bakcend": "tmux"}})
+        VoiceTypingConfig.from_toml({"output": {"bakcend": "wtype"}})
 
 
 def test_from_toml_section_not_a_table_raises():
@@ -185,7 +184,7 @@ def test_valid_device_values_load():
 
 # ---------------------------------------------------------------------------
 # output.backend enum validation (bugfix Issue 3 / VT-005 precedent): only "wtype" |
-# "ydotool" | "tmux" are valid. A typo such as "wtyp" is a valid str but would otherwise
+# "ydotool" | "null" are valid. A typo such as "wtyp" is a valid str but would otherwise
 # flow into typing_backends.make_backend() and raise there — under systemd a
 # Restart=on-failure crash-loop. Reject at load with a clear ValueError (TYPE correct,
 # VALUE not — mirrors asr.device). make_backend() keeps its own ValueError as a 2nd gate.
@@ -193,15 +192,15 @@ def test_valid_device_values_load():
 
 
 def test_invalid_backend_value_raises():
-    """bugfix Issue 3: a backend value outside {wtype, ydotool, tmux} is rejected at load with a ValueError naming it."""
+    """bugfix Issue 3: a backend value outside {wtype, ydotool, null} is rejected at load with a ValueError naming it."""
     for bad in ("wtyp", "xterm", "WTYPE", "", "auto", "gpu"):
         with pytest.raises(ValueError, match="backend"):
             VoiceTypingConfig.from_toml({"output": {"backend": bad}})
 
 
 def test_valid_backend_values_load():
-    """bugfix Issue 3: 'wtype', 'ydotool', 'tmux' are the accepted backend values and round-trip through TOML."""
-    for good in ("wtype", "ydotool", "tmux"):
+    """bugfix Issue 3: 'wtype', 'ydotool', 'null' are the accepted backend values and round-trip through TOML."""
+    for good in ("wtype", "ydotool", "null"):
         cfg = VoiceTypingConfig.from_toml({"output": {"backend": good}})
         assert cfg.output.backend == good
 
@@ -315,13 +314,12 @@ def test_from_toml_file_reads_toml(tmp_path):
     """from_toml_file parses a real TOML file (binary mode — tomllib requirement)."""
     f = tmp_path / "c.toml"
     f.write_text(
-        '[asr]\nlanguage = "fr"\n[output]\nbackend = "tmux"\ntmux_target = "voicetest:0.0"\n',
+        '[asr]\nlanguage = "fr"\n[output]\nbackend = "null"\n',
         encoding="utf-8",
     )
     cfg = VoiceTypingConfig.from_toml_file(f)
     assert cfg.asr.language == "fr"
-    assert cfg.output.backend == "tmux"
-    assert cfg.output.tmux_target == "voicetest:0.0"
+    assert cfg.output.backend == "null"
 
 
 def test_invalid_toml_propagates(tmp_path):

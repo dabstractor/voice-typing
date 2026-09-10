@@ -1,9 +1,9 @@
 # voice-typing
 
 Fully-local voice typing for Linux. Speak into your mic and the recognized text is
-typed into whatever window or tmux pane has focus. Built on RealtimeSTT
-(faster-whisper / CTranslate2 on CUDA). Intended for an Arch + Wayland / Hyprland +
-tmux desktop. The recognizer runs 100% on your machine; nothing is sent to a cloud.
+typed into whatever window has focus. Built on RealtimeSTT
+(faster-whisper / CTranslate2 on CUDA). Intended for an Arch + Wayland / Hyprland
+desktop. The recognizer runs 100% on your machine; nothing is sent to a cloud.
 Offline mode is enforced: the launch wrapper (`launch_daemon.sh`) sets `HF_HUB_OFFLINE=1`,
 so models load from the local cache with zero runtime network calls (the install prefetches
 them).
@@ -17,7 +17,6 @@ the repo. It assumes a Linux power user who wants exact commands, not hand-holdi
 - NVIDIA GPU with CUDA drivers. Optional: the daemon auto-falls-back to CPU (slower).
 - Wayland / Hyprland, for the default `wtype` typing backend and `hyprctl notify`.
 - PipeWire (the daemon records the system default source).
-- `tmux`, optional, only for the live partials in the status line.
 - `portaudio` (PyAudio build dep). Check it with `pacman -Q portaudio`.
 
 ## Install
@@ -40,8 +39,7 @@ The script is idempotent and re-runnable. It does, in order:
 5. Installs, daemon-reloads, enables, and restarts the systemd user unit.
 6. Copies `config.toml` to `~/.config/voice-typing/config.toml` if absent (never
    overwrites an existing one).
-7. Prints the usage line, the tmux snippet, the Hyprland source line, and the logs
-   command.
+7. Prints the usage line, the Hyprland source line, and the logs command.
 
 When install.sh finishes, the daemon is **running, NOT listening, and NOT loaded**
 (~0 VRAM). It never hot-mics on boot and loads no models until the first
@@ -50,7 +48,7 @@ When install.sh finishes, the daemon is **running, NOT listening, and NOT loaded
 ## First run
 
 A real-microphone smoke you run by hand. Full paths are used because the desktop zsh
-aliases `tmux`, `python3`, and `pip`.
+aliases `python3` and `pip`.
 
 The first `voicectl toggle` (or `start`) each session takes ~1-3s to load the
 models — `voicectl` prints `loading models… (first arm, ~1–3 s)` to stderr while
@@ -60,15 +58,15 @@ disarmed; see [Model lifecycle & VRAM](#model-lifecycle--vram)).
 ```
 systemctl --user start voice-typing
 /home/<you>/projects/voice-typing/.venv/bin/voicectl toggle   # arms the mic
-# speak. Watch the tmux status line for live partials, or the hyprctl toasts:
+# speak. Watch the hyprctl toasts, or poll `voicectl status` / `state.json` for live partials:
 #   the first arm shows "Loading…" then "Recording"; later arms just "Recording";
 #   disarming shows "Recording Stopped" (the ✔ final popup is optional — see feedback.notify_on_final).
 /home/<you>/projects/voice-typing/.venv/bin/voicectl toggle   # disarms
 ```
 
-Expected behavior while listening: live partial words appear in the tmux status
-line as you speak; shortly after you pause, the finalized text is typed into the
-focused window. A pause does **not** end the session. The recognizer segments
+Expected behavior while listening: hyprctl toasts track Recording / Recording Stopped
+and the finalized text is typed into the
+focused window as you pause. A pause does **not** end the session. The recognizer segments
 utterances and keeps listening; only `voicectl stop` (or toggle off) disarms the
 mic.
 
@@ -108,7 +106,7 @@ runs) — ~half the VRAM and markedly faster finals, at lower accuracy. Good for
 (URLs, shell commands, quick replies) where the big model's latency isn't worth it. Each key
 toggles its own mode on/off; to switch modes, press the active key to stop, then the other key to
 start in its mode (switching reloads the model set, ~1–3 s, same as a cold first arm). The mode is
-shown in `voicectl status` and the tmux status line (a `⚡` prefix in lite).
+shown in `voicectl status` (a `⚡` prefix marks lite).
 
 Hyprland uses the last matching bind for a given MODS+key. Source this file LAST
 (at the bottom of `hyprland.conf`) so its binds win. If a bind is inert, your config may
@@ -129,25 +127,22 @@ feel instant rather than merely transcribing a little faster. Arm it with `voice
 one is resident tears the recorder down and respawns it (~1–3 s reload, same as a cold first
 arm) — so switching modes costs one reload. Both modes share the graceful drain on stop
 (§4.2 #2), the 30 s auto-stop, and idle-unload. The armed mode shows in `voicectl status`
-(`mode:`), `state.json` (`mode`), and the tmux status line (a `⚡` prefix in lite). See
+(`mode:`) and `state.json` (`mode`). See
 [Hotkey](#hotkey-hyprland) for the binds and [Model lifecycle & VRAM](#model-lifecycle--vram).
 
-## tmux status line
+## Feedback surfaces
 
-Add these two lines to `~/.tmux.conf` (install.sh prints them; the repo never edits
-your tmux.conf):
+The daemon publishes its live state to a JSON file, written atomically on every change:
 
-```
-set -g status-interval 1
-set -g status-right "#(/home/<you>/projects/voice-typing/voice_typing/status.sh)"
-```
-
-Result: while listening, `status-right` shows the current text (live partials while you
-speak, then the finalized text once it's typed) preceded by a microphone emoji,
-truncated to 60 characters with a trailing `…` on overflow (widen it with
-`tmux set-environment VOICE_TYPING_STATUS_MAX 80`). When idle it is blank. The text
-comes from the daemon's atomic writes to a state file at
-`$XDG_RUNTIME_DIR/voice-typing/state.json`, which `status.sh` reads each second.
+- **State file** — `$XDG_RUNTIME_DIR/voice-typing/state.json` (override with
+  `feedback.state_file`). Fields: `listening`, `phase` (`unloaded`/`loading`/`idle`/
+  `listening`/`speaking`), `models_loaded`, `mode` (`normal`/`lite`), `partial` (the
+  latest live partial; overwritten with the finalized text when an utterance finalizes),
+  `last_final`, and `ts`. Poll it with `jq` for your own UI (waybar, conky, …).
+- **`voicectl status`** — human-readable one-shot of the same state (adds the loaded
+  model names and the `⚡` lite marker).
+- **hyprctl toasts** — `Loading…` on a cold first arm, `Recording` / `Recording
+  Stopped` on arm/disarm, and (optional, `feedback.notify_on_final`) `✔ <text>` per final.
 
 ## Configuration
 
@@ -172,10 +167,9 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `asr.realtime_model` | `"small.en"` | the fast model that produces live partials. |
 | `asr.lite_model` | `"small.en"` | the SINGLE model loaded in **lite mode** (`toggle-lite` / Alt+Super+D) — used for both partials AND finals, so the large model never loads. ~half VRAM + faster finals, lower accuracy. |
 | `asr.language` | `"en"` | ISO-639-1 code. |
-| `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"tmux"`. `wtype` auto-falls-back to `ydotool`. |
-| `output.tmux_target` | `""` | pane target, used only when `backend="tmux"`, e.g. `"voicetest:0.0"`. |
+| `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"null"` (types nothing; used by the headless E2E tests). `wtype` auto-falls-back to `ydotool`. |
 | `output.append_space` | `true` | append one trailing space after each final. |
-| `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each final's text (`✔ <text>`). Set `false` to keep only the brief `Recording` / `Recording Stopped` toasts — the text is already typed into the focused window and shown in the tmux status line, so the final popup is redundant. |
+| `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each final's text (`✔ <text>`). Set `false` to keep only the brief `Recording` / `Recording Stopped` toasts — the text is already typed into the focused window, so the final popup is redundant. |
 | `feedback.notify_ms` | `2500` | how long hyprctl popups stay on screen (ms). Lower for a brief start/stop flash. |
 | `feedback.hypr_notify` | `true` | master on/off for ALL hyprctl popups. `false` suppresses the start/stop toasts too (`notify_on_final` only adds the per-final ✔ popup; this is the global kill switch). |
 | `filter.min_chars` | `2` | finals shorter than this are dropped. |
@@ -284,8 +278,8 @@ fails on a given window, the daemon logs a warning and retries once with `ydotoo
 (uinput). `ydotool` needs `ydotoold` running; on this machine it is an enabled user
 service.
 
-To force a single backend, set `[output] backend = "ydotool"` (or `"tmux"` for a
-specific pane). Restart the daemon after editing.
+To force a single backend, set `[output] backend = "ydotool"` (or `"null"` to disable
+typing entirely — finals still appear in the state file). Restart the daemon after editing.
 
 ## Logs, status, stopping
 

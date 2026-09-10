@@ -7,7 +7,7 @@ Pure-Python, subprocess.run MOCKED: no display, no ydotoold, NO real keystrokes.
 subprocess.run is monkeypatched for every test via the `recorder` fixture, so each call
 is captured (argv + kwargs) and never reaches the OS. This is the test harness for
 typing_backends.py (P1.M3.T1.S1): it pins the three PRD §4.3 command lists (wtype /
-ydotool --key-delay 2 / tmux send-keys -t -l --) and the wtype->ydotool auto-fallback
+ydotool --key-delay 2 / null no-op) and the wtype->ydotool auto-fallback
 contract (PRD §4.3 + §8 risk "wtype fails on some window") before the daemon
 (P1.M4.T1.S2) is wired.
 
@@ -22,7 +22,7 @@ import pytest
 
 from voice_typing.config import OutputConfig
 from voice_typing.typing_backends import (
-    TmuxBackend,
+    NullBackend,
     TypingBackend,
     WtypeBackend,
     YdotoolBackend,
@@ -46,7 +46,7 @@ class _Recorder:
 
     By default each call returns CompletedProcess(returncode=0) (success under
     check=True). Configure failures with raise_on(argv[0], exc): the first element
-    of argv selects the behavior ("wtype" / "ydotool" / "/usr/bin/tmux").
+    of argv selects the behavior ("wtype" / "ydotool").
     """
 
     def __init__(self) -> None:
@@ -137,60 +137,15 @@ def test_ydotool_passes_check_true(recorder):
 
 
 # ---------------------------------------------------------------------------
-# TmuxBackend — /usr/bin/tmux send-keys -t <target> -l -- text (PRD §4.3)
+# NullBackend — types nothing (headless E2E verifies finals via state.json)
 # ---------------------------------------------------------------------------
 
 
-def test_tmux_uses_full_bin_path(recorder):
-    # zsh aliases `tmux`; the FULL path is mandatory (system_context.md §1).
-    TmuxBackend(OutputConfig(backend="tmux", tmux_target="s:0.0")).type_text("hi")
-    assert recorder.argvs[0][0] == "/usr/bin/tmux"
-
-
-def test_tmux_send_keys_with_dash_l(recorder):
-    # `-l` = literal text (no key-name interpretation, no trailing Enter).
-    TmuxBackend(OutputConfig(backend="tmux", tmux_target="s:0.0")).type_text("a;b")
-    assert recorder.argvs[0][:5] == (
-        "/usr/bin/tmux",
-        "send-keys",
-        "-t",
-        "s:0.0",
-        "-l",
-    )
-
-
-def test_tmux_invokes_exact_argv(recorder):
-    TmuxBackend(OutputConfig(backend="tmux", tmux_target="voicetest:0.0")).type_text(
-        "Hello 123"
-    )
-    assert recorder.argvs[0] == (
-        "/usr/bin/tmux",
-        "send-keys",
-        "-t",
-        "voicetest:0.0",
-        "-l",
-        "--",
-        "Hello 123",
-    )
-
-
-def test_tmux_uses_empty_target_when_unset(recorder):
-    # OutputConfig().tmux_target defaults to "" (active pane / explicit default).
-    TmuxBackend(OutputConfig(backend="tmux")).type_text("hi")
-    assert recorder.argvs[0] == (
-        "/usr/bin/tmux",
-        "send-keys",
-        "-t",
-        "",
-        "-l",
-        "--",
-        "hi",
-    )
-
-
-def test_tmux_passes_check_true(recorder):
-    TmuxBackend(OutputConfig(backend="tmux")).type_text("hi")
-    assert recorder.calls[0][1].get("check") is True
+def test_null_backend_spawns_no_subprocess(recorder):
+    # The null backend must not touch the OS at all — the E2E relies on that so a
+    # headless run never types into the developer's focused window.
+    NullBackend().type_text("hi")
+    assert recorder.argvs == []
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +161,7 @@ def test_typing_backend_is_abstract():
 def test_concrete_backends_are_typing_backends():
     assert isinstance(WtypeBackend(), TypingBackend)
     assert isinstance(YdotoolBackend(), TypingBackend)
-    assert isinstance(TmuxBackend(OutputConfig(backend="tmux")), TypingBackend)
+    assert isinstance(NullBackend(), TypingBackend)
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +182,9 @@ def test_make_backend_ydotool():
     assert isinstance(b, YdotoolBackend)
 
 
-def test_make_backend_tmux_carries_target():
-    b = make_backend(OutputConfig(backend="tmux", tmux_target="s:0.1"))
-    assert isinstance(b, TmuxBackend)
-    assert b._tmux_target == "s:0.1"
+def test_make_backend_null():
+    b = make_backend(OutputConfig(backend="null"))
+    assert isinstance(b, NullBackend)
 
 
 def test_make_backend_unknown_raises_value_error():

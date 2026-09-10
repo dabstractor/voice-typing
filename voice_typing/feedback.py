@@ -11,15 +11,15 @@ $XDG_RUNTIME_DIR/voice-typing/state.json (overridable via feedback.state_file):
     {"listening": true, "phase": "speaking", "models_loaded": true, "partial": "...", "last_final": "...", "ts": 1783718400.123}
 While models are not yet loaded (boot) or mid-load, phase is 'unloaded' or 'loading' and
 models_loaded is false (§4.2bis); once loaded, phase cycles idle/listening/speaking.
-Consumed by voice_typing/status.sh (the tmux status-right helper) and by voicectl status.
+Consumed by `voicectl status` and polled by the E2E tests (which verify finals through it).
 
 NOTIFICATION DISCIPLINE (the #1 contract — PRD §4.6 inline example is SUPERSEDED):
 Hyprland notifications are NOT replaceable by ID, so per-partial popups would stack into
-unreadable spam. Partials go to the state file ONLY (tmux shows them live). hyprctl popups
+unreadable spam. Partials go to the state file ONLY. hyprctl popups
 fire EXCLUSIVELY on:
   - listening-start  -> "Recording"     (set_listening False->True transition)
   - each final       -> "✔ <text>"      (record_final; GATED by notify_on_final — the text is
-                                          already typed + shown in tmux, so this popup is optional)
+                                          already typed into the focused window, so this popup is optional)
   - listening-stop   -> "Recording Stopped" (set_listening True->False transition; ANY disarm)
   - cold model load  -> "Loading…" (Feedback.notify, BEFORE the lazy first-arm model load). The
                         daemon fires this ONCE per session so the hotkey isn't a silent ~1–3 s gap;
@@ -32,8 +32,8 @@ in-memory partial is ALWAYS updated (so the next flush captures the latest words
 the disk write is throttled. set_phase / record_final / set_listening always write.
 
 ATOMIC WRITE: tempfile.mkstemp(dir=<target dir>) + os.replace(tmp, target) is a
-same-filesystem atomic rename (POSIX) — a concurrent tmux jq-reader (status-interval 1s)
-never sees a half-written file. mkstemp creates the file mode 0o600 (Python 3 default) →
+same-filesystem atomic rename (POSIX) — a concurrent reader (voicectl status, the E2E
+pollers) never sees a half-written file. mkstemp creates the file mode 0o600 (Python 3 default) →
 the renamed state.json inherits 0o600. Parent dir makedirs(exist_ok=True, mode=0o700).
 
 THREAD SAFETY: Feedback methods are called from RealtimeSTT callback threads (partial/
@@ -136,7 +136,7 @@ class Feedback:
         Driven by the daemon's _load_recorder() at each lifecycle transition (->False while
         loading / on failure; ->True on success) and at construction. Always writes —
         model-lifecycle transitions are infrequent, so the state file stays current for
-        voicectl status + status.sh. Never notifies (not a start/final/stop event — same
+        voicectl status. Never notifies (not a start/final/stop event — same
         anti-spam rule as set_phase).
         """
         self._state["models_loaded"] = bool(loaded)
@@ -153,13 +153,13 @@ class Feedback:
     def record_final(self, text: str) -> None:
         """Record a finalized utterance; set last_final AND partial; always write; maybe notify.
 
-        partial is overwritten with the FINAL text so the tmux status-right matches what was
-        actually typed — without this, the status line keeps showing the last realtime partial,
+        partial is overwritten with the FINAL text so status consumers see what was actually
+        typed — without this, voicectl status keeps showing the last realtime partial,
         which usually trails the final by a word or two (final "...typing here today?" vs partial
         "...typing here?"). The next update_partial (new utterance) overwrites it again.
 
         The '✔ <text>' notification fires only when BOTH cfg.hypr_notify AND cfg.notify_on_final
-        are True — the popup is redundant once the text is typed and shown live in tmux, so
+        are True — the popup is redundant once the text is typed into the focused window, so
         notify_on_final lets users keep just the brief Recording / Recording Stopped toasts.
         """
         self._state["last_final"] = text
@@ -172,8 +172,8 @@ class Feedback:
         """Set the master listening gate; always write; notify start/stop ON TRANSITION ONLY.
 
         start (False->True): 'Recording' (a transient hyprctl toast), AND clears any stale partial
-        left over from the previous session — otherwise the tmux status-right flashes the old words
-        the instant the mic arms (status.sh renders '🎤 <partial>' as soon as listening flips true).
+        left over from the previous session — otherwise consumers flash the stale old words
+        the instant the mic arms (state.json still carries the old partial as listening flips true).
         The partial repopulates from the next on_realtime_transcription_stabilized callback once
         speech is actually detected. For the FIRST arm of a session the daemon ALSO fires a 'Loading…'
         toast beforehand (Feedback.notify), so a cold model load reads 'Loading…' then 'Recording'.
