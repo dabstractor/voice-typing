@@ -1,6 +1,10 @@
 # PRD: Fully-Local Voice Typing for Linux/Wayland — "voice-typing"
 
-**Status:** Approved for implementation. No further user input will be given — this document is the complete spec. Where it says MUST, do it; where it says SHOULD, do it unless it demonstrably fails on this machine; where a decision is left open, the default stated here is the decision.
+**Status:** Approved for implementation. No further user input will be given — this document is the complete spec.
+
+**Rev 2 (streaming dictation):** adds §4.2quater — phone-style typed partials revised in place, rolling context prompting, deterministic casing/punctuation guards, and Backspace-cancel. The small model (`small.en`) is the ONLY mode — the former big-model normal mode is REMOVED (user decision; §1). This revokes the Rev 1 decision that only finalized text is typed (§1).
+
+Where it says MUST, do it; where it says SHOULD, do it unless it demonstrably fails on this machine; where a decision is left open, the default stated here is the decision.
 
 ---
 
@@ -18,7 +22,11 @@ Additional requirements:
 
 Decisions already made with the user (do not revisit):
 - **Activation:** toggle (start/stop via a control command; hotkey binding is Phase 2). Never auto-stops on silence.
-- **Feedback:** live partials go to a status display (state file + `hyprctl notify`). Only finalized text is typed. Do NOT backspace-correct inside the target window.
+- **Feedback (Rev 1 — SUPERSEDED on the small-model path by §4.2quater):** live partials go to a status display (state file + `hyprctl notify`). Only finalized text is typed. Do NOT backspace-correct inside the target window. *This was the experiment the user disliked: no visible output while talking, and silence-triggered appends felt like the recording kept stopping. Fully superseded — streaming replaces it everywhere.*
+- **Streaming output (Rev 2, §4.2quater):** on the small-model path, stabilized partial text is TYPED into the focused window as it is spoken and revised in place (delete-and-retype only the changed tail). The mic never pauses for decoding; silence only triggers the commit/correction pass. One model (`small.en`) is the product.
+- **Stranded text (Rev 2):** if a commit can never land (drain timeout, child death), the on-screen tail FREEZES as committed — typed text is never auto-deleted. The only deliberate deletion is an explicit cancel.
+- **Cancel (Rev 2):** Backspace while a fragment is in flight cancels it — rewind that fragment's typed text (minus the one character the keystroke itself deleted), drop its buffered audio, keep listening. Any other user keypress freezes the tail (never type over the user's cursor).
+- **One mode (user decision):** normal mode (`distil-large-v3`, two-model construction, mode switching) is REMOVED — one model, one keybind. The implementing revision collapses §4.2ter's lite machinery into the single path and deletes the normal-mode surface (`final_model` config, `toggle` vs `toggle-lite` distinction, T7's mode-switching, acceptance #10). No re-addition is planned.
 - **Output scope:** type into whatever window has focus (uinput/virtual-keyboard), plus an inert `null` backend (types nothing) for headless tests.
 - **GPU:** models load **lazily on first arm** (`voicectl toggle`/`start`), NOT at daemon boot. A boot where voice typing is never armed consumes ~0 VRAM; after the first arm the models stay resident so re-arms are instant — until 30 min of disarmed idle, when they unload to reclaim VRAM (§4.2bis Idle unload); so the load cost is paid once per ~30 min of actual use, not once per boot. Trade-off accepted: the first arm each session blocks ~1–3 s while faster-whisper loads `distil-large-v3` + `small.en` into VRAM. Rationale: the daemon autostarts on every login but is used rarely — loading at boot parked ~2.8 GB on the GPU 24/7 for nothing. Full lifecycle in §4.2bis.
 
@@ -129,6 +137,7 @@ Single process, three concerns:
    - `{"cmd":"toggle"}` → `{"ok":true,"listening":true}`
    - `{"cmd":"start"}` / `{"cmd":"stop"}` / `{"cmd":"status"}` → `{"ok":true,"listening":...,"partial":"...","uptime_s":...,"mode":"normal"|"lite"}`
    - `{"cmd":"toggle-lite"}` / `{"cmd":"start-lite"}` → arm in lite mode (§4.2ter); same payload with `mode` reflecting the requested mode.
+  - `{"cmd":"cancel"}` → §4.2quater: rewind + drop the in-flight fragment, keep listening (`{"ok":true,"listening":true}`); no-op when nothing is in flight.
    - `{"cmd":"quit"}` → clean shutdown.
    Unknown cmd → `{"ok":false,"error":"..."}`. Remove stale socket file on startup.
 
@@ -166,7 +175,7 @@ A second arming mode for short, speed-critical snippets (URLs, shell commands, s
 
 **Recorder construction (lite):** the recorder-host child builds the recorder with `model = lite_model`, `realtime_model_type = lite_model`, and `use_main_model_for_realtime = True`. Verified against RealtimeSTT v1.0.2: with `use_main_model_for_realtime=True` the separate realtime engine is NOT initialized (`_initialize_realtime_transcription_model` early-returns), so exactly ONE model (`lite_model`) is resident — the large final model is never constructed. All other kwargs (device, compute_type, language, silero) are identical to normal mode EXCEPT `post_speech_silence_duration`, which lite overrides with its own snugger threshold (`lite_post_speech_silence_duration`, §4.5) — see the latency note below for why this is load-bearing. `on_final` therefore yields `lite_model` finals — fast, lower-accuracy — over the SAME clean→type→record path as normal mode (§4.2).
 
-**The silence gate, not the model, is the perceived-latency bottleneck (latency-log finding).** The per-utterance latency line clocks `speech_end_to_final_ms` from `on_vad_stop`, which fires only AFTER `post_speech_silence_duration` of trailing silence. On this GPU the small model's final pass is ~80 ms vs the large model's ~130 ms — a ~50 ms win that is SWAMPED by the silence wait, which is identical across modes unless lite overrides it. (Observed live: a 1.5 s `post_speech_silence_duration` made lite feel "no faster than the big model" even though the small model was in fact ~1.6× faster at transcription.) Therefore lite MUST use its own shorter `post_speech_silence_duration` (default `0.5` — the small model is fast and quips are short, so the big model's thinking-pause cushion isn't needed); that is what makes lite actually FEEL instant, cutting stop→text latency from ~1.6 s to ~0.6 s. Tunable: ~0.3 = razor-snappy (may split a brief pause into two finals), ~0.6 = safe.
+**The silence gate, not the model, is the perceived-latency bottleneck (latency-log finding).** The per-utterance latency line clocks `speech_end_to_final_ms` from `on_vad_stop`, which fires only AFTER `post_speech_silence_duration` of trailing silence. On this GPU the small model's final pass is ~80 ms vs the large model's ~130 ms — a ~50 ms win that is SWAMPED by the silence wait, which is identical across modes unless lite overrides it. (Observed live: a 1.5 s `post_speech_silence_duration` made lite feel "no faster than the big model" even though the small model was in fact ~1.6× faster at transcription.) Therefore lite MUST use its own shorter `post_speech_silence_duration` (default `0.5` — the small model is fast and quips are short, so the big model's thinking-pause cushion isn't needed); that is what makes lite actually FEEL instant, cutting stop→text latency from ~1.6 s to ~0.6 s. Tunable: ~0.3 = razor-snappy (may split a brief pause into two finals), ~0.6 = safe. **Rev 2 (§4.2quater):** under streaming the endpointer no longer gates *visible* output — words are typed as they are spoken — it only delays the commit/correction pass, so the default rises to `0.8` (halving mid-thought cuts for +0.3 s commit latency). The "must be snug" rationale above applied to the Rev 1 output model, where finals were the only visible output; `0.5` remains the razor-snappy setting.
 
 **Mode is a spawn-time property of the recorder-host child; the daemon tracks `self._mode` (`"normal"` | `"lite"`).** The resident child is always in exactly one mode. Arming rules:
 - Arm in mode X while resident child is mode X → instant arm (models already resident in the right mode).
@@ -180,9 +189,39 @@ Idle-unload (§4.2bis) tears down whichever mode is resident; the next arm reloa
 
 **Why a reload on switch is accepted:** it is the same ~1–3 s cost already paid on first-arm and after idle-unload, and a user picks a mode for a stretch of use rather than toggling per utterance. A no-reload alternative — committing the realtime partial from the resident two-model recorder — was REJECTED: it keeps the large model loaded, still spins its final pass per utterance, and so delivers neither the VRAM nor the latency benefit that motivates lite mode.
 
+### 4.2quater Streaming dictation — typed partials, in-place revision, Backspace-cancel (Rev 2; small-model/lite path only)
+
+The Rev 1 output model — partials visible only in the status display, one append per silence-triggered final, and a snug endpointer existing largely to force frequent visible output — is REPLACED on this path by phone-style dictation: **words are typed into the focused window as they are spoken, revised in place, and the mic never pauses for decoding.** Scope: the small-model recorder — the ONLY mode (normal mode removed, §1).
+
+**Output state machine (daemon process).** The daemon tracks two strings per armed session:
+- `committed` — finalized text, ending at the last commit checkpoint;
+- `tail` — everything typed since that checkpoint (the current utterance: tentative, revisable, no trailing space while tentative).
+
+1. **Partial typing.** On each stabilized-partial event (existing IPC): diff against the currently typed `tail`. Extends it → type only the delta. Revises it → `press_backspace(len(revised_chars))` then type the corrected tail. Full rewinds are rate-limited (≥300 ms apart — code constant, not config) so a wobbling decode cannot flicker.
+2. **Commit (silence trips).** The child's small.en re-decodes the complete utterance (the old "final", now a *correction pass*): if it differs from the typed `tail`, rewind + retype; append the trailing space (`output.append_space`); advance the checkpoint; refresh the rolling context prompt (below). Existing gates unchanged: `textproc.clean` (blocklist/min_chars) and the `listening` gate; a rejected final freezes the `tail` as-is.
+3. **Drain unchanged** (§4.2 #2) — an explicit stop mid-speech still lets the correction pass land before disarming.
+4. **Stranded tail → FREEZE, never delete** (user decision). If no commit can ever land (drain-watchdog abort, child death), the tail stays on screen exactly as last shown. The ONLY thing that deletes typed text is an explicit cancel (below).
+5. **User-typing protection.** Any non-Backspace keypress observed while a `tail` is pending → immediately freeze the tail and stop revising that utterance entirely (suppress further partial typing until the next utterance boundary). The user took the cursor; never type over them.
+
+**Typing backend additions.** `press_backspace(n)` MUST delete exactly n characters in an ordinary text field (wtype: repeat `-k Backspace`; ydotool: repeat the backspace keycode; batched so ~80 chars rewind in <150 ms). Revision correctness assumes the cursor sits at the end of our typed text and one keystroke deletes one character — the window where that can be false is narrowed to "the user has typed nothing since our last keystroke" by rule 5.
+
+**Backspace-cancel.**
+- **Listener:** a passive, read-only (never `EVIOCGRAB`) evdev listener thread in the daemon process over every keyboard `/dev/input/event*` node (auto-enumerate: EV_KEY devices that expose KEY_BACKSPACE; `[cancel].devices` overrides). The user is in the `input` group (§2) — no permission changes. `python-evdev` is the implementation dep.
+- **Trigger:** KEY_BACKSPACE press while armed AND a `tail` is pending → cancel: rewind `max(len(tail)−1, 0)` characters (the physical keystroke itself already deleted one — compensate by subtraction, never by re-typing), drop the child's in-flight utterance (host abort discards its buffered audio), keep listening — just say the sentence again. **Idempotent:** further Backspaces with no pending tail are plain user edits and are never compensated.
+- **Fallback:** `voicectl cancel` (control-socket cmd, §4.2 #3) runs the identical path — keybind-able when no keyboard node is readable (log once at arm; §4.10) and the automated-test seam (T8e).
+
+**Rolling context prompt.** Every decode is conditioned on the committed text **back to the last sentence boundary** (last `.`/`!`/`?`), capped at ~200 tokens (Whisper's ~224-token prompt budget — code constant): partial decodes via `initial_prompt_realtime`, commit decodes via `initial_prompt`. Both kwargs exist in the installed RealtimeSTT 1.0.2 but are constructor-static — the child MUST make them dynamic (update between utterances); if that fails, degrade to context-free decoding and log (never crash). This is the primary fix for mid-paragraph fragments starting capitalized or acquiring spurious trailing periods: the decoder is told it is *continuing*, not starting.
+
+**Deterministic guards (textproc, Rev 2).** Applied at typing time (pure, unit-tested):
+- **Casing:** if `committed` does not end a sentence (no terminal `. ! ?`), lowercase the fragment's first word.
+- **Period:** if the casing guard fired (we joined mid-sentence), strip one trailing `.` from the committed fragment — a decoder closing a sentence it was just told it was continuing is spurious by definition.
+Rev 1 `clean()` rules (blocklist, min_chars, whitespace) are unchanged.
+
+**Unchanged:** VAD segmentation (it now only triggers commits); feedback/state file/toasts (the `partial` field mirrors the live tail; `record_final` records the committed text); lazy load, idle unload, idle auto-stop, and the lite recorder construction (§4.2ter) including single-model `use_main_model_for_realtime=True`; `output.streaming=false` restores Rev 1 append-only behavior as a rollback hatch (§4.5).
+
 ### 4.3 Typing backends (`typing_backends.py`)
 
-Interface: `type_text(text: str) -> None`. Selected by config `output.backend`, default **`wtype`**.
+Interface: `type_text(text: str) -> None` (append committed text) plus `press_backspace(n: int) -> None` (Rev 2, §4.2quater — delete exactly n characters for in-place revision). Selected by config `output.backend`, default **`wtype`**.
 
 - **wtype** (default): `subprocess.run(["wtype", "--", text])`. Uses Wayland `virtual-keyboard-v1` — supported by Hyprland, full Unicode, no layout issues. Types into the focused window.
 - **ydotool**: `subprocess.run(["ydotool", "type", "--key-delay", "2", "--", text])`. uinput-level, works even for XWayland apps; known weakness: non-ASCII/layout quirks. Keep as fallback; daemon MUST auto-fall-back to ydotool if a wtype call fails (nonzero exit), logging a warning.
@@ -228,6 +267,7 @@ Notes:
   must happen via os.execv re-exec or in a launcher wrapper, because LD_LIBRARY_PATH is read at process start. **Realized approach:** `voice_typing/launch_daemon.sh` (the ExecStart, §4.9) recomputes the cuBLAS/cuDNN lib dirs from the *live installed* `nvidia-*-cu12` wheels on every launch and exports `LD_LIBRARY_PATH` before exec'ing python — so no baked `Environment=LD_LIBRARY_PATH=` is used in the unit (it would go stale on `uv sync`). If `libcudnn_ops*.so` errors still appear, check the wrapper (`LD_DEBUG=libs launch_daemon.sh`).
 - If CUDA init fails entirely, daemon MUST log clearly and fall back to `device="cpu", compute_type="int8"` with `realtime_model_type="tiny.en"`, model `small.en` — degraded but functional — and say so in `status`.
 - **Lite mode (§4.2ter):** the lite recorder is constructed with `model = lite_model`, `realtime_model_type = lite_model`, `use_main_model_for_realtime = True` (verified: only ONE model initializes; the large final model is never constructed), AND a snugger `post_speech_silence_duration = lite_post_speech_silence_duration` — the silence gate, not the model, is the perceived-latency bottleneck, so lite MUST shorten it to actually feel faster (see §4.2ter).
+- **Streaming path (Rev 2, §4.2quater):** the lite recorder additionally runs with a dynamic `initial_prompt` / `initial_prompt_realtime` (rolling committed context; both kwargs exist in installed v1.0.2 but are constructor-static — the child updates them between utterances) and `lite_post_speech_silence_duration = 0.8` default.
 
 ### 4.5 Config (`config.toml`, parsed with stdlib `tomllib` into dataclasses)
 
@@ -239,7 +279,8 @@ lite_model = "small.en"             # the SINGLE model loaded in lite mode (used
 language = "en"
 device = "cuda"                       # "cuda" | "cpu"
 post_speech_silence_duration = 0.6
-lite_post_speech_silence_duration = 0.5  # PRD §4.2ter: lite-mode silence threshold (see the latency note — the silence gate, not the model, is the perceived bottleneck). 0.3 = razor-snappy; 0.6 = safe.
+lite_post_speech_silence_duration = 0.8  # Rev 2 §4.2quater: the endpointer only delays COMMIT under streaming (words are already typed live) — 0.8 halves mid-thought cuts for +0.3 s commit latency. 0.5 = razor-snappy; 1.0 = near-zero cuts.
+context_prompt = true                  # Rev 2 §4.2quater: condition every decode on the rolling committed context (back to the last sentence boundary, ~200-token cap)
 realtime_processing_pause = 0.15
 auto_stop_idle_seconds = 30.0          # auto-disarm after this many seconds of no speech; 0 disables
 auto_unload_idle_seconds = 1800.0     # after this many seconds disarmed (loaded, not listening), tear down models to free VRAM; 0 disables (§4.2bis Idle unload)
@@ -247,6 +288,11 @@ auto_unload_idle_seconds = 1800.0     # after this many seconds disarmed (loaded
 [output]
 backend = "wtype"                     # "wtype" | "ydotool" | "null"
 append_space = true
+streaming = true                     # Rev 2 §4.2quater: type stabilized partials live + revise in place; false = Rev 1 append-only finals (rollback hatch)
+
+[cancel]                              # Rev 2 §4.2quater: Backspace-cancel
+on_backspace = true                  # evdev listener: Backspace while a fragment is in flight cancels it (rewind + drop audio, keep listening)
+devices = []                         # empty → auto-enumerate keyboard /dev/input/event* nodes; else explicit path list override
 
 [feedback]
 state_file = ""                       # empty → $XDG_RUNTIME_DIR/voice-typing/state.json
@@ -293,7 +339,7 @@ Unit-test this module (pure python, fast).
 
 ### 4.8 `voicectl` (`ctl.py`)
 
-`uv run voicectl <toggle|start|stop|status|quit|toggle-lite|start-lite>` and an installed console-script entry point (`[project.scripts] voicectl = "voice_typing.ctl:main"`, plus `voice-typing-daemon = "voice_typing.daemon:main"`). Connects to the socket, sends one JSON line, prints human-readable result (`listening: on`), exit code 0/1. `status` pretty-prints the state incl. partial, `phase` (`unloaded`/`loading`/`idle`/`listening`/`speaking`), `models_loaded` (§4.2bis), and `mode` (`normal`/`lite`, §4.2ter). `toggle-lite`/`start-lite` arm in lite mode; `stop` disarms either. If daemon not running: clear message + exit 2.
+`uv run voicectl <toggle|start|stop|status|quit|toggle-lite|start-lite|cancel>` and an installed console-script entry point (`[project.scripts] voicectl = "voice_typing.ctl:main"`, plus `voice-typing-daemon = "voice_typing.daemon:main"`). Connects to the socket, sends one JSON line, prints human-readable result (`listening: on`), exit code 0/1. `status` pretty-prints the state incl. partial, `phase` (`unloaded`/`loading`/`idle`/`listening`/`speaking`), `models_loaded` (§4.2bis), and `mode` (`normal`/`lite`, §4.2ter). `toggle-lite`/`start-lite` arm in lite mode; `stop` disarms either. If daemon not running: clear message + exit 2.
 
 ### 4.9 systemd user service (`systemd/voice-typing.service`)
 
@@ -340,6 +386,7 @@ Hyprland keybinding: append to nothing — instead create `hypr-binds.conf` in t
 ```
 bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle
 bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite
+bind = SUPER ALT, Backspace, exec, $HOME/.local/bin/voicectl cancel   # fallback when the evdev Backspace listener can't open a keyboard (§4.2quater)
 ```
 (`Ctrl+Alt+Super+D` = big/normal model; `Alt+Super+D` = little/lite model, §4.2ter.) Print an instruction to `source` it from `~/.config/hypr/hyprland.conf`. Do NOT modify the user's Hyprland config automatically. (Richer overlay UI is out of scope; state file + toasts are the UI for now.)
 
@@ -350,7 +397,7 @@ bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite
 1. `cd /home/dustin/projects/voice-typing`
 2. Ensure portaudio: `pacman -Q portaudio || sudo pacman -S --noconfirm portaudio` (PyAudio dep of RealtimeSTT).
 3. `/home/dustin/.local/bin/uv init --bare --python 3.12` (already a git repo; keep name `voice-typing`).
-4. `uv add "realtimestt[faster-whisper,silero-vad]" nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" "huggingface_hub>=0.23"` — the extras pull torch, faster-whisper, pyaudio, webrtcvad, and Silero; the `nvidia-*-cu12` wheels provide the cuBLAS/cuDNN 9 shared objects CTranslate2 loads; `huggingface_hub` is used by `prefetch.py`. If torch arrives CPU-only, add the CUDA wheel explicitly (`uv add torch --index https://download.pytorch.org/whl/cu126` or current cu12x index). Torch is needed for Silero VAD, not the whisper inference itself (that's CTranslate2), so `torch.cuda` availability is nice-to-have; **`ctranslate2` CUDA is the must-have**: `python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"` → ≥1.
+4. `uv add "realtimestt[faster-whisper,silero-vad]" nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" "huggingface_hub>=0.23" evdev` — the extras pull torch, faster-whisper, pyaudio, webrtcvad, and Silero; the `nvidia-*-cu12` wheels provide the cuBLAS/cuDNN 9 shared objects CTranslate2 loads; `huggingface_hub` is used by `prefetch.py`. If torch arrives CPU-only, add the CUDA wheel explicitly (`uv add torch --index https://download.pytorch.org/whl/cu126` or current cu12x index). Torch is needed for Silero VAD, not the whisper inference itself (that's CTranslate2), so `torch.cuda` availability is nice-to-have; **`ctranslate2` CUDA is the must-have**: `python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())"` → ≥1.
 5. Write all source files per §4.
 6. Prefetch models; run tests (§6); install service.
 7. Commit everything to git on `main` with a sensible message. (User's git identity is already configured.)
@@ -392,6 +439,9 @@ Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while spea
 
 **T7 — Lite mode (`test_feed_audio.py` lite variant + `voicectl`):** construct the lite recorder (`model = lite_model`, `realtime_model_type = lite_model`, `use_main_model_for_realtime = True`, `post_speech_silence_duration = lite_post_speech_silence_duration`) and feed `utt_simple.wav`: assert (a) exactly ONE model is resident (no `distil-large-v3` / large-model worker — grep the child log / check VRAM ≈ half of normal); (b) finals still arrive over the normal clean→type path and fuzzy-accuracy ≥70% (lower bar than normal mode's 80%, since `small.en` is the final model); (c) the lite kwargs carry the SHORTER `post_speech_silence_duration` (the silence gate — not the model — is the perceived bottleneck; without this lite feels no faster than normal — §4.2ter), and end-to-end stop→text latency is materially lower than normal mode on the same utterance. Then over the socket: `toggle-lite` arms with `mode:"lite"` in the response; `toggle-lite` again disarms; a subsequent `toggle` reloads into `mode:"normal"` (one reload); `status` reports the current `mode`.
 
+**T8 — Streaming dictation (Rev 2 §4.2quater, `test_streaming.py`, no mic):** lite recorder child + a RecordingTypingBackend (records `type_text`/`press_backspace` calls; no real keystrokes). Feed WAVs via `feed_audio`.
+Assert: (a) while speech streams, typing deltas arrive at least every 500 ms and only the delta when a partial extends the tail; (b) a differing commit rewinds exactly the tail length then types the final text (+ trailing space); (c) a single sentence split by a 3 s pause joins into ONE coherent commit — no mid-sentence capital, no spurious trailing period (context prompt + textproc guards); (d) the child's decodes carry `initial_prompt` = committed text back to the last sentence boundary, capped (assert via child log/kwargs); (e) `cancel` while a tail is pending → `press_backspace(len(tail)−1)`, the buffered audio is dropped (no commit for it later), listening stays on; a second cancel is a no-op; (f) a non-Backspace user key while a tail is pending → tail frozen, no further revision keystrokes for that utterance; (g) the stranded-tail path (forced drain-timeout) → text frozen on screen, not rewound. The evdev key-event parser is unit-tested separately with synthetic events (no real keyboard); real-Backspace behavior stays in the T5 manual smoke (add: press Backspace mid-fragment → the fragment disappears, dictation continues armed).
+
 ---
 
 ## 7. Acceptance criteria (definition of done)
@@ -399,13 +449,15 @@ Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while spea
 1. T1–T4, T6 pass, demonstrated by actual command output (not claimed).
 2. A pause mid-dictation of ≥3 s loses zero words and does not end the session (T1b, T3).
 3. Live partials observable in `state.json` while audio plays (T3).
-4. Only finalized text reaches the target; nothing typed while toggled off.
+4. Only the daemon's typed output reaches the target — Rev 2: live partial text plus commits (§4.2quater); nothing typed while toggled off (the `listening` gates on partial and commit paths are unchanged).
 5. Daemon survives ≥2 min of silence with no hallucinated output and trivial CPU use.
 6. `voicectl toggle/start/stop/status/quit` all work; daemon runs as a systemd user service, starts un-armed (not listening) and **un-loaded** (~0 VRAM until first arm, §4.2bis), auto-restarts on failure.
 7. Everything committed to git; README documents: install, hotkey snippet, feedback surfaces, config tuning table, troubleshooting (cuDNN libs, PyAudio device, wtype vs ydotool), and how to switch to CPU-only mode.
 8. No network access needed at runtime (models cached by install).
 9. After `auto_unload_idle_seconds` of disarmed idle, the recorder unloads (~0 VRAM, verified via `nvidia-smi`) and a later arm reloads it; the teardown is bounded (completes in seconds, no 90 s hang).
 10. **Lite mode (§4.2ter):** `voicectl toggle-lite` arms in lite mode using ONLY `lite_model` (the large model never loads — verified ~half the VRAM of normal mode on `nvidia-smi`); `voicectl toggle` arms in normal mode; switching between them costs one bounded reload; `status` and `state.json` report `mode`; lite uses its own shorter `post_speech_silence_duration` (the silence gate is the perceived bottleneck — §4.2ter) so it is observably snappier end-to-end, not just faster at transcription; both modes honor the graceful drain (§4.2 #2).
+11. **Streaming (§4.2quater):** while speaking, words are typed into the focused window continuously (≥1 update/500 ms, T8a); commits revise in place (T8b); a mid-paragraph fragment never starts with a capital nor ends with a spurious period (T8c); Backspace mid-fragment cancels it — text rewound, mic still armed (T8e); stranded fragments freeze, never auto-delete (T8g); `output.streaming=false` restores Rev 1 append-only behavior.
+12. **Cancel fallback:** with evdev unavailable, `voicectl cancel` performs the same rewind over the socket (T8e) and the daemon logs the listener failure once at arm.
 
 ## 8. Known risks & prescribed mitigations
 
@@ -422,6 +474,11 @@ Latency targets (log-derived, from T1/T3): partial cadence ≤ 300 ms while spea
 | First arm is slow (~1–3 s model load) | Accepted trade-off of lazy load (§4.2bis); `voicectl` prints `loading models…`; only the first arm after a load (or after an idle-unload) pays it |
 | Model load fails on first arm (CUDA/cuDNN) | daemon returns to `unloaded`, arm returns `ok:false` with error + CPU-fallback hint; no half-built recorder left behind (§4.2bis) |
 | `recorder.shutdown()` hangs ~90 s (seen on every `quit`: `SIGKILL` after systemd `TimeoutStopSec`) | **Prerequisite for idle-unload.** The teardown MUST be bounded/non-blocking (§4.2bis Idle unload): hard timeout + force-cleanup of the recorder's worker threads / `transcript_process` so VRAM is released and a racing arm isn't blocked for 90 s. Root-cause the wedge (likely the `transcript_process` join or the mic stream close) and fix it; until then idle-unload would hang every 30 min. |
+| Streaming revision corrupts text if the user moves the cursor mid-utterance | any non-Backspace keypress freezes the tail (§4.2quater rule 5); rewind assumes 1 char/keystroke with cursor at end of typed text — documented assumption, window narrowed by the freeze rule |
+| `initial_prompt`/`initial_prompt_realtime` are constructor-static in RealtimeSTT 1.0.2 (verified) | child updates them between utterances (small local patch); on failure degrade to context-free decoding + log, never crash |
+| Backspace semantics differ per app (terminals, editors) | cancel fires only while armed AND a tail is pending; idempotent; compensation is by subtraction; falls back to `voicectl cancel` keybind |
+| Revision flicker (rewind/retype storms) | type deltas by default; full rewinds rate-limited (≥300 ms); no trailing space while tentative |
+| evdev listener misses keyboards / permission loss | fail-safe: log once at arm, keybind (`voicectl cancel`) keeps working; `[cancel].devices` override for odd setups |
 
 ## 9. Future work (explicitly out of scope now)
 
