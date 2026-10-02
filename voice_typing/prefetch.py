@@ -3,9 +3,15 @@
 Populates ~/.cache/huggingface/hub so the daemon's AudioToTextRecorder
 construction (P1.M4.T1.S1) is instant: RealtimeSTT/faster-whisper resolve
 the short model names to these HF repo_ids and find the weights already
-cached. With all four repos local, the CUDA path (distil-large-v3 +
-small.en), the CPU-fallback path (small.en + tiny.en), AND the approved
-substitute (large-v3-turbo) are all on disk — no network at runtime.
+cached. With both repos local, the SINGLE Rev 2 model (small.en) and the
+CPU-fallback model (tiny.en) are on disk — no network at runtime.
+
+Rev 2 (P1.M1.T2.S4) collapsed the daemon to ONE dictation mode: small.en
+is THE model — it produces BOTH the live partial text and the finals
+(streaming, PRD §4.2quater) — and cuda_check's CPU fallback (P1.M1.T2.S1)
+downgrades to tiny.en when no usable CUDA is found. Those are the only two
+names the daemon can ever be told to load, so they are the only repos
+prefetched.
 
 This is INTERNAL install-time tooling (no user-facing surface). The only
 documented caller is the CLI `python -m voice_typing.prefetch`, re-invoked
@@ -14,16 +20,12 @@ whose cached etag already matches, so re-runs are free.
 
 Repo IDs are VERIFIED against faster-whisper/utils.py _MODELS
 (research_faster_whisper_cuda.md §1) and the live HF API
-(research/huggingface_hub_prefetch_verification.md §3). All four are
-CTranslate2 format (model.bin present). NOTE the three different owners:
-Systran/ (distil-large-v3, small.en, tiny.en) and mobiuslabsgmbh/ (turbo).
-Do NOT prefetch distil-whisper/distil-large-v3 (raw PyTorch — CTranslate2
-cannot load it).
+(research/huggingface_hub_prefetch_verification.md §3). Both are
+CTranslate2 format (model.bin present), both owned by Systran/.
 
 This module imports ONLY huggingface_hub (lazily, inside prefetch()), so
 `import voice_typing.prefetch` triggers NO network call and needs NO CUDA
-/ ctranslate2 / faster_whisper — it can run (and this task can complete)
-before T2.S2 installs ctranslate2.
+/ ctranslate2 / faster_whisper.
 """
 from __future__ import annotations
 
@@ -31,20 +33,14 @@ import os
 import sys
 
 # Short name -> HF repo_id. The short-name KEYS match what RealtimeSTT passes
-# (model="distil-large-v3", realtime_model_type="small.en", ...) and what
-# cuda_check.py returns (final_model/realtime_model) — faster-whisper's _MODELS
-# resolves them to these repo_ids. Keeping the keys aligned guarantees the
-# daemon finds a cached weight for every name it can be told to load.
+# (model=<cfg.asr.lite_model>, the ONE Rev 2 model) and what cuda_check.py
+# returns (S1 contract: small.en on CUDA, tiny.en on the CPU-fallback path) —
+# faster-whisper's _MODELS resolves them to these repo_ids. Keeping the keys
+# aligned guarantees the daemon finds a cached weight for every name it can be
+# told to load.
 CORE_REPOS: dict[str, str] = {
-    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",  # FINAL model (CUDA default)
-    "small.en": "Systran/faster-whisper-small.en",  # REALTIME/partials (also CPU-fallback FINAL)
-    "tiny.en": "Systran/faster-whisper-tiny.en",  # CPU-fallback REALTIME (degraded mode)
-}
-
-OPTIONAL_REPOS: dict[str, str] = {
-    # Approved FINAL substitute (PRD §3: "if distil-large-v3 downloads/runs poorly").
-    # DIFFERENT owner (mobiuslabsgmbh, NOT Systran) — the trap-avoidance.
-    "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "small.en": "Systran/faster-whisper-small.en",  # THE single model (Rev 2): partials + finals
+    "tiny.en": "Systran/faster-whisper-tiny.en",    # CPU fallback (cuda_check downgrade path)
 }
 
 
@@ -52,7 +48,7 @@ def prefetch(short_to_repo: dict[str, str] | None = None) -> dict[str, str]:
     """Download each repo into the HF cache via huggingface_hub.snapshot_download.
 
     Args:
-        short_to_repo: {short_name: hf_repo_id}. Defaults to CORE+OPTIONAL (all four).
+        short_to_repo: {short_name: hf_repo_id}. Defaults to CORE_REPOS (both Rev 2 repos).
 
     Returns:
         {short_name: local_snapshot_path} for each SUCCESSFULLY downloaded repo.
@@ -68,7 +64,7 @@ def prefetch(short_to_repo: dict[str, str] | None = None) -> dict[str, str]:
     from huggingface_hub import snapshot_download  # lazy: keeps import-time side-effect-free
 
     if short_to_repo is None:
-        short_to_repo = {**CORE_REPOS, **OPTIONAL_REPOS}
+        short_to_repo = dict(CORE_REPOS)
 
     results: dict[str, str] = {}
     for short, repo_id in short_to_repo.items():
@@ -101,10 +97,10 @@ def _human_bytes(n: int) -> str:
 
 
 def _main() -> int:
-    """CLI: prefetch CORE (required) + OPTIONAL (turbo); report; exit by core success.
+    """CLI: prefetch the CORE repos; report; exit 0 iff all succeeded.
 
-    Exit 0 iff ALL CORE repos succeeded. OPTIONAL (turbo) failures are WARNINGS —
-    recorded and skipped, never fatal — so install.sh can run under `set -e`.
+    Exit 0 iff ALL CORE repos succeeded — any failure is fatal (the daemon
+    cannot start without a model), so install.sh can run under `set -e`.
     """
     # Local-first: opt out of huggingface_hub's anonymous telemetry (no-op if already set).
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -123,35 +119,20 @@ def _main() -> int:
             core_fail[short] = f"{type(exc).__name__}: {exc}"
             print(f"\n!!! CORE FAIL [{short}] {repo_id}: {core_fail[short]}", file=sys.stderr, flush=True)
 
-    # OPTIONAL repos: failures are warnings, never fatal.
-    opt_ok: list[str] = []
-    opt_fail: dict[str, str] = {}
-    for short, repo_id in OPTIONAL_REPOS.items():
-        try:
-            prefetch({short: repo_id})
-            opt_ok.append(short)
-        except Exception as exc:
-            opt_fail[short] = f"{type(exc).__name__}: {exc}"
-            print(f"\n!!! OPTIONAL warn [{short}] {repo_id}: {opt_fail[short]}", file=sys.stderr, flush=True)
-
     # Summary. Sum model.bin sizes from the cache via a no-download re-resolve (local_files_only).
     total = 0
-    for short in core_ok + opt_ok:
-        repo_id = {**CORE_REPOS, **OPTIONAL_REPOS}[short]
+    for short in core_ok:
+        repo_id = CORE_REPOS[short]
         sp = _local_snapshot(repo_id)
         total += (_model_bin_size(sp) or 0) if sp else 0
 
     print("\n=== summary ===", flush=True)
     print(f"core ok:    {core_ok or '(none)'}", flush=True)
     print(f"core FAIL:  {list(core_fail) or '(none)'}", flush=True)
-    print(f"opt  ok:    {opt_ok or '(none)'}", flush=True)
-    print(f"opt  warn:  {list(opt_fail) or '(none)'}", flush=True)
     print(f"total model.bin bytes cached: {_human_bytes(total)}", flush=True)
     if core_fail:
         print(f"\nFAILED CORE repos — daemon cannot start until fixed: {list(core_fail)}", flush=True)
         return 1
-    if opt_fail:
-        print("\nNOTE: optional (turbo) repo failed — the substitute path is not cached.", flush=True)
     return 0
 
 

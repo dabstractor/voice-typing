@@ -206,8 +206,8 @@ echo "daemon : running and NOT listening (~0 VRAM; first 'voicectl toggle' loads
 echo "CUDA   : ${VERDICT:-unknown}"
 echo "offline: daemon runs fully local (HF_HUB_OFFLINE=1 via launch_daemon.sh) — no network at runtime"
 echo
-echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|quit|toggle-lite|start-lite"
-echo "          (bind Ctrl+Alt+Super+D -> voicectl toggle;  Alt+Super+D -> voicectl toggle-lite; see the Hyprland note below)"
+echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|quit"
+echo "          (bind Ctrl+Alt+Super+D -> voicectl toggle; see the Hyprland note below)"
 echo
  echo "Hyprland — source the repo's hypr-binds.conf from ~/.config/hypr/hyprland.conf (add this line):"
 echo "  source = $REPO/hypr-binds.conf"

@@ -221,36 +221,43 @@ def test_install_sh_offline_grep_and_summary():
 
 
 def test_install_sh_usage_lists_all_commands_and_correct_keybinds():
-    """install.sh [7/7] onboarding lists ALL 7 commands (PRD §4.8) + the CORRECT keybinds
-    (PRD §4.10 / hypr-binds.conf: Ctrl+Alt+Super+D -> toggle [normal], Alt+Super+D ->
-    toggle-lite). bugfix Issue 1 (P1.M1.T1.S1). Static read_text check (same pattern as
-    test_install_sh_offline_grep_and_summary) — closes the gap that let the wrong hint ship
-    (the config drift-guard checks only parsed VALUES, not usage/help strings).
+    """install.sh [7/7] usage lists the 5 commands + the single toggle keybind (Rev 2).
+
+    Rev 2 single-mode collapse (P1.M1.T2.S4): ctl.py _COMMANDS is exactly
+    (toggle, start, stop, status, quit) and hypr-binds.conf ships ONE bind
+    (Ctrl+Alt+Super+D -> voicectl toggle); the lite commands and the
+    standalone Alt+Super+D bind are deleted surfaces. Static read_text check
+    (same pattern as test_install_sh_offline_grep_and_summary) — closes the
+    gap that let a wrong hint ship (the config drift-guard checks only parsed
+    VALUES, not usage/help strings).
     """
     text = _install_sh_path().read_text()
-    # (a) usage line lists all 7 commands (PRD §4.8; ctl.py _COMMANDS).
-    assert "toggle-lite" in text, (
-        "install.sh usage line omits 'toggle-lite' (PRD §4.8 lists 7 commands)."
-    )
-    assert "start-lite" in text, (
-        "install.sh usage line omits 'start-lite' (PRD §4.8 lists 7 commands)."
-    )
-    # (b) correct NORMAL keybind is stated (hypr-binds.conf:5; PRD §4.10).
+    # (a) usage line lists all 5 commands (ctl.py _COMMANDS; Rev 2 single-mode).
+    for cmd in ("toggle", "start", "stop", "status", "quit"):
+        assert cmd in text, f"install.sh usage omits '{cmd}' (Rev 2: 5 commands)."
+    # (b) the single keybind is stated (hypr-binds.conf: Ctrl+Alt+Super+D -> toggle).
     assert "Ctrl+Alt+Super+D" in text, (
-        "install.sh bind hint is missing the correct normal bind 'Ctrl+Alt+Super+D' "
-        "(PRD §4.10: CTRL+SUPER+ALT+D -> voicectl toggle)."
+        "install.sh bind hint is missing 'Ctrl+Alt+Super+D' "
+        "(Rev 2: the ONE dictation bind is Ctrl+Alt+Super+D -> voicectl toggle)."
     )
-    # (c) correct LITE keybind is stated and mapped to toggle-lite.
-    assert "Alt+Super+D -> voicectl toggle-lite" in text, (
-        "install.sh bind hint is missing the correct lite bind "
-        "'Alt+Super+D -> voicectl toggle-lite' (hypr-binds.conf:6)."
+    # (c) NEGATIVE: the deleted lite surfaces must not survive anywhere in install.sh.
+    assert "toggle-lite" not in text, (
+        "install.sh still mentions 'toggle-lite' (Rev 2 deleted it — P1.M1.T2.S4)."
     )
-    # (d) the WRONG mapping is gone. 'SUPER+ALT+D -> voicectl toggle' claimed the LITE bind
-    #     (SUPER+ALT+D) maps to normal toggle — backwards. Exact-substring check so the
-    #     legitimate 'Alt+Super+D -> voicectl toggle-lite' does NOT trip it.
+    assert "start-lite" not in text, (
+        "install.sh still mentions 'start-lite' (Rev 2 deleted it — P1.M1.T2.S4)."
+    )
+    # The standalone lite bind is gone. NOTE 'Ctrl+Alt+Super+D' CONTAINS 'Alt+Super+D'
+    # as a substring, so strip the legit bind before asserting the bare form is absent.
+    assert "Alt+Super+D" not in text.replace("Ctrl+Alt+Super+D", ""), (
+        "install.sh still advertises the standalone lite bind 'Alt+Super+D' "
+        "(Rev 2 collapsed to one bind — P1.M1.T2.S4)."
+    )
+    # (d) the WRONG mapping is still gone. 'SUPER+ALT+D -> voicectl toggle' claimed the
+    #     lite bind maps to the single toggle — backwards even in the two-mode era.
     assert "SUPER+ALT+D -> voicectl toggle" not in text, (
-        "install.sh still claims 'SUPER+ALT+D -> voicectl toggle' — WRONG: SUPER+ALT+D is "
-        "the LITE bind (toggle-lite); normal toggle is Ctrl+Alt+Super+D (PRD §4.10)."
+        "install.sh still claims 'SUPER+ALT+D -> voicectl toggle' — wrong mapping "
+        "(the single bind is Ctrl+Alt+Super+D -> voicectl toggle)."
     )
 
 
