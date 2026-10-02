@@ -81,6 +81,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
+import voice_typing.streaming as streaming
 import voice_typing.textproc as textproc
 import voice_typing.typing_backends as typing_backends
 from voice_typing import cuda_check
@@ -683,6 +684,18 @@ class VoiceTypingDaemon:
         self._feedback.set_models_loaded(loaded)  # P1.M2.T2.S1: mirror phase at boot
         self._backend = (
             backend if backend is not None else typing_backends.make_backend(cfg.output)
+        )
+        # P1.M2.T6.S1 (PRD §4.2quater): the streaming-output engine (extend/revise with
+        # guards + rate-limited full rewinds). Constructed UNCONDITIONALLY so the landed
+        # cancel() seam (_pending_tail_len/_reset_stream_after_cancel -> self._stream via
+        # getattr) now resolves to the real API instead of the defensive no-op. Pure-python
+        # object: no models, no threads, no subprocesses at construction. Nothing ROUTES
+        # partials through it yet — _on_partial wiring + the commit path are P1.M2.T6.S2 —
+        # so daemon behavior is unchanged: idle tail is "" (pending_tail_len() -> 0) and
+        # reset_after_cancel() is a no-op on an empty tail, identical to the pre-T6 path.
+        # With cfg.output.streaming False the engine is (already) a mirror-only pass-through.
+        self._stream = streaming.StreamingOutput(
+            self._backend, self._feedback, cfg.output.streaming
         )
         # Mic health probe (bugfix Issue 2 / P1.M1.T2.S1): detect a dead/missing mic so status
         # (P1.M1.T2.S2) can surface it instead of silently reporting "listening: on". Injectable

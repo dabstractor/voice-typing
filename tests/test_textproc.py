@@ -13,7 +13,7 @@ against it together. Written FIRST (TDD) — it is RED until textproc.py lands.
 from __future__ import annotations
 
 from voice_typing.config import FilterConfig
-from voice_typing.textproc import clean
+from voice_typing.textproc import apply_streaming_guards, clean
 
 
 # ---------------------------------------------------------------------------
@@ -143,3 +143,65 @@ def test_returns_none_for_every_rejection_reason():
     assert clean("A", FilterConfig()) is None              # too short
     assert clean("Thank you.", FilterConfig()) is None     # blocklist
     assert clean("", FilterConfig()) is None               # empty
+
+
+# ---------------------------------------------------------------------------
+# apply_streaming_guards (PRD §4.2quater rule 1 — P1.M2.T6.S1)
+# ---------------------------------------------------------------------------
+
+def test_guards_mid_sentence_lowercases_first_word():
+    # committed not ending in terminal punctuation -> fragment joins mid-sentence
+    assert apply_streaming_guards("Then he said", "The") == "the"
+
+
+def test_guards_preserve_case_after_sentence_terminal():
+    assert apply_streaming_guards("Then he said.", "The") == "The"
+    assert apply_streaming_guards("Wow!", "The") == "The"
+    assert apply_streaming_guards("Really?", "The") == "The"
+
+
+def test_guards_already_lowercase_fragment_unchanged():
+    assert apply_streaming_guards("Then he said", "the") == "the"
+    assert apply_streaming_guards("Then he said", "hello world") == "hello world"
+
+
+def test_guards_strip_exactly_one_trailing_period():
+    # mid-sentence waffle "Stop..." -> lowercase + strip ONE '.', keeping the rest
+    assert apply_streaming_guards("Then he said", "Stop...") == "stop.."
+    assert apply_streaming_guards("Then he said", "Stop.") == "stop"
+
+
+def test_guards_keep_legitimate_period_after_terminal():
+    # after a real sentence end a fragment's own period is legitimate
+    assert apply_streaming_guards("Then he said.", "Stop.") == "Stop."
+
+
+def test_guards_empty_committed_preserves_case():
+    # session/utterance start: no casing context -> keep capitalization, keep periods
+    assert apply_streaming_guards("", "Hello world") == "Hello world"
+    assert apply_streaming_guards("", "Hello.") == "Hello."
+
+
+def test_guards_empty_fragment_safe():
+    assert apply_streaming_guards("Hello", "") == ""
+    assert apply_streaming_guards("", "") == ""
+
+
+def test_guards_committed_trailing_whitespace_rstripped():
+    # trailing whitespace must not hide the sentence terminal (nor invent one)
+    assert apply_streaming_guards("Then he said.   ", "The") == "The"
+    assert apply_streaming_guards("Then he said   ", "The") == "the"
+
+
+def test_guards_first_cased_char_is_lowercased_not_first_char():
+    # a leading quote/paren/digit is skipped; the first CASED char is lowercased
+    assert apply_streaming_guards("hi there", '"Quoted') == '"quoted'
+    assert apply_streaming_guards("hi there", "(Also)") == "(also)"
+
+
+def test_guards_no_cased_char_still_strips_mid_sentence_period():
+    # rule (b) rides on the mid-sentence BRANCH, not on an actual case change:
+    # a lone "." delta mid-sentence guards to "" (nothing typed) — kills the
+    # "word." <-> "word and" waffle class at the source
+    assert apply_streaming_guards("hi", ".") == ""
+    assert apply_streaming_guards("hi", "5.") == "5"

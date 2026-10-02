@@ -24,6 +24,8 @@ CONSUMES: voice_typing.config.FilterConfig (P1.M2.T1.S1).
 CONSUMED BY: daemon.on_final (P1.M4.T1.S2) as:
     txt = textproc.clean(text, cfg.filter)
     if txt is not None: <type txt + " " when cfg.output.append_space>
+  and (P1.M2.T6.S1) voice_typing.streaming.StreamingOutput.on_partial, which applies
+  apply_streaming_guards() to every delta/revised-tail before typing it.
 
 NO SIDE EFFECTS, NO I/O. Deterministic and pure.
 """
@@ -68,3 +70,65 @@ def clean(text: str, cfg: FilterConfig) -> str | None:
 
     # Step 4: return cleaned text (caller appends a space when append_space).
     return cleaned
+
+
+# Terminal punctuation that ends a sentence for the CASING guard (PRD §4.2quater
+# rule 1). Pinned verbatim: a '.' '!' or '?' as the last non-whitespace char of
+# the preceding text means the next fragment starts a NEW sentence and keeps its
+# capitalization. ',' ';' ':' and everything else mean mid-sentence -> lowercase.
+_SENTENCE_TERMINALS = ".!?"
+
+
+def apply_streaming_guards(committed: str, fragment: str) -> str:
+    """Deterministic casing + period guards for a streaming fragment (PRD §4.2quater R1).
+
+    Applied by StreamingOutput (P1.M2.T6.S1) to EVERY piece of text it is about to
+    type (an extend delta, or a full revised tail). Two rules, in order:
+
+      (a) CASING — if `committed` (rstripped) is non-empty and does NOT end with a
+          terminal '.' '!' or '?', the fragment joins MID-SENTENCE: lowercase the
+          first cased (alphabetic, case-distinct) character of the fragment, so a
+          Whisper partial like "The" lands as "the" after "then he said". An EMPTY
+          `committed` (session/utterance start) preserves the fragment's case —
+          the first dictated words should stay capitalized.
+      (b) PERIOD — only when rule (a) FIRED (mid-sentence) and the fragment
+          (rstripped) ends with '.', strip exactly ONE trailing '.'. Whisper
+          partials waffle between "word." and "word and" mid-utterance; eating
+          that single spurious period converts a whole class of flickering
+          rewind-and-retype cycles into clean extensions ("word." -> "word" is
+          typed once, then "word and" extends). After a sentence terminal the
+          period is legitimate and is kept.
+
+    Rule (b) fires whenever rule (a)'s mid-sentence branch is taken, even if the
+    fragment has no cased character to lowercase (e.g. a lone "." delta becomes
+    "" and nothing is typed). Rule (a) without a cased character is a no-op.
+
+    Args:
+        committed: the finalized text preceding this fragment (the casing
+            context). Trailing whitespace is ignored; empty/whitespace-only
+            means "session start" -> case preserved.
+        fragment: the text about to be typed. Assumed pre-normalized
+            (whitespace-collapsed) by the caller; never made to end with a space.
+
+    Returns:
+        The guarded fragment (possibly unchanged, possibly shorter by one '.').
+        PURE: no I/O, no state, deterministic.
+    """
+    context = committed.rstrip()
+    # Rule (a): empty context == session start -> keep the fragment verbatim
+    # (and rule (b) never fires without it).
+    if not context or context[-1] in _SENTENCE_TERMINALS:
+        return fragment
+    # Mid-sentence: lowercase the FIRST cased character (skips quotes/parens/
+    # digits — '"Quoted' -> '"quoted'). Already-lowercase chars are rewritten to
+    # themselves, so an already-lowercase fragment is unchanged.
+    for i, ch in enumerate(fragment):
+        if ch.isalpha() and ch.lower() != ch.upper():
+            fragment = fragment[:i] + ch.lower() + fragment[i + 1 :]
+            break
+    # Rule (b): strip exactly ONE mid-sentence trailing '.' ("Stop..." -> "stop..").
+    stripped = fragment.rstrip()
+    if stripped.endswith("."):
+        cut = len(stripped) - 1  # index of that final '.'; keep anything after it
+        fragment = fragment[:cut] + fragment[cut + 1 :]
+    return fragment
