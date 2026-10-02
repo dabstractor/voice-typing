@@ -17,6 +17,7 @@ satisfy PRD §7.9 + §6 T6(d). See plan/003.../P1M3T2S2/research/residual_cuda_c
 
 IPC PROTOCOL (two multiprocessing queues + one event):
   cmd_queue (daemon -> child):  ("arm", {}) | ("disarm", {}) | ("text", {}) | ("shutdown", {})
+                              | ("prompt", {"text": ...})   # P1.M2.T5.S1 rolling context prompt
   abort_event (daemon -> child): a multiprocessing.Event SET by the daemon to interrupt a child
       blocked in recorder.text() (the cmd_queue is NOT read while text() blocks). A separate child
       thread polls it and calls recorder.abort(). ("abort", {}) on cmd_queue is belt-and-suspenders.
@@ -25,7 +26,11 @@ IPC PROTOCOL (two multiprocessing queues + one event):
       exactly like abort_event, but ALSO discards the buffered/in-flight audio and emits the
       unblock sentinel MARKED ("cancelled": True) so the daemon drops the cancelled utterance.
       Plain abort() (stop/drain) semantics are UNCHANGED.
-  event_queue (child -> daemon): ("ready", {device,compute_type,model})     # Rev 2: ONE model
+  event_queue (child -> daemon): ("ready", {device,compute_type,model,       # Rev 2: ONE model;
+                                            context_prompt})                #   context_prompt=True iff the
+                                                                            #   dynamic PromptedExecutor is armed
+                                                                            #   (P1.M2.T5.S1; additive key — daemon
+                                                                            #   consumption is P1.M2.T5.S2)
                                  | ("error", {msg}) |
                                  ("final", {text}) |          # or {text:"", "cancelled":True}
                                                               #   (the CANCEL sentinel, T7.S1)
@@ -68,6 +73,7 @@ import logging
 import multiprocessing as mp
 import os
 import signal
+import sys
 import threading
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -488,9 +494,21 @@ def _worker_main(
     force_cpu=True (CPU fallback, PRD §4.4 — only the child touches CUDA, so the retry is clean
     here) then signals 'error' + exits.
 
+    CONTEXT PROMPT (P1.M2.T5.S1): when cfg.asr.context_prompt is true, the child first arms a
+    prompt_engine.PromptedExecutor — CAPABILITY PROBE = construct + warmup transcription of 1 s
+    of zeros; on ANY failure it logs ONE INFO degrade line and the build proceeds with STOCK
+    kwargs (context-free decoding — the SAME path as config-off, PRD §8 never-crash). On success
+    the SAME executor object is injected as BOTH transcription_executor and
+    realtime_transcription_executor (ONE faster-whisper model total; RealtimeSTT skips its
+    TranscriptionWorker process). The 'ready' payload reports the outcome as
+    context_prompt: true|false. The executor is constructed HERE in the child (CUDA objects are
+    unpicklable and must never exist in the daemon process).
+
     Command loop: ("text", {}) -> recorder.text(child_on_final) (BLOCKS until a final, which puts
     a "final" event then returns); ("arm"/"disarm", {}) -> set_microphone; ("abort", {}) ->
-    recorder.abort(); ("shutdown", {}) -> recorder.shutdown() (best-effort; the daemon SIGKILLs the
+    recorder.abort(); ("prompt", {"text"}) -> prompt_executor.set_prompt (read only BETWEEN
+    utterances — the loop blocks inside text(); commit-time delivery is BY DESIGN, no watcher
+    thread); ("shutdown", {}) -> recorder.shutdown() (best-effort; the daemon SIGKILLs the
     group anyway), put "gone", exit. cancel_event (P1.M2.T7.S1) is polled by the SAME abort-handler
     thread: a cancel unblocks text() like an abort but DISCARDS the audio and MARKS the sentinel.
     """
@@ -503,9 +521,28 @@ def _worker_main(
         # killpg(getpgid(pid)) still targets our group; the grandchildren just inherit our pgid.
         logger.debug("child: os.setsid() failed (non-fatal): %s", exc)
 
+    # Child logging (P1.M2.T5.S1): a spawn child never runs main()/_setup_logging, so without a
+    # handler only WARNING+ reaches stderr (logging.lastResort) and the child's INFO lines — the
+    # context-prompt probe result — would be INVISIBLE in journald (the PRP's Level-3 grep would
+    # find nothing). basicConfig is IDEMPOTENT: a no-op when a root handler already exists
+    # (pytest/caplog), so tests are unaffected. Mirrors the daemon's stderr format; the level
+    # comes from the same cfg.log.level (defensively clamped — LogConfig.level is a free str).
+    _child_level = str(getattr(getattr(cfg, "log", None), "level", "INFO") or "INFO").upper()
+    if _child_level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        _child_level = "INFO"
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=_child_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     # Lazy import: ONLY the child imports daemon.build_recorder (which lazy-imports RealtimeSTT).
     # This keeps the daemon process CUDA-free (the daemon imports only the RecorderHost handle).
     from voice_typing.daemon import build_recorder
+    # P1.M2.T5.S1 context-prompt wiring: augment_kwargs_with_executor (module-level, below) lazily
+    # imports prompt_engine HERE IN THE CHILD. The prompt_engine MODULE is stdlib-only (CUDA-free)
+    # at import, but the executor OBJECTS own faster-whisper/CUDA contexts: they are unpicklable
+    # across the spawn boundary and must never exist in the daemon process.
 
     # The child's recorder callbacks RELAY events to the daemon over evt_q (they cannot touch the
     # daemon's Feedback/LatencyLog — those objects live in the daemon process). build_recorder wires
@@ -517,13 +554,35 @@ def _worker_main(
     def _child_on_speech() -> None:
         _safe_put(evt_q, ("speech", {}))
 
+    def _extra_kwargs_for_build(force: bool) -> "tuple[dict[str, Any] | None, Any]":
+        """Probe + arm the context-prompt executor for ONE build attempt (P1.M2.T5.S1).
+
+        Returns (extra_kwargs, prompt_executor). extra_kwargs is None on the stock path (config
+        off OR probe failure — the SAME path) or carries transcription_executor +
+        realtime_transcription_executor -> the PromptedExecutor on success. Runs IN THE CHILD.
+        """
+        if not cfg.asr.context_prompt:
+            return None, None
+        resolved = _child_resolved_device(cfg, force)
+        extra: dict[str, Any] = {}
+        executor = augment_kwargs_with_executor(extra, cfg, resolved, logger)  # module-level, below
+        return (extra if executor is not None else None), executor
+
     # Construct the recorder via the UNCHANGED production path. CPU fallback: retry once with
     # force_cpu=True if the cuda construction fails (mirrors the daemon's old in-process retry,
     # now in the child where the CUDA context lives — cleaner because only the child touches CUDA).
     recorder = None
+    prompt_executor: Any = None
     try:
         try:
-            recorder = build_recorder(cfg, relay_fb, relay_lat, on_speech=_child_on_speech)
+            extra_kwargs, prompt_executor = _extra_kwargs_for_build(force_cpu)
+            recorder = build_recorder(
+                cfg,
+                relay_fb,
+                relay_lat,
+                on_speech=_child_on_speech,
+                extra_kwargs=extra_kwargs,
+            )
         except Exception as exc:
             if force_cpu:
                 _safe_put(evt_q, ("error", {"msg": f"force_cpu build failed: {exc!r}"}))
@@ -532,8 +591,16 @@ def _worker_main(
                 "child: CUDA recorder construction failed (%s); retrying with force_cpu=True", exc
             )
             try:
+                # FRESH probe for the CPU attempt: a CUDA-armed executor is wrong for a CPU
+                # recorder; a CPU probe failure degrades exactly like the first attempt did.
+                extra_kwargs, prompt_executor = _extra_kwargs_for_build(True)
                 recorder = build_recorder(
-                    cfg, relay_fb, relay_lat, force_cpu=True, on_speech=_child_on_speech
+                    cfg,
+                    relay_fb,
+                    relay_lat,
+                    force_cpu=True,
+                    on_speech=_child_on_speech,
+                    extra_kwargs=extra_kwargs,
                 )
             except Exception as exc2:
                 _safe_put(
@@ -544,8 +611,11 @@ def _worker_main(
         # Report the resolved device so the daemon can seed _resolved_device_cache WITHOUT probing
         # CUDA itself (the daemon must stay CUDA-free). _child_resolved_device derives the 3-key
         # {device,compute_type,model} from the cuda_check resolution the child just performed.
+        # P1.M2.T5.S1: + the additive context_prompt flag (True iff the executor is armed).
         resolved_device = _child_resolved_device(cfg, force_cpu)
-        _safe_put(evt_q, ("ready", dict(resolved_device)))
+        _safe_put(
+            evt_q, ("ready", _ready_payload(resolved_device, prompt_executor is not None))
+        )
     except Exception as exc:
         _safe_put(evt_q, ("error", {"msg": f"unexpected construction error: {exc!r}"}))
         return
@@ -629,6 +699,16 @@ def _worker_main(
                     _clear_recorder_audio(recorder)
                 elif kind == "abort":
                     recorder.abort()  # belt-and-suspenders (the abort_event path is the primary one)
+                elif kind == "prompt":
+                    # P1.M2.T5.S1: rolling context-prompt update. DELIVERY TIMING (by design, NO
+                    # watcher thread): this loop BLOCKS inside recorder.text() while an utterance
+                    # is in flight, so prompt commands are only read BETWEEN utterances — exactly
+                    # when the daemon sends them (commit time; the sender is P1.M2.T5.S2).
+                    text = payload.get("text") if isinstance(payload, dict) else None
+                    if prompt_executor is not None:
+                        prompt_executor.set_prompt(str(text) if text is not None else None)
+                    else:
+                        logger.debug("child: prompt command ignored (context-prompt not armed)")
                 elif kind == "shutdown":
                     running = False
                 else:
@@ -651,6 +731,78 @@ def _safe_put(evt_q: Any, item: tuple) -> None:
         evt_q.put(item)
     except (BrokenPipeError, OSError, EOFError):
         pass
+
+
+def _default_prompt_executor_factory(model: str, device: str, compute_type: str) -> Any:
+    """Build the production PromptedExecutor (injectable seam for CUDA-free unit tests)."""
+    from voice_typing.prompt_engine import PromptedExecutor  # child-only import
+
+    return PromptedExecutor(model_name=model, device=device, compute_type=compute_type)
+
+
+def augment_kwargs_with_executor(
+    kwargs: dict[str, Any],
+    cfg: "VoiceTypingConfig",
+    resolved: dict[str, str],
+    logger: logging.Logger,
+    *,
+    executor_factory: "Callable[[str, str, str], Any] | None" = None,
+) -> Any | None:
+    """Child-side: conditionally arm the context-prompt executor into recorder kwargs.
+
+    P1.M2.T5.S1 (PRD §4.2quater rolling context prompt). When cfg.asr.context_prompt is true:
+    construct ONE PromptedExecutor for cfg.asr.lite_model at the resolved device/compute_type,
+    run the CAPABILITY PROBE (build + 1 s warmup transcription), and on success mutate `kwargs`
+    in place with kwargs["transcription_executor"] = kwargs["realtime_transcription_executor"]
+    = executor (the SAME object -> ONE model for partials AND finals; RealtimeSTT skips its
+    TranscriptionWorker). On ANY probe failure — and when context_prompt is false, which takes
+    the IDENTICAL stock path — kwargs are left untouched and None is returned (degrade to
+    context-free decoding; PRD §8 never-crash).
+
+    Must run IN THE CHILD only: the executor owns faster-whisper/CUDA objects (unpicklable;
+    daemon import purity). Module-level + factory-injectable so tests exercise it WITHOUT CUDA
+    (tests/test_prompt_engine.py). Returns the armed executor, or None on the stock path.
+    """
+    if not getattr(cfg.asr, "context_prompt", False):
+        return None  # config gate == degrade path: stock kwargs, no probe
+    from voice_typing import prompt_engine  # child-only import (module scope is CUDA-free)
+
+    factory = (
+        executor_factory if executor_factory is not None else _default_prompt_executor_factory
+    )
+    try:
+        executor = factory(cfg.asr.lite_model, resolved["device"], resolved["compute_type"])
+        probe = prompt_engine.probe_prompt_executor(executor)
+        if not probe.ok:
+            raise RuntimeError(probe.error or "prompt-executor probe failed")
+    except Exception as exc:  # noqa: BLE001 — deliberate broad degrade (probe contract)
+        logger.info(
+            "voice-typing context-prompt: probe failed (%s); degrading to context-free decoding",
+            exc,
+        )
+        return None
+    kwargs["transcription_executor"] = executor
+    kwargs["realtime_transcription_executor"] = executor
+    logger.info(
+        "voice-typing context-prompt: dynamic executor armed "
+        "(model=%s device=%s compute_type=%s)",
+        cfg.asr.lite_model,
+        resolved.get("device", "?"),
+        resolved.get("compute_type", "?"),
+    )
+    return executor
+
+
+def _ready_payload(resolved_device: dict[str, str], context_prompt_active: bool) -> dict[str, Any]:
+    """The child's ('ready', ...) payload: resolved device/model + the context-prompt flag.
+
+    'context_prompt' is True iff the dynamic PromptedExecutor was armed (probe passed); False
+    on the config-off OR probe-failure degrade path (identical stock configuration). The key is
+    ADDITIVE — existing readers ignore it; the daemon-side consumer is P1.M2.T5.S2.
+    """
+    payload = dict(resolved_device)
+    payload["context_prompt"] = bool(context_prompt_active)
+    return payload
 
 
 def _clear_recorder_audio(recorder: Any) -> None:

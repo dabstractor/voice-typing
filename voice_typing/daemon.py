@@ -272,6 +272,7 @@ def _construct(
     latency: "LatencyLog | None" = None,
     force_cpu: bool = False,
     on_speech: "Callable[[], None] | None" = None,
+    extra_kwargs: "dict[str, Any] | None" = None,
 ) -> Any:
     """Build kwargs + callbacks, defensively filter to the signature, construct recorder_cls.
 
@@ -292,6 +293,13 @@ def _construct(
     resolved = dict(cuda_check.CPU_FALLBACK) if force_cpu else None
     kwargs = cfg_to_kwargs(cfg, resolved=resolved)
     kwargs.update(_build_callbacks(feedback, latency, on_speech=on_speech))
+    if extra_kwargs:
+        # P1.M2.T5.S1: the recorder-host CHILD injects the context-prompt executors here (after
+        # cfg_to_kwargs — cfg_to_kwargs stays executor-free; the executor objects are constructed
+        # in the child and must never exist daemon-side). Merged BEFORE the signature filter:
+        # AudioToTextRecorder 1.0.2 declares transcription_executor/realtime_transcription_executor,
+        # so they survive the filter; unknown keys would still be logged-and-dropped defensively.
+        kwargs.update(extra_kwargs)
     filtered = _filter_kwargs_to_signature(kwargs, recorder_cls)
     return recorder_cls(**filtered)
 
@@ -302,6 +310,7 @@ def build_recorder(
     latency: "LatencyLog | None" = None,
     force_cpu: bool = False,
     on_speech: "Callable[[], None] | None" = None,
+    extra_kwargs: "dict[str, Any] | None" = None,
 ) -> Any:
     """Construct ONE AudioToTextRecorder wired to feedback (+ optional latency) (PRD §4.2, §4.4).
 
@@ -315,6 +324,12 @@ def build_recorder(
     _construct() with a fake class instead; this function is exercised by the feed_audio test
     (P1.M7.T2.S1) and the real daemon startup (P1.M4.T1.S2).
 
+    `extra_kwargs` (P1.M2.T5.S1): optional kwargs merged AFTER cfg_to_kwargs + callbacks and
+    BEFORE the signature filter — the CHILD-side injection point for the context-prompt
+    transcription_executor/realtime_transcription_executor objects (recorder_host._worker_main).
+    NEVER populated in the daemon process: executors own CUDA contexts (unpicklable + an import-
+    purity violation); default None leaves the daemon path byte-for-byte unchanged.
+
     `force_cpu=True` (bugfix Issue 3 / P1.M1.T3.S1) builds a CPU-only recorder from
     cuda_check.CPU_FALLBACK without probing CUDA — the construction-failure retry hook for
     main() (P1.M1.T3.S2). Default False (the normal CUDA/CPU-fallback path).
@@ -322,7 +337,7 @@ def build_recorder(
     from RealtimeSTT import AudioToTextRecorder  # lazy: keeps `import voice_typing.daemon` cheap
 
     return _construct(cfg, feedback, AudioToTextRecorder, latency, force_cpu=force_cpu,
-                      on_speech=on_speech)
+                      on_speech=on_speech, extra_kwargs=extra_kwargs)
 
 
 # --- Control socket path resolution (P1.M4.T2.S1; PRD §4.2(3)) -------------------------------

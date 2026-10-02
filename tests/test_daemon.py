@@ -2818,11 +2818,16 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
     sb = inspect.signature(daemon.build_recorder).parameters
     assert "force_cpu" in sb and sb["force_cpu"].default is False
     assert "on_speech" in sb and sb["on_speech"].default is None
-    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu", "on_speech"], list(sb)
+    # extra_kwargs (P1.M2.T5.S1): the CHILD-side injection point for the context-prompt
+    # transcription executors — defaulted None so the daemon path is unchanged; cfg_to_kwargs
+    # stays executor-free (asserted below).
+    assert "extra_kwargs" in sb and sb["extra_kwargs"].default is None
+    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu", "on_speech", "extra_kwargs"], list(sb)
     sc = inspect.signature(daemon._construct).parameters
     assert "force_cpu" in sc and sc["force_cpu"].default is False
     assert "on_speech" in sc and sc["on_speech"].default is None
-    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu", "on_speech"], list(sc)
+    assert "extra_kwargs" in sc and sc["extra_kwargs"].default is None
+    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu", "on_speech", "extra_kwargs"], list(sc)
     # cfg_to_kwargs kept the keyword-only resolved injection point (default None); the single-path
     # collapse (P1.M1.T2.S2) removed the old two-mode flag:
     sk = inspect.signature(daemon.cfg_to_kwargs).parameters

@@ -190,7 +190,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T5.S1",
                   "title": "Child-side dynamic prompt mechanism + capability probe + degrade",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",
