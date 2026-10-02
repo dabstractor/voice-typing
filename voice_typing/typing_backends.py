@@ -26,6 +26,10 @@ NEVER EMIT ENTER/NEWLINE: the backends type EXACTLY the text passed (no trailing
 newline). textproc.clean() already stripped trailing newlines/whitespace; the daemon
 appends a single trailing space when output.append_space (not the backend).
 
+Rev 2 adds press_backspace(n) (PRD §4.2quater): delete exactly n characters — ONE
+batched subprocess per call (wtype repeats "-k Backspace"; ydotool repeats
+"14:1","14:0" press/release pairs); n <= 0 is a no-op (no subprocess).
+
 CONSUMES: voice_typing.config.OutputConfig (P1.M2.T1.S1): backend.
   append_space is the DAEMON's concern (not used here).
 CONSUMED BY: daemon on_final (P1.M4.T1.S2) as:
@@ -61,6 +65,15 @@ class TypingBackend(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def press_backspace(self, n: int) -> None:
+        """Delete exactly n characters via n Backspace keypresses (PRD §4.2quater R2).
+
+        Implementations MUST batch into ONE subprocess invocation (~80 chars in <150 ms —
+        per-keystroke spawning blows the budget). n <= 0 is a no-op (no subprocess).
+        """
+        raise NotImplementedError
+
 
 class WtypeBackend(TypingBackend):
     """wtype: Wayland virtual-keyboard-v1. Full Unicode. The default backend."""
@@ -71,6 +84,14 @@ class WtypeBackend(TypingBackend):
         # auto-fallback wrapper. A missing wtype binary raises FileNotFoundError
         # (an OSError), also caught by the fallback.
         subprocess.run(["wtype", "--", text], check=True)
+
+    def press_backspace(self, n: int) -> None:
+        # ONE batched invocation: repeated "-k Backspace" pairs are verified to repeat
+        # within a single wtype call (external_deps.md §2, env -i probe). No "--" —
+        # all args are options (there is no positional text to separate).
+        if n <= 0:
+            return
+        subprocess.run(["wtype"] + ["-k", "Backspace"] * n, check=True)
 
 
 class YdotoolBackend(TypingBackend):
@@ -83,12 +104,25 @@ class YdotoolBackend(TypingBackend):
             ["ydotool", "type", "--key-delay", "2", "--", text], check=True
         )
 
+    def press_backspace(self, n: int) -> None:
+        # ONE batched invocation: "14:1 14:0" = Backspace press+release (keycode 14);
+        # explicit "-d 1" (1 ms between events) — never rely on the default delay for
+        # an 80-press batch.
+        if n <= 0:
+            return
+        subprocess.run(
+            ["ydotool", "key", "-d", "1"] + ["14:1", "14:0"] * n, check=True
+        )
+
 
 class NullBackend(TypingBackend):
     """Types nothing. Headless E2E tests verify finals via the state file instead."""
 
     def type_text(self, text: str) -> None:
         logger.debug("null backend: suppressed %d chars", len(text))
+
+    def press_backspace(self, n: int) -> None:
+        logger.debug("null backend: suppressed %d backspaces", n)
 
 
 class _WtypeWithFallback(TypingBackend):
@@ -121,6 +155,20 @@ class _WtypeWithFallback(TypingBackend):
                 "wtype typing failed (%s); retrying once via ydotool", exc
             )
             self._fallback.type_text(text)  # may raise -> propagates (one retry only)
+
+    def press_backspace(self, n: int) -> None:
+        if n <= 0:
+            return  # guard BEFORE the try: n=0 must not try wtype nor log a WARNING
+        try:
+            self._primary.press_backspace(n)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            # Same superset as type_text: OSError covers FileNotFoundError and
+            # PermissionError; CalledProcessError covers nonzero exit. TypeError is
+            # NOT caught here — let it surface.
+            logger.warning(
+                "wtype backspace failed (%s); retrying once via ydotool", exc
+            )
+            self._fallback.press_backspace(n)  # may raise -> propagates (one retry)
 
 
 def make_backend(cfg: OutputConfig) -> TypingBackend:

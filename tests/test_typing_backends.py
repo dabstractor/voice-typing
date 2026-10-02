@@ -299,3 +299,105 @@ def test_module_docstring_names_on_final_serialization_lock():
     assert "_on_final_lock" in doc, "THREAD SAFETY note must reference _on_final_lock"
     assert "no locking is needed" not in doc, "stale FALSE claim removed (Issue 5)"
     assert "serializes on_final calls" not in doc, "stale FALSE claim removed (Issue 5)"
+
+
+# ===========================================================================
+# Rev 2 P1.M1.T3.S1 — press_backspace(n): batched backspace primitive (PRD §4.2quater R2)
+# (ONE subprocess per call — the <150ms/80-char budget; n<=0 is a no-op. Exact argv pins for
+#  wtype (-k Backspace ×n) and ydotool (key -d 1 + 14:1/14:0 ×n); the wrapper mirrors the
+#  type_text catch/WARNING/retry-once contract. All via the `recorder` fixture — no real keys.)
+# ===========================================================================
+
+
+def test_wtype_press_backspace_exact_argv(recorder):
+    WtypeBackend().press_backspace(3)
+    assert recorder.argvs == [
+        ("wtype", "-k", "Backspace", "-k", "Backspace", "-k", "Backspace")
+    ]
+    assert recorder.calls[0][1].get("check") is True
+
+
+def test_ydotool_press_backspace_exact_argv(recorder):
+    YdotoolBackend().press_backspace(2)
+    assert recorder.argvs == [
+        ("ydotool", "key", "-d", "1", "14:1", "14:0", "14:1", "14:0")
+    ]
+    assert recorder.calls[0][1].get("check") is True
+
+
+@pytest.mark.parametrize("n", [0, -1, -5])
+def test_press_backspace_nonpositive_spawns_nothing(recorder, caplog, n):
+    with caplog.at_level(logging.WARNING, logger="voice_typing.typing_backends"):
+        WtypeBackend().press_backspace(n)
+        YdotoolBackend().press_backspace(n)
+        make_backend(OutputConfig(backend="wtype")).press_backspace(n)
+    assert recorder.calls == []  # no subprocess at all
+    assert not any(
+        "ydotool" in r.getMessage() for r in caplog.records
+    )  # no spurious WARNING
+
+
+def test_press_backspace_n80_is_one_invocation(recorder):
+    # The budget contract (PRD §4.2quater): ~80 chars must rewind via ONE subprocess call.
+    WtypeBackend().press_backspace(80)
+    assert len(recorder.argvs) == 1
+    assert len(recorder.argvs[0]) == 1 + 2 * 80  # "wtype" + 80 × ("-k","Backspace")
+    assert recorder.argvs[0].count("Backspace") == 80
+    YdotoolBackend().press_backspace(80)
+    assert len(recorder.argvs) == 2  # one MORE call (total), still 1 each
+    assert len(recorder.argvs[1]) == 4 + 2 * 80  # + "-d","1" pair
+    assert recorder.argvs[1].count("14:1") == 80 and recorder.argvs[1].count("14:0") == 80
+
+
+def test_press_backspace_fallback_ordering(recorder):
+    recorder.raise_on("wtype", subprocess.CalledProcessError(1, ["wtype"]))
+    make_backend(OutputConfig(backend="wtype")).press_backspace(2)
+    assert recorder.argvs == [
+        ("wtype", "-k", "Backspace", "-k", "Backspace"),
+        ("ydotool", "key", "-d", "1", "14:1", "14:0", "14:1", "14:0"),
+    ]  # retry exactly ONCE, correct argv each
+
+
+def test_press_backspace_fallback_missing_binary_also_retries(recorder):
+    recorder.raise_on("wtype", FileNotFoundError("wtype"))
+    make_backend(OutputConfig(backend="wtype")).press_backspace(1)
+    assert recorder.argvs[0][0] == "wtype" and recorder.argvs[1][0] == "ydotool"
+
+
+def test_press_backspace_fallback_logs_warning(recorder, caplog):
+    recorder.raise_on("wtype", subprocess.CalledProcessError(1, ["wtype"]))
+    with caplog.at_level(logging.WARNING, logger="voice_typing.typing_backends"):
+        make_backend(OutputConfig(backend="wtype")).press_backspace(1)
+    assert any(
+        r.levelno == logging.WARNING and "ydotool" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_press_backspace_fallback_failure_propagates(recorder):
+    recorder.raise_on("wtype", subprocess.CalledProcessError(1, ["wtype"]))
+    recorder.raise_on("ydotool", FileNotFoundError("ydotool"))
+    with pytest.raises(OSError):
+        make_backend(OutputConfig(backend="wtype")).press_backspace(1)
+
+
+def test_press_backspace_primary_success_no_fallback(recorder):
+    make_backend(OutputConfig(backend="wtype")).press_backspace(2)
+    assert len(recorder.argvs) == 1 and recorder.argvs[0][0] == "wtype"
+
+
+def test_null_press_backspace_spawns_no_subprocess(recorder):
+    NullBackend().press_backspace(5)
+    assert recorder.calls == []
+
+
+def test_press_backspace_is_abstract_on_abc():
+    with pytest.raises(TypeError):
+        TypingBackend()  # still abstract overall
+
+    class _OnlyTypeText(TypingBackend):
+        def type_text(self, text):
+            ...
+
+    with pytest.raises(TypeError):
+        _OnlyTypeText()  # press_backspace missing -> uninstantiable (genuinely abstract)
