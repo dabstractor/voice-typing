@@ -293,7 +293,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T7.S1",
                   "title": "cancel: control socket + recorder abort/discard + ctl + keybind + install usage",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S3",
