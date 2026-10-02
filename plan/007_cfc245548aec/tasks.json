@@ -286,7 +286,7 @@
               "type": "Task",
               "id": "P1.M2.T7",
               "title": "Backspace-cancel — socket command, daemon semantics, evdev listener (R4)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "The only path that deliberately deletes typed text: control-socket cancel + voicectl cancel + a passive evdev listener that triggers on physical Backspace presses while a tail is pending, with the keybind fallback and log-once failure handling.",
               "subtasks": [
                 {
@@ -312,7 +312,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T7.S2",
                   "title": "evdev passive listener thread + synthetic parser tests",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2",

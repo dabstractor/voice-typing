@@ -86,6 +86,9 @@ import voice_typing.textproc as textproc
 import voice_typing.typing_backends as typing_backends
 from voice_typing import cuda_check
 from voice_typing.config import VoiceTypingConfig
+# P1.M2.T7.S2: passive evdev Backspace-cancel listener (PRD §4.2quater). Pure-python import —
+# evdev pulls no torch/RealtimeSTT into the daemon process (import-purity rule, §4.2bis).
+from voice_typing.key_listener import KeyListener
 from voice_typing.recorder_host import RecorderHost  # P1.M3.T2.S2: child-subprocess recorder owner
 
 if TYPE_CHECKING:
@@ -557,6 +560,7 @@ class VoiceTypingDaemon:
         backend: "TypingBackend | None" = None,
         latency: "LatencyLog | None" = None,
         mic_prober: Callable[[], tuple[bool, str | None]] | None = None,
+        key_listener: KeyListener | None = None,
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
@@ -701,6 +705,30 @@ class VoiceTypingDaemon:
             cfg.output.streaming,
             append_space=cfg.output.append_space,
         )
+        # P1.M2.T7.S2 (PRD §4.2quater): the passive evdev listener behind Backspace-cancel —
+        # routes a physical Backspace press -> cancel() (S1) and any other keypress ->
+        # note_user_keypress() (T6.S3 freeze, PRD §4.2quater rule 5) while armed. Constructed
+        # here when cfg.cancel.on_backspace (schema: CancelConfig, P1.M1.T1.S1 — read-only;
+        # never extended). CONSTRUCTION IS PURE: no devices opened, no threads started. The
+        # reader threads start in run() (_start_key_listener) — run() is the repo's hermetic
+        # boundary for background threads (mirrors both idle watchdogs) precisely because the
+        # unit suite exercises _arm() heavily and must never open real /dev/input nodes.
+        # Events are inert while disarmed (is_active gate), so boot-time start is
+        # behaviorally identical to the first-arm start. key_listener= injects a test double
+        # (same seam pattern as backend=/latency=/mic_prober=).
+        self._key_listener: KeyListener | None = key_listener
+        if self._key_listener is None and cfg.cancel.on_backspace:
+            self._key_listener = KeyListener(
+                cancel_cb=self._on_cancel_backspace,
+                other_key_cb=self._on_user_keypress,
+                is_active=lambda: self._listening.is_set(),
+                devices=list(cfg.cancel.devices),
+            )
+        # Once-only latch for the zero-keyboard WARNING (P1.M2.T7.S2 fail-safe): logged at the
+        # FIRST _arm() after the listener started with nothing watchable; later arms stay
+        # silent forever. Plain bool, written only under _lock (via _arm) — same discipline
+        # as _cancel_suppress_final.
+        self._cancel_listener_warned = False
         # Mic health probe (bugfix Issue 2 / P1.M1.T2.S1): detect a dead/missing mic so status
         # (P1.M1.T2.S2) can surface it instead of silently reporting "listening: on". Injectable
         # (mic_prober=) so unit tests stay hermetic — NO real PyAudio/CUDA in the test suite
@@ -832,6 +860,10 @@ class VoiceTypingDaemon:
         # Idle UNLOAD watchdog (P1.M3.T1.S1 / PRD §4.2bis): reclaims VRAM after cfg.asr.auto_unload_idle_seconds
         # DISARMED. Mirrors the idle-watchdog start above; same _shutdown.wait(1.0) tick + daemon thread.
         threading.Thread(target=self._idle_unload_watchdog, name="voice-typing-idle-unload", daemon=True).start()
+        # P1.M2.T7.S2: passive evdev Backspace-cancel listener (daemon reader threads). Started
+        # here, NOT at the first _arm() — see _start_key_listener's docstring for why (test-suite
+        # hermeticity; is_active gating makes the timing behaviorally identical).
+        self._start_key_listener()
         while not self._shutdown.is_set():
             # Liveness check (bugfix Issue 3 / P1.M2.T2.S1): detect a crashed recorder-host child
             # (CUDA OOM / segfault / OOM-killer) on each ~50ms idle iteration. is_alive is cheap
@@ -1092,6 +1124,8 @@ class VoiceTypingDaemon:
         self._feedback.set_mode("lite")   # Rev 2 single-mode constant (§4.6 schema stable; ctl renders it)
         self._feedback.set_listening(True)
         self._refresh_mic_status()  # TTL-cached (Issue 3 / P1.M2.T2.S1): re-probes at most once / 30s
+        # P1.M2.T7.S2: once-only zero-keyboard WARNING (latched — see _warn_no_keyboards_once).
+        self._warn_no_keyboards_once()
 
     def _disarm(self) -> None:
         """Private: disarm mic + clear listening + notify. Called under lock.
@@ -1232,6 +1266,66 @@ class VoiceTypingDaemon:
         note = getattr(stream, "note_user_keypress", None)
         if callable(note):
             note()
+
+    # --- P1.M2.T7.S2: the KeyListener callback wrappers + lifecycle (PRD §4.2quater) ---------
+
+    def _on_cancel_backspace(self) -> None:
+        """PRD §4.2quater Backspace-cancel gesture (P1.M2.T7.S2): a physical Backspace press.
+
+        Runs on a KeyListener reader thread with NO daemon locks held. cancel() self-gates on
+        armed-ness + pending tail and is idempotent (proven by the S1 tests), so a Backspace
+        while disarmed or with no tail is a plain user-editing no-op here; the is-active check
+        is just the cheap first gate (cancel() takes self._lock internally — we hold none).
+        """
+        if self._listening.is_set():
+            self.cancel()
+
+    def _on_user_keypress(self) -> None:
+        """PRD §4.2quater rule 5 (P1.M2.T7.S2): a NON-Backspace keypress was observed.
+
+        Forwards to note_user_keypress() (T6.S3), which is already gated on _listening and
+        pending-tail — a keypress while idle or with no tail is a no-op there.
+        """
+        self.note_user_keypress()
+
+    def _start_key_listener(self) -> None:
+        """Start the passive evdev Backspace-cancel listener (P1.M2.T7.S2). NEVER raises.
+
+        Called ONCE by run() — NOT at the first _arm(): run() is the repo's hermetic boundary
+        for background threads (mirrors the idle watchdogs) and the unit suite exercises _arm()
+        heavily; it must never open real /dev/input nodes. start() is idempotent, takes no
+        daemon locks, and spawns only daemon=True threads, so calling it here (before any arm)
+        is behaviorally identical: events stay inert until _listening is set.
+        """
+        listener = self._key_listener
+        if listener is None:  # on_backspace=false (or a None injection): pure no-op
+            return
+        try:
+            watched = listener.start()
+        except Exception:  # pylint: disable=broad-except — the listener must never break boot
+            logger.warning(
+                "voice-typing cancel-listener: start failed; Backspace-cancel unavailable"
+                " (voicectl cancel keybind still works)",
+                exc_info=True,
+            )
+            return
+        if watched:
+            logger.info("voice-typing cancel-listener watching %d keyboard(s): %s", len(watched), watched)
+
+    def _warn_no_keyboards_once(self) -> None:
+        """P1.M2.T7.S2 fail-safe (PRD §4.2quater): if the listener started with ZERO readable
+        keyboards, log ONE WARNING at the first arm, then stay silent forever — no retry storm,
+        and the `voicectl cancel` keybind (S1) still works. Called from _arm() (under _lock)."""
+        listener = self._key_listener
+        if listener is None or self._cancel_listener_warned:
+            return
+        if not listener.started or listener.device_count > 0:
+            return  # not started yet (tests), or keyboards ARE being watched — nothing to warn about
+        self._cancel_listener_warned = True  # latch: later arms stay silent
+        logger.warning(
+            "voice-typing cancel-listener: no readable keyboard devices; Backspace-cancel"
+            " unavailable (voicectl cancel keybind still works)"
+        )
 
     def _freeze_stranded_tail(self, reason: str) -> None:
         """SESSION-freeze a typed streaming tail that can never be committed (P1.M2.T6.S3,
@@ -1887,6 +1981,14 @@ class VoiceTypingDaemon:
         # timeout (signal thread died) fall back to our OWN teardown — safe because
         # RecorderHost._stop_lock (P1.M1.T1.S1) serializes host.stop(), so the fallback cannot
         # reproduce the double-teardown.
+        # P1.M2.T7.S2: best-effort listener teardown FIRST — closing the evdev fds lets the
+        # reader threads exit promptly. Pure hygiene: the threads are daemon=True, so process
+        # exit alone is safe; stop() is idempotent and never raises.
+        if self._key_listener is not None:
+            try:
+                self._key_listener.stop()
+            except Exception:  # pylint: disable=broad-except — teardown is best-effort
+                logger.debug("key-listener stop raised during shutdown (ignored)", exc_info=True)
         with self._lock:
             already_claimed = getattr(self, "_shutdown_done", False)
             if not already_claimed:

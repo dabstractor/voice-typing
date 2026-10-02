@@ -49,8 +49,8 @@ streaming   = true      # PRD §4.2quater: type stabilized partials live + revis
 
 [cancel]   # Rev 2: erase the last committed utterance (PRD §4.2quater)
 
-on_backspace = true     # enable the cancel gesture: Alt+Super+Backspace erases the last committed utterance (types Backspaces to undo it) instead of typing a literal Backspace.
-devices     = []        # keyboard device node(s) to watch for the cancel bind, e.g. ["/dev/input/event3"]. Empty list = auto-detect the keyboard device(s).
+on_backspace = true     # enable the cancel gesture (PRD §4.2quater): while dictating — a tentative fragment is on screen — a physical Backspace erases the fragment and drops the in-flight utterance; the mic stays hot, just speak again. Any other keypress freezes the fragment instead (it is never typed over). Fallback bind: Alt+Super+Backspace (`voicectl cancel`) works even with no readable keyboard.
+devices     = []        # keyboard device node(s) to watch for the physical-Backspace gesture, e.g. ["/dev/input/event3"]. Empty list = auto-detect keyboards exposing KEY_BACKSPACE (virtual uinput/ydotool devices are always excluded, so self-typing cannot self-cancel). Nothing readable -> one journal warning at the first arm; the Alt+Super+Backspace fallback bind still works.
 
 
 [feedback]   # runtime state file + Hyprland notifications
