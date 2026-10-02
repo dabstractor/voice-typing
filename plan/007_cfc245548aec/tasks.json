@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Substrate — single-mode collapse, config schema, backspace primitive",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Make the repo safe to build the streaming engine on: one recorder construction everywhere (config, cuda_check, daemon, recorder_host, ctl, prefetch, binds), the full config schema delta in one coherent edit, the evdev dependency, and the press_backspace(n) typing primitive with batched backends.",
           "tasks": [
             {
@@ -54,7 +54,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Single-mode collapse across cuda_check, daemon, recorder_host, ctl, prefetch, binds",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Delete the normal/two-model construction everywhere (PRD R1): the former lite construction (single lite_model, use_main_model_for_realtime=True, lite silence duration) becomes THE path. Decision recorded in system_context.md: status/state.json keep 'mode' as constant 'lite'.",
               "subtasks": [
                 {
@@ -95,7 +95,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "ctl.py command surface (drop lite commands)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2"
@@ -110,7 +110,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S4",
                   "title": "Prefetch slim-down, bind collapse, ACCEPTANCE #10 rewrite",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -130,14 +130,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "press_backspace(n) typing primitive (R2)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Add press_backspace(n: int) -> None to the TypingBackend ABC and every backend, batched so ~80 chars rewind in <150 ms, with the same auto-fallback contract as type_text on the wtype wrapper.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "ABC + batched wtype/ydotool/null implementations + fallback",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §5: TypingBackend ABC :45-60 (single abstract type_text); WtypeBackend :63-72 (subprocess.run(['wtype','--',text], check=True)); YdotoolBackend :75-83 (['ydotool','type','--key-delay','2','--',text]); NullBackend :86-89; _WtypeWithFallback :92-127 (catches (CalledProcessError, OSError), retries ONCE on fallback); make_backend :130-148. external_deps.md §2-§4: wtype -k repeats within ONE invocation (man synopsis + env -i parse probe — no usage error, fails only at Wayland connect); ydotool key takes repeated '14:1 14:0' pairs with -d ms; KEY_BACKSPACE=14. Tests pin exact argv (test_typing_backends.py:89/:122) with a no-real-subprocess guard :274.\n2. INPUT: the existing ABC and backend classes above.\n3. LOGIC: Add abstract press_backspace(n: int) -> None. WtypeBackend: ONE subprocess.run(['wtype'] + ['-k','Backspace']*n, check=True) — never spawn per keystroke (80 spawns blows the <150 ms budget); n<=0 returns immediately without spawning. YdotoolBackend: ONE subprocess.run(['ydotool','key','-d','1'] + ['14:1','14:0']*n, check=True). NullBackend: no-op. _WtypeWithFallback.press_backspace: same catch/retry-once-fallback contract as type_text. Update tests/test_typing_backends.py: exact argv pins for both backends, n=0/negative no-op (no subprocess), single-invocation batching for n=80 (assert ONE subprocess.run call), fallback ordering, abstract-ness. Mock subprocess as the existing _Recorder fake does — no real keystrokes ever.\n4. OUTPUT: TypingBackend.press_backspace contract consumed by P1.M2.T6 (revise/commit rewinds), P1.M2.T7.S1 (cancel rewind), and mirrored by the T8 RecordingTypingBackend double.\n5. DOCS: none beyond docstrings — internal primitive (README streaming section lands with P1.M3.T10.S1).",

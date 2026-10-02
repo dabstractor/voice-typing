@@ -31,7 +31,7 @@ _STATUS_ON = {
     "ok": True, "listening": True, "phase": "listening", "models_loaded": True, "load_error": "",
     "partial": "hello wor", "last_final": "previous sentence.",
     "uptime_s": 12.345, "device": "cuda", "compute_type": "float16",
-    "final_model": "distil-large-v3", "realtime_model": "small.en",
+    "mode": "lite", "model": "small.en",                 # Rev 2 13-key snapshot (P1.M1.T2.S2/S3)
     "mic_ok": True, "mic_error": "",                       # bugfix Issue 2 / P1.M1.T2.S2
 }
 
@@ -59,24 +59,24 @@ def test_format_quit_no_listening_key():
     assert ctl.format_result("quit", {"ok": True, "shutting_down": True}) == ("shutting down", 0)
 
 
-def test_format_status_multiline_has_partial_and_models():
+def test_format_status_multiline_has_partial_and_mode():
     text, code = ctl.format_result("status", _STATUS_ON)
     assert code == 0
     assert "listening: on" in text
-    assert "mode: normal" in text                   # PRD §4.2ter: mode rendered (defaults normal)
+    assert "mode: lite" in text                      # Rev 2 constant (P1.M1.T2.S2); .get default stays
     assert "phase: listening" in text                # P1.M2.T2.S1: lifecycle phase rendered
     assert "hello wor" in text                      # partial
-    assert "distil-large-v3" in text and "small.en" in text   # models loaded
-    assert "(loaded)" in text                        # P1.M2.T2.S1: models_loaded marker
+    assert "models:" not in text                     # models line DROPPED (P1.M1.T2.S3); JSON-only now
     assert "cuda" in text and "float16" in text      # device + compute_type
     assert "12.345" in text                          # uptime
 
 
-def test_lite_commands_are_accepted_and_toggle_lite_renders_lite_mode():
-    """toggle-lite / start-lite are valid commands (PRD §4.2ter); status reflects mode: lite."""
-    assert set(("toggle-lite", "start-lite")).issubset(set(ctl._COMMANDS))
-    text, code = ctl.format_result("status", {**_STATUS_ON, "mode": "lite"})
-    assert code == 0 and "mode: lite" in text
+def test_lite_commands_are_rejected_as_usage_errors():
+    """Rev 2 single-mode (P1.M1.T2.S3): toggle-lite/start-lite are gone from the surface;
+    main() rejects them with exit 64 (EX_USAGE) BEFORE any socket connect."""
+    assert "toggle-lite" not in ctl._COMMANDS and "start-lite" not in ctl._COMMANDS
+    assert ctl.main(["toggle-lite"]) == 64      # usage path returns before socket resolution
+    assert ctl.main(["start-lite"]) == 64
 
 
 def test_format_status_shows_unloaded_state_and_load_error():
@@ -86,9 +86,7 @@ def test_format_status_shows_unloaded_state_and_load_error():
     text, code = ctl.format_result("status", resp)
     assert code == 0
     assert "phase: unloaded" in text
-    assert "(not loaded)" in text
     assert "load error: CUDA load failed" in text
-    assert "(loaded)" not in text                    # marker flips, not appended
 
 
 def test_format_status_shows_mic_ok_when_healthy():
@@ -172,7 +170,8 @@ def test_main_status_round_trip_returns_zero_and_prints(capsys, running_server):
     code = ctl.main(["status"])
     out = capsys.readouterr().out
     assert code == 0
-    assert "listening: off" in out and "distil-large-v3" in out
+    assert "listening: off" in out and "mode: lite" in out
+    assert "models:" not in out                     # models line dropped (P1.M1.T2.S3)
 
 
 def test_main_toggle_then_status_lists_on(capsys, running_server):
@@ -379,26 +378,24 @@ def test_dispatch_start_ok_true_when_no_load_error_attr():
     assert resp["ok"] is True
     assert resp["listening"] is True   # _StubDaemon.start() arms
 # ===========================================================================
-# P1.M1.T3.S1 — help text surfaces all 7 commands (bugfix Issue 3)
-# (argparse format_help() + the module docstring must list toggle-lite/start-lite, matching
-#  _COMMANDS + PRD §4.8 + the no-arg error path. Before the fix --help showed only 5 while
-#  `voicectl` (no args) showed 7 — internally inconsistent. TDD red→green.)
+# P1.M1.T2.S3 — help surfaces list exactly the 5 Rev 2 commands (bugfix Issue 3, inverted)
+# (argparse format_help() + the module docstring must list the 5 commands matching _COMMANDS
+#  + the no-arg error path — and NO stale toggle-lite/start-lite anywhere. The negative sweep
+#  catches a stale epilog/docstring line the way Issue 3's positive sweep caught the missing ones.)
 # ===========================================================================
-def test_help_surfaces_list_all_seven_commands():
-    """All 7 commands appear in every help surface (PRD §4.8; bugfix Issue 3).
-
-    argparse's format_help() renders BOTH the positional `cmd` help AND the epilog (the two
-    --help surfaces); ctl.__doc__ is the module docstring (Usage line + subcommand block). All
-    must list toggle-lite/start-lite, matching _COMMANDS + the no-arg error path. Before the
-    ctl.py fix this is RED (the lite commands are absent from --help + the docstring).
+def test_help_surfaces_list_all_five_commands():
+    """Rev 2 surface (P1.M1.T2.S3): exactly 5 commands in _COMMANDS, --help (positional help +
+    epilog), and the module docstring — and NO stale lite entries anywhere (bugfix Issue 3's
+    consistency guard, inverted for the collapse).
     """
-    seven = {"toggle", "start", "stop", "status", "quit", "toggle-lite", "start-lite"}
-    assert set(ctl._COMMANDS) == seven, sorted(ctl._COMMANDS)   # _COMMANDS = the source of truth
+    five = {"toggle", "start", "stop", "status", "quit"}
+    assert set(ctl._COMMANDS) == five, sorted(ctl._COMMANDS)   # _COMMANDS = the source of truth
     # (1) argparse --help (format_help renders BOTH the positional help AND the epilog):
     help_text = ctl._build_parser().format_help()
-    for cmd in seven:
+    for cmd in five:
         assert cmd in help_text, f"{cmd!r} missing from --help:\n{help_text}"
-    # (2) module docstring (Usage line + subcommand block):
-    assert ctl.__doc__ is not None, "ctl module docstring is missing"
-    for cmd in seven:
         assert cmd in ctl.__doc__, f"{cmd!r} missing from the ctl module docstring"
+    # (2) negative sweep: the dropped lite commands must be ABSENT from every help surface:
+    for stale in ("toggle-lite", "start-lite"):
+        assert stale not in help_text, f"{stale!r} still in --help:\n{help_text}"
+        assert stale not in ctl.__doc__, f"{stale!r} still in the module docstring"

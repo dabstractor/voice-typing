@@ -14,12 +14,10 @@ Subcommands (PRD §4.8):
     toggle   arm/disarm the mic (flip the listening gate)
     start    arm the mic (start listening)
     stop     disarm the mic (stop listening)
-    status   pretty-print listening + partial + last final + uptime + device + loaded models
+    status   pretty-print listening + mode + phase + partial + last final + uptime + device + mic
     quit     request a clean daemon shutdown (releases GPU workers)
-    toggle-lite  arm/disarm in LITE mode (single small model — PRD §4.2ter)
-    start-lite   arm in LITE mode (start listening with the small model only)
 
-Usage:  voicectl <toggle|start|stop|status|quit|toggle-lite|start-lite>
+Usage:  voicectl <toggle|start|stop|status|quit>
         (the full usage table is in the project README; this is the user-facing CLI surface.)
 
 Stdlib-only: argparse, json, socket, sys + the shared socket-path resolver from voice_typing.daemon.
@@ -34,7 +32,7 @@ import threading
 
 from voice_typing.daemon import _default_control_socket_path  # canonical resolver (P1.M4.T2.S1); reuse, do not duplicate
 
-_COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit", "toggle-lite", "start-lite")
+_COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit")  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' is appended by P1.M2.T7.S1
 # BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
 # so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
 _EX_USAGE: int = 64
@@ -51,9 +49,8 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
     Exit code: 0 if response["ok"] is true, else 1 (logical failure). The text:
       - ok:false                      -> the daemon's error text ("error: <...>")
       - quit ({"ok":true,"shutting_down":true}) -> "shutting down"  (NO listening key -> branch first)
-      - status                        -> multi-line: listening, partial, last_final, uptime, device,
-                                        compute_type, final_model, realtime_model, mic  (PRD §4.8 "incl.
-                                        partial and models loaded"; mic health per bugfix Issue 2)
+      - status                        -> multi-line: listening, mode, phase, partial, last_final, uptime,
+                                        device, compute_type, mic  (PRD §4.8; mic health per bugfix Issue 2)
       - toggle/start/stop             -> "listening: on" / "listening: off"
 
     Defensive .get(...) everywhere so a missing key never raises (the protocol guarantees the 8-key
@@ -66,15 +63,12 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
     if cmd == "status":
         listening = "on" if response.get("listening") else "off"
         phase = response.get("phase", "") or ""                       # P1.M2.T2.S1: lifecycle phase (§4.2bis)
-        mode = response.get("mode", "normal") or "normal"              # PRD §4.2ter: normal | lite
+        mode = response.get("mode", "normal") or "normal"              # Rev 2: daemon constant "lite" (P1.M1.T2.S2); default kept defensive
         partial = response.get("partial", "") or ""
         last_final = response.get("last_final", "") or ""
         uptime = response.get("uptime_s", 0.0)
         device = response.get("device", "unknown")
         compute_type = response.get("compute_type", "unknown")
-        final_model = response.get("final_model", "unknown")
-        realtime_model = response.get("realtime_model", "unknown")
-        models_loaded = response.get("models_loaded", False)          # P1.M2.T2.S1: models resident?
         load_error = response.get("load_error", "") or ""            # P1.M2.T2.S1: last load failure
         mic_ok = response.get("mic_ok", True)             # bugfix Issue 2 / P1.M1.T2.S2: default True
         mic_error = response.get("mic_error", "") or ""   #   so a missing key never looks broken
@@ -84,7 +78,6 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
             mic_line = f"mic: unavailable ({mic_error})"
         else:
             mic_line = "mic: unavailable"
-        loaded_marker = "loaded" if models_loaded else "not loaded"   # distinguishes loaded from loading/unloaded
         text = (
             f"listening: {listening}\n"
             f"mode: {mode}\n"
@@ -93,7 +86,6 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
             f"last: {last_final}\n"
             f"uptime: {uptime}s\n"
             f"device: {device} ({compute_type})\n"
-            f"models: {final_model} + {realtime_model} ({loaded_marker})\n"
             f"{mic_line}"
         )
         if load_error:                                     # surface §4.2bis load failures (absent on the happy path)
@@ -155,12 +147,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "prints the result. Exits 0 on success, 1 on a logical failure, 2 if the daemon is not "
             "running, 64 on a usage error (unknown/missing command)."
         ),
-        epilog="subcommands: toggle, start, stop, status, quit, toggle-lite, start-lite  (see the project README for the full usage table)",
+        epilog="subcommands: toggle, start, stop, status, quit  (see the project README for the full usage table)",
     )
     parser.add_argument(
         "cmd",
         nargs="?",
-        help="toggle | start | stop | status | quit | toggle-lite | start-lite",
+        help="toggle | start | stop | status | quit",
     )
     return parser
 
@@ -191,12 +183,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # 2. Talk to the daemon. Connect OSError -> exit 2; protocol ValueError -> exit 1.
-    #    start/toggle (and their lite variants) may block ~1–3 s on a cold arm or a mode-switch
-    #    reload (PRD §4.2bis/§4.2ter) while the daemon lazy-loads models; route them through
-    #    _send_command_with_loading_hint so voicectl prints a 'loading models…' hint if the reply is
-    #    slow (resident, same-mode arms reply in ms → no hint). stop/status/quit use plain send_command.
+    #    start/toggle may block ~1–3 s on the COLD FIRST ARM (PRD §4.2bis lazy load of the single
+    #    model); route them through _send_command_with_loading_hint so voicectl prints a 'loading
+    #    models…' hint if the reply is slow (resident arms reply in ms → no hint).
+    #    stop/status/quit use plain send_command.
     try:
-        if cmd in ("start", "toggle", "start-lite", "toggle-lite"):
+        if cmd in ("start", "toggle"):
             response = _send_command_with_loading_hint(socket_path, cmd)
         else:
             response = send_command(socket_path, cmd)
