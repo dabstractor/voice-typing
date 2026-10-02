@@ -648,8 +648,10 @@ def test_on_final_happy_path_appends_space():
     d, fb, rec, be = _make_daemon()
     d.start()   # arm
     d.on_final("hello world")
-    assert be.typed == ["hello world "]   # append_space default True
-    assert fb.finals == ["hello world"]   # recorded WITHOUT the trailing space
+    # P1.M2.T6.S2: streaming (default) commits through the engine — the final, then
+    # the trailing space as its own keystroke call. Recorded WITHOUT a trailing space.
+    assert be.typed == ["hello world", " "]
+    assert fb.finals == ["hello world"]
 
 
 def test_on_final_append_space_false():
@@ -671,9 +673,9 @@ def test_on_final_rejects_hallucination():
 
 
 def test_on_final_typing_raises_is_caught_and_record_still_happens():
-    d, fb, rec, be = _make_daemon(backend=_FakeBackend(raise_on="boom "))
+    d, fb, rec, be = _make_daemon(backend=_FakeBackend(raise_on="boom"))
     d.start()
-    d.on_final("boom")   # payload "boom " matches raise_on → type_text raises
+    d.on_final("boom")   # commit's first type_text("boom") matches raise_on → raises
     assert be.typed == []          # nothing typed (it raised)
     assert fb.finals == ["boom"]   # record_final STILL called (recognition is final regardless)
 
@@ -753,7 +755,7 @@ def test_on_final_clears_final_pending():
     assert d._final_pending is True
     d.on_final("hello world")
     assert d._final_pending is False
-    assert be.typed == ["hello world "]
+    assert be.typed == ["hello world", " "]   # commit: final + space (P1.M2.T6.S2)
 
 
 def test_arm_resets_stale_final_pending_from_prior_session():
@@ -822,7 +824,7 @@ def test_stop_within_session_stray_partial_after_final_disarms_immediately():
     assert d._final_pending is True
     d._text_in_flight.set()          # run loop blocked inside text()
     d.on_final("hello world")        # final lands + is typed; _final_pending=False, _utterance_finalized=True
-    assert be.typed == ["hello world "]
+    assert be.typed == ["hello world", " "]   # commit: final + space (P1.M2.T6.S2)
     assert d._utterance_finalized is True
     # run loop re-enters text() for the next utterance (still blocked inside text()); _utterance_finalized
     # stays True until the loop resets it on the NEXT text() entry — but a stray partial fires FIRST:
@@ -970,7 +972,7 @@ def test_on_final_lock_held_across_type_text():
     worker.join(timeout=2.0)
     assert not worker.is_alive(), "on_final worker did not finish"
     assert d._on_final_lock.locked() is False, "lock must be released once on_final returns"
-    assert probe.typed == ["hello world "]   # append_space default True
+    assert probe.typed == ["hello world", " "]   # commit: final, then the space
 
 
 def test_on_final_serializes_two_concurrent_callbacks():
@@ -1012,7 +1014,7 @@ def test_on_final_serializes_two_concurrent_callbacks():
     t1.join(timeout=2.0)
     t2.join(timeout=2.0)
     assert not t1.is_alive() and not t2.is_alive(), "workers did not finish"
-    assert sorted(probe.typed) == ["alpha ", "bravo "]   # both typed, in some order
+    assert sorted(probe.typed) == [" ", " ", "alpha", "bravo"]   # text+space per commit
 
 
 # --- start / stop / toggle ---
@@ -1598,8 +1600,8 @@ def test_on_final_emits_structured_latency_line(caplog):
     assert "text='hello world'" in line          # %r of cleaned text
     # total_ms is a number (t_speech_end was set) -> not n/a
     assert re.search(r"total_ms=\d", line)
-    # S2 behavior preserved:
-    assert be.typed == ["hello world "] and fb.finals == ["hello world"]
+    # S2 behavior preserved (commit emits the latency line on the streaming path too):
+    assert be.typed == ["hello world", " "] and fb.finals == ["hello world"]
 
 
 def test_on_final_latency_line_na_when_no_vad_stop(caplog):
@@ -3991,7 +3993,7 @@ def test_cancel_suppression_drops_racing_final_and_clears_on_sentinel():
     assert d._cancel_suppress_final is False, "the marked sentinel must clear the suppression"
     assert be.typed == [] and fb.finals == []   # sentinel typed/recorded nothing
     d.on_final("fresh sentence")                # a NORMAL final afterwards flows through
-    assert be.typed == ["fresh sentence "]
+    assert be.typed == ["fresh sentence", " "]   # commit: final + space (P1.M2.T6.S2)
     assert fb.finals == ["fresh sentence"]
 
 
@@ -4012,3 +4014,150 @@ def test_arm_clears_stale_cancel_suppression():
     d.start()                          # start() -> _load_host() no-op -> _arm() under the lock
     assert d._cancel_suppress_final is False
     assert d.is_listening() is True
+
+
+# ===========================================================================
+# P1.M2.T6.S2 — streaming commit path + Rev 1 rollback hatch (daemon wiring)
+# ===========================================================================
+
+
+class _PromptRecordingHost(_FakeHost):
+    """_FakeHost + a recorded set_prompt seam (P1.M2.T6.S2 context-prompt push)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.prompts = []
+
+    def set_prompt(self, text):
+        self.prompts.append(text)
+
+
+def test_on_final_streaming_commit_types_via_engine():
+    """streaming=True (the default): on_final routes through StreamingOutput.commit —
+    the daemon itself never calls backend.type_text directly for the payload."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("hello wor")          # routes through the engine: types the tail
+    d.on_final("hello world")           # commit: extend delta "ld" + the trailing space
+    assert be.typed == ["hello wor", "ld", " "]
+    assert d._stream.committed == "hello world "
+    assert fb.finals == ["hello world"]
+
+
+def test_on_final_streaming_revise_rewinds_and_retypes():
+    """A final that differs from the tail: the engine rewinds exactly len(tail) and
+    retypes the guarded final + space (NOT rate-limited — commit is authoritative)."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("hello world")
+    d.on_final("hello there")
+    assert be.typed == ["hello world", ("bs", 11), "hello there", " "]
+    assert d._stream.committed == "hello there "
+    assert fb.finals == ["hello there"]
+
+
+def test_on_final_streaming_false_is_verbatim_rev1_hatch():
+    """output.streaming=False: the daemon types cleaned+space DIRECTLY (ONE call) and
+    the engine makes ZERO backend calls — the rollback hatch is keystroke-identical
+    to the pre-S2 path (engine partial handling is mirror-only)."""
+    cfg = VoiceTypingConfig()
+    cfg.output.streaming = False
+    d, fb, rec, be = _make_daemon(cfg=cfg)
+    d.start()
+    d._on_partial("hello wor")          # engine mirror-only: NOTHING typed
+    d.on_final("hello world")
+    assert be.typed == ["hello world "]  # byte-identical Rev 1: one payload+space call
+    assert fb.partials == ["hello wor"]  # raw partial still mirrored (via the engine)
+    assert fb.finals == ["hello world"]
+    assert d._stream.committed == ""     # the checkpoint never advances in Rev 1 mode
+
+
+def test_on_final_streaming_rejected_final_freezes_tail_and_keeps_bookkeeping():
+    """Rejected final (blocklist) under streaming: the tail freezes AS-IS (no rewind,
+    no retype) and the drain/idle bookkeeping (_final_pending/_utterance_finalized)
+    still runs so a pending drain can finish."""
+    cfg = VoiceTypingConfig()
+    cfg.filter.blocklist = ["hello"]
+    d, fb, rec, be = _make_daemon(cfg=cfg)
+    d.start()
+    d._on_partial("hello world")        # typed tail on screen
+    d.on_final("hello")                 # blocklisted -> clean() -> None
+    assert be.typed == ["hello world"]  # frozen as-is: NO rewind, NO retype, NO space
+    assert d._stream.frozen is True
+    assert d._stream.committed == ""    # checkpoint NOT advanced
+    assert d._final_pending is False    # bookkeeping ran despite the rejection
+    assert d._utterance_finalized is True
+    assert fb.finals == []
+
+
+def test_on_final_streaming_false_rejected_final_is_plain_early_return():
+    """Rev 1 rejected final: today's behavior byte-for-byte — no freeze interaction."""
+    cfg = VoiceTypingConfig()
+    cfg.output.streaming = False
+    cfg.filter.blocklist = ["hello"]
+    d, fb, rec, be = _make_daemon(cfg=cfg)
+    d.start()
+    d._on_partial("hello world")        # mirror-only (no typing in Rev 1)
+    d.on_final("hello")
+    assert be.typed == []
+    assert d._stream.frozen is False    # the engine is never touched in Rev 1 mode
+    assert fb.finals == []
+
+
+def test_on_partial_routes_through_engine_in_streaming_mode():
+    """_on_partial goes through the engine: the partial is TYPED and mirrored."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("hello wor")
+    assert be.typed == ["hello wor"]
+    assert fb.partials == ["hello wor"]
+
+
+def test_on_partial_streaming_false_mirror_only():
+    """Rev 1 parity: the raw partial is mirrored verbatim, zero keystrokes."""
+    cfg = VoiceTypingConfig()
+    cfg.output.streaming = False
+    d, fb, rec, be = _make_daemon(cfg=cfg)
+    d.start()
+    d._on_partial("hello wor")
+    assert be.typed == []
+    assert fb.partials == ["hello wor"]
+
+
+def test_on_final_streaming_pushes_context_prompt_to_host():
+    """After the commit, _refresh_context_prompt sends the committed text since the
+    last sentence boundary to the host's set_prompt seam."""
+    cfg = VoiceTypingConfig()
+    host = _PromptRecordingHost(cfg, _DaemonFakeFeedback(), daemon.LatencyLog(), None, None, None)
+    host.spawn()   # mark the pre-built host alive so _load_host() fast-paths (keeps OUR host)
+    d, fb, rec, be = _make_daemon(cfg=cfg, recorder_host=host)
+    d.start()
+    d._on_partial("First one. sec")
+    d.on_final("First one. second")     # commit -> committed "First one. second "
+    assert be.typed == ["First one. sec", "ond", " "]
+    assert host.prompts == ["second"]   # text since the last '.', whitespace-stripped
+
+
+def test_refresh_context_prompt_missing_host_seam_is_silent_noop():
+    """A host WITHOUT set_prompt (the legacy recorder adapter here) is a silent DEBUG
+    no-op — on_final must complete normally."""
+    d, fb, rec, be = _make_daemon()     # legacy adapter host: no set_prompt attr
+    d.start()
+    d.on_final("hello world")           # commit + refresh: must not raise
+    assert fb.finals == ["hello world"]
+    assert be.typed == ["hello world", " "]
+
+
+def test_arm_and_disarm_reset_the_stream_session():
+    """_arm/_disarm call reset_session(): committed/tail clear across sessions and a
+    fresh arm re-arms the engine (a fresh arm legitimately unfreezes)."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("hello")
+    d.on_final("hello world")           # committed "hello world "
+    assert d._stream.committed == "hello world "
+    d._disarm()                         # session over -> strings reset (tail stays typed)
+    assert d._stream.committed == "" and d._stream.tail == ""
+    d.start()                           # fresh arm: the engine types again from scratch
+    d._on_partial("Next")
+    assert be.typed[-1] == "Next"       # fresh session start: case preserved, typed anew

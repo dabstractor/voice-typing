@@ -256,6 +256,20 @@ class RecorderHost:
         except (BrokenPipeError, OSError, EOFError):
             self._dead = True  # child gone; idempotent
 
+    def set_prompt(self, text: str) -> None:
+        """Queue a rolling context-prompt update for the child (P1.M2.T5.S1; sender T6.S2).
+
+        Fire-and-forget cmd_q put, mirroring set_microphone: never blocks, never raises
+        (a dead/full queue is a no-op). The child's command loop dispatches ("prompt",
+        ...) BETWEEN utterances (it blocks inside text() while one is in flight —
+        exactly when the daemon sends this, at commit time) and safely ignores the
+        command when its prompt executor is degraded (logged DEBUG child-side).
+        """
+        try:
+            self._cmd_q.put(("prompt", {"text": text}))
+        except (BrokenPipeError, OSError, EOFError):
+            self._dead = True  # child gone; idempotent
+
     def abort(self) -> None:
         """Interrupt a blocked text() in the child. Sets the abort event (polled by a child thread).
 

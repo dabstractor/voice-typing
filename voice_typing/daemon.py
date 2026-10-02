@@ -693,9 +693,13 @@ class VoiceTypingDaemon:
         # partials through it yet — _on_partial wiring + the commit path are P1.M2.T6.S2 —
         # so daemon behavior is unchanged: idle tail is "" (pending_tail_len() -> 0) and
         # reset_after_cancel() is a no-op on an empty tail, identical to the pre-T6 path.
-        # With cfg.output.streaming False the engine is (already) a mirror-only pass-through.
+        # With cfg.output.streaming False the engine is a mirror-only pass-through (the
+        # P1.M2.T6.S2 rollback hatch — daemon finals route around it entirely).
         self._stream = streaming.StreamingOutput(
-            self._backend, self._feedback, cfg.output.streaming
+            self._backend,
+            self._feedback,
+            cfg.output.streaming,
+            append_space=cfg.output.append_space,
         )
         # Mic health probe (bugfix Issue 2 / P1.M1.T2.S1): detect a dead/missing mic so status
         # (P1.M1.T2.S2) can surface it instead of silently reporting "listening: on". Injectable
@@ -981,15 +985,42 @@ class VoiceTypingDaemon:
                 return            # dropped: no clean, no type_text, no record_final
             cleaned = textproc.clean(text, self._cfg.filter)
             if not cleaned:                    # rejected: blocklist hallucination / below min_chars
+                # P1.M2.T6.S2: under streaming a rejected final FREEZES the tail as-is
+                # (PRD §4.2quater rule 2 — nothing authoritative was decoded, so nothing
+                # is rewound) and resets the boundary; the drain/idle flags still run so
+                # a pending drain sees the utterance as finished. Rev 1 mode stays
+                # today's plain early return, byte for byte.
+                if self._cfg.output.streaming:
+                    self._stream.freeze("rejected final (blocklist/min_chars)")
+                    self._stream.reset_boundary()
+                    self._final_pending = False  # finalized-by-rejection: a drain can finish
+                    self._utterance_finalized = True  # validation Issue 2: this text() is done
                 return
             self._final_pending = False  # the in-flight utterance is finalized; a pending drain can finish
             self._utterance_finalized = True  # validation Issue 2: mark this text() invocation done
-            payload = cleaned + (" " if self._cfg.output.append_space else "")
-            try:
-                self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
-            except Exception:
-                logger.exception("typing backend failed for final %r", cleaned)
-            t_typed = time.monotonic()             # right after type_text (PRD §4.2 latency logging)
+            if self._cfg.output.streaming:
+                # P1.M2.T6.S2 streaming commit path (the correction pass): the engine
+                # corrects the on-screen tail in place (rewind+retype only when the
+                # final differs), appends the trailing space, advances the checkpoint.
+                # MUST run INSIDE _on_final_lock so a racing cancel() can never
+                # interleave rewind keystrokes (lock ordering: the engine never takes a
+                # daemon lock back). commit() contains backend failures internally
+                # (fail-safe freeze); this wrap only defends the reader thread against
+                # the truly unexpected.
+                try:
+                    self._stream.commit(cleaned)
+                except Exception:
+                    logger.exception("streaming commit failed for final %r", cleaned)
+                t_typed = time.monotonic()             # right after commit typing (PRD §4.2)
+            else:
+                # Rev 1 rollback hatch (output.streaming=false): the pre-S2 body
+                # VERBATIM — no StreamingOutput backend call can occur in this mode.
+                payload = cleaned + (" " if self._cfg.output.append_space else "")
+                try:
+                    self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
+                except Exception:
+                    logger.exception("typing backend failed for final %r", cleaned)
+                t_typed = time.monotonic()             # right after type_text (PRD §4.2 latency logging)
             self._feedback.record_final(cleaned)   # recognition is final regardless of typing success
             record = self._latency.finalize_utterance(
                 text=cleaned, t_final_ready=t_final_ready, t_typed=t_typed
@@ -1015,6 +1046,11 @@ class VoiceTypingDaemon:
                 record["t_final_ready"],
                 record["t_typed"],
             )
+            if self._cfg.output.streaming:
+                # P1.M2.T6.S2: refresh the rolling context-prompt seam AFTER the commit
+                # (streaming.context_after_last_boundary -> host.set_prompt; the thin S2
+                # seam — P1.M2.T5.S2 formalizes the full daemon-side computation).
+                self._refresh_context_prompt()
 
     def _arm(self) -> None:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle.
@@ -1026,6 +1062,9 @@ class VoiceTypingDaemon:
         self._final_pending = False  # Issue 2: fresh arm = no utterance in flight (clear stale stray partials)
         self._utterance_finalized = False  # validation Issue 2: fresh arm = no final yet for this session
         self._cancel_suppress_final = False  # P1.M2.T7.S1: a fresh arm re-arms the final pipeline
+        stream_reset = getattr(self._stream, "reset_session", None)  # P1.M2.T6.S2: NEW session
+        if callable(stream_reset):
+            stream_reset()  # a fresh arm legitimately unfreezes; engine strings reset for the session
         self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
         self._disarmed_monotonic = None                  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
         if self._host is not None:
@@ -1057,6 +1096,9 @@ class VoiceTypingDaemon:
         self._utterance_finalized = False  # validation Issue 2: session ends -> no final on record
         self._last_speech_monotonic = None  # not listening → idle clock is inactive
         self._disarmed_monotonic = time.monotonic()  # start the idle-UNLOAD clock (P1.M3.T1.S1)
+        stream_reset = getattr(self._stream, "reset_session", None)  # P1.M2.T6.S2: session over
+        if callable(stream_reset):
+            stream_reset()  # engine strings reset; the pending tail simply stays typed (T6.S3 owns cleanup)
         if self._host is not None:
             self._host.set_microphone(False)
         self._feedback.set_listening(False)
@@ -1088,12 +1130,16 @@ class VoiceTypingDaemon:
     def _on_partial(self, text: str) -> None:
         """Handle a realtime partial from the host's reader thread (P1.M3.T2.S2 re-plan).
 
-        Mirrors the in-process _build_callbacks partial callback: update the Feedback partial +
-        count it for the latency log. The 'speech' event (fired alongside by the child's on_speech
-        hook) drives _touch_speech separately (which flags the in-flight utterance for the drain).
-        Called from the host reader thread (daemon thread).
+        Routes the partial through the streaming engine (P1.M2.T6.S2): extend/revise
+        typing with guards — the engine mirrors into the Feedback partial on EVERY path
+        (streaming disabled = verbatim raw-partial mirror, Rev 1 parity), so
+        state.json keeps showing what the user sees — and count it for the latency log.
+        The 'speech' event (fired alongside by the child's on_speech hook) drives
+        _touch_speech separately (which flags the in-flight utterance for the drain).
+        Called from the host reader thread (daemon thread). The engine never raises
+        (backend calls are fail-safe wrapped).
         """
-        self._feedback.update_partial(text)
+        self._stream.on_partial(text)
         self._latency.note_partial(text)
 
     def _request_stop(self) -> None:
@@ -1146,6 +1192,29 @@ class VoiceTypingDaemon:
         if callable(reset):
             reset()   # T6: clears the tail, suppresses partial typing until the next boundary
         self._feedback.update_partial("")
+
+    def _refresh_context_prompt(self) -> None:
+        """Push the rolling context prompt to the recorder-host child (P1.M2.T6.S2 seam).
+
+        Sends the committed text since the last sentence boundary
+        (streaming.context_after_last_boundary) so the child's small.en decode of the
+        NEXT utterance starts primed with the current partial sentence (PRD
+        §4.2quater). THIN S2 SEAM, kept minimal on purpose: P1.M2.T5.S2 owns the full
+        daemon-side prompt computation; the child already dispatches ("prompt", ...)
+        between utterances and safely ignores it when its executor is degraded.
+        Defensive getattr mirrors the _pending_tail_len seam style: a host without
+        set_prompt (unit-test fakes, the legacy recorder adapter) is a silent DEBUG
+        no-op. NEVER raises — the on_final reader thread must survive.
+        """
+        try:
+            text = streaming.context_after_last_boundary(self._stream.committed)
+            setter = getattr(self._host, "set_prompt", None)
+            if callable(setter):
+                setter(text)
+            else:
+                logger.debug("context-prompt push skipped: host has no set_prompt seam")
+        except Exception:
+            logger.debug("context-prompt push failed (ignored)", exc_info=True)
 
     def cancel(self) -> dict:
         """Cancel the pending dictation fragment and KEEP listening (PRD §4.2quater; P1.M2.T7.S1).

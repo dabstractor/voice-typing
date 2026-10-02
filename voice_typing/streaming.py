@@ -30,8 +30,9 @@ leaves the on-screen state unknown ("typed text is never auto-deleted", PRD
 §4.2quater), so the safest S1 response is to stop revising that utterance. The
 feedback mirror keeps updating. T6.S3 formalizes freeze triggers.
 
-THREAD CONTEXT: on_partial is called from the host reader (daemon) thread; commit
-will come from the on_final thread (T6.S2); cancel()/pending_tail_len() from the
+THREAD CONTEXT: on_partial is called from the host reader (daemon) thread; commit()
+from the daemon's on_final thread INSIDE _on_final_lock (landed P1.M2.T6.S2);
+cancel()/pending_tail_len() from the
 control-socket thread via daemon._pending_tail_len/_reset_stream_after_cancel.
 One internal threading.Lock guards all state. Backend calls happen WHILE HOLDING
 it — deliberate, matching the daemon's _on_final_lock style: partial events are
@@ -68,14 +69,34 @@ logger = logging.getLogger(__name__)
 # wobbling decoder can never be tuned into flicker).
 _FULL_REWIND_RATE_LIMIT_S = 0.3
 
+# Sentence terminators that end the rolling context sentence (PRD §4.2quater rule 2:
+# the child's context prompt carries the text since the last sentence boundary). Same
+# set as textproc's casing guard — pinned verbatim.
+_CONTEXT_BOUNDARY_CHARS = ".!?"
+
+
+def context_after_last_boundary(committed: str) -> str:
+    """Text after the last sentence terminator in `committed` (rolling context prompt).
+
+    The daemon's thin P1.M2.T6.S2 seam: after every commit it pushes this slice to
+    the recorder-host child so the NEXT small.en decode starts primed with the
+    current partial sentence (the formal daemon-side computation is P1.M2.T5.S2's).
+    Returns "" when `committed` has no '.', '!' or '?' at all, or when the last
+    terminator sits at the very end (nothing after it). Surrounding whitespace is
+    stripped. PURE: no I/O, no state, deterministic.
+    """
+    last = max(committed.rfind(ch) for ch in _CONTEXT_BOUNDARY_CHARS)
+    return committed[last + 1 :].strip() if last >= 0 else ""
+
 
 class StreamingOutput:
     """Per-armed-session streaming output state machine (PRD §4.2quater R1).
 
     State (all under self._lock):
-        committed: finalized text through the last commit checkpoint (S1 only
-            maintains the field + a read-only property; T6.S2 advances it on
-            commit). Read by the guards as the casing context.
+        committed: finalized text through the last commit checkpoint (commit()
+            advances it by the text ACTUALLY TYPED + the trailing space; read by
+            the guards as the casing context and by the daemon's context-prompt
+            seam via the `committed` property).
         tail: everything typed since that checkpoint — tentative, revisable,
             NEVER ending with a space. Length == exactly the chars a rewind
             must delete.
@@ -93,6 +114,7 @@ class StreamingOutput:
         feedback,
         streaming: bool,
         *,
+        append_space: bool = True,
         rate_limit_s: float = _FULL_REWIND_RATE_LIMIT_S,
         clock=time.monotonic,
     ) -> None:
@@ -102,12 +124,16 @@ class StreamingOutput:
             or a test double). Called once per on_partial event.
         streaming: the cfg.output.streaming flag; False = mirror-only Rev 1
             behavior (tail stays "", raw partial mirrored verbatim).
+        append_space: the cfg.output.append_space flag; commit() appends the
+            inter-final trailing space IFF true (the ONLY code that ever types a
+            space while the engine is live — P1.M2.T6.S2).
         rate_limit_s: minimum spacing between full rewinds (override only in tests).
         clock: monotonic time source (injectable for deterministic rate-limit tests).
         """
         self._backend = backend
         self._feedback = feedback
         self._streaming = bool(streaming)
+        self._append_space = bool(append_space)
         self._rate_limit_s = float(rate_limit_s)
         self._clock = clock
         self._lock = threading.Lock()
@@ -164,6 +190,26 @@ class StreamingOutput:
         with self._lock:
             self._tail = ""
             self._suppressed = False
+
+    def reset_session(self) -> None:
+        """A NEW armed session (P1.M2.T6.S2): clear committed + tail + suppressed + FROZEN.
+
+        Session-lifecycle counterpart of reset_boundary(): a fresh arm legitimately
+        unfreezes — whatever stranded the previous session's tail (a backend failure,
+        a rejected final) must not carry into the next one, and the full-rewind
+        budget starts fresh. reset_boundary() deliberately does NOT clear `frozen`
+        (the in-session freeze lifecycle is T6.S3's); reset_session() is the only
+        engine method that does. On disarm the pending tail simply stays typed on
+        screen (stranded-tail cleanup is T6.S3's domain); the engine strings reset
+        for the next session. Called from daemon._arm()/_disarm() (defensive getattr
+        seam, matching daemon.cancel()'s style).
+        """
+        with self._lock:
+            self._committed = ""
+            self._tail = ""
+            self._suppressed = False
+            self._frozen = False
+            self._last_full_rewind = None
 
     def freeze(self, reason: str = "") -> None:
         """Stop typing (mirror-only) for the rest of this utterance; log why."""
@@ -246,6 +292,84 @@ class StreamingOutput:
                 # Stamp only ACTUAL rewinds — never fresh starts.
                 self._last_full_rewind = now
             self._feedback.update_partial(self._tail)
+
+    # --- the commit (correction pass; PRD §4.2quater rule 2, P1.M2.T6.S2) ---
+
+    def commit(self, final_text: str) -> None:
+        """Apply the child's silence-triggered final (the small.en correction pass).
+
+        Called from the daemon's on_final thread while the daemon's _on_final_lock is
+        held, so a racing cancel() can never interleave rewind keystrokes with the
+        compensation rewind. Serialized with on_partial by self._lock (same discipline
+        as on_partial; this code never takes a daemon lock back).
+
+        Paths:
+          - streaming disabled: return (the daemon routes Rev 1 finals AROUND the
+            engine — the rollback hatch must be provably keystroke-identical).
+          - frozen: absorb the typed tail into `committed` WITHOUT keystrokes (typed
+            text is never auto-deleted, PRD rule 4) — the on-screen text becomes the
+            de-facto committed text for on-screen continuity — then clear the tail,
+            lift suppression, mirror, return. Freeze LIFECYCLE triggers stay T6.S3's;
+            commit only needs to not strand state across the boundary.
+          - final EXTENDS the tail: type ONLY the guarded delta (same context shape
+            as _guard_context_delta). NOT rate-limited: commits are authoritative,
+            never wobble (the >=300 ms limiter exists only for partial cycles).
+          - final DIFFERS (revise/rewrite/shorter/fresh): press_backspace(len(tail))
+            then type the guarded final. NOT rate-limited: a commit is once per
+            utterance.
+        Then append the trailing space iff append_space, advance the checkpoint
+        (`committed` gains the text ACTUALLY TYPED + the space, so future guards and
+        the context prompt diff against screen truth), clear the tail, lift
+        suppression, and mirror into feedback (matches feedback.record_final's
+        final-into-partial behavior).
+
+        Backend failure: _safe_type/_safe_backspace freeze the engine; commit returns
+        WITHOUT advancing the checkpoint (the frozen tail stays on screen — PRD
+        "stranded tail freezes"; T6.S3 formalizes the cleanup). Never raises.
+        """
+        with self._lock:
+            if not self._streaming:
+                return  # Rev 1 rollback hatch: engine is a mirror-only pass-through
+            text = " ".join(final_text.split())
+            if self._frozen:
+                # Absorb WITHOUT keystrokes: the tail is already on screen and stays.
+                # rstrip the base: committed normally ends with the appended inter-
+                # final space, and the join must not double it (the space typed between
+                # committed and tail is already on screen).
+                self._committed = " ".join(p for p in (self._committed.rstrip(), self._tail) if p)
+                self._tail = ""
+                self._suppressed = False
+                self._feedback.update_partial(self._committed)
+                return
+            if self._tail and text.startswith(self._tail):
+                # EXTEND: the final confirms the tail — type only the guarded delta.
+                delta = text[len(self._tail) :]
+                guarded = ""
+                if delta:
+                    guarded = textproc.apply_streaming_guards(self._guard_context_delta(), delta)
+                    if guarded and not self._safe_type(guarded):
+                        return  # frozen by the fail-safe; tail frozen on screen
+                    self._tail += guarded
+                typed = self._tail
+            else:
+                # REVISE / fresh start: exact-length rewind + guarded retype. A commit
+                # is authoritative — no rate-limit consult, no _last_full_rewind stamp.
+                guarded = textproc.apply_streaming_guards(self._committed, text)
+                if not self._safe_backspace(len(self._tail)):
+                    return  # frozen; on-screen state unknown — touch nothing further
+                if guarded and not self._safe_type(guarded):
+                    return  # frozen mid-retype: the rewind landed, the retype did not
+                self._tail = guarded
+                typed = guarded
+            space = " " if self._append_space else ""
+            if space and not self._safe_type(space):
+                return  # frozen: checkpoint stays at the pre-commit boundary
+            # rstrip the base so the join never doubles the previous commit's
+            # trailing space (it is already on screen exactly once).
+            self._committed = " ".join(p for p in (self._committed.rstrip(), typed) if p) + space
+            self._tail = ""
+            self._suppressed = False
+            self._feedback.update_partial(self._committed)
 
     # --- internals ---
 
