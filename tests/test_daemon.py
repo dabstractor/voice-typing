@@ -477,6 +477,11 @@ class _FakeBackend:
             raise RuntimeError("boom (test)")
         self.typed.append(text)
 
+    def press_backspace(self, n: int) -> None:
+        # P1.M2.T7.S1: recorded alongside typed text with an ('bs', n) tag — the existing
+        # string-only assertions (typed == ["..."]) keep passing since cancel tests are additive.
+        self.typed.append(("bs", n))
+
 
 def _ok_probe():
     """Hermetic mic-probe stub for daemon-constructing tests (bugfix Issue 2 / P1.M1.T2.S1).
@@ -531,6 +536,11 @@ class _FakeHost:
         self.stop_calls = 0
         self.device = {"device": "cuda", "compute_type": "float16", "model": "small.en"}
         self._alive = False
+        # P1.M2.T7.S1: cancel surface mirroring the real RecorderHost (cancel records the call and
+        # rides the abort path; _cancel_mark mirrors the reader-side marked-sentinel flag that
+        # consume_cancel_mark() returns-and-clears).
+        self.cancel_calls = 0
+        self._cancel_mark = False
 
     def spawn(self, timeout=180.0):
         self.spawn_calls += 1
@@ -550,6 +560,22 @@ class _FakeHost:
 
     def abort(self):
         self.recorder.abort()
+
+    def cancel(self):
+        """P1.M2.T7.S1: record the cancel (mirrors the real host: it rides the abort path)."""
+        self.cancel_calls += 1
+        self.recorder.abort()
+
+    def consume_cancel_mark(self):
+        """Read-and-clear the marked-sentinel flag, exactly like RecorderHost.consume_cancel_mark."""
+        marked = self._cancel_mark
+        self._cancel_mark = False
+        return marked
+
+    def mark_cancel_sentinel(self):
+        """Test seam: simulate the child's MARKED sentinel arriving (the real reader thread sets
+        this flag right before relaying that final to the daemon's on_final)."""
+        self._cancel_mark = True
 
     def text(self, on_final):
         self.recorder.text(on_final)
@@ -3850,3 +3876,134 @@ def test_dispatch_failed_toggle_returns_ok_false():
     resp = srv._dispatch(json.dumps({"cmd": "toggle"}))
     assert resp["ok"] is False
     assert "model load failed" in resp["error"]
+
+
+# ===========================================================================
+# P1.M2.T7.S1 — daemon.cancel(): Backspace-cancel (PRD §4.2quater)
+# (socket 'cancel' cmd + voicectl + the SUPER ALT Backspace keybind share THIS entry point)
+# ===========================================================================
+
+
+class _FakeStream:
+    """P1.M2.T6 streaming-seam stand-in: pending_tail_len() + reset_after_cancel() (T7.S1 lands
+    standalone; T6 snaps onto the same seam)."""
+
+    def __init__(self, tail_len: int = 0) -> None:
+        self._tail_len = tail_len
+        self.reset_calls = 0
+
+    def pending_tail_len(self) -> int:
+        return self._tail_len
+
+    def reset_after_cancel(self) -> None:
+        self.reset_calls += 1
+        self._tail_len = 0
+
+
+def _make_cancel_daemon():
+    """An ARMED daemon with a resident _FakeHost and an in-flight text() — the cancel-ready state.
+
+    _load_host() (fake factory) builds the host; _listening + _text_in_flight are set exactly as
+    run() would leave them mid-utterance. No threads run; tests call cancel()/on_final() directly.
+    """
+    d, fb = _make_lazy_daemon(host_factory=_fake_host_factory(spawn_result=True))
+    assert d._load_host() is True
+    d._listening.set()
+    d._text_in_flight.set()
+    return d, fb
+
+
+def test_cancel_with_pending_tail_presses_len_minus_1():
+    """The physical keystroke deleted the FIRST tail char: compensate with max(len(tail)-1, 0)
+    backspaces — never len(tail), NEVER a re-type of the fragment, and nothing recorded."""
+    d, fb = _make_cancel_daemon()
+    d._stream = _FakeStream(tail_len=8)
+    resp = d.cancel()
+    assert resp["ok"] is True and resp["listening"] is True
+    assert d._backend.typed == [("bs", 7)], d._backend.typed   # exactly one backspace batch, n=len-1
+    assert fb.finals == [], "the cancelled fragment must NOT be recorded"
+    assert d._stream.reset_calls == 1, "the stream tail must be reset to a fresh one"
+
+
+def test_cancel_without_tail_is_noop_on_the_backend():
+    """Armed + in flight but NO pending tail (no _stream): no backspace, ok:true — and the
+    in-flight utterance is still dropped (host.cancel() called)."""
+    d, fb = _make_cancel_daemon()
+    resp = d.cancel()
+    assert resp["ok"] is True and resp["listening"] is True
+    assert d._backend.typed == [], f"no backspace without a pending tail; got {d._backend.typed!r}"
+    assert fb.finals == []
+    assert d._host.cancel_calls == 1   # the in-flight utterance is discarded even with no tail
+
+
+def test_cancel_len_1_tail_issues_no_backspace():
+    """tail_len=1 -> n = max(0, 0) = 0: the keystroke already deleted the only char, so the daemon
+    must not press Backspace again (guards the `if n > 0` contract at the call site)."""
+    d, _fb = _make_cancel_daemon()
+    d._stream = _FakeStream(tail_len=1)
+    d.cancel()
+    assert d._backend.typed == [], d._backend.typed
+
+
+def test_cancel_when_disarmed_is_noop():
+    """Disarmed: cancel is an idempotent no-op — ok:true, NO backspace, host.cancel NOT called
+    (never touch the recorder while nothing is in flight — the _safe_abort wedge rule)."""
+    d, fb = _make_cancel_daemon()
+    d._stream = _FakeStream(tail_len=8)
+    d._listening.clear()
+    d._text_in_flight.clear()
+    resp = d.cancel()
+    assert resp["ok"] is True
+    assert d._backend.typed == [], d._backend.typed
+    assert d._host.cancel_calls == 0, "a disarmed cancel must never touch the host"
+
+
+def test_cancel_twice_without_tail_is_idempotent():
+    """cancel x2 with nothing pending: the second is a no-op too (PRD §4.2quater freeze-rule:
+    further Backspaces are plain user edits, never compensated)."""
+    d, _fb = _make_cancel_daemon()
+    r1 = d.cancel()
+    d._text_in_flight.clear()          # the first cancel unblocked text(); loop is between rounds
+    r2 = d.cancel()
+    assert r1["ok"] is True and r2["ok"] is True
+    assert d._backend.typed == [], d._backend.typed
+
+
+def test_cancel_suppression_drops_racing_final_and_clears_on_sentinel():
+    """RACE-SAFETY (the documented double-type bug class): a REAL final emitted just before the
+    cancel's abort took effect is DROPPED, the MARKED sentinel closes the window (flag cleared),
+    and a subsequent normal final flows through the pipeline normally."""
+    d, fb = _make_cancel_daemon()
+    be = d._backend
+    host = d._host
+    d.cancel()                                  # arms _cancel_suppress_final + host.cancel()
+    assert host.cancel_calls == 1
+    d.on_final("racing tail")                   # real final racing the cancel -> DROPPED
+    assert be.typed == [] and fb.finals == []
+    assert d._cancel_suppress_final is True     # still armed: the sentinel has not been seen
+    host.mark_cancel_sentinel()                 # reader relays the marked sentinel next
+    d.on_final("")                              # the sentinel itself -> DROPPED, window closes
+    assert d._cancel_suppress_final is False, "the marked sentinel must clear the suppression"
+    assert be.typed == [] and fb.finals == []   # sentinel typed/recorded nothing
+    d.on_final("fresh sentence")                # a NORMAL final afterwards flows through
+    assert be.typed == ["fresh sentence "]
+    assert fb.finals == ["fresh sentence"]
+
+
+def test_cancel_keeps_listening():
+    """cancel does NOT disarm: the listening gate stays set, and the response/snapshot agree."""
+    d, fb = _make_cancel_daemon()
+    resp = d.cancel()
+    assert d.is_listening() is True
+    assert resp["listening"] is True
+    assert d.status_snapshot()["listening"] is True
+
+
+def test_arm_clears_stale_cancel_suppression():
+    """Defense in depth: a cancel whose sentinel was LOST (child died mid-cancel) must not eat a
+    later utterance's finals — a fresh arm re-arms the final pipeline."""
+    d, _fb = _make_cancel_daemon()
+    d._cancel_suppress_final = True   # simulate the lost-sentinel residue
+    d.start()                          # start() -> _load_host() no-op -> _arm() under the lock
+    assert d._cancel_suppress_final is False
+    assert d.is_listening() is True

@@ -593,6 +593,14 @@ class VoiceTypingDaemon:
         # ONLY by run() on the single main thread; read by _safe_abort() on control/worker threads
         # (a stale True during the brief teardown window is harmless — abort() is then a valid nudge).
         self._text_in_flight = threading.Event()   # cleared → no thread in text() at boot
+        # P1.M2.T7.S1 (PRD §4.2quater Backspace-cancel): set by cancel() while it aborts the
+        # in-flight utterance; while set, on_final DROPS every final (the real final that raced
+        # the cancel AND the marked sentinel). Cleared ONLY by the cancelled sentinel
+        # (consume_cancel_mark() True) so a racing final can never land, and re-armed defensively
+        # on the next _arm() so a lost sentinel (child died mid-cancel) cannot eat a later
+        # utterance. Plain bool: written by cancel() under _lock, read/cleared by on_final under
+        # _on_final_lock — no read-modify-write race (each writer owns the full transition).
+        self._cancel_suppress_final = False
         self._start_monotonic: float | None = None
         # Idle auto-stop: timestamp of the last recognized speech; the _idle_watchdog thread disarms
         # when now - this exceeds cfg.asr.auto_stop_idle_seconds. None while NOT listening. Set on
@@ -933,6 +941,16 @@ class VoiceTypingDaemon:
         # P1.M2.T2.S1). The gate above stays OUTSIDE the lock (read-only race guard); the lock is
         # SEPARATE from _lock (see __init__) so this never stalls toggle/start/stop and never deadlocks.
         with self._on_final_lock:
+            # P1.M2.T7.S1 cancel window: while the flag is set, EVERY final is dropped — the real
+            # final that raced the cancel AND the marked sentinel itself. The sentinel (relayed
+            # with the "cancelled" mark) closes the window: consume_cancel_mark() True re-arms
+            # the pipeline. RACE-SAFE by construction: textproc.clean('') rejection alone cannot
+            # tell a racing real final from the sentinel.
+            if self._cancel_suppress_final:
+                consume = getattr(self._host, "consume_cancel_mark", None)
+                if callable(consume) and consume():
+                    self._cancel_suppress_final = False  # sentinel seen; pipeline re-armed
+                return            # dropped: no clean, no type_text, no record_final
             cleaned = textproc.clean(text, self._cfg.filter)
             if not cleaned:                    # rejected: blocklist hallucination / below min_chars
                 return
@@ -979,6 +997,7 @@ class VoiceTypingDaemon:
         self._listening.set()
         self._final_pending = False  # Issue 2: fresh arm = no utterance in flight (clear stale stray partials)
         self._utterance_finalized = False  # validation Issue 2: fresh arm = no final yet for this session
+        self._cancel_suppress_final = False  # P1.M2.T7.S1: a fresh arm re-arms the final pipeline
         self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
         self._disarmed_monotonic = None                  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
         if self._host is not None:
@@ -1074,6 +1093,66 @@ class VoiceTypingDaemon:
                 self._disarm()
             if self._host is not None:
                 self._safe_abort()
+
+    def _pending_tail_len(self) -> int:
+        """Chars of the tentative tail typed since the last commit checkpoint. 0 = nothing pending.
+
+        Narrow seam over the P1.M2.T6 streaming state. Defensive getattr: cancel() (P1.M2.T7.S1)
+        must land standalone and keep working before AND after T6's real StreamingOutput API
+        arrives — T6 snaps onto this single call site.
+        """
+        stream = getattr(self, "_stream", None)          # StreamingOutput (P1.M2.T6) — may not exist yet
+        if stream is None or not self._listening.is_set():
+            return 0
+        getter = getattr(stream, "pending_tail_len", None)
+        return int(getter()) if callable(getter) else 0
+
+    def _reset_stream_after_cancel(self) -> None:
+        """Fresh tail at the current cursor; committed text unchanged. No-op pre-T6 (P1.M2.T7.S1).
+
+        Also clears the Feedback partial mirror so state.json's partial shows the (now-empty)
+        tail instead of the cancelled fragment. Never raises (the T6 reset may not exist yet).
+        """
+        stream = getattr(self, "_stream", None)
+        reset = getattr(stream, "reset_after_cancel", None)
+        if callable(reset):
+            reset()   # T6: clears the tail, suppresses partial typing until the next boundary
+        self._feedback.update_partial("")
+
+    def cancel(self) -> dict:
+        """Cancel the pending dictation fragment and KEEP listening (PRD §4.2quater; P1.M2.T7.S1).
+
+        The physical Backspace keystroke already deleted the FIRST character of the tentative
+        tail, so the daemon compensates by SUBTRACTION: press_backspace(max(len(tail) - 1, 0)) —
+        never len(tail) and never a re-type of the fragment. It then aborts the in-flight
+        utterance with an audio-DISCARDING cancel (host.cancel(): the child drops buffered/queued
+        audio so NO late final from the cancelled utterance can land) and resets the streaming
+        tail to a fresh one at the current cursor (committed text unchanged — the fragment is
+        GONE, not committed). The cancellation sentinel is emitted MARKED and dropped (see
+        _cancel_suppress_final): nothing typed, nothing recorded, mic stays hot.
+
+        Idempotent (PRD §4.2quater freeze-rule): when NOT armed, or armed with NO pending tail,
+        this issues no backspace and still replies ok — further Backspaces are plain user edits,
+        never compensated (only typed dictation may be deleted, and only by this path).
+        """
+        with self._lock:
+            if not self._listening.is_set():
+                # Not armed: nothing pending — idempotent no-op (never touch backend/host).
+                return {"ok": True, **self.status_snapshot()}
+            tail_len = self._pending_tail_len()
+            n = max(tail_len - 1, 0)          # the keystroke already deleted 1 char
+            if n > 0:                         # backends no-op at n<=0 too; the guard is the contract
+                self._backend.press_backspace(n)
+            if self._text_in_flight.is_set() and self._host is not None:
+                # Same gate as _safe_abort: touching the recorder while NO text() is in flight can
+                # block forever (RealtimeSTT abort() waits on an event set only inside text()).
+                host_cancel = getattr(self._host, "cancel", None)
+                if callable(host_cancel):
+                    # Drop the racing real final AND the marked sentinel (on_final suppression).
+                    self._cancel_suppress_final = True
+                    host_cancel()
+            self._reset_stream_after_cancel()   # fresh tail at the cursor; committed unchanged
+        return {"ok": True, "listening": True, **self.status_snapshot()}
 
     def _begin_drain(self) -> None:
         """Mark a drain in progress + arm the hang watchdog. Idempotent vs a re-press of the hotkey."""
@@ -1694,6 +1773,7 @@ class ControlServer:
 
     Protocol (PRD §4.2(3); research §2 — uniform status payload):
       {"cmd":"toggle"|"start"|"stop"|"status"} -> {"ok":true, **daemon.status_snapshot()}
+      {"cmd":"cancel"}                         -> {"ok":true, **daemon.status_snapshot()}  (idempotent; T7.S1)
       {"cmd":"quit"}                           -> {"ok":true,"shutting_down":true}  (+ request_shutdown)
       malformed JSON                           -> {"ok":false,"error":"malformed JSON: ..."}
       non-dict JSON                            -> {"ok":false,"error":"request must be a JSON object"}
@@ -1874,6 +1954,10 @@ class ControlServer:
         if cmd == "stop":
             self._daemon.stop()
             return {"ok": True, **self._daemon.status_snapshot()}
+        if cmd == "cancel":
+            # P1.M2.T7.S1 (PRD §4.2quater): drop the pending fragment, keep listening.
+            # Idempotent; returns the daemon's own {ok, listening, **status} dict.
+            return self._daemon.cancel()
         if cmd == "status":
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "quit":

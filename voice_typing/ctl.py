@@ -16,8 +16,9 @@ Subcommands (PRD §4.8):
     stop     disarm the mic (stop listening)
     status   pretty-print listening + mode + phase + partial + last final + uptime + device + mic
     quit     request a clean daemon shutdown (releases GPU workers)
+    cancel   drop the pending dictation fragment and keep listening (Backspace keybind fallback)
 
-Usage:  voicectl <toggle|start|stop|status|quit>
+Usage:  voicectl <toggle|start|stop|status|cancel|quit>
         (the full usage table is in the project README; this is the user-facing CLI surface.)
 
 Stdlib-only: argparse, json, socket, sys + the shared socket-path resolver from voice_typing.daemon.
@@ -32,7 +33,7 @@ import threading
 
 from voice_typing.daemon import _default_control_socket_path  # canonical resolver (P1.M4.T2.S1); reuse, do not duplicate
 
-_COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit")  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' is appended by P1.M2.T7.S1
+_COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit", "cancel")  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' = Backspace-cancel fallback (P1.M2.T7.S1)
 # BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
 # so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
 _EX_USAGE: int = 64
@@ -51,7 +52,7 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
       - quit ({"ok":true,"shutting_down":true}) -> "shutting down"  (NO listening key -> branch first)
       - status                        -> multi-line: listening, mode, phase, partial, last_final, uptime,
                                         device, compute_type, mic  (PRD §4.8; mic health per bugfix Issue 2)
-      - toggle/start/stop             -> "listening: on" / "listening: off"
+      - toggle/start/stop/cancel      -> "listening: on" / "listening: off"
 
     Defensive .get(...) everywhere so a missing key never raises (the protocol guarantees the 8-key
     block for toggle/start/stop/status, but .get keeps the unit tests + future shapes safe).
@@ -91,7 +92,8 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         if load_error:                                     # surface §4.2bis load failures (absent on the happy path)
             text += f"\nload error: {load_error}"
         return text, 0
-    # toggle / start / stop
+    # toggle / start / stop / cancel (cancel is NOT an arm command: no loading hint, falls through
+    # to the default branch — P1.M2.T7.S1)
     return f"listening: {'on' if response.get('listening') else 'off'}", 0
 
 
@@ -147,12 +149,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "prints the result. Exits 0 on success, 1 on a logical failure, 2 if the daemon is not "
             "running, 64 on a usage error (unknown/missing command)."
         ),
-        epilog="subcommands: toggle, start, stop, status, quit  (see the project README for the full usage table)",
+        epilog="subcommands: toggle, start, stop, status, quit, cancel  (see the project README for the full usage table)",
     )
     parser.add_argument(
         "cmd",
         nargs="?",
-        help="toggle | start | stop | status | quit",
+        help="toggle | start | stop | status | quit | cancel",
     )
     return parser
 
@@ -186,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     #    start/toggle may block ~1–3 s on the COLD FIRST ARM (PRD §4.2bis lazy load of the single
     #    model); route them through _send_command_with_loading_hint so voicectl prints a 'loading
     #    models…' hint if the reply is slow (resident arms reply in ms → no hint).
-    #    stop/status/quit use plain send_command.
+    #    stop/status/quit/cancel use plain send_command (cancel is NOT an arm command; P1.M2.T7.S1).
     try:
         if cmd in ("start", "toggle"):
             response = _send_command_with_loading_hint(socket_path, cmd)

@@ -39,6 +39,11 @@ class _StubDaemon:
         self.calls.append("toggle"); self._listening = not self._listening  # noqa: E702
     def start(self): self.calls.append("start"); self._listening = True  # noqa: E702
     def stop(self): self.calls.append("stop"); self._listening = False  # noqa: E702
+    def cancel(self):
+        # P1.M2.T7.S1: mirror VoiceTypingDaemon.cancel() — records the call, returns the shape
+        # dispatch passes through verbatim ({ok, listening, **status_snapshot()}).
+        self.calls.append("cancel")
+        return {"ok": True, "listening": self._listening, **self.status_snapshot()}
     def request_shutdown(self): self.calls.append("quit")
     def is_listening(self): return self._listening
     def status_snapshot(self):
@@ -265,3 +270,32 @@ def test_default_socket_path_raises_when_xdg_unset(monkeypatch):
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     with pytest.raises(RuntimeError):
         daemon._default_control_socket_path()
+
+
+# --- P1.M2.T7.S1: dispatch 'cancel' -------------------------------------------------------
+
+
+def test_dispatch_cancel_routes_to_daemon_cancel_and_returns_shape():
+    """'cancel' dispatches to daemon.cancel() exactly once and returns its dict verbatim — the
+    {ok: true, listening: true, **status} shape voicectl renders as 'listening: on' (exit 0)."""
+    stub = _StubDaemon(listening=True)
+    r = daemon.ControlServer(stub)._dispatch(json.dumps({"cmd": "cancel"}))
+    assert stub.calls == ["cancel"]
+    assert r["ok"] is True
+    assert r["listening"] is True
+    assert "mode" in r   # the uniform status payload rides along
+
+
+def test_dispatch_cancel_disarmed_still_ok():
+    """cancel while disarmed: the stub mirrors the daemon's idempotent ok (no error, no 500-style
+    reply) — dispatch must not special-case the disarmed state."""
+    stub = _StubDaemon(listening=False)
+    r = daemon.ControlServer(stub)._dispatch(json.dumps({"cmd": "cancel"}))
+    assert stub.calls == ["cancel"]
+    assert r["ok"] is True and r["listening"] is False
+
+
+def test_dispatch_cancel_near_miss_still_unknown():
+    """Guards the unknown-command fallthrough ordering: a near-miss of 'cancel' is still unknown
+    (the 'cancel' case must not shadow other commands, and vice versa)."""
+    assert _disp({"cmd": "cancel-now"}) == {"ok": False, "error": "unknown command: 'cancel-now'"}

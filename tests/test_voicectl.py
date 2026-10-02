@@ -144,6 +144,11 @@ class _StubDaemon:
         self.calls.append("stop")
         self._listening = False
 
+    def cancel(self):
+        # P1.M2.T7.S1: mirror VoiceTypingDaemon.cancel() — records the call, returns the shape.
+        self.calls.append("cancel")
+        return {"ok": True, "listening": self._listening, **self.status_snapshot()}
+
     def request_shutdown(self):
         self.calls.append("quit")
 
@@ -383,19 +388,48 @@ def test_dispatch_start_ok_true_when_no_load_error_attr():
 #  + the no-arg error path — and NO stale toggle-lite/start-lite anywhere. The negative sweep
 #  catches a stale epilog/docstring line the way Issue 3's positive sweep caught the missing ones.)
 # ===========================================================================
-def test_help_surfaces_list_all_five_commands():
-    """Rev 2 surface (P1.M1.T2.S3): exactly 5 commands in _COMMANDS, --help (positional help +
-    epilog), and the module docstring — and NO stale lite entries anywhere (bugfix Issue 3's
-    consistency guard, inverted for the collapse).
+def test_help_surfaces_list_all_commands():
+    """Rev 2 surface (P1.M1.T2.S3; 'cancel' added by P1.M2.T7.S1): exactly 6 commands in _COMMANDS,
+    --help (positional help + epilog), and the module docstring — and NO stale lite entries
+    anywhere (bugfix Issue 3's consistency guard, inverted for the collapse).
     """
-    five = {"toggle", "start", "stop", "status", "quit"}
-    assert set(ctl._COMMANDS) == five, sorted(ctl._COMMANDS)   # _COMMANDS = the source of truth
+    commands = {"toggle", "start", "stop", "status", "quit", "cancel"}
+    assert set(ctl._COMMANDS) == commands, sorted(ctl._COMMANDS)   # _COMMANDS = the source of truth
     # (1) argparse --help (format_help renders BOTH the positional help AND the epilog):
     help_text = ctl._build_parser().format_help()
-    for cmd in five:
+    for cmd in commands:
         assert cmd in help_text, f"{cmd!r} missing from --help:\n{help_text}"
         assert cmd in ctl.__doc__, f"{cmd!r} missing from the ctl module docstring"
     # (2) negative sweep: the dropped lite commands must be ABSENT from every help surface:
     for stale in ("toggle-lite", "start-lite"):
         assert stale not in help_text, f"{stale!r} still in --help:\n{help_text}"
         assert stale not in ctl.__doc__, f"{stale!r} still in the module docstring"
+
+
+# --- P1.M2.T7.S1: 'cancel' subcommand -------------------------------------------------------
+
+
+def test_cancel_in_commands_docstring_and_epilog():
+    """'cancel' is a first-class subcommand: the _COMMANDS entry, the module docstring subcommand
+    block, and the --help epilog all list it."""
+    assert ctl._COMMANDS == ("toggle", "start", "stop", "status", "quit", "cancel")
+    assert "cancel" in (ctl.__doc__ or ""), "the module docstring's subcommand block must list cancel"
+    epilog = ctl._build_parser().epilog or ""
+    assert "cancel" in epilog, "the argparse epilog must list cancel"
+
+
+def test_format_cancel_renders_listening_on_and_off():
+    """cancel falls through format_result's default branch: 'listening: on/off', exit 0 — no
+    loading-hint wrapping (it is NOT an arm command; P1.M2.T7.S1)."""
+    assert ctl.format_result("cancel", {"ok": True, "listening": True}) == ("listening: on", 0)
+    assert ctl.format_result("cancel", {"ok": True, "listening": False}) == ("listening: off", 0)
+
+
+def test_main_cancel_round_trip_returns_zero_and_routes(capsys, running_server):
+    """'voicectl cancel' routes {cmd: cancel} over the socket and renders the listening line."""
+    srv, _path = running_server
+    code = ctl.main(["cancel"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "listening:" in out
+    assert srv._daemon.calls == ["cancel"], "the cancel command must reach the daemon"

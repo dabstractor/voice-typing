@@ -20,9 +20,15 @@ IPC PROTOCOL (two multiprocessing queues + one event):
   abort_event (daemon -> child): a multiprocessing.Event SET by the daemon to interrupt a child
       blocked in recorder.text() (the cmd_queue is NOT read while text() blocks). A separate child
       thread polls it and calls recorder.abort(). ("abort", {}) on cmd_queue is belt-and-suspenders.
+  cancel_event (daemon -> child): a multiprocessing.Event SET by RecorderHost.cancel() (P1.M2.T7.S1,
+      PRD §4.2quater Backspace-cancel). The SAME child thread polls it: a cancel unblocks text()
+      exactly like abort_event, but ALSO discards the buffered/in-flight audio and emits the
+      unblock sentinel MARKED ("cancelled": True) so the daemon drops the cancelled utterance.
+      Plain abort() (stop/drain) semantics are UNCHANGED.
   event_queue (child -> daemon): ("ready", {device,compute_type,model})     # Rev 2: ONE model
                                  | ("error", {msg}) |
-                                 ("final", {text}) |
+                                 ("final", {text}) |          # or {text:"", "cancelled":True}
+                                                              #   (the CANCEL sentinel, T7.S1)
                                  ("partial", {text}) |     # realtime stabilized partial
                                  ("speech", {}) |          # on_speech -> _touch_speech (idle auto-stop reset)
                                  ("vad", {phase}) |        # "listening"|"speaking" (on_vad_detect_start/_start)
@@ -140,6 +146,12 @@ class RecorderHost:
         # is how stop()/toggle(off) interrupt a blocked text() so the run loop can re-check _listening.
         # Spawn-context (same as the Process) so the child inherits it cleanly.
         self._abort_event: Any = ctx.Event()
+        # Dedicated CANCEL signal (P1.M2.T7.S1, PRD §4.2quater Backspace-cancel): the SAME polled-
+        # Event mechanism as _abort_event — the child's command loop BLOCKS in recorder.text(), so
+        # a queued command would never be read. Setting it makes the child unblock text() AND
+        # discard the buffered audio AND emit the sentinel MARKED ("cancelled": True) so the daemon
+        # drops the cancelled utterance. Spawn-context (same as the Process) like _abort_event.
+        self._cancel_event: Any = ctx.Event()
         self._proc: Any = None
         # Single-flight lock for stop(): serializes concurrent callers (SIGTERM signal thread +
         # main-thread finally both reach host.stop()) so exactly ONE join+killpg teardown runs; the
@@ -147,6 +159,12 @@ class RecorderHost:
         # Issue 1 / P1.M1.T1.S1). Plain Lock (not RLock): stop() is never re-entered.
         self._stop_lock = threading.Lock()
         self._reader: threading.Thread | None = None
+        # P1.M2.T7.S1: set by the reader when the 'final' event it is relaying is the CANCELLED
+        # sentinel ("cancelled": True); consumed (read-and-cleared) by the daemon's on_final
+        # suppression via consume_cancel_mark(). Per-event: each 'final' overwrites it, so it
+        # always mirrors the most recent final event. on_final runs ON the reader thread, so the
+        # mark is always observed in the write-then-relay order (no lock needed).
+        self._cancel_mark = False
         self._final_evt = threading.Event()
         self._ready_evt = threading.Event()
         self._device: dict[str, str] = {}
@@ -183,7 +201,14 @@ class RecorderHost:
         # target _worker_main is a module-level fn (picklable).
         self._proc = ctx.Process(
             target=_worker_main,
-            args=(self._cfg, self._cmd_q, self._evt_q, self._abort_event, self._force_cpu),
+            args=(
+                self._cfg,
+                self._cmd_q,
+                self._evt_q,
+                self._abort_event,
+                self._cancel_event,
+                self._force_cpu,
+            ),
             name="voice-typing-recorder-host",
             daemon=True,
         )
@@ -237,6 +262,39 @@ class RecorderHost:
             self._abort_event.set()
         except (OSError, EOFError):
             self._dead = True
+
+    def cancel(self) -> None:
+        """Cancel the in-flight utterance (PRD §4.2quater Backspace-cancel; P1.M2.T7.S1).
+
+        Sets _cancel_event AND THEN _abort_event, in that order. BOTH are required: abort_event
+        alone would unblock text() without discarding audio or marking the sentinel; cancel_event
+        alone is only half the signal the child's poll loop acts on. The child's abort-handler
+        thread processes the cancel: it sets its per-utterance `cancelled` marker, calls
+        recorder.abort() (unblocking text()), the buffered/in-flight audio is DISCARDED
+        (_clear_recorder_audio) and the unblock sentinel is emitted MARKED
+        ("final", {text: "", "cancelled": True}) — the daemon's suppression flag drops it, so
+        nothing is typed and no late final from the discarded utterance can land, while the mic
+        stays hot. Idempotent (setting an already-set event is a no-op). Best-effort (never
+        raises across IPC). abort()'s plain drain-watchdog semantics are UNCHANGED.
+        """
+        try:
+            self._cancel_event.set()
+        except (OSError, EOFError):
+            self._dead = True
+            return
+        self.abort()
+
+    def consume_cancel_mark(self) -> bool:
+        """True iff the most recent 'final' event was the CANCELLED sentinel; clears the flag.
+
+        The reader thread sets the mark from the event payload just before relaying that final to
+        the daemon's on_final; the daemon's on_final suppression (P1.M2.T7.S1) consumes it to know
+        the cancelled sentinel arrived and the suppression window can close. Per-event semantics:
+        a plain final overwrites the mark to False.
+        """
+        marked = self._cancel_mark
+        self._cancel_mark = False
+        return marked
 
     def text(self, on_final: "Callable[[str], None]") -> None:
         """Block until the child produces ONE final, then invoke on_final on the reader thread.
@@ -352,6 +410,10 @@ class RecorderHost:
             self._ready_evt.set()
         elif kind == "final":
             text = str(payload.get("text", ""))
+            # P1.M2.T7.S1: record whether THIS final is the cancelled sentinel BEFORE relaying it —
+            # the daemon's on_final suppression consumes the mark (consume_cancel_mark()) to close
+            # the cancel window. A plain final resets the mark to False (per-event semantics).
+            self._cancel_mark = bool(payload.get("cancelled"))
             # on_final runs HERE (the reader thread), matching the in-process worker-thread model.
             # The daemon's on_final stamps t_final_ready, calls finalize_utterance, types, logs.
             try:
@@ -414,6 +476,7 @@ def _worker_main(
     cmd_q: Any,
     evt_q: Any,
     abort_event: Any,
+    cancel_event: Any,
     force_cpu: bool,
 ) -> None:
     """Child-process entry point: construct the recorder + serve commands until shutdown.
@@ -428,7 +491,8 @@ def _worker_main(
     Command loop: ("text", {}) -> recorder.text(child_on_final) (BLOCKS until a final, which puts
     a "final" event then returns); ("arm"/"disarm", {}) -> set_microphone; ("abort", {}) ->
     recorder.abort(); ("shutdown", {}) -> recorder.shutdown() (best-effort; the daemon SIGKILLs the
-    group anyway), put "gone", exit.
+    group anyway), put "gone", exit. cancel_event (P1.M2.T7.S1) is polled by the SAME abort-handler
+    thread: a cancel unblocks text() like an abort but DISCARDS the audio and MARKS the sentinel.
     """
     # Own session/group so killpg(child) reaches our grandchildren. Must be the first syscall so
     # any RealtimeSTT-spawned mp.Process inherits our pgid.
@@ -498,10 +562,30 @@ def _worker_main(
     # that returns None on the abort path) instead of relying on recorder.text()'s version-specific
     # non-None return value. Cleared at the top of each 'text' command below.
     aborted = threading.Event()
+    # P1.M2.T7.S1 (Backspace-cancel): a sibling per-utterance marker set when the abort was a
+    # CANCEL (RecorderHost.cancel()), not a plain stop/drain abort. _run_text_and_emit_final keys
+    # the audio discard + the MARKED sentinel on it; cleared at the top of each 'text' command.
+    cancelled = threading.Event()
 
     def _abort_handler() -> None:
-        """Watch abort_event; call recorder.abort() to unblock a sleeping text()."""
+        """Watch cancel_event/abort_event; call recorder.abort() to unblock a sleeping text().
+
+        cancel_event is checked FIRST (P1.M2.T7.S1): a cancel unblocks text() exactly like a plain
+        abort, but ALSO sets `cancelled` so the sentinel is emitted MARKED and the buffered audio
+        is discarded. RecorderHost.cancel() sets BOTH events — the cancel branch consumes
+        abort_event too, so the plain-abort branch below does not run recorder.abort() twice.
+        """
         while not stop_abort_thread.is_set():
+            if cancel_event.wait(timeout=0.2):
+                cancel_event.clear()
+                abort_event.clear()  # cancel() set both; consume both (ONE recorder.abort())
+                aborted.set()        # VT-007: the sentinel must fire (same as a plain abort) ...
+                cancelled.set()      # ... but MARKED, with the buffered audio discarded
+                try:
+                    recorder.abort()
+                except Exception:
+                    logger.exception("child: recorder.abort() raised (best-effort; ignored)")
+                continue
             if abort_event.wait(timeout=0.2):
                 abort_event.clear()
                 aborted.set()  # VT-007: mark so _run_text_and_emit_final emits the sentinel
@@ -526,12 +610,13 @@ def _worker_main(
                     # session does not immediately abort this utterance.
                     abort_event.clear()
                     aborted.clear()  # VT-007: fresh per-utterance abort marker
+                    cancelled.clear()  # P1.M2.T7.S1: fresh per-utterance cancel marker
                     # blocks until a final (or an abort). _run_text_and_emit_final GUARANTEES a
                     # ('final', ...) event on BOTH paths (real final via on_final, OR abort via the
                     # sentinel) so the daemon's host.text() always unblocks — without it an abort
                     # (stop/toggle-off/auto-stop) leaves host.text() blocked forever (the child is
                     # still alive), wedging the run() loop so no further utterance transcribes.
-                    _run_text_and_emit_final(recorder, evt_q, _child_on_final, aborted)
+                    _run_text_and_emit_final(recorder, evt_q, _child_on_final, aborted, cancelled)
                 elif kind == "arm":
                     recorder.set_microphone(True)
                 elif kind == "disarm":
@@ -617,6 +702,7 @@ def _run_text_and_emit_final(
     evt_q: Any,
     on_final: "Callable[[str], None]",
     aborted: "threading.Event | None" = None,
+    cancelled: "threading.Event | None" = None,
 ) -> None:
     """Child: run ONE recorder.text(on_final) call AND guarantee a ('final', ...) event when it ends.
 
@@ -659,7 +745,17 @@ def _run_text_and_emit_final(
         # Abort/shutdown path: emit the ('final', {text:''}) sentinel so the daemon's host.text()
         # unblocks instead of wedging the run() loop forever. See the VT-007 note above for why we
         # key on the `aborted` flag (our signal) OR the legacy non-None return (v1.0.2 contract).
-        _safe_put(evt_q, ("final", {"text": ""}))
+        if cancelled is not None and cancelled.is_set():
+            # P1.M2.T7.S1 cancel path: DISCARD the buffered/in-flight audio so NO late final from
+            # the cancelled utterance can land (the same all-defensive helper the disarm path
+            # uses — it never raises), and emit the sentinel MARKED. The daemon's suppression
+            # flag drops it: nothing typed, nothing recorded, mic stays hot. The sentinel is
+            # still EMITTED (never skipped) or host.text() would wedge forever (the VT-007
+            # regression) — cancel changes its PAYLOAD, never its existence.
+            _clear_recorder_audio(recorder)
+            _safe_put(evt_q, ("final", {"text": "", "cancelled": True}))
+        else:
+            _safe_put(evt_q, ("final", {"text": ""}))
 
 
 def _child_resolved_device(cfg: "VoiceTypingConfig", force_cpu: bool) -> dict[str, str]:

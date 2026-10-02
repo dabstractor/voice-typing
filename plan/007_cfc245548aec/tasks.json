@@ -161,14 +161,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "Deterministic textproc guards (R6)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "New pure functions alongside clean() (unchanged): casing guard and period guard applied at typing time on the streaming path.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "Casing + period guard pure functions",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §6: textproc.py clean():26-69 (pure; _TRAILING_PUNCT :19; returns None for min_chars/blocklist rejections; never appends space); 21 existing tests in tests/test_textproc.py — clean() must remain byte-identical in behavior.\n2. INPUT: none (leaf, pure functions).\n3. LOGIC: Add a pure function alongside clean(), e.g. apply_streaming_guards(committed: str, fragment: str) -> str: (a) casing guard — if committed (rstripped of whitespace) does not end with a terminal '.' '!' '?', lowercase the fragment's first alphabetic character's word (first word's first cased char); (b) period guard — if the casing guard fired (we joined mid-sentence) and the fragment (rstripped) ends with '.', strip exactly one trailing '.'. Signature naming is a suggestion; it must stay pure and unit-testable. Unit tests: mid-sentence vs after-terminal cases, fragment already lowercase, fragment ending '...', only-one-period-stripped, empty/edge inputs.\n4. OUTPUT: apply_streaming_guards consumed by P1.M2.T6.S1 — applied to every typed fragment (partial deltas AND commit retypes).\n5. DOCS: none — internal (README tuning notes land with P1.M3.T10.S1 per PRD R6).",

@@ -574,3 +574,107 @@ def test_abort_sentinel_unblocks_blocked_host_text():
     host._dispatch("final", {"text": ""})
     assert done.wait(2.0), "the abort-path ('final', {text:''}) sentinel did NOT unblock host.text()"
     t.join(2.0)
+
+
+# ---------------------------------------------------------------------------
+# P1.M2.T7.S1 — cancel: marked sentinel + audio discard (plain abort UNCHANGED)
+# ---------------------------------------------------------------------------
+
+
+class _CancelFakeRecorder:
+    """Cancel-path recorder: abort-style return ('') + the attribute surface _clear_recorder_audio
+    touches, so the cancel branch's audio DISCARD is assertable.
+
+    Mimics RealtimeSTT's abort semantics exactly like _AbortFakeRecorder (text(cb) returns ''
+    without ever calling cb) and records every clear the helper performs: clear_audio_queue(),
+    the recorded_audio_queue drain, frames/last_frames clear, and audio=None.
+    """
+
+    def __init__(self) -> None:
+        import queue as _q
+        self.text_calls = 0
+        self.clear_audio_queue_calls = 0
+        self.recorded_audio_queue: Any = _q.Queue()
+        self.recorded_audio_queue.put(b"stale-audio")   # a completed recording awaiting transcription
+        self.frames = ["frame1", "frame2"]              # the wait_audio() fallback source
+        self.last_frames = ["last1"]
+        self.audio: Any = object()
+
+    def text(self, callback):
+        self.text_calls += 1
+        return ""   # cancel/abort path: return '' WITHOUT calling the callback
+
+    def clear_audio_queue(self) -> None:
+        self.clear_audio_queue_calls += 1
+
+
+def test_cancel_sets_both_cancel_and_abort_events():
+    """RecorderHost.cancel() sets _cancel_event AND _abort_event: cancel_event marks + discards,
+    abort_event guarantees the text() unblock. Neither alone is the full signal."""
+    host = _make_host()
+    assert not host._cancel_event.is_set()
+    assert not host._abort_event.is_set()
+    host.cancel()
+    assert host._cancel_event.is_set()
+    assert host._abort_event.is_set()
+
+
+def test_consume_cancel_mark_only_for_marked_sentinel():
+    """The reader marks ONLY the ('final', {text:'', 'cancelled': True}) sentinel;
+    consume_cancel_mark() returns-and-clears, and a plain final resets the mark to False
+    (per-event semantics the daemon's suppression window depends on)."""
+    host = _make_host()
+    host._dispatch("final", {"text": "hello"})
+    assert host.consume_cancel_mark() is False
+    host._dispatch("final", {"text": "", "cancelled": True})
+    assert host.consume_cancel_mark() is True
+    assert host.consume_cancel_mark() is False   # cleared by the first consume
+    host._dispatch("final", {"text": "next"})
+    assert host.consume_cancel_mark() is False
+
+
+def test_run_text_cancel_emits_marked_sentinel_and_discards_audio():
+    """P1.M2.T7.S1: on the cancel path the helper DISCARDS the buffered/in-flight audio
+    (clear_audio_queue + recorded_audio_queue drain + frames/last_frames/audio clear) and emits
+    the unblock sentinel MARKED ('cancelled': True) so the daemon drops the cancelled utterance."""
+    import queue as _queue
+
+    evt_q: Any = _queue.Queue()
+    rec = _CancelFakeRecorder()
+    aborted = threading.Event()
+    cancelled = threading.Event()
+    aborted.set()      # the child's abort handler sets BOTH on a cancel
+    cancelled.set()
+    recorder_host._run_text_and_emit_final(rec, evt_q, lambda _t: None, aborted, cancelled)
+
+    assert rec.text_calls == 1
+    assert rec.clear_audio_queue_calls == 1, "cancel path must clear the recorder's audio queues"
+    assert rec.recorded_audio_queue.empty(), "recorded_audio_queue must be drained (stale-final source)"
+    assert rec.frames == [] and rec.last_frames == [] and rec.audio is None
+    events = _drain(evt_q)
+    assert events == [("final", {"text": "", "cancelled": True})], (
+        f"cancel path must emit exactly one MARKED sentinel (the daemon drops it, but host.text() "
+        f"must still unblock — the VT-007 contract); got {events!r}"
+    )
+
+
+def test_run_text_plain_abort_emits_unmarked_sentinel_and_keeps_audio():
+    """REGRESSION GUARD for the plain abort() path (the drain watchdog _safe_abort depends on it):
+    with `cancelled` UNSET the sentinel is emitted UNMARKED exactly as before P1.M2.T7.S1, and the
+    recorder's audio is NOT touched (a drain may still want the in-flight utterance)."""
+    import queue as _queue
+
+    evt_q: Any = _queue.Queue()
+    rec = _CancelFakeRecorder()
+    aborted = threading.Event()
+    aborted.set()          # plain abort (stop/drain watchdog) — NOT a cancel
+    recorder_host._run_text_and_emit_final(rec, evt_q, lambda _t: None, aborted)
+
+    assert rec.text_calls == 1
+    assert rec.clear_audio_queue_calls == 0, "plain abort must NOT discard audio"
+    assert not rec.recorded_audio_queue.empty()
+    assert rec.frames == ["frame1", "frame2"] and rec.audio is not None
+    events = _drain(evt_q)
+    assert events == [("final", {"text": ""})], (
+        f"plain abort sentinel must stay UNMARKED ({{'text': ''}} — no 'cancelled' key); got {events!r}"
+    )
