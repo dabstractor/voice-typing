@@ -4161,3 +4161,131 @@ def test_arm_and_disarm_reset_the_stream_session():
     d.start()                           # fresh arm: the engine types again from scratch
     d._on_partial("Next")
     assert be.typed[-1] == "Next"       # fresh session start: case preserved, typed anew
+
+
+# --- P1.M2.T6.S3: user-keypress seam + stranded-tail freeze wiring (PRD rules 4/5) ---
+
+
+class _FakeKeypressStream(_FakeStream):
+    """_FakeStream + the T6.S3 note_user_keypress seam (counts calls)."""
+
+    def __init__(self, tail_len: int = 0) -> None:
+        super().__init__(tail_len)
+        self.keypress_notes = 0
+
+    def note_user_keypress(self) -> None:
+        self.keypress_notes += 1
+
+
+def test_note_user_keypress_forwards_to_stream_while_listening():
+    """Armed: the seam forwards to the engine's note_user_keypress (T7.S2's future call)."""
+    d, fb = _make_cancel_daemon()
+    d._stream = _FakeKeypressStream(tail_len=8)
+    d.note_user_keypress()
+    assert d._stream.keypress_notes == 1
+
+
+def test_note_user_keypress_disarmed_is_noop():
+    """Disarmed: the _listening gate drops the note BEFORE touching the engine — a
+    keypress while idle must never freeze engine state."""
+    d, fb = _make_cancel_daemon()
+    d._stream = _FakeKeypressStream(tail_len=8)
+    d._listening.clear()
+    d.note_user_keypress()
+    assert d._stream.keypress_notes == 0
+
+
+def test_note_user_keypress_without_stream_is_noop():
+    """Defensive getattr seam style (_pending_tail_len): a missing stream must not raise."""
+    d, fb = _make_cancel_daemon()
+    del d._stream
+    d.note_user_keypress()              # must not raise
+
+
+def test_on_final_user_keypress_frozen_commit_absorbs_then_unfreezes():
+    """End-to-end S3 sequence on the real engine: a keypress mid-utterance freezes the
+    tail PER-UTTERANCE; the final's commit absorbs it with zero further keystrokes;
+    the daemon's post-commit reset_boundary() lifts the freeze; the NEXT utterance
+    streams normally."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("hello wor")
+    d.note_user_keypress()
+    assert d._stream.frozen is True
+    d.on_final("hello world")
+    assert be.typed == ["hello wor"]            # frozen-absorb: no further keystrokes
+    assert d._stream.committed == "hello wor"
+    assert d._stream.frozen is False            # lifted at the boundary, after the commit
+    d._on_partial("next")
+    assert be.typed == ["hello wor", "next"]    # the next utterance types normally
+
+
+def test_drain_timeout_freezes_pending_tail_session_class():
+    """PRD rule 4: the drain watchdog's abort kills the in-flight final — a typed tail
+    can never be committed, so it freezes SESSION-class before the abort (a late
+    partial mirrors, a racing final absorbs; nothing is ever rewound)."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()
+    d._on_partial("hello wor")          # typed tail pending
+    d._text_in_flight.set()
+    d._begin_drain()
+    d._drain_timeout()                  # simulate the watchdog firing (final never came)
+    assert rec.aborts == 1              # the watchdog still aborts (unchanged behavior)
+    assert d._stream.frozen is True and d._stream.frozen_session is True
+    assert be.typed == ["hello wor"]    # frozen as-is: nothing rewound or retyped
+
+
+def test_drain_timeout_without_pending_tail_does_not_freeze():
+    """No tail pending: the watchdog aborts exactly as before and the engine stays
+    unfrozen (nothing on screen to strand)."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._touch_speech()
+    d._text_in_flight.set()
+    d._begin_drain()
+    d._drain_timeout()
+    assert rec.aborts == 1
+    assert d._stream.frozen is False
+
+
+def test_freeze_stranded_tail_gates():
+    """_freeze_stranded_tail no-ops when streaming is off, when disarmed, and when no
+    tail is pending; freezes session-class when all gates pass."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("hello wor")
+    d._freeze_stranded_tail("test")
+    assert d._stream.frozen is True and d._stream.frozen_session is True
+    d._stream.reset_session()
+    # Gate 1: no pending tail -> no-op.
+    d._freeze_stranded_tail("test")
+    assert d._stream.frozen is False
+    # Gate 2: disarmed -> no-op (the _listening gate inside _pending_tail_len).
+    d._on_partial("tail again")
+    d._listening.clear()
+    d._freeze_stranded_tail("test")
+    assert d._stream.frozen is False
+    d._listening.set()
+    # Gate 3: streaming disabled -> no-op.
+    d._cfg.output.streaming = False
+    d._freeze_stranded_tail("test")
+    assert d._stream.frozen is False
+
+
+def test_child_death_branch_freezes_pending_tail_before_handle_dead_host():
+    """PRD rule 4: a recorder-host death mid-utterance strands the typed tail — frozen
+    SESSION-class BEFORE _handle_dead_host() clears the listening gate; the tail then
+    stays on screen across the state transition and NO keystrokes are ever sent for it
+    (reset_session at the next arm sends no backspaces)."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("hello wor")
+    # The run-loop liveness branch, executed verbatim (run() holds no lock here):
+    d._freeze_stranded_tail("recorder-host child died: stranded tail")
+    d._handle_dead_host()
+    assert d._listening.is_set() is False       # _handle_dead_host ran (gate cleared)
+    assert d._stream.frozen is True and d._stream.frozen_session is True
+    assert be.typed == ["hello wor"]            # zero keystrokes for the stranded tail
+    d._disarm()  # the next disarm/arm cycle: engine strings reset, still no keystrokes
+    assert be.typed == ["hello wor"]

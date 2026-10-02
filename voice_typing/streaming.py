@@ -27,8 +27,12 @@ FAILURE POLICY: a backend exception inside on_partial NEVER propagates (it would
 kill the host reader thread and streaming would silently stop). It is logged as a
 WARNING and the engine FREEZES itself (frozen=True): a failed rewind+retype
 leaves the on-screen state unknown ("typed text is never auto-deleted", PRD
-§4.2quater), so the safest S1 response is to stop revising that utterance. The
-feedback mirror keeps updating. T6.S3 formalizes freeze triggers.
+§4.2quater), so the safest response is to stop touching the text. The feedback
+mirror keeps updating. P1.M2.T6.S3 landed the freeze lifecycle: freezes come in
+two classes — SESSION (backend failure; stranded tail from a drain-timeout abort
+or a recorder-host child death; survives reset_boundary(), lifted only by
+reset_session()) and PER-UTTERANCE (a non-Backspace user keypress over a pending
+tail — note_user_keypress(); lifted at the next utterance boundary).
 
 THREAD CONTEXT: on_partial is called from the host reader (daemon) thread; commit()
 from the daemon's on_final thread INSIDE _on_final_lock (landed P1.M2.T6.S2);
@@ -101,8 +105,12 @@ class StreamingOutput:
             NEVER ending with a space. Length == exactly the chars a rewind
             must delete.
         frozen: True -> on_partial does NO backend calls, mirror-only (set by
-            freeze() or by a backend failure). NOT auto-cleared by
-            reset_boundary() — T6.S3 owns the freeze lifecycle.
+            freeze() or a backend failure). Comes in two classes (P1.M2.T6.S3):
+            per-utterance (_frozen_session False) is lifted by the next
+            reset_boundary(); session (_frozen_session True) survives every
+            reset_boundary() and is cleared ONLY by reset_session().
+        frozen_session: the class of the current freeze (False when not frozen
+            or per-utterance).
         suppressed: True after reset_after_cancel() -> mirror-only until the
             next utterance boundary, so a stale late partial from the cancelled
             utterance cannot re-type text right after a cancel.
@@ -140,6 +148,7 @@ class StreamingOutput:
         self._committed: str = ""
         self._tail: str = ""
         self._frozen: bool = False
+        self._frozen_session: bool = False  # True = survives reset_boundary() (P1.M2.T6.S3)
         self._suppressed: bool = False
         # None = no full rewind has happened yet (first revise is always allowed).
         # A plain 0.0 sentinel would break a fake clock starting at 0.0 (and read
@@ -163,6 +172,15 @@ class StreamingOutput:
         """True once freeze()d or after a backend failure — mirror-only until unfrozen."""
         return self._frozen
 
+    @property
+    def frozen_session(self) -> bool:
+        """Class of the current freeze: True = session freeze (survives reset_boundary()).
+
+        False both for a per-utterance freeze and when not frozen at all; callers
+        combine it with `frozen` to tell the two states apart.
+        """
+        return self._frozen_session
+
     # --- lifecycle (daemon.cancel() seam — exact names are load-bearing) ---
 
     def pending_tail_len(self) -> int:
@@ -182,14 +200,22 @@ class StreamingOutput:
             self._suppressed = True
 
     def reset_boundary(self) -> None:
-        """New utterance boundary: clear the tail and lift the post-cancel suppression.
+        """New utterance boundary: clear the tail, lift post-cancel suppression, and
+        lift a PER-UTTERANCE freeze.
 
-        `frozen` is deliberately NOT cleared here — the freeze lifecycle (stranded
-        tail, user keypress, ...) is P1.M2.T6.S3's concern.
+        The daemon calls this once per utterance, right after commit() (or a rejected
+        final), so a user-keypress freeze (P1.M2.T6.S3, PRD rule 5) is lifted exactly
+        here: the frozen commit has already absorbed the tail without keystrokes and
+        the next utterance streams normally. SESSION-class freezes (backend failure,
+        stranded tail — PRD rule 4) deliberately SURVIVE this boundary: only
+        reset_session() may clear them.
         """
         with self._lock:
             self._tail = ""
             self._suppressed = False
+            if self._frozen and not self._frozen_session:
+                self._frozen = False
+                self._frozen_session = False
 
     def reset_session(self) -> None:
         """A NEW armed session (P1.M2.T6.S2): clear committed + tail + suppressed + FROZEN.
@@ -197,27 +223,72 @@ class StreamingOutput:
         Session-lifecycle counterpart of reset_boundary(): a fresh arm legitimately
         unfreezes — whatever stranded the previous session's tail (a backend failure,
         a rejected final) must not carry into the next one, and the full-rewind
-        budget starts fresh. reset_boundary() deliberately does NOT clear `frozen`
-        (the in-session freeze lifecycle is T6.S3's); reset_session() is the only
-        engine method that does. On disarm the pending tail simply stays typed on
-        screen (stranded-tail cleanup is T6.S3's domain); the engine strings reset
-        for the next session. Called from daemon._arm()/_disarm() (defensive getattr
-        seam, matching daemon.cancel()'s style).
+        budget starts fresh. reset_boundary() lifts only PER-UTTERANCE freezes;
+        session-class freezes (backend failure, stranded tail) survive every boundary
+        and are cleared ONLY here. On disarm the pending tail simply stays typed on
+        screen FOREVER (PRD rule 4: a stranded tail is never rewound — reset_session()
+        sends NO keystrokes, it resets the engine strings only); the engine strings
+        reset for the next session. Called from daemon._arm()/_disarm() (defensive
+        getattr seam, matching daemon.cancel()'s style).
         """
         with self._lock:
             self._committed = ""
             self._tail = ""
             self._suppressed = False
             self._frozen = False
+            self._frozen_session = False
             self._last_full_rewind = None
 
-    def freeze(self, reason: str = "") -> None:
-        """Stop typing (mirror-only) for the rest of this utterance; log why."""
+    def freeze(self, reason: str = "", *, session: bool = False) -> None:
+        """Stop typing (mirror-only); log why. `session=True` freezes survive reset_boundary().
+
+        Two classes (P1.M2.T6.S3 / PRD §4.2quater rules 4-5):
+          - per-utterance (default): lifted at the next reset_boundary() — e.g. a user
+            keypress over a pending tail must stop revising THIS utterance only.
+          - session: on-screen state can no longer be trusted for the rest of the
+            armed session (backend failure; stranded tail from a drain-timeout abort
+            or a recorder-host child death) — only reset_session() (fresh arm) lifts
+            it, and the tail simply stays on screen across disarm (NO rewind).
+
+        Idempotent and PROMOTE-ONLY: freezing while already frozen is a no-op, except
+        that a session freeze upgrades a per-utterance one (a later per-utterance
+        reason must never weaken a session freeze).
+        """
         with self._lock:
             if self._frozen:
+                if session and not self._frozen_session:
+                    self._frozen_session = True
+                    logger.warning(
+                        "streaming output frozen (session): %s", reason or "unspecified"
+                    )
                 return
             self._frozen = True
-        logger.warning("streaming output frozen (%s)", reason or "unspecified")
+            self._frozen_session = bool(session)
+        logger.warning(
+            "streaming output frozen (%s): %s",
+            "session" if session else "per-utterance",
+            reason or "unspecified",
+        )
+
+    def note_user_keypress(self) -> None:
+        """PRD §4.2quater rule 5 — never type over the user's cursor (P1.M2.T6.S3).
+
+        Called by daemon.note_user_keypress() (the seam the T7.S2 evdev listener will
+        drive) for every NON-Backspace keypress observed while listening. A pending
+        tail means the engine's next keystrokes would land ON TOP of the user's edit,
+        so the tail freezes PER-UTTERANCE: mirror-only until the next boundary, where
+        commit() absorbs it without keystrokes and reset_boundary() lifts the freeze
+        (the next utterance streams normally). No pending tail -> plain user editing,
+        nothing of ours at risk -> no-op. Idempotent (an existing freeze is never
+        weakened) and thread-safe: self._lock serializes with on_partial/commit, so
+        the listener thread needs no other coordination.
+        """
+        with self._lock:
+            if not self._streaming or self._frozen or not self._tail:
+                return
+            self._frozen = True
+            self._frozen_session = False
+        logger.warning("streaming output frozen (user keypress while tail pending)")
 
     # --- the engine (PRD §4.2quater rule 1) ---
 
@@ -309,8 +380,10 @@ class StreamingOutput:
           - frozen: absorb the typed tail into `committed` WITHOUT keystrokes (typed
             text is never auto-deleted, PRD rule 4) — the on-screen text becomes the
             de-facto committed text for on-screen continuity — then clear the tail,
-            lift suppression, mirror, return. Freeze LIFECYCLE triggers stay T6.S3's;
-            commit only needs to not strand state across the boundary.
+            lift suppression, mirror, return. Works for BOTH freeze classes
+            (P1.M2.T6.S3): a stranded/session-frozen tail whose final races in late
+            absorbs and STAYS frozen, and a user-keypress-frozen tail absorbs before
+            the daemon's post-commit reset_boundary() lifts the per-utterance freeze.
           - final EXTENDS the tail: type ONLY the guarded delta (same context shape
             as _guard_context_delta). NOT rate-limited: commits are authoritative,
             never wobble (the >=300 ms limiter exists only for partial cycles).
@@ -391,7 +464,10 @@ class StreamingOutput:
             logger.warning(
                 "streaming type_text(%r) failed (%s); freezing tail", s, exc
             )
+            # SESSION-class freeze (P1.M2.T6.S3): on-screen state unknown — survives
+            # reset_boundary(); only reset_session() (fresh arm) lifts it.
             self._frozen = True
+            self._frozen_session = True
             return False
 
     def _safe_backspace(self, n: int) -> bool:
@@ -403,5 +479,7 @@ class StreamingOutput:
             return True
         except Exception as exc:  # noqa: BLE001 — the reader thread must survive
             logger.warning("streaming press_backspace(%d) failed (%s); freezing", n, exc)
+            # SESSION-class freeze (P1.M2.T6.S3): on-screen state unknown — see _safe_type.
             self._frozen = True
+            self._frozen_session = True
             return False

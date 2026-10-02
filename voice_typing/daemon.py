@@ -843,6 +843,13 @@ class VoiceTypingDaemon:
                     "recorder-host child (pid=%s) died; transitioning to unloaded",
                     getattr(self._host, "pid", "?"),
                 )
+                # P1.M2.T6.S3 / PRD §4.2quater rule 4: the child's in-flight final died with
+                # it — a typed tail can never be committed. Freeze it SESSION-class BEFORE
+                # _handle_dead_host() mutates state (it clears _listening, the gate that
+                # _pending_tail_len reads). The tail stays on screen exactly as last shown;
+                # no keystrokes are ever sent for it again this session. Called outside
+                # self._lock (see _freeze_stranded_tail) — the run loop holds no lock here.
+                self._freeze_stranded_tail("recorder-host child died: stranded tail")
                 self._handle_dead_host()
                 continue
             if self._host is None:
@@ -991,7 +998,14 @@ class VoiceTypingDaemon:
                 # a pending drain sees the utterance as finished. Rev 1 mode stays
                 # today's plain early return, byte for byte.
                 if self._cfg.output.streaming:
-                    self._stream.freeze("rejected final (blocklist/min_chars)")
+                    # P1.M2.T6.S3 class tag: a rejected final is an UNTRUSTWORTHY decode —
+                    # deliberately a SESSION-class freeze. The reset_boundary() on the next
+                    # line is this utterance's boundary event (it clears the tail so late
+                    # stragglers mirror instead of type); a per-utterance freeze would be
+                    # lifted by it immediately, so the freeze must survive every boundary
+                    # until reset_session() (fresh arm). The landed S2 test pins frozen=True
+                    # across this call — do not retag to per-utterance.
+                    self._stream.freeze("rejected final (blocklist/min_chars)", session=True)
                     self._stream.reset_boundary()
                     self._final_pending = False  # finalized-by-rejection: a drain can finish
                     self._utterance_finalized = True  # validation Issue 2: this text() is done
@@ -1047,6 +1061,12 @@ class VoiceTypingDaemon:
                 record["t_typed"],
             )
             if self._cfg.output.streaming:
+                # P1.M2.T6.S3: the utterance-boundary event — lifts a PER-UTTERANCE freeze
+                # (e.g. user keypress) exactly once per utterance, AFTER the commit: a frozen
+                # commit absorbs the tail first, then the boundary unfreezes the engine so the
+                # next utterance streams. Behavior-neutral on the healthy path (commit()
+                # already cleared tail/suppression internally).
+                self._stream.reset_boundary()
                 # P1.M2.T6.S2: refresh the rolling context-prompt seam AFTER the commit
                 # (streaming.context_after_last_boundary -> host.set_prompt; the thin S2
                 # seam — P1.M2.T5.S2 formalizes the full daemon-side computation).
@@ -1193,6 +1213,49 @@ class VoiceTypingDaemon:
             reset()   # T6: clears the tail, suppresses partial typing until the next boundary
         self._feedback.update_partial("")
 
+    def note_user_keypress(self) -> None:
+        """P1.M2.T6.S3 / PRD §4.2quater rule 5 seam: a NON-Backspace user keypress was observed.
+
+        Forwards to StreamingOutput.note_user_keypress(), which freezes a pending tail
+        PER-UTTERANCE — "never type over the user's cursor": the engine stops typing and
+        revising the utterance until the next boundary (its commit absorbs the tail without
+        keystrokes, then the boundary unfreezes the engine). The T7.S2 evdev listener is the
+        intended caller — this seam lands standalone so the listener only ever calls this one
+        daemon method; do NOT add evdev/device code here (Backspace-cancel is T7.S1, landed).
+        Gated on _listening (a keypress while idle touches no engine state) and written in the
+        defensive-getattr style of _pending_tail_len. Safe from ANY thread: the engine's
+        internal lock serializes with on_partial/commit; never raises.
+        """
+        if not self._listening.is_set():
+            return
+        stream = getattr(self, "_stream", None)
+        note = getattr(stream, "note_user_keypress", None)
+        if callable(note):
+            note()
+
+    def _freeze_stranded_tail(self, reason: str) -> None:
+        """SESSION-freeze a typed streaming tail that can never be committed (P1.M2.T6.S3,
+        PRD §4.2quater rule 4).
+
+        Called from the drain watchdog (Timer thread) and the run-loop child-death branch —
+        always OUTSIDE self._lock: cancel() takes daemon _lock THEN the engine lock, so engine
+        calls under self._lock would invert that order (the engine's internal lock is the
+        serializer, mirroring _complete_drain's out-of-lock discipline). The frozen tail stays
+        on screen exactly as last shown — never rewound, never deleted; reset_session() at the
+        next disarm/arm clears engine strings WITHOUT keystrokes, and only an explicit cancel
+        (T7.S1) removes text. Defensive getattr + tail gate mirror the _pending_tail_len seam:
+        no-op when the engine is a Rev 1 pass-through (its tail is always empty there) and when
+        the S3 freeze API is absent. Never raises.
+        """
+        if not self._cfg.output.streaming:
+            return
+        if self._pending_tail_len() <= 0:
+            return
+        stream = getattr(self, "_stream", None)
+        freeze = getattr(stream, "freeze", None)
+        if callable(freeze):
+            freeze(reason, session=True)
+
     def _refresh_context_prompt(self) -> None:
         """Push the rolling context prompt to the recorder-host child (P1.M2.T6.S2 seam).
 
@@ -1289,12 +1352,20 @@ class VoiceTypingDaemon:
         still set and calls _complete_drain. Best-effort + never re-raises (a wedged abort must not
         strand the drain). Covers the case where nothing was actually pending (the _final_pending
         heuristic raced) or the final model wedged.
+
+        P1.M2.T6.S3 / PRD §4.2quater rule 4: the abort kills the in-flight final, so a typed tail
+        can never be committed — freeze it SESSION-class BEFORE the abort (a late partial then
+        mirrors, a final that raced the watchdog is still absorbed by commit()'s frozen path, and
+        nothing ever rewinds). Mainly closes the abort→_complete_drain→_disarm race window and
+        documents intent. _freeze_stranded_tail is a no-op without a pending tail and runs OUTSIDE
+        self._lock (Timer thread; engine lock is the serializer).
         """
         if self._drain and self._host is not None and self._text_in_flight.is_set():
             logger.info(
                 "voice-typing drain: no final within %.1fs; aborting to complete stop",
                 _DRAIN_TIMEOUT_S,
             )
+            self._freeze_stranded_tail("drain timeout: stranded tail")
             self._safe_abort()  # breaks the blocked text(); run loop then completes the drain
 
     def _maybe_auto_stop(self) -> None:

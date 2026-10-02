@@ -343,11 +343,14 @@ def test_reset_session_clears_post_cancel_suppression():
 
 
 def test_reset_boundary_still_does_not_clear_frozen():
-    # The S1 contract reset_session must not break: reset_boundary keeps the freeze.
+    # P1.M2.T6.S3 refined the S2 interim contract: reset_boundary lifts a PER-UTTERANCE
+    # freeze (see tests/test_streaming_freeze.py) but must NEVER clear a SESSION-class
+    # one — reset_session() is the only path that does. (Deliberate call-site update:
+    # the explicit session= tag is what preserves the survival property asserted here.)
     stream, be, _fb = _make_stream()
-    stream.freeze("test freeze")
+    stream.freeze("test freeze", session=True)
     stream.reset_boundary()
-    assert stream.frozen is True
+    assert stream.frozen is True and stream.frozen_session is True
 
 
 # ---------------------------------------------------------------------------

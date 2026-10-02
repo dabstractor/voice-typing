@@ -225,7 +225,7 @@
               "type": "Task",
               "id": "P1.M2.T6",
               "title": "Streaming output state machine in the daemon (R3 — the heavy task)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "While armed with output.streaming=true (default), type partials live and revise in place: per-session committed/tail state, delta typing with rate-limited rewinds, the commit correction pass, stranded-tail and user-typing freezes, and the output.streaming=false rollback hatch (Rev 1 path kept intact).",
               "subtasks": [
                 {
@@ -267,7 +267,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T6.S3",
                   "title": "Freeze rules — stranded tail, user typing, utterance boundary",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T6.S1",
