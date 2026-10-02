@@ -1,9 +1,10 @@
 """CUDA smoke check + degraded-mode decision for the voice-typing daemon.
 
 Decides whether the daemon runs on GPU (device="cuda", compute_type="float16",
-final_model="distil-large-v3", realtime_model="small.en") or falls back to CPU
-(device="cpu", compute_type="int8", final_model="small.en",
-realtime_model="tiny.en"), per PRD §4.4.
+model="small.en") or falls back to CPU (device="cpu", compute_type="int8",
+model="tiny.en"), per PRD §4.4 and the Rev 2 single-mode collapse
+(§4.2ter/§4.2quater): ONE model (the small model) serves BOTH realtime
+partials and final transcription.
 
 This is a REAL smoke check (no mocking). It is meant to run under
 launch_daemon.sh's environment so LD_LIBRARY_PATH (the cuBLAS + cuDNN 9 lib
@@ -16,14 +17,13 @@ wrapper's LD_LIBRARY_PATH export in the shell first (see Validation L3).
 THE DEGRADED-MODE KNOB  (PRD §4.4 — the user-facing surface):
   When ctranslate2.get_cuda_device_count() == 0 — or ctranslate2 cannot be
   imported, or its CUDA init raises for any reason — the daemon MUST run:
-      device="cpu", compute_type="int8",
-      final_model="small.en", realtime_model="tiny.en"
+      device="cpu", compute_type="int8", model="tiny.en"
   and surface device="cpu" in its status (feedback.py state.json, written in
   P1.M3.T2.S1; the daemon status string is wired in P1.M4.T1.S1). The CUDA path
   is the CUDA_DEFAULTS below. Resolve the active config ONCE at daemon startup
   via resolve_device_and_models() and pass the result into the
-  AudioToTextRecorder: P1.M4.T1.S1 maps  final_model -> model=  and
-  realtime_model -> realtime_model_type=.
+  AudioToTextRecorder: P1.M4.T1.S1 maps  model -> model=  AND
+  realtime_model_type=  (single model, both slots).
 
 The MUST-HAVE check is ctranslate2 CUDA (the whisper inference engine).
 torch.cuda.is_available() is a NICE-TO-HAVE (only Silero VAD uses torch, and it
@@ -41,20 +41,20 @@ from __future__ import annotations
 import sys
 from typing import Mapping
 
-# PRD §4.4 — the config the daemon WANTS when CUDA works.
+# PRD §4.4/§4.2ter (Rev 2 single-mode) — the config the daemon WANTS when CUDA works.
+# ONE model (the small model) serves BOTH realtime partials and final transcription.
 CUDA_DEFAULTS: dict[str, str] = {
     "device": "cuda",
     "compute_type": "float16",
-    "final_model": "distil-large-v3",
-    "realtime_model": "small.en",
+    "model": "small.en",
 }
 
 # PRD §4.4 — the degraded config applied when ctranslate2 sees no CUDA device.
+# The approved CPU substitute for the single small model is tiny.en.
 CPU_FALLBACK: dict[str, str] = {
     "device": "cpu",
     "compute_type": "int8",
-    "final_model": "small.en",
-    "realtime_model": "tiny.en",
+    "model": "tiny.en",
 }
 
 
@@ -114,7 +114,8 @@ def is_cuda_available() -> bool:
 def resolve_device_and_models(
     defaults: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Resolve {device, compute_type, final_model, realtime_model} for the daemon.
+    """Resolve {device, compute_type, model} — the SINGLE model (Rev 2 §4.2ter)
+    used for both realtime partials and finals.
 
     If ctranslate2 CUDA is available, return a copy of `defaults` (or
     CUDA_DEFAULTS when `defaults` is None). Otherwise apply the PRD §4.4 CPU
@@ -122,7 +123,8 @@ def resolve_device_and_models(
     dict the caller may mutate freely.
 
     Consumed once at daemon startup by the recorder wiring (P1.M4.T1.S1),
-    which maps final_model -> model= and realtime_model -> realtime_model_type=.
+    which maps model -> model= AND realtime_model_type= (single model, both
+    slots).
     """
     if defaults is None:
         defaults = CUDA_DEFAULTS
@@ -144,7 +146,7 @@ def _main() -> int:
       torch_cuda_available=<True|False>
       VERDICT=<cuda-ok|cpu-fallback-required>
       # <reason>
-      # resolved: device=.. compute_type=.. final_model=.. realtime_model=..
+      # resolved: device=.. compute_type=.. model=..
 
     Exit code mirrors the verdict: 0 = cuda-ok, 1 = cpu-fallback-required.
     NOTE: cpu-fallback-required is a VALID degraded mode, not an error —
@@ -159,7 +161,7 @@ def _main() -> int:
     cfg = resolve_device_and_models()
     print(
         f"# resolved: device={cfg['device']} compute_type={cfg['compute_type']} "
-        f"final_model={cfg['final_model']} realtime_model={cfg['realtime_model']}"
+        f"model={cfg['model']}"
     )
     return 0 if is_cuda_available() else 1
 

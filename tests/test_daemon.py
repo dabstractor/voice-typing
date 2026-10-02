@@ -2739,12 +2739,14 @@ import inspect  # noqa: E402 (kept local to this section to match the file's add
 
 def test_construct_force_cpu_uses_cpu_fallback(cfg):
     """force_cpu=True builds the exact PRD §4.4 CPU config regardless of cfg.asr.device."""
+    # P1.M1.T2.S1 single-mode collapse: RED-TRANSIENT until P1.M1.T2.S2 rewires
+    #  cfg_to_kwargs to map resolved['model'] to both model= and realtime_model_type=. Do NOT shim.
     rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=True)
     kw = rec.kwargs
     assert kw["device"] == "cpu"
     assert kw["compute_type"] == "int8"
-    assert kw["model"] == "small.en"
-    assert kw["realtime_model_type"] == "tiny.en"
+    assert kw["model"] == "tiny.en"
+    assert kw["realtime_model_type"] == "tiny.en"  # single model fills BOTH slots (P1.M1.T2.S2)
 
 
 def test_construct_force_cpu_skips_resolve(cfg, monkeypatch):
@@ -2808,11 +2810,12 @@ def test_cfg_to_kwargs_accepts_resolved_override(cfg, monkeypatch):
     def _boom(_cfg=None):
         raise AssertionError("must not resolve when resolved= is given")
     monkeypatch.setattr(daemon, "_resolve_device_config", _boom)
+    # P1.M1.T2.S1 single-mode collapse: RED-TRANSIENT until P1.M1.T2.S2 rewires
+    #  cfg_to_kwargs to map resolved['model'] to both model= and realtime_model_type=. Do NOT shim.
     kw = daemon.cfg_to_kwargs(
-        cfg, resolved={"device": "cpu", "compute_type": "int8",
-                       "final_model": "small.en", "realtime_model": "tiny.en"}
+        cfg, resolved={"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
     )
-    assert kw["device"] == "cpu" and kw["model"] == "small.en"
+    assert kw["device"] == "cpu" and kw["model"] == "tiny.en"
     assert kw["realtime_model_type"] == "tiny.en" and kw["compute_type"] == "int8"
 
 
@@ -2845,8 +2848,10 @@ def test_log_resolved_device_reads_cache_after_cpu_fallback(caplog):
         (m for m in (r.getMessage() for r in caplog.records) if "device resolved" in m), None
     )
     assert line is not None, "no device-resolved line"
+    # P1.M1.T2.S1 single-mode collapse: RED-TRANSIENT until P1.M1.T2.S2 rewires
+    #  _log_resolved_device to print the 3-key resolved dict. Do NOT shim.
     assert "device=cpu" in line and "compute_type=int8" in line
-    assert "final_model=small.en" in line and "realtime_model=tiny.en" in line
+    assert "model=tiny.en" in line
 
 
 # ===========================================================================

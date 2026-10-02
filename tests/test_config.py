@@ -68,17 +68,21 @@ def test_defaults_match_prd_4_5():
 
 
 def test_defaults_match_cuda_check():
-    """Drift guard: the asr device default must equal cuda_check.CUDA_DEFAULTS.
+    """Drift guard: the asr single-model/device defaults must equal cuda_check.CUDA_DEFAULTS.
 
     config holds the DESIRED value; cuda_check holds the same value for its CUDA
     path. If these drift, the daemon's cuda_check override (P1.M4.T1.S1) would
-    contradict the config default. (Model defaults are no longer pinned here:
-    AsrConfig dropped the old two-model fields in the Rev 2 single-mode collapse;
-    cuda_check's model keys are collapsed in P1.M1.T2.S1.)
+    contradict the config default. Single-model contract (Rev 2 / P1.M1.T2.S1):
+    cuda_check resolves exactly {device, compute_type, model}; config's
+    lite_model is THE model and must equal CUDA_DEFAULTS["model"]; the CPU
+    substitute is tiny.en.
     """
-    from voice_typing.cuda_check import CUDA_DEFAULTS
+    from voice_typing.cuda_check import CPU_FALLBACK, CUDA_DEFAULTS
 
+    assert set(CUDA_DEFAULTS) == {"device", "compute_type", "model"}
+    assert AsrConfig().lite_model == CUDA_DEFAULTS["model"]
     assert AsrConfig().device == CUDA_DEFAULTS["device"]
+    assert CPU_FALLBACK["model"] == "tiny.en"  # the approved CPU substitute
 
 
 def test_field_types_are_tomllib_natural_types():
