@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Config schema delta + evdev dependency",
-              "status": "Ready",
+              "status": "Complete",
               "description": "One coherent edit of the config surface (PRD R7): remove asr.final_model / asr.realtime_model, change lite_post_speech_silence_duration default to 0.8, add asr.context_prompt, output.streaming, and the [cancel] section; keep config.toml the self-documenting user-facing reference. Add the evdev dependency (R8).",
               "subtasks": [
                 {
@@ -39,7 +39,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Add evdev dependency (uv add + lock)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §6: pyproject [project] dependencies at :9-13; uv.lock exists; venv Python 3.12.10. external_deps.md §1: PyPI 'evdev' 1.9.3, requires-python >=3.11 — compatible. evdev NOT currently importable in .venv (probe).\n2. INPUT: current pyproject.toml dependency list.\n3. LOGIC: Run `/home/dustin/.local/bin/uv add evdev` (full path per PRD §5 alias warning; wrap in timeout 120). Verify: uv.lock diff contains evdev; `timeout 30 .venv/bin/python -c 'import evdev; print(evdev.__version__)'` succeeds. No source imports yet — the import lands with the listener in P1.M2.T7.S2. AGENTS.md: no daemon runs, no pytest needed for this subtask.\n4. OUTPUT: pyproject.toml + uv.lock with evdev; import evdev available to P1.M2.T7.S2.\n5. DOCS: none — dependency manifest only (README surface handled by the final docs task P1.M3.T10.S1).",
@@ -61,7 +61,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "cuda_check single-model contract",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
