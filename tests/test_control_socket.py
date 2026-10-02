@@ -30,15 +30,14 @@ class _StubDaemon:
         self.calls: list[str] = []
         self._listening = listening
         self._snapshot = snapshot or {
-            "listening": listening, "partial": "", "last_final": "",
-            "uptime_s": 0.0, "device": "cuda", "compute_type": "float16",
-            "final_model": "distil-large-v3", "realtime_model": "small.en",
+            "listening": listening, "mode": "lite", "phase": "idle", "models_loaded": True,
+            "load_error": "", "partial": "", "last_final": "", "uptime_s": 0.0,
+            "device": "cuda", "compute_type": "float16", "model": "small.en",
+            "mic_ok": True, "mic_error": "",
         }
     def toggle(self):
         self.calls.append("toggle"); self._listening = not self._listening  # noqa: E702
     def start(self): self.calls.append("start"); self._listening = True  # noqa: E702
-    def start_lite(self): self.calls.append("start-lite"); self._listening = True  # noqa: E702
-    def toggle_lite(self): self.calls.append("toggle-lite"); self._listening = not self._listening  # noqa: E702
     def stop(self): self.calls.append("stop"); self._listening = False  # noqa: E702
     def request_shutdown(self): self.calls.append("quit")
     def is_listening(self): return self._listening
@@ -119,8 +118,9 @@ def test_dispatch_toggle():
 
 def test_dispatch_status_has_all_keys():
     r = _disp({"cmd": "status"})
-    assert set(r) == {"ok", "listening", "partial", "last_final", "uptime_s", "device",
-                      "compute_type", "final_model", "realtime_model"}
+    assert set(r) == {"ok", "listening", "mode", "phase", "models_loaded", "load_error",
+                      "partial", "last_final", "uptime_s", "device", "compute_type",
+                      "model", "mic_ok", "mic_error"}   # ok + the 13-key Rev 2 snapshot
 
 
 def test_dispatch_start_stop_set_listening():
@@ -128,34 +128,27 @@ def test_dispatch_start_stop_set_listening():
     assert _disp({"cmd": "stop"})["listening"] is False
 
 
-def test_dispatch_lite_commands_call_daemon(monkeypatch):
-    """toggle-lite / start-lite dispatch to the daemon's lite arm methods (PRD §4.2ter)."""
-    d = _StubDaemon()
-    srv = daemon.ControlServer(d)
-    assert srv._dispatch(json.dumps({"cmd": "start-lite"}))["ok"] is True
-    assert d.calls == ["start-lite"]
-    d2 = _StubDaemon()
-    srv2 = daemon.ControlServer(d2)
-    assert srv2._dispatch(json.dumps({"cmd": "toggle-lite"}))["ok"] is True
-    assert d2.calls == ["toggle-lite"]
+def test_dispatch_lite_commands_are_unknown():
+    """Rev 2 (P1.M1.T2.S2): the lite socket commands are gone — unknown-command reply."""
+    assert _disp({"cmd": "start-lite"}) == {"ok": False, "error": "unknown command: 'start-lite'"}
+    assert _disp({"cmd": "toggle-lite"}) == {"ok": False, "error": "unknown command: 'toggle-lite'"}
 
 
 def test_dispatch_status_response_carries_mode():
-    """P1.M1.T2.S2: the wire status response carries the daemon's 'mode' field.
+    """The wire status response carries the daemon's 'mode' field.
 
-    The shared _StubDaemon.status_snapshot() omits 'mode' (and test_dispatch_status_has_all_keys
-    pins exactly 9 keys), so this uses a subclass that emits it — proving the
-    {'ok': True, **status_snapshot()} spread surfaces mode on the wire (the PRD §4.2 status-payload
-    contract). The subclass override is local to this test (no ripple to the shared stub).
+    The shared _StubDaemon.status_snapshot() carries the Rev 2 CONSTANT 'lite'; this subclass
+    proves the {'ok': True, **status_snapshot()} spread surfaces mode on the wire (the PRD §4.2
+    status-payload contract) even when a daemon reports a different value.
     """
     class _ModeDaemon(_StubDaemon):
         def status_snapshot(self):
-            return {**super().status_snapshot(), "mode": "lite"}
+            return {**super().status_snapshot(), "mode": "other"}
 
     srv = daemon.ControlServer(_ModeDaemon())
     r = srv._dispatch(json.dumps({"cmd": "status"}))
     assert r["ok"] is True
-    assert r.get("mode") == "lite", f"status response missing 'mode': {r}"
+    assert r.get("mode") == "other", f"status response missing 'mode': {r}"
 
 
 def test_dispatch_quit_calls_request_shutdown():

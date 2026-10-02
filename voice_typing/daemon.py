@@ -12,17 +12,20 @@ SCOPE (P1.M4.T1.S1 + P1.M4.T1.S2):
     processes) — see _bounded_shutdown(). LATER: precise per-utterance latency timestamps
     (P1.M4.T1.S3). These are NOT in this module yet.
 
-LAZY LOAD (PRD §4.2bis): AudioToTextRecorder.__init__ loads BOTH whisper models (final + realtime) into
-resident memory (GPU VRAM on cuda, RAM on cpu) — seconds of work + ~1.5-3 GB VRAM. To avoid taxing the GPU on
+LAZY LOAD (PRD §4.2bis): AudioToTextRecorder.__init__ loads the single Whisper model into resident
+memory (GPU VRAM on cuda, RAM on cpu) — seconds of work + VRAM. To avoid taxing the GPU on
 boots where voice typing is never used, the recorder is NOT built at daemon boot — it is built lazily on the
-FIRST arm (start/toggle) via VoiceTypingDaemon._load_recorder() (single-flight). A session that never arms
-stays at ~0 VRAM; after the first arm the recorder stays resident so re-arms are instant. _load_recorder() also
-owns the construction-failure CPU fallback (migrated from main(), bugfix Issue 3).
+FIRST arm (start/toggle) via VoiceTypingDaemon._load_host() (single-flight). A session that never arms
+stays at ~0 VRAM; after the first arm the recorder stays resident so re-arms are instant.
 
-CPU FALLBACK (PRD §4.4): cfg_to_kwargs() resolves device/compute_type/models via
+CPU FALLBACK (PRD §4.4): cfg_to_kwargs() resolves device/compute_type/model via
 voice_typing.cuda_check.resolve_device_and_models(), which returns the cuda config when
-ctranslate2 sees a GPU, else the PRD §4.4 CPU_FALLBACK (cpu/int8/small.en/tiny.en). This is
-applied BEFORE construction so the recorder is built for the right device the first time.
+ctranslate2 sees a GPU, else the PRD §4.4 CPU_FALLBACK (cpu/int8/tiny.en) wholesale. This is
+applied BEFORE construction so the recorder is built for the right device the first time. Rev 2
+(PRD §4.2quater) has ONE model: cfg.asr.lite_model — cuda_check maps it to the CPU substitute
+tiny.en on no-CUDA, and cfg_to_kwargs fills BOTH the model= and realtime_model_type= slots from
+that single resolved value (use_main_model_for_realtime=True skips the separate realtime engine —
+verified against RealtimeSTT v1.0.2).
 
   KNOWN LIMITATION (not fixed here): resolve_device_and_models() probes the CUDA DRIVER only
   (ctranslate2.get_cuda_device_count) — it does NOT load cuDNN. A missing libcudnn_ops.so.9
@@ -51,7 +54,7 @@ CONSUMES:
   - voice_typing.textproc (P1.M2.T2.S1): clean(text, cfg.filter) — the gate inside on_final.
   - voice_typing.typing_backends (P1.M3.T1.S1): make_backend(cfg.output).type_text(text).
 CONSUMED BY:
-  - the daemon main loop (P1.M4.T1.S2 + P1.M2.T1.S1): VoiceTypingDaemon builds the recorder LAZILY on first arm via _load_recorder() (§4.2bis), not in __init__.
+  - the daemon main loop (P1.M4.T1.S2 + P1.M2.T1.S1): VoiceTypingDaemon builds the recorder LAZILY on first arm via _load_host() (§4.2bis), not in __init__.
   - the control socket (P1.M4.T2.S1): VoiceTypingDaemon.toggle/start/stop/is_listening/
     uptime_s/request_shutdown.
   - the daemon entry point (P1.M4.T3.S1): VoiceTypingDaemon.run() under `if __name__ == "__main__":`.
@@ -98,7 +101,6 @@ logger = logging.getLogger(__name__)
 # avoidance). Mirrors the PRD §4.4 block with the two item corrections applied.
 _FIXED_KWARGS: dict[str, Any] = {
     "enable_realtime_transcription": True,
-    "use_main_model_for_realtime": False,   # two models — avoid contention (PRD §4.4)
     "min_length_of_recording": 0.3,
     "min_gap_between_recordings": 0.0,      # resume listening immediately
     "silero_sensitivity": 0.4,
@@ -133,84 +135,65 @@ _COLD_LOAD_NOTIFY_LOADING = "Loading…"
 # the run loop's blocked text() return the natural final (the large model finishes + on_final types
 # it), THEN disarm. This is the max we'll wait for that final before the drain watchdog aborts the
 # blocked text() so the stop can't hang (no pending utterance / model wedged). Comfortably covers
-# post_speech_silence_duration (~0.6s normal / ~0.5s lite trailing silence to trigger finalization) + the final model's
-# transcription time (~0.5–1.5s); raise if you load a much larger final model.
+# post_speech_silence_duration (~0.8s trailing silence to trigger finalization) + the model's
+# transcription time (~0.5–1.5s); raise if you load a much larger model.
 _DRAIN_TIMEOUT_S: float = 5.0
 
 
 def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     """Build cuda_check defaults from cfg, then resolve (applies PRD §4.4 CPU fallback).
 
-    Returns {device, compute_type, final_model, realtime_model}. compute_type is DERIVED from
-    cfg.asr.device (config.py has no compute_type field — it is a cuda_check concern) before being
-    handed to cuda_check. cuda_check.resolve_device_and_models() then either keeps these defaults
-    (cuda available) or overrides wholesale with CPU_FALLBACK (no cuda).
+    Returns {device, compute_type, model}. compute_type is DERIVED from cfg.asr.device (config.py
+    has no compute_type field — it is a cuda_check concern) before being handed to cuda_check.
+    cuda_check.resolve_device_and_models() then either keeps these defaults (cuda available) or
+    overrides wholesale with CPU_FALLBACK — device cpu, compute_type int8, and the CPU substitute
+    model tiny.en (no CUDA, ONE place maps the model; Rev 2 §4.2quater).
     """
     defaults = {
         "device": cfg.asr.device,
         "compute_type": "float16" if cfg.asr.device == "cuda" else "int8",
-        "final_model": cfg.asr.final_model,
-        "realtime_model": cfg.asr.realtime_model,
+        "model": cfg.asr.lite_model,
     }
     return cuda_check.resolve_device_and_models(defaults)
 
 
-def cfg_to_kwargs(
-    cfg: VoiceTypingConfig, *, resolved: dict[str, str] | None = None, lite: bool = False
-) -> dict[str, Any]:
+def cfg_to_kwargs(cfg: VoiceTypingConfig, *, resolved: dict[str, str] | None = None) -> dict[str, Any]:
     """Build the AudioToTextRecorder kwargs from cfg (CPU fallback already applied).
 
     Returns the NON-callback kwargs (model/device/timing/VAD/silero). The on_* callbacks are wired
     separately in build_recorder() (they need the Feedback instance).
 
-    `resolved` ({device,compute_type,final_model,realtime_model} | None): when given, use it
-    INSTEAD of calling _resolve_device_config(cfg). The force_cpu path (bugfix Issue 3 /
-    P1.M1.T3.S1) passes dict(cuda_check.CPU_FALLBACK) here so the cuda_check driver probe is
-    SKIPPED entirely and kwargs are built straight from the PRD §4.4 CPU config (no ctranslate2
-    import / no driver probe during a CPU retry). Default None resolves via cuda_check (the
-    normal path — the only side effect is cuda_check.resolve_device_and_models() probing CUDA;
-    tests monkeypatch it to force a path deterministically).
+    `resolved` ({device,compute_type,model} | None): when given, use it INSTEAD of calling
+    _resolve_device_config(cfg). The force_cpu path (bugfix Issue 3 / P1.M1.T3.S1) passes
+    dict(cuda_check.CPU_FALLBACK) here so the cuda_check driver probe is SKIPPED entirely and
+    kwargs are built straight from the PRD §4.4 CPU config (no ctranslate2 import / no driver
+    probe during a CPU retry). Default None resolves via cuda_check (the normal path — the only
+    side effect is cuda_check.resolve_device_and_models() probing CUDA; tests monkeypatch it to
+    force a path deterministically).
 
-    `lite` (PRD §4.2ter, default False): lite mode loads ONLY `cfg.asr.lite_model` and uses it as
-    BOTH the realtime and the final model (`use_main_model_for_realtime=True`, which verified
-    against RealtimeSTT v1.0.2 SKIPS the separate realtime-engine init). The large final model is
-    never constructed. Device/compute_type still come from `resolved` (cuda or cpu-fallback).
-    The lite model is `cfg.asr.lite_model` ("small.en") on CUDA, but downgrades to the CPU lite
-    substitute "tiny.en" when `resolved["device"] == "cpu"` — mirroring how normal CPU-fallback maps
-    small.en→tiny.en for the realtime field (delta §3.2 BUG-A).
+    Rev 2 single model (§4.2quater): ONE model fills BOTH the final and realtime slots
+    (use_main_model_for_realtime=True skips the separate realtime engine — verified against
+    RealtimeSTT v1.0.2). The CPU substitute (tiny.en) comes from cuda_check's CPU_FALLBACK
+    wholesale override — there is NO device discrimination here; both slots get resolved["model"]
+    verbatim. The endpointer silence gate is cfg.asr.lite_post_speech_silence_duration.
     """
     if resolved is None:
         resolved = _resolve_device_config(cfg)
-    if lite:
-        resolved = dict(resolved)
-        # CPU lite substitute is tiny.en — mirrors how CPU_FALLBACK maps small.en→tiny.en (the
-        # realtime model) in normal mode. On CUDA keep cfg.asr.lite_model. Discriminate on
-        # resolved["device"] (NOT a force_cpu flag — cfg_to_kwargs has none; device is the
-        # resolved truth and also covers probe-failure / cuda_check→CPU). (§4.2ter; delta §3.2 BUG-A)
-        lite_model = "tiny.en" if resolved["device"] == "cpu" else cfg.asr.lite_model
-        resolved["final_model"] = lite_model
-        resolved["realtime_model"] = lite_model
     kwargs: dict[str, Any] = {
-        # model identity — cuda_check-resolved (final_model/realtime_model may be the CPU-fallback
-        # small.en/tiny.en when no GPU is visible)
-        "model": resolved["final_model"],
-        "realtime_model_type": resolved["realtime_model"],
+        # Rev 2 single model (§4.2quater): ONE model fills BOTH the final and realtime slots
+        # (use_main_model_for_realtime=True skips the separate realtime engine — verified
+        # against RealtimeSTT v1.0.2). The CPU substitute (tiny.en) comes from cuda_check's
+        # CPU_FALLBACK wholesale override — no device discrimination here.
+        "model": resolved["model"],
+        "realtime_model_type": resolved["model"],
+        "use_main_model_for_realtime": True,
         "language": cfg.asr.language,
         "device": resolved["device"],
         "compute_type": resolved["compute_type"],
-        # tunables that ARE in config.toml (PRD §4.5 [asr])
         "realtime_processing_pause": cfg.asr.realtime_processing_pause,
-        "post_speech_silence_duration": cfg.asr.post_speech_silence_duration,
+        "post_speech_silence_duration": cfg.asr.lite_post_speech_silence_duration,
     }
     kwargs.update(_FIXED_KWARGS)
-    if lite:
-        # Lite mode (§4.2ter): ONE model for both realtime + final. Overrides the
-        # use_main_model_for_realtime=False from _FIXED_KWARGS; verified to skip the realtime engine.
-        kwargs["use_main_model_for_realtime"] = True
-        # §4.2ter latency lever: the silence gate (not the model) is the perceived-latency bottleneck, so lite
-        # uses its own SNUGGER post_speech_silence_duration (default 0.5 vs normal 0.6) to actually feel faster.
-        # Overrides the common-block value set above; mirrors the use_main_model_for_realtime override pattern.
-        kwargs["post_speech_silence_duration"] = cfg.asr.lite_post_speech_silence_duration
     return kwargs
 
 
@@ -289,7 +272,6 @@ def _construct(
     latency: "LatencyLog | None" = None,
     force_cpu: bool = False,
     on_speech: "Callable[[], None] | None" = None,
-    lite: bool = False,
 ) -> Any:
     """Build kwargs + callbacks, defensively filter to the signature, construct recorder_cls.
 
@@ -301,14 +283,14 @@ def _construct(
     force_cpu (bugfix Issue 3 / P1.M1.T3.S1, default False): when True, replace the resolved
     device dict with dict(cuda_check.CPU_FALLBACK) BEFORE building kwargs — this SKIPS the
     _resolve_device_config / cuda_check path entirely (no driver probe, no ctranslate2 import)
-    so the CPU retry in main() (P1.M1.T3.S2) never re-touches a GPU whose construction just
+    so the CPU retry in the recorder-host child never re-touches a GPU whose construction just
     failed. The recorder is then built with the exact PRD §4.4 degraded config (device=cpu,
-    compute_type=int8, final_model=small.en, realtime_model=tiny.en). The NON-device kwargs
+    compute_type=int8, model=tiny.en — the CPU substitute fills BOTH slots). The NON-device kwargs
     (language, timing, _FIXED_KWARGS) still come from cfg as usual; only device/compute_type/
-    models are overridden. Consumed via build_recorder(..., force_cpu=True).
+    model are overridden. Consumed via build_recorder(..., force_cpu=True).
     """
     resolved = dict(cuda_check.CPU_FALLBACK) if force_cpu else None
-    kwargs = cfg_to_kwargs(cfg, resolved=resolved, lite=lite)
+    kwargs = cfg_to_kwargs(cfg, resolved=resolved)
     kwargs.update(_build_callbacks(feedback, latency, on_speech=on_speech))
     filtered = _filter_kwargs_to_signature(kwargs, recorder_cls)
     return recorder_cls(**filtered)
@@ -320,19 +302,18 @@ def build_recorder(
     latency: "LatencyLog | None" = None,
     force_cpu: bool = False,
     on_speech: "Callable[[], None] | None" = None,
-    lite: bool = False,
 ) -> Any:
     """Construct ONE AudioToTextRecorder wired to feedback (+ optional latency) (PRD §4.2, §4.4).
 
-    Resolves device/models (CPU fallback), builds kwargs + callbacks, defensively filters to the
+    Resolves device/model (CPU fallback), builds kwargs + callbacks, defensively filters to the
     installed RealtimeSTT signature, then constructs the recorder. Model load happens HERE (in
     __init__) and stays resident — the main loop (P1.M4.T1.S2) reuses this single recorder for the
     daemon's lifetime. `latency` (optional) threads the per-utterance collector into on_vad_stop/
     partial. Returns the constructed AudioToTextRecorder.
 
-    Heavy: imports RealtimeSTT + loads models on first call (seconds). Unit tests call _construct()
-    with a fake class instead; this function is exercised by the feed_audio test (P1.M7.T2.S1) and
-    the real daemon startup (P1.M4.T1.S2).
+    Heavy: imports RealtimeSTT + loads the model on first call (seconds). Unit tests call
+    _construct() with a fake class instead; this function is exercised by the feed_audio test
+    (P1.M7.T2.S1) and the real daemon startup (P1.M4.T1.S2).
 
     `force_cpu=True` (bugfix Issue 3 / P1.M1.T3.S1) builds a CPU-only recorder from
     cuda_check.CPU_FALLBACK without probing CUDA — the construction-failure retry hook for
@@ -341,7 +322,7 @@ def build_recorder(
     from RealtimeSTT import AudioToTextRecorder  # lazy: keeps `import voice_typing.daemon` cheap
 
     return _construct(cfg, feedback, AudioToTextRecorder, latency, force_cpu=force_cpu,
-                      on_speech=on_speech, lite=lite)
+                      on_speech=on_speech)
 
 
 # --- Control socket path resolution (P1.M4.T2.S1; PRD §4.2(3)) -------------------------------
@@ -545,7 +526,7 @@ class VoiceTypingDaemon:
     PRD §4.2 items 1+2. run() is the main-thread loop that fixes the WhisperX flaw: recorder.text()
     returning is normal SEGMENTATION, never session end (PRD §1 #1). on_final gates→cleans→types→records.
     start/stop/toggle arm/disarm the mic via set_microphone+abort; the FIRST arm lazily loads the models
-    via _load_recorder() (§4.2bis) — subsequent arms are instant (resident). NEVER recorder.shutdown() on
+    via _load_host() (§4.2bis) — subsequent arms are instant (resident). NEVER recorder.shutdown() on
     toggle/stop — only on quit (bounded teardown).
     """
 
@@ -650,10 +631,6 @@ class VoiceTypingDaemon:
         self._utterance_finalized: bool = False
         self._drain: bool = False
         self._drain_timer: threading.Timer | None = None
-        # PRD §4.2ter: the mode of the resident (or last) recorder-host child — "normal" (two models:
-        # distil-large-v3 + small.en) or "lite" (lite_model only). Set on a successful _load_host;
-        # status reports it; arming in the OTHER mode reloads. Default "normal".
-        self._mode: str = "normal"
         # Lazy load (PRD §4.2bis / delta D1,D2): the recorder (now in a child subprocess owned by a RecorderHost)
         # is NOT built at boot — it is spawned on the FIRST arm (start/toggle) via _load_host(), so a session that
         # never arms stays at ~0 VRAM. recorder_host= injected (unit tests / a pre-built host) → already loaded;
@@ -676,7 +653,7 @@ class VoiceTypingDaemon:
         # existing lock; existing `with self._lock:` code is unaffected.
         self._load_cond = threading.Condition(self._lock)
         # Boot lifecycle phase (delta D2/D3): 'idle' if a recorder was injected (loaded), else 'unloaded' (the lazy
-        # boot state). _load_recorder() drives loading->idle; a failed load returns to 'unloaded'. (The feedback
+        # boot state). _load_host() drives loading->idle; a failed load returns to 'unloaded'. (The feedback
         # models_loaded FIELD + status_snapshot/ctl exposure is P1.M2.T2.S1; T1 tracks the daemon-side
         # self._models_loaded + drives phase via the existing set_phase — no feedback.py edit.)
         self._feedback.set_phase("idle" if loaded else "unloaded")
@@ -697,60 +674,33 @@ class VoiceTypingDaemon:
         self._mic_probe_at: float = 0.0
         self._refresh_mic_status(force=True)   # construction always probes (sets the initial stamp)
 
-    def _load_recorder(self) -> bool:
-        """Back-compat alias for _load_host (P1.M3.T2.S2 re-plan renamed the method).
+    def _load_host(self) -> bool:
+        """Single-flight lazy SPAWN of the recorder-host child (PRD §4.2bis). True iff ready.
 
-        The recorder now lives in a child subprocess owned by a RecorderHost; "loading" = spawning
-        the child + waiting for its 'ready'/'error'. Kept under the old name so start()/toggle()'s
-        call sites (and the existing tests' `recorder=` injection seam) are unchanged. Defaults to
-        normal mode (PRD §4.2ter); start_lite/toggle_lite call _load_host("lite") directly.
+        Rev 2 single path (§4.2quater): there is ONE recorder construction — a resident, alive child
+        short-circuits True (instant warm arm); there is no mode machinery to compare or reload.
+
+        Called by start()/toggle() BEFORE arming — NOT inside _arm() (which holds self._lock; this
+        method acquire-release-reacquires that same lock, so nesting would deadlock). Single-flight
+        via _load_cond: a second caller while _loading WAITS for the in-flight spawn and returns ITS
+        result (never starts a 2nd child). The heavy host.spawn() runs OUTSIDE _lock so concurrent
+        status/stop stay responsive during the load.
         """
-        return self._load_host("normal")
-
-    def _load_host(self, mode: str = "normal") -> bool:
-        """Single-flight lazy SPAWN of the recorder-host child (PRD §4.2bis + §4.2ter). True iff ready.
-
-        Mode-aware (PRD §4.2ter): a resident child built for `mode` is instant; a resident child
-        built for the OTHER mode is torn down + respawned in `mode` (one bounded reload — the same
-        ~1–3 s cost as a first arm / post-idle reload). The reload is the price of building the
-        recorder with a different model set (lite = lite_model only; normal = both models); the
-        rejected no-reload alternative keeps the large model loaded + spinning, defeating the point.
-
-        Called by start()/start_lite()/toggle()/toggle_lite() BEFORE arming — NOT inside _arm()
-        (which holds self._lock; this method acquire-release-reacquires that same lock, so nesting
-        would deadlock). Single-flight via _load_cond: a second caller while _loading WAITS for the
-        in-flight spawn and returns ITS result (never starts a 2nd child). The heavy host.spawn()
-        runs OUTSIDE _lock so concurrent status/stop stay responsive during the load.
-        """
-        # Fast path + mode-mismatch detection under the lock.
+        # Fast path under the lock: resident + alive → instant (there is only ONE mode).
         with self._lock:
             if self._models_loaded and self._host is not None and self._host.is_alive:
-                if getattr(self._host, "mode", "normal") == mode:
-                    return True                       # resident + alive + SAME mode → instant
-                switch_mode = True                   # resident but WRONG mode → reload below
-            else:
-                switch_mode = False
+                return True
             if self._loading:
                 while self._loading:               # wait for the in-flight spawn (spurious-wake safe)
                     self._load_cond.wait()
-                return self._models_loaded and getattr(self._host, "mode", "normal") == mode
+                return self._models_loaded
             self._loading = True                   # we are the loader
             self._load_error = None
             self._feedback.set_phase("loading")
             self._feedback.set_models_loaded(False)  # models not resident while loading
-        # Cold-load UX toast (see _COLD_LOAD_NOTIFY_LOADING): fires for cold loads AND mode switches
-        # (any heavy work ahead) so the hotkey isn't a silent gap. Gated by hypr_notify.
+        # Cold-load UX toast (see _COLD_LOAD_NOTIFY_LOADING): fires for cold loads (any heavy work
+        # ahead) so the hotkey isn't a silent gap. Gated by hypr_notify.
         self._feedback.notify(_COLD_LOAD_NOTIFY_LOADING)
-        # Mode switch: tear down the wrong-mode resident child BEFORE spawning the requested one.
-        # Bounded teardown under _lock (the resident's host.stop() joins+killpg the group); done here
-        # (not in the single-flight block) so phase stays "loading". _load_host is only called while
-        # NOT listening (start*/toggle* arm only when idle), so the resident is disarmed + safe to kill.
-        if switch_mode and self._host is not None:
-            logger.info("voice-typing mode switch → %s; reloading recorder-host child", mode)
-            with self._lock:
-                self._bounded_shutdown(timeout=5.0)
-                self._host = None
-                self._models_loaded = False
         # --- heavy spawn OUTSIDE _lock (status/stop stay responsive during the ~1–3 s child load) ---
         factory = self._host_factory or RecorderHost
         # Issue 2 residual gate: the real RecorderHost gets an is_listening predicate so stray
@@ -761,12 +711,12 @@ class VoiceTypingDaemon:
             host = factory(
                 self._cfg, self._feedback, self._latency,
                 self.on_final, self._on_partial, self._touch_speech,
-                is_listening=self.is_listening, mode=mode,
+                is_listening=self.is_listening,
             )
         else:
             host = factory(
                 self._cfg, self._feedback, self._latency,
-                self.on_final, self._on_partial, self._touch_speech, mode=mode,
+                self.on_final, self._on_partial, self._touch_speech,
             )
         ok = host.spawn()
         # --- re-acquire _lock to publish the result + wake any waiters ---
@@ -775,7 +725,6 @@ class VoiceTypingDaemon:
             if ok:
                 self._host = host
                 self._models_loaded = True
-                self._mode = mode                   # PRD §4.2ter: resident child's mode (for status)
                 self._load_error = None
                 # Seed the status device cache from the CHILD's 'ready' dict (the daemon must NOT probe
                 # CUDA itself — the child owns the cuda_check resolution now). Replaces the old in-process
@@ -967,12 +916,10 @@ class VoiceTypingDaemon:
         try:
             resolved = self._resolved_device()
             logger.info(
-                "voice-typing device resolved: device=%s compute_type=%s final_model=%s "
-                "realtime_model=%s",
+                "voice-typing device resolved: device=%s compute_type=%s model=%s",
                 resolved["device"],
                 resolved["compute_type"],
-                resolved["final_model"],
-                resolved["realtime_model"],
+                resolved["model"],
             )
         except Exception:
             logger.info("voice-typing device resolved: (resolution failed; see cuda_check logs)")
@@ -1036,7 +983,7 @@ class VoiceTypingDaemon:
         self._disarmed_monotonic = None                  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
         if self._host is not None:
             self._host.set_microphone(True)
-        self._feedback.set_mode(self._mode)   # PRD §4.2ter: publish the armed mode to state.json
+        self._feedback.set_mode("lite")   # Rev 2 single-mode constant (§4.6 schema stable; ctl renders it)
         self._feedback.set_listening(True)
         self._refresh_mic_status()  # TTL-cached (Issue 3 / P1.M2.T2.S1): re-probes at most once / 30s
 
@@ -1429,24 +1376,12 @@ class VoiceTypingDaemon:
 
     def start(self) -> None:
         # Lazy load (PRD §4.2bis): spawn the recorder-host child on the first arm. _load_host() is a
-        # single-flight no-op once resident in NORMAL mode (a resident LITE child reloads — §4.2ter).
+        # single-flight no-op once resident (Rev 2 single path — there is nothing to reload into).
         # Called OUTSIDE _lock (it acquire-release-reacquires that lock; under _lock it would
         # deadlock). A cold load fires a 'Loading…' toast inside _load_host before the spawn; the arm
         # then fires the 'Recording' start toast.
-        if not self._load_host("normal"):
+        if not self._load_host():
             return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
-        with self._lock:
-            self._arm()
-
-    def start_lite(self) -> None:
-        """Arm in LITE mode (PRD §4.2ter): only `lite_model` loads; the large model never runs.
-
-        Mirrors start() but loads the lite recorder-host child. If the resident child is normal
-        mode this costs one bounded reload (~1–3 s, "Loading…" toast) — the accepted tradeoff for
-        getting the VRAM + latency benefit of a single small model.
-        """
-        if not self._load_host("lite"):
-            return  # load failed → stay unarmed
         with self._lock:
             self._arm()
 
@@ -1456,65 +1391,26 @@ class VoiceTypingDaemon:
         self._request_stop()
 
     def toggle(self) -> None:
-        """NORMAL-mode toggle (PRD §4.2ter / delta §3.4): mode-specific arming.
+        """Single-path toggle (Rev 2 §4.2quater): disarm iff listening, arm otherwise.
 
-        Disarms ONLY if currently armed in NORMAL; otherwise arms in normal. So: pressing D while
-        idle arms in normal; pressing D while armed-in-normal disarms; pressing D while armed-in
-        LITE switches to normal (one bounded reload — the same mode-switch _load_host uses). Each
-        key only ever toggles its own mode on/off; the cross-mode press switches (one reload).
+        Pressing the key while idle arms the ONE recorder; pressing it while armed disarms. There
+        is no cross-mode switching (the two-mode substrate is gone): a re-arm while the resident
+        child is alive short-circuits in _load_host (instant, like a warm arm).
 
         The read/act split is race-tolerant exactly like the abort()-outside-_lock design (the
-        listening Event + on_final gate are the source of truth; toggle is user-paced): both
-        _listening + _mode are read together under one _lock, then _load_host runs OUTSIDE _lock
-        (it acquire-release-reacquires that lock; calling it under _lock deadlocks).
+        listening Event + on_final gate are the source of truth; toggle is user-paced): _listening
+        is read under _lock, then _load_host runs OUTSIDE _lock (it acquire-release-reacquires that
+        lock; calling it under _lock deadlocks), then _arm runs under _lock.
         """
         with self._lock:
             listening = self._listening.is_set()
-            mode = self._mode
-        if listening and mode == "normal":
-            self._request_stop()           # armed-in-normal → disarm
-        else:
-            # idle, OR armed-in-lite → arm in normal (switch from lite = one reload via _load_host)
-            if not self._load_host("normal"):
-                # Load failed. If this was a cross-mode switch (was armed-in-lite), the resident
-                # host has been torn down by _load_host (self._host is None) but _listening is still
-                # set from the previous arm → a stale 'listening: on' for a daemon with no recorder
-                # (validation Issue MEDIUM). Clear it + publish disarm so status_snapshot is honest
-                # and _load_error surfaces. No abort needed: _load_host already stopped the child.
-                if listening:
-                    with self._lock:
-                        self._disarm()
-                return  # load failed → stay unarmed
-            with self._lock:
-                self._arm()
-
-    def toggle_lite(self) -> None:
-        """LITE-mode toggle (PRD §4.2ter / delta §3.4): mode-specific arming.
-
-        Disarms ONLY if currently armed in LITE; otherwise arms in lite. So: pressing D while idle
-        arms in lite; pressing D while armed-in-lite disarms; pressing D while armed-in NORMAL
-        switches to lite (one bounded reload — the same mode-switch _load_host uses). Each key only
-        ever toggles its own mode on/off; the cross-mode press switches (one reload).
-        """
+        if listening:
+            self._request_stop()           # armed → disarm
+            return
+        if not self._load_host():
+            return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
         with self._lock:
-            listening = self._listening.is_set()
-            mode = self._mode
-        if listening and mode == "lite":
-            self._request_stop()           # armed-in-lite → disarm
-        else:
-            # idle, OR armed-in-normal → arm in lite (switch from normal = one reload via _load_host)
-            if not self._load_host("lite"):
-                # Load failed. If this was a cross-mode switch (was armed-in-normal), the resident
-                # host has been torn down by _load_host (self._host is None) but _listening is still
-                # set from the previous arm → a stale 'listening: on' for a daemon with no recorder
-                # (validation Issue MEDIUM). Clear it + publish disarm so status_snapshot is honest
-                # and _load_error surfaces. No abort needed: _load_host already stopped the child.
-                if listening:
-                    with self._lock:
-                        self._disarm()
-                return  # load failed → stay unarmed
-            with self._lock:
-                self._arm()
+            self._arm()
 
     def request_shutdown(self) -> None:
         """Signal run() to exit + tear down the child so a blocked text() unblocks (BUG-1 fix).
@@ -1613,23 +1509,24 @@ class VoiceTypingDaemon:
     def status_snapshot(self) -> dict:
         """The status payload for the control socket `status`/`toggle`/`start`/`stop` cmds.
 
-        Returns {listening, phase, models_loaded, load_error, partial, last_final, uptime_s, device,
-        compute_type, final_model, realtime_model, mic_ok, mic_error}. phase/models_loaded come from
-        the LIVE in-memory Feedback state (the lazy-load lifecycle, §4.2bis — unloaded/loading/idle/
-        listening/speaking + models resident bool); load_error is the daemon attr _load_recorder sets
-        on failure. mic_ok/mic_error come from S1's PyAudio probe
+        Returns {listening, mode, phase, models_loaded, load_error, partial, last_final, uptime_s,
+        device, compute_type, model, mic_ok, mic_error} — 13 keys. `mode` is the Rev 2 CONSTANT
+        "lite" (§4.6 schema stability: state.json/ctl rendering unchanged; there is only one mode).
+        phase/models_loaded come from the LIVE in-memory Feedback state (the lazy-load lifecycle,
+        §4.2bis — unloaded/loading/idle/listening/speaking + models resident bool); load_error is
+        the daemon attr _load_host sets on failure. mic_ok/mic_error come from S1's PyAudio probe
         (self._mic_ok/self._mic_error), refreshed in __init__/_arm — lets voicectl status + JSON
-        consumers see a dead mic without journalctl. partial/last_final come from the LIVE in-memory Feedback state (NOT the
-        throttled state.json, which lags >=10 Hz); device/models come from _resolve_device_config
-        (the SAME resolution build_recorder used -> status matches the actually-loaded models),
-        cached on first call. Safe to call from the socket thread; never raises (device probe
+        consumers see a dead mic without journalctl. partial/last_final come from the LIVE in-memory
+        Feedback state (NOT the throttled state.json, which lags >=10 Hz); device/compute_type/model
+        come from the cached resolution (the child's 'ready' dict once armed — status matches the
+        actually-loaded model). Safe to call from the socket thread; never raises (device probe
         failures degrade to 'unknown').
         """
         snap = self._feedback.snapshot()
         dev = self._resolved_device()
         return {
             "listening": self.is_listening(),
-            "mode": self._mode,                     # PRD §4.2ter: "normal" | "lite"
+            "mode": "lite",                         # Rev 2 constant (§4.6 schema stable)
             "phase": snap.get("phase", "unloaded"),          # P1.M2.T2.S1: lifecycle phase (§4.2bis)
             "models_loaded": snap.get("models_loaded", False),  # P1.M2.T2.S1: models resident?
             "load_error": self._load_error or "",            # P1.M2.T2.S1: last load failure (None -> "")
@@ -1638,14 +1535,13 @@ class VoiceTypingDaemon:
             "uptime_s": round(self.uptime_s, 3),
             "device": dev.get("device", "unknown"),
             "compute_type": dev.get("compute_type", "unknown"),
-            "final_model": dev.get("final_model", "unknown"),
-            "realtime_model": dev.get("realtime_model", "unknown"),
+            "model": dev.get("model", "unknown"),   # P1.M1.T2.S2: ONE model key (the two-model pair is gone)
             "mic_ok": self._mic_ok,            # bugfix Issue 2 / P1.M1.T2.S2: surface mic health (S1 detects)
             "mic_error": self._mic_error or "",  # None -> "" so JSON always carries a string
         }
 
     def _resolved_device(self) -> dict[str, str]:
-        """Resolved {device,compute_type,final_model,realtime_model}, cached.
+        """Resolved {device,compute_type,model}, cached.
 
         VT-001: the daemon process MUST NEVER probe CUDA (import ctranslate2 / torch / create a
         CUDA context) — that is the recorder-host subprocess architecture's core invariant. So
@@ -1667,7 +1563,7 @@ class VoiceTypingDaemon:
         return resolved
 
     def _unprobed_device_config(self) -> dict[str, str]:
-        """Config-derived {device,compute_type,final_model,realtime_model} WITHOUT probing CUDA.
+        """Config-derived {device,compute_type,model} WITHOUT probing CUDA.
 
         compute_type is derived from cfg.asr.device the SAME way _resolve_device_config does, but
         cuda_check.resolve_device_and_models() is NEVER called — the daemon must stay CUDA-free
@@ -1678,8 +1574,7 @@ class VoiceTypingDaemon:
         return {
             "device": self._cfg.asr.device,
             "compute_type": "float16" if self._cfg.asr.device == "cuda" else "int8",
-            "final_model": self._cfg.asr.final_model,
-            "realtime_model": self._cfg.asr.realtime_model,
+            "model": self._cfg.asr.lite_model,
         }
 
     def _bounded_shutdown(self, timeout: float = 5.0) -> None:
@@ -1940,10 +1835,10 @@ class ControlServer:
     def _arm_response(self) -> dict:
         """Build the response after a start/toggle ARM attempt (PRD §4.2bis / P1.M2.T1.S2).
 
-        After P1.M2.T1.S1, start()/toggle() call _load_recorder() BEFORE arming; on a load failure the arm is
+        After P1.M2.T1.S1, start()/toggle() call _load_host() BEFORE arming; on a load failure the arm is
         suppressed (daemon stays not-listening) and self._load_error is set. Per §4.2bis the arm command MUST
         then return {"ok":false,"error":...} (NOT ok:true with listening:false, which voicectl would render as a
-        silent 'listening: off'). _load_error is reset by _load_recorder on each fresh attempt and set only on a
+        silent 'listening: off'). _load_error is reset by _load_host on each fresh attempt and set only on a
         fresh failure, so a set value read on an arm attempt is always THIS attempt's failure (never stale — see
         P1.M2.T1.S2 research §4.1). getattr(..., None) keeps the duck-typed test _StubDaemon (no _load_error) on
         the ok:true path. The 'loading models…' hint itself is printed CLIENT-SIDE by ctl.py during the block;
@@ -1965,43 +1860,17 @@ class ControlServer:
         cmd = msg.get("cmd")
         if cmd == "toggle":
             was_listening = self._daemon.is_listening()
-            load_error_before = getattr(self._daemon, "_load_error", None)
             self._daemon.toggle()
-            # A toggle arms UNLESS we were armed-in-THIS-mode (then it disarms). On the disarm path
-            # nothing loaded; on every arm path a load may have failed — including a cross-mode
-            # switch where was_listening was True (validation Issue MEDIUM: _load_host tears down the
-            # resident host on failure, and _disarm now clears _listening, so _arm_response surfaces
-            # _load_error honestly). Route through _arm_response whenever an arm was ATTEMPTED.
-            arm_attempted = not was_listening or self._daemon.is_listening()
-            if arm_attempted:
-                return self._arm_response()
-            # Cross-mode toggle (was_listening True, now disarmed => arm_attempted False) may have
-            # FAILED its reload: _load_host resets _load_error=None per attempt, so (None before +
-            # truthy after) reliably means a failure DURING THIS toggle. Route it through
-            # _arm_response() so voicectl prints 'error: model load failed: ...' (exit 1) instead
-            # of a silent {ok:true, listening:false}. (bugfix Issue 1 / P1.M1.T1.S1)
-            if load_error_before is None and getattr(self._daemon, "_load_error", None):
+            # A toggle arms (from idle) or disarms (when armed) — Rev 2 single path, no cross-mode
+            # switch. On every arm path a load may have failed: route through _arm_response whenever
+            # an arm was ATTEMPTED so voicectl surfaces _load_error honestly (validation Issue
+            # MEDIUM heritage: 'error: model load failed: ...' instead of a silent ok:true).
+            if not was_listening or self._daemon.is_listening():
                 return self._arm_response()
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "start":
             self._daemon.start()
             return self._arm_response()      # ok:false+error if the first arm's model load failed (§4.2bis)
-        if cmd == "start-lite":              # PRD §4.2ter: arm in lite mode (lite_model only)
-            self._daemon.start_lite()
-            return self._arm_response()
-        if cmd == "toggle-lite":             # PRD §4.2ter: lite-mode toggle (arms lite when idle)
-            was_listening = self._daemon.is_listening()
-            load_error_before = getattr(self._daemon, "_load_error", None)
-            self._daemon.toggle_lite()
-            arm_attempted = not was_listening or self._daemon.is_listening()
-            if arm_attempted:
-                return self._arm_response()
-            # Cross-mode toggle-lite mirror of the toggle branch above (bugfix Issue 1 / P1.M1.T1.S1):
-            # route a FRESH _load_error (None before + truthy after) through _arm_response() so a
-            # failed normal→lite reload surfaces as {ok:false, error:'model load failed: ...'}.
-            if load_error_before is None and getattr(self._daemon, "_load_error", None):
-                return self._arm_response()
-            return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "stop":
             self._daemon.stop()
             return {"ok": True, **self._daemon.status_snapshot()}
@@ -2253,8 +2122,8 @@ def main() -> int:
         from voice_typing.feedback import Feedback
 
         feedback = Feedback(cfg.feedback)
-        # One LatencyLog shared by _load_recorder()'s build_recorder (recorder on_vad_stop/partial callbacks) and the
-        # daemon's on_final.finalize_utterance. (bugfix Issue 3 CPU-fallback now lives in _load_recorder — P1.M2.T1.S1
+        # One LatencyLog shared by _load_host()'s build_recorder (recorder on_vad_stop/partial callbacks) and the
+        # daemon's on_final.finalize_utterance. (bugfix Issue 3 CPU-fallback now lives in the recorder-host child — P1.M2.T1.S1
         # lazy load — so main() no longer retries here; construction is fast and model-free.)
         latency = LatencyLog()
         daemon = VoiceTypingDaemon(cfg, feedback, latency=latency)   # FAST — no models loaded (lazy, §4.2bis)

@@ -119,8 +119,7 @@ def test_dispatch_final_calls_on_final_and_sets_final_event():
 
 def test_dispatch_ready_seeds_device_and_sets_ready_event():
     host = _make_host()
-    device = {"device": "cuda", "compute_type": "float16",
-              "final_model": "distil-large-v3", "realtime_model": "small.en"}
+    device = {"device": "cuda", "compute_type": "float16", "model": "small.en"}
     host._dispatch("ready", device)
     assert host.device == device
     assert host._ready_evt.is_set()
@@ -307,8 +306,7 @@ def test_concurrent_stop_calls_share_one_teardown(monkeypatch):
 def test_spawn_ready_seeds_device_via_dispatch():
     """A 'ready' event on evt_q seeds host.device + sets _ready_evt (the spawn() happy path)."""
     host = _make_host()
-    device = {"device": "cuda", "compute_type": "float16",
-              "final_model": "distil-large-v3", "realtime_model": "small.en"}
+    device = {"device": "cuda", "compute_type": "float16", "model": "small.en"}
     host._dispatch("ready", device)
     assert host._ready_evt.is_set()
     assert host.device == device

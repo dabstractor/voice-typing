@@ -76,7 +76,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "daemon.py + recorder_host.py mode collapse",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -95,7 +95,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "ctl.py command surface (drop lite commands)",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2"

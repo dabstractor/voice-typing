@@ -126,31 +126,33 @@ def test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set(cfg, monkeypatch):
     assert set(kw) == expected, sorted(set(kw) ^ expected)
 
 
+def test_cfg_to_kwargs_single_model_fills_both_slots(cfg):
+    """Rev 2 single-mode (PRD §4.2quater): ONE model fills BOTH the model + realtime_model_type slots.
+
+    cfg_to_kwargs maps resolved["model"] (cuda_check's resolution) to BOTH slots and sets
+    use_main_model_for_realtime=True — verified against RealtimeSTT v1.0.2 to SKIP the separate
+    realtime-engine init, so the single model is the only one ever constructed. The endpointer
+    silence gate is cfg.asr.lite_post_speech_silence_duration. Passing resolved= skips the
+    cuda_check probe, so this is deterministic with NO CUDA and NO monkeypatch.
+    """
+    kw = daemon.cfg_to_kwargs(
+        cfg, resolved={"device": "cuda", "compute_type": "float16", "model": "small.en"}
+    )
+    assert kw["model"] == "small.en"
+    assert kw["realtime_model_type"] == "small.en"
+    assert kw["use_main_model_for_realtime"] is True        # skips the separate realtime engine
+    assert kw["post_speech_silence_duration"] == cfg.asr.lite_post_speech_silence_duration
+    assert kw["device"] == "cuda" and kw["compute_type"] == "float16"
+    assert kw["language"] == cfg.asr.language
+
+
 def test_cfg_to_kwargs_cuda_path(cfg, monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     kw = daemon.cfg_to_kwargs(cfg)
     assert kw["device"] == "cuda"
     assert kw["compute_type"] == "float16"
-    assert kw["model"] == "distil-large-v3"
+    assert kw["model"] == "small.en"
     assert kw["realtime_model_type"] == "small.en"
-
-
-def test_cfg_to_kwargs_lite_mode_uses_one_model(cfg, monkeypatch):
-    """lite=True (PRD §4.2ter): lite_model for BOTH realtime + final + use_main_model_for_realtime=True.
-
-    Pins that lite mode loads exactly ONE model (the large final model is never constructed) and
-    overrides the _FIXED_KWARGS use_main_model_for_realtime=False.
-    """
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
-    cfg.asr.lite_model = "small.en"
-    kw = daemon.cfg_to_kwargs(cfg, lite=True)
-    assert kw["model"] == "small.en"                       # lite_model as the final model
-    assert kw["realtime_model_type"] == "small.en"          # AND the realtime model (one model)
-    assert kw["use_main_model_for_realtime"] is True        # skips the separate realtime engine
-    assert kw["device"] == "cuda" and kw["compute_type"] == "float16"   # device unchanged
-    # normal mode is untouched:
-    kw_n = daemon.cfg_to_kwargs(cfg)
-    assert kw_n["model"] == "distil-large-v3" and kw_n["use_main_model_for_realtime"] is False
 
 
 def test_cfg_to_kwargs_cpu_fallback(cfg, monkeypatch):
@@ -158,84 +160,58 @@ def test_cfg_to_kwargs_cpu_fallback(cfg, monkeypatch):
     kw = daemon.cfg_to_kwargs(cfg)
     assert kw["device"] == "cpu"
     assert kw["compute_type"] == "int8"
-    assert kw["model"] == "small.en"
+    assert kw["model"] == "tiny.en"
     assert kw["realtime_model_type"] == "tiny.en"
 
 
-def test_cfg_to_kwargs_lite_cpu_fallback_uses_tiny_en(cfg):
-    """lite + CPU → tiny.en for BOTH model fields (pins S1 / delta §3.2 BUG-A; PRD §4.2ter).
+def test_cfg_to_kwargs_cpu_resolved_tiny_en_both_slots(cfg):
+    """CPU resolved → tiny.en fills BOTH slots (P1.M1.T2.S2 end state).
 
-    On the CPU path lite mode loads the CPU lite substitute 'tiny.en' for BOTH the final and
-    realtime model — mirroring how normal CPU-fallback maps small.en→tiny.en for the realtime
-    field. Passing resolved=CPU_FALLBACK skips the cuda_check probe, so this is deterministic
-    with NO CUDA and NO monkeypatch. use_main_model_for_realtime stays True (one-model guarantee
-    holds on CPU too). This is the committed regression for S1 (P1.M1.T1.S1), which S1's PRP
-    explicitly deferred to S2.
+    The CPU substitute (tiny.en) comes from cuda_check's CPU_FALLBACK wholesale override — the
+    daemon maps resolved["model"] to both slots verbatim. Passing resolved=CPU_FALLBACK skips
+    the cuda_check probe, so this is deterministic with NO CUDA and NO monkeypatch.
+    use_main_model_for_realtime stays True (one-model guarantee holds on CPU too).
+    """
+    kw = daemon.cfg_to_kwargs(cfg, resolved=dict(daemon.cuda_check.CPU_FALLBACK))
+    assert kw["model"] == "tiny.en" and kw["realtime_model_type"] == "tiny.en"
+    assert kw["device"] == "cpu" and kw["compute_type"] == "int8"
+    assert kw["use_main_model_for_realtime"] is True
+
+
+def test_cfg_to_kwargs_never_discriminates_model_on_device(cfg):
+    """The CPU mapping lives ONLY in cuda_check's CPU_FALLBACK — never in the daemon.
+
+    cfg_to_kwargs fills both slots from resolved["model"] VERBATIM; it must NOT swap the model
+    based on resolved["device"] (the old daemon-side tiny.en-if-cpu discrimination is deleted).
+    An inconsistent-but-possible resolved dict (device=cpu, model=small.en) flows through as-is.
     """
     kw = daemon.cfg_to_kwargs(
-        cfg, resolved=dict(daemon.cuda_check.CPU_FALLBACK), lite=True
+        cfg, resolved={"device": "cpu", "compute_type": "int8", "model": "small.en"}
     )
-    assert kw["model"] == "tiny.en", kw["model"]
-    assert kw["realtime_model_type"] == "tiny.en", kw["realtime_model_type"]
-    assert kw["device"] == "cpu"
-    assert kw["compute_type"] == "int8"
-    assert kw["use_main_model_for_realtime"] is True   # one-model guarantee on CPU too
+    assert kw["model"] == "small.en" and kw["realtime_model_type"] == "small.en"
 
 
-def test_cfg_to_kwargs_lite_keeps_all_other_kwargs_equal(cfg, monkeypatch):
-    """Lite mode changes ONLY model/realtime_model_type/use_main_model_for_realtime/post_speech_silence_duration.
+def test_cfg_to_kwargs_uses_lite_post_speech_silence_duration(cfg, monkeypatch):
+    """§4.2quater: the single recorder's endpointer silence gate IS lite_post_speech_silence_duration.
 
-    Drift guard (PRD §4.2ter): device/compute_type/language/timing/VAD/silero must be IDENTICAL
-    between lite and normal mode on CUDA, so a future cfg_to_kwargs / _FIXED_KWARGS edit can't
-    silently diverge lite from normal. The CUDA-lite model pick itself is pinned by
-    test_cfg_to_kwargs_lite_mode_uses_one_model; this test guards the REST of the kwargs dict.
-    (post_speech_silence_duration is the 4th allowed difference — §4.2ter: lite's snugger silence gate is the
-    perceived-latency lever; its value is pinned by test_cfg_to_kwargs_lite_uses_shorter_silence_duration.)
+    Pins: (a) the default (0.8) reaches the kwargs (post_speech_silence_duration stays in
+    config.toml for §4.6 schema stability but is no longer consumed here); (b) an override flows
+    through.
     """
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
-    normal = daemon.cfg_to_kwargs(cfg)
-    lite = daemon.cfg_to_kwargs(cfg, lite=True)
-
-    differing = {"model", "realtime_model_type", "use_main_model_for_realtime", "post_speech_silence_duration"}
-    # 1) the key SETS are identical (no kwarg silently added/dropped by lite):
-    assert set(normal) == set(lite)
-    # 2) after removing the 4 allowed-to-differ keys, the remaining dicts are byte-identical:
-    assert {k: v for k, v in lite.items() if k not in differing} == \
-           {k: v for k, v in normal.items() if k not in differing}
-    # 3) and the 4 differing keys differ EXACTLY as the spec requires:
-    assert lite["model"] == cfg.asr.lite_model == "small.en"        # lite_model as the final model
-    assert lite["realtime_model_type"] == "small.en"                # AND the realtime model (one model)
-    assert lite["use_main_model_for_realtime"] is True              # skips the realtime engine
-    assert lite["post_speech_silence_duration"] == 0.5              # §4.2ter: snugger lite silence gate
-    assert normal["model"] == "distil-large-v3"
-    assert normal["realtime_model_type"] == "small.en"
-    assert normal["use_main_model_for_realtime"] is False
-    assert normal["post_speech_silence_duration"] == 0.6            # normal mode unchanged
-
-
-def test_cfg_to_kwargs_lite_uses_shorter_silence_duration(cfg, monkeypatch):
-    """Lite uses its own snugger post_speech_silence_duration (§4.2ter latency lever); normal is unaffected.
-
-    The silence gate — not the model — is the perceived-latency bottleneck (PRD §4.2ter), so lite MUST shorten
-    post_speech_silence_duration to actually feel faster. Pins: (a) the default lite value (0.5) reaches the kwargs;
-    (b) an override flows through; (c) normal mode is unchanged (0.6).
-    """
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
-    # (a) default: lite carries the snugger 0.5; normal carries 0.6.
-    assert daemon.cfg_to_kwargs(cfg, lite=True)["post_speech_silence_duration"] == 0.5
-    assert daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"] == 0.6
-    # (b) override flows through lite only (cfg fixture is function-scoped -> safe to mutate):
+    # (a) default:
+    assert daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"] == \
+        cfg.asr.lite_post_speech_silence_duration == 0.8
+    # (b) override flows through (cfg fixture is function-scoped -> safe to mutate):
     cfg.asr.lite_post_speech_silence_duration = 0.3
-    assert daemon.cfg_to_kwargs(cfg, lite=True)["post_speech_silence_duration"] == 0.3
-    # (c) normal is unaffected by the lite override (still the normal cfg value):
-    assert daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"] == 0.6
+    assert daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"] == 0.3
 
 
 def test_cfg_to_kwargs_fixed_values(cfg, monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     kw = daemon.cfg_to_kwargs(cfg)
     assert kw["enable_realtime_transcription"] is True
-    assert kw["use_main_model_for_realtime"] is False
+    assert kw["use_main_model_for_realtime"] is True   # Rev 2: the ONE model also serves partials
     assert kw["min_length_of_recording"] == 0.3
     assert kw["min_gap_between_recordings"] == 0.0
     assert kw["silero_sensitivity"] == 0.4
@@ -282,19 +258,18 @@ def test_cfg_to_kwargs_passes_through_config_values(monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     custom = VoiceTypingConfig(asr=AsrConfig(
         language="es",
-        post_speech_silence_duration=0.9,
+        lite_post_speech_silence_duration=0.9,
         realtime_processing_pause=0.2,
-        final_model="large-v3-turbo",
-        realtime_model="medium.en",
+        lite_model="large-v3-turbo",
         device="cuda",
     ))
     kw = daemon.cfg_to_kwargs(custom)
     assert kw["language"] == "es"
     assert kw["post_speech_silence_duration"] == 0.9
     assert kw["realtime_processing_pause"] == 0.2
-    # final_model/realtime_model flow through the resolver (CUDA_DEFAULTS here keeps them).
+    # the model flows cfg.asr.lite_model -> resolve defaults -> BOTH slots (cuda path echoes it):
     assert kw["model"] == "large-v3-turbo"
-    assert kw["realtime_model_type"] == "medium.en"
+    assert kw["realtime_model_type"] == "large-v3-turbo"
 
 
 def test_cfg_to_kwargs_calls_resolve_with_cfg_defaults(cfg, monkeypatch):
@@ -309,8 +284,8 @@ def test_cfg_to_kwargs_calls_resolve_with_cfg_defaults(cfg, monkeypatch):
     daemon.cfg_to_kwargs(cfg)
     assert seen, "resolve_device_and_models was not called"
     d = seen[0]
-    assert d["final_model"] == cfg.asr.final_model
-    assert d["realtime_model"] == cfg.asr.realtime_model
+    assert set(d) == {"device", "compute_type", "model"}   # 3-key Rev 2 resolve contract (S1)
+    assert d["model"] == cfg.asr.lite_model
     assert d["device"] == cfg.asr.device
     assert d["compute_type"] == "float16"  # derived from device=='cuda'
 
@@ -387,7 +362,7 @@ def test_construct_passes_filtered_kwargs_to_recorder(cfg, monkeypatch):
     rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder)
     kw = rec.kwargs
     # cfg values present
-    assert kw["model"] == "distil-large-v3"
+    assert kw["model"] == "small.en"
     assert kw["device"] == "cuda"
     assert kw["language"] == "en"
     # callbacks present
@@ -554,8 +529,7 @@ class _FakeHost:
         self.spawn_calls = 0
         self.spawn_result = True
         self.stop_calls = 0
-        self.device = {"device": "cuda", "compute_type": "float16",
-                       "final_model": "distil-large-v3", "realtime_model": "small.en"}
+        self.device = {"device": "cuda", "compute_type": "float16", "model": "small.en"}
         self._alive = False
 
     def spawn(self, timeout=180.0):
@@ -598,17 +572,15 @@ class _FakeHost:
         done.wait(timeout=timeout)
 
 
-def _fake_host_factory(spawn_result=True, device=None, mode=None):
+def _fake_host_factory(spawn_result=True, device=None):
     """Build a host_factory callable returning a _FakeHost with the given spawn() result + device.
 
-    `mode` (default None): if given, the returned _FakeHost reports that mode (so lite/mismatch
-    tests can pin it); None leaves the _FakeHost default "normal".
+    (_load_host passes NO mode since the P1.M1.T2.S2 single-path collapse; the _FakeHost ctor's
+    vestigial mode default is retained — fakes may keep the attr — but tests never force it.)
     """
     def _factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
         host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
         host.spawn_result = spawn_result
-        if mode is not None:
-            host.mode = mode
         if device is not None:
             host.device = dict(device)
         return host
@@ -1644,13 +1616,8 @@ def test_on_final_rejected_hallucination_emits_no_latency_line(caplog):
 
 
 def test_run_logs_resolved_device_at_startup(monkeypatch, caplog):
-    # Force a deterministic cuda resolution so the startup line is stable + hermetic.
-    monkeypatch.setattr(
-        daemon.cuda_check,
-        "resolve_device_and_models",
-        lambda defaults=None: {"device": "cuda", "compute_type": "float16",
-                               "final_model": "distil-large-v3", "realtime_model": "small.en"},
-    )
+    # The daemon NEVER probes cuda_check itself (VT-001): the startup line prints the cached
+    # UN-PROBED config (device=cfg.asr.device + model=cfg.asr.lite_model) until a child arms.
     d, _, _, _ = _make_daemon()
     import threading
     t = threading.Thread(target=d.run, daemon=True)
@@ -1665,7 +1632,7 @@ def test_run_logs_resolved_device_at_startup(monkeypatch, caplog):
         t.join(timeout=2.0)
     assert any("voice-typing device resolved:" in m for m in msgs), msgs
     dev_line = next(m for m in msgs if "device resolved" in m)
-    assert "device=cuda" in dev_line and "final_model=distil-large-v3" in dev_line
+    assert "device=cuda" in dev_line and "model=small.en" in dev_line
 
 
 # ===========================================================================
@@ -1709,15 +1676,16 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
     fb.record_final("world")
     s = d.status_snapshot()
     assert set(s) == {"listening", "mode", "phase", "models_loaded", "load_error", "partial", "last_final",
-                      "uptime_s", "device", "compute_type", "final_model", "realtime_model",
-                      "mic_ok", "mic_error"}                     # P1.M2.T2.S1: +phase/models_loaded/load_error; §4.2ter: +mode
+                      "uptime_s", "device", "compute_type", "model",
+                      "mic_ok", "mic_error"}     # P1.M1.T2.S2: 13 keys — ONE 'model' key (Rev 2)
     assert s["listening"] is False and s["partial"] == "world" and s["last_final"] == "world"   # record_final writes the final into partial so the status matches the screen
     assert s["phase"] == "idle" and s["models_loaded"] is True and s["load_error"] == ""  # P1.M2.T2.S1: injected recorder -> loaded
-    # device/compute_type/models come from the UN-PROBED config (VT-001) until the child reports
+    assert s["mode"] == "lite"                       # Rev 2: the CONSTANT mode (§4.6 schema stable)
+    # device/compute_type/model come from the UN-PROBED config (VT-001) until the child reports
     # its actual resolved device on arm. The defaults happen to equal CUDA_DEFAULTS, so this also
     # pins that the config<->cuda_check defaults have not drifted.
     assert s["device"] == "cuda" and s["compute_type"] == "float16"
-    assert s["final_model"] == "distil-large-v3" and s["realtime_model"] == "small.en"
+    assert s["model"] == "small.en"
     assert s["mic_ok"] is True and s["mic_error"] == ""          # S1's _ok_probe via _make_daemon_with_feedback
     assert calls["n"] == 0, "status_snapshot must NOT call cuda_check.resolve_device_and_models (VT-001)"
 
@@ -1751,7 +1719,7 @@ def test_status_snapshot_reports_configured_device_when_not_loaded(tmp_path, mon
     )
     s = d.status_snapshot()
     assert s["device"] == "cpu" and s["compute_type"] == "int8"   # UN-PROBED configured values
-    assert s["final_model"] == "distil-large-v3" and s["realtime_model"] == "small.en"  # configured, NOT cpu-fallback
+    assert s["model"] == "small.en"   # the CONFIGURED lite_model, NOT CPU_FALLBACK's tiny.en
     assert calls["n"] == 0, "status_snapshot must NOT call cuda_check (VT-001)"
 
 
@@ -2767,8 +2735,8 @@ def test_construct_force_cpu_overrides_cuda_path(cfg, monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # force cuda
     rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=True)
     assert rec.kwargs["device"] == "cpu"            # force_cpu overrides the cuda verdict
-    assert rec.kwargs["model"] == "small.en"
-    assert rec.kwargs["realtime_model_type"] == "tiny.en"
+    assert rec.kwargs["model"] == "tiny.en"
+    assert rec.kwargs["realtime_model_type"] == "tiny.en"   # single model fills BOTH slots
 
 
 def test_construct_force_cpu_keeps_non_device_kwargs(cfg):
@@ -2778,7 +2746,7 @@ def test_construct_force_cpu_keeps_non_device_kwargs(cfg):
     # non-device tunables from cfg (default cfg):
     assert kw["language"] == "en"
     assert kw["realtime_processing_pause"] == 0.15
-    assert kw["post_speech_silence_duration"] == 0.6
+    assert kw["post_speech_silence_duration"] == 0.8   # §4.2quater: lite_post is THE duration
     # _FIXED_KWARGS survive (P1.M1.T1.S1's no_log_file + the silero correction):
     assert kw["no_log_file"] is True
     assert kw["silero_backend"] == "auto"
@@ -2802,7 +2770,7 @@ def test_construct_force_cpu_false_is_default_behavior(cfg, monkeypatch):
     non_cb_omitted = {k: v for k, v in omitted.kwargs.items() if not k.startswith("on_")}
     assert non_cb_explicit == non_cb_omitted
     assert omitted.kwargs["device"] == "cuda"       # the normal cuda path, untouched
-    assert omitted.kwargs["model"] == "distil-large-v3"
+    assert omitted.kwargs["model"] == "small.en"
 
 
 def test_cfg_to_kwargs_accepts_resolved_override(cfg, monkeypatch):
@@ -2824,18 +2792,17 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
     sb = inspect.signature(daemon.build_recorder).parameters
     assert "force_cpu" in sb and sb["force_cpu"].default is False
     assert "on_speech" in sb and sb["on_speech"].default is None
-    assert "lite" in sb and sb["lite"].default is False            # PRD §4.2ter
-    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu", "on_speech", "lite"], list(sb)
+    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu", "on_speech"], list(sb)
     sc = inspect.signature(daemon._construct).parameters
     assert "force_cpu" in sc and sc["force_cpu"].default is False
     assert "on_speech" in sc and sc["on_speech"].default is None
-    assert "lite" in sc and sc["lite"].default is False
-    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu", "on_speech", "lite"], list(sc)
-    # cfg_to_kwargs got the keyword-only resolved injection point (default None):
+    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu", "on_speech"], list(sc)
+    # cfg_to_kwargs kept the keyword-only resolved injection point (default None); the single-path
+    # collapse (P1.M1.T2.S2) removed the old two-mode flag:
     sk = inspect.signature(daemon.cfg_to_kwargs).parameters
     assert "resolved" in sk and sk["resolved"].default is None
     assert sk["resolved"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert "lite" in sk and sk["lite"].default is False            # PRD §4.2ter
+    assert list(sk) == ["cfg", "resolved"], list(sk)
 
 
 def test_log_resolved_device_reads_cache_after_cpu_fallback(caplog):
@@ -2883,45 +2850,43 @@ def test_lazy_daemon_boots_unloaded_with_no_recorder():
     assert d._load_error is None
 
 
-def test_load_recorder_success_loads_and_marks_loaded(monkeypatch):
+def test_load_host_success_loads_and_marks_loaded(monkeypatch):
     """_load_host() spawns via host_factory + flips _models_loaded; returns True."""
     factory = _fake_host_factory(spawn_result=True)
     d, fb = _make_lazy_daemon(host_factory=factory)
-    assert d._load_recorder() is True
+    assert d._load_host() is True
     assert d._host is not None and d._host.spawn_calls == 1
     assert d._models_loaded is True
     assert d._load_error is None
     assert fb.phases[-1] == "idle"          # phase driven to 'idle' on success
 
 
-def test_load_recorder_is_noop_once_loaded(monkeypatch):
-    """A second _load_recorder() after success does NOT spawn again (resident)."""
+def test_load_host_is_noop_once_loaded(monkeypatch):
+    """A second _load_host() after success does NOT spawn again (resident, single path)."""
     factory = _fake_host_factory(spawn_result=True)
     d, _fb = _make_lazy_daemon(host_factory=factory)
-    assert d._load_recorder() is True
-    assert d._load_recorder() is True       # resident -> no-op
+    assert d._load_host() is True
+    assert d._load_host() is True       # resident -> no-op
     assert d._host.spawn_calls == 1         # spawn called exactly ONCE
 
 
-def test_load_recorder_cpu_fallback_on_cuda_failure(monkeypatch, caplog):
-    """CPU fallback now lives in the CHILD (recorder_host._worker_main). At the daemon level, a
-    spawn that reports a CPU device (the child fell back) seeds _resolved_device_cache from the
-    child's 'ready' device dict — so status reports device=cpu WITHOUT the daemon probing CUDA.
-    This test pins that the daemon seeds the cache from the host's device (the post-fix path)."""
-    cpu_device = {"device": "cpu", "compute_type": "int8",
-                  "final_model": "small.en", "realtime_model": "tiny.en"}
+def test_load_host_seeds_cache_from_child_device(monkeypatch, caplog):
+    """The child owns the cuda_check resolution: a spawn that reports a CPU device (the child fell
+    back) seeds _resolved_device_cache from the child's 3-key 'ready' device dict — so status
+    reports device=cpu WITHOUT the daemon probing CUDA."""
+    cpu_device = {"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
     factory = _fake_host_factory(spawn_result=True, device=cpu_device)
     d, _fb = _make_lazy_daemon(host_factory=factory)
-    assert d._load_recorder() is True
+    assert d._load_host() is True
     assert d._host is not None and d._models_loaded is True
     assert d._resolved_device()["device"] == "cpu"   # cache seeded from the host's (child's) device
 
 
-def test_load_recorder_total_failure_stays_unloaded(monkeypatch):
+def test_load_host_total_failure_stays_unloaded(monkeypatch):
     """A spawn that returns False -> _load_host stays unloaded, NO half-built host, _load_error set (§4.2bis)."""
     factory = _fake_host_factory(spawn_result=False)
     d, _fb = _make_lazy_daemon(host_factory=factory)
-    assert d._load_recorder() is False
+    assert d._load_host() is False
     assert d._host is None                           # NO half-built host
     assert d._models_loaded is False
     assert d._load_error is not None
@@ -2964,99 +2929,58 @@ def test_warm_arm_fires_no_loading_toast(monkeypatch):
     assert fb.notifies == []                          # no cold load -> no 'Loading…' toast
 
 
-# --- lite mode (PRD §4.2ter): small-model-only quick dictation on a separate keybind ---
+# --- Rev 2 single path (P1.M1.T2.S2): ONE recorder; start/toggle arm it, stop disarms ---
 
-def test_start_lite_loads_lite_host_and_arms():
-    """start_lite() spawns the host in LITE mode (host.mode == 'lite') and arms."""
-    factory = _fake_host_factory(spawn_result=True)
-    d, fb = _make_lazy_daemon(host_factory=factory)
-    d.start_lite()
-    assert d._models_loaded is True
-    assert d.is_listening() is True
-    assert d._host.mode == "lite"                     # the child was built for lite
-    assert d._mode == "lite"                          # daemon tracks it
-    assert fb.modes == ["lite"]                       # published to state.json via set_mode
+def test_start_arms_single_construction_and_sets_lite_mode():
+    """start() arms the ONE single-model recorder exactly once + publishes the constant mode.
 
-
-def test_mode_switch_normal_to_lite_reloads():
-    """Arming lite while a NORMAL child is resident tears it down + respawns lite (one reload).
-
-    Pins the accepted §4.2ter tradeoff: switching modes costs one bounded reload (the recorder is
-    built with a different model set). spawn() runs AGAIN and the new host reports mode 'lite'.
+    Rev 2 (PRD §4.2quater): a single construction path — one spawn, no reload machinery — and the
+    armed mode published to state.json is the CONSTANT "lite" (§4.6 schema stability; ctl.py
+    renders it untouched). The daemon carries no _mode attribute at all.
     """
-    factory = _fake_host_factory(spawn_result=True)
-    d, fb = _make_lazy_daemon(host_factory=factory)
-    d.start()                                        # cold arm -> normal host, spawn_calls == 1
-    assert d._host.mode == "normal" and d._host.spawn_calls == 1
-    d.stop()                                         # disarm (resident stays, just not listening)
-    d.start_lite()                                   # mode mismatch -> teardown + respawn lite
-    assert d._host.mode == "lite"                     # a NEW lite host is resident
-    assert d._host.spawn_calls == 1                   # the new host spawned once (fresh instance)
-    assert d._mode == "lite"
+    spawns: list = []
+    d, fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
+    d.start()
+    assert d.is_listening() and len(spawns) == 1     # ONE construction
+    assert not hasattr(d, "_mode")                   # the two-mode daemon attr is gone
+    assert d.status_snapshot()["mode"] == "lite"     # constant on the status surface
+    assert fb.modes == ["lite"]                      # published to state.json via set_mode
 
 
-def test_same_mode_arm_is_instant_no_reload():
-    """Re-arming the SAME mode while resident does NOT reload (instant, like a warm arm)."""
-    factory = _fake_host_factory(spawn_result=True, mode="lite")
-    d, fb = _make_lazy_daemon(host_factory=factory)
-    d.start_lite()                                   # spawn lite
-    host1 = d._host
-    d.stop()
-    d.start_lite()                                   # resident lite -> instant, no reload
-    assert d._host is host1                           # SAME host object (no teardown/respawn)
-    assert d._host.mode == "lite"
+def test_toggle_is_involution_single_mode():
+    """toggle() is a pure on/off involution: idle→arm, armed→disarm, disarmed→arm — ONE spawn.
 
-
-def test_toggle_lite_while_listening_in_lite_stops():
-    """toggle_lite while listening IN LITE disarms (mode-specific arming, delta §3.4).
-
-    The cross-mode case (toggle_lite while armed-in-normal → switch to lite) is covered by
-    test_toggle_lite_while_armed_in_normal_switches_to_lite in the P1.M1.T2.S1 section below.
-    """
-    factory = _fake_host_factory(spawn_result=True)
-    d, fb = _make_lazy_daemon(host_factory=factory)
-    d.start_lite()                                  # listening in lite
-    assert d.is_listening() is True
-    d.toggle_lite()                                  # armed-in-lite -> disarm branch
-    assert d.is_listening() is False
-
-
-def test_status_snapshot_reports_mode():
-    """status_snapshot carries 'mode' (normal | lite) for voicectl status + state.json consumers."""
-    factory = _fake_host_factory(spawn_result=True)
-    d, fb = _make_lazy_daemon(host_factory=factory)
-    assert d.status_snapshot()["mode"] == "normal"   # default at boot
-    d.start_lite()
-    assert d.status_snapshot()["mode"] == "lite"
-
-
-def test_mode_switch_stops_outgoing_host():
-    """P1.M1.T2.S2: a normal->lite mode switch TEARS DOWN the outgoing resident host
-    (host.stop() called exactly once), not just respawns.
-
-    Pins the switch_mode teardown branch (daemon.py: resident-wrong-mode -> _bounded_shutdown ->
-    host.stop path). The existing test_mode_switch_normal_to_lite_reloads counts the NEW host's
-    spawns but never reads the OUTGOING host's stop_calls (the default _fake_host_factory drops the
-    old instance); this closes that gap. A regression that respawns but forgets to tear down the
-    old host would leak VRAM + leave a dangling child.
+    Re-arms while resident never reload (the resident+alive host short-circuits _load_host), and
+    there is no cross-mode switching to reload into.
     """
     spawns: list = []
     d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.start()                                        # resident + armed in normal
-    assert len(spawns) == 1 and spawns[0].mode == "normal"
-    assert spawns[0].stop_calls == 0
-    d.start_lite()                                   # switch normal -> lite (teardown normal, spawn lite, arm)
-    assert len(spawns) == 2
-    assert spawns[1].mode == "lite" and d._mode == "lite" and d._host is spawns[1]
-    assert spawns[0].stop_calls == 1, (              # the OUTGOING normal host was torn down exactly once
-        f"mode switch did not stop the outgoing host (stop_calls={spawns[0].stop_calls})"
-    )
-    assert spawns[1].stop_calls == 0                 # the new lite host has not been stopped
+    d.toggle()                                       # idle → arm
+    assert d.is_listening() is True
+    d.toggle()                                       # armed → disarm (bare-listening condition)
+    assert d.is_listening() is False
+    host1 = d._host
+    d.toggle()                                       # disarmed → arm (resident → instant, no reload)
+    assert d.is_listening() is True
+    assert d._host is host1                          # SAME host object (no teardown/respawn)
+    assert len(spawns) == 1
 
 
-def test_start_lite_after_idle_unload_reloads_in_lite(monkeypatch):
-    """P1.M1.T2.S2: after idle-unload (no resident), start_lite() reloads in LITE mode (the lite
-    counterpart of test_cold_arm_after_idle_unload for normal).
+def test_status_snapshot_has_single_model_key():
+    """status_snapshot: the CONSTANT mode 'lite' + ONE 'model' key (13 keys; no two-model pair)."""
+    factory = _fake_host_factory(spawn_result=True)
+    d, _fb = _make_lazy_daemon(host_factory=factory)
+    snap = d.status_snapshot()
+    assert snap["mode"] == "lite"                    # constant before AND after arming
+    assert "model" in snap
+    assert "final_model" not in snap and "realtime_model" not in snap
+    assert len(snap) == 13
+    d.start()
+    assert d.status_snapshot()["mode"] == "lite"
+
+
+def test_start_after_idle_unload_reloads():
+    """P1.M1.T2.S2 (single-path rename): after idle-unload (no resident), start() reloads.
 
     Mirrors test_cold_arm_after_idle_unload_refires_loading_toast's idle-unload trigger verbatim
     (the _idle_unload_watchdog only starts in run(), which the fast suite never calls; the tests
@@ -3064,17 +2988,16 @@ def test_start_lite_after_idle_unload_reloads_in_lite(monkeypatch):
     """
     spawns: list = []
     d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.start_lite()                                   # load + arm lite
-    assert len(spawns) == 1 and spawns[0].mode == "lite" and d._mode == "lite"
+    d.start()                                        # load + arm
+    assert len(spawns) == 1
     d.stop()                                         # disarm -> _disarmed_monotonic stamped
     # Force the idle-UNLOAD condition (the _idle_unload_watchdog thread only starts in run(),
     # which these unit tests never call); mirror test_cold_arm_after_idle_unload's -9999.0 trick.
     d._disarmed_monotonic = _time.monotonic() - 9999.0
     d._maybe_idle_unload()
     assert d._models_loaded is False and d._host is None   # host torn down -> next arm is cold again
-    d.start_lite()                                   # reload after idle-unload -> lite again
-    assert len(spawns) == 2
-    assert spawns[1].mode == "lite" and d._mode == "lite" and d._host is spawns[1]
+    d.start()                                        # reload after idle-unload
+    assert len(spawns) == 2 and d._host is spawns[1] and d.is_listening()
 
 
 def test_cold_arm_after_idle_unload_refires_loading_toast(monkeypatch):
@@ -3113,8 +3036,8 @@ def test_injected_recorder_is_loaded_at_construction():
     assert d._models_loaded is True                      # tests that inject get a loaded daemon immediately
 
 
-def test_load_recorder_single_flight_one_build_under_concurrency(monkeypatch):
-    """Two concurrent _load_recorder() calls -> exactly ONE host spawn (the 2nd waits, §4.2bis)."""
+def test_load_host_single_flight_one_build_under_concurrency(monkeypatch):
+    """Two concurrent _load_host() calls -> exactly ONE host spawn (the 2nd waits, §4.2bis)."""
     import threading as _t
     started = _t.Event()
     release = _t.Event()
@@ -3134,7 +3057,7 @@ def test_load_recorder_single_flight_one_build_under_concurrency(monkeypatch):
     results = []
 
     def caller():
-        results.append(d._load_recorder())
+        results.append(d._load_host())
 
     t1 = _t.Thread(target=caller)
     t2 = _t.Thread(target=caller)
@@ -3302,7 +3225,7 @@ def test_recorder_never_half_torn_down_during_race(monkeypatch):
 
 
 def test_load_and_unload_serialize_on_the_same_single_flight_lock():
-    """Clause (a) mechanism: _load_recorder()'s FIRST action is `with self._lock:` — the SAME lock
+    """Clause (a) mechanism: _load_host()'s FIRST action is `with self._lock:` — the SAME lock
     _unload_recorder() holds during teardown. So while the lock is held, a load physically CANNOT
     proceed. Proven directly, without timing."""
     d, _fb, _rec, _be = _make_daemon()  # loaded, not listening (injected _StubRecorder)
@@ -3314,13 +3237,13 @@ def test_load_and_unload_serialize_on_the_same_single_flight_lock():
     proceeded = threading.Event()
 
     def load():
-        d._load_recorder()  # first line is `with self._lock:` -> blocks here
+        d._load_host()  # first line is `with self._lock:` -> blocks here
         proceeded.set()
 
     t = threading.Thread(target=load, name="test-load-blocked", daemon=True)
     t.start()
     _time.sleep(0.15)
-    assert not proceeded.is_set(), "_load_recorder proceeded without the single-flight lock"
+    assert not proceeded.is_set(), "_load_host proceeded without the single-flight lock"
     assert t.is_alive(), "load must be blocked on the lock the teardown holds"
 
     d._lock.release()  # teardown releases -> load proceeds (resident -> immediate True)
@@ -3379,7 +3302,7 @@ def test_armed_state_aborts_unload_via_listening_recheck():
 #   (g) any _arm() RESETS the idle-unload clock (_disarmed_monotonic -> None).
 # Plus two lifecycle gap-fills the P1.M2.T1.S1 section left:
 #   (a) lazy boot drives phase='unloaded' (existing boot test checks attrs, not phase);
-#   (c) two concurrent start() calls build the recorder exactly ONCE (existing is _load_recorder-level).
+#   (c) two concurrent start() calls build the recorder exactly ONCE (existing is _load_host-level).
 # Mirrors the auto-stop section (~480-560): inline setup, direct _maybe_idle_unload() call, pushed
 # _disarmed_monotonic timestamp. Asserts via fb.phases[-1] / d._recorder / d._models_loaded /
 # rec.shutdowns (the fakes have NO snapshot() — do NOT call d.status_snapshot() here).
@@ -3725,8 +3648,7 @@ def test_status_device_reseeded_not_stale_after_child_death(tmp_path, monkeypatc
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
     fb = Feedback(cfg.feedback)
-    cpu_device = {"device": "cpu", "compute_type": "int8",
-                  "final_model": "small.en", "realtime_model": "tiny.en"}
+    cpu_device = {"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
     factory = _fake_host_factory(spawn_result=True, device=cpu_device)
     d = daemon.VoiceTypingDaemon(
         cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
@@ -3740,6 +3662,12 @@ def test_status_device_reseeded_not_stale_after_child_death(tmp_path, monkeypatc
         assert d.status_snapshot()["device"] == "cpu"   # cache seeded from the child's 'ready'
         d._host._alive = False                           # child crashes
         assert _wait_for(lambda: d._host is None, timeout=2.0), "dead host not cleaned up"
+        # _handle_dead_host publishes host=None and the VT-002 reseed under ONE _lock hold; the
+        # unlocked poll above can observe host=None mid-hold, so wait for the reseed itself to land
+        # (state.json writes sit between the two assignments inside the lock block).
+        assert _wait_for(
+            lambda: d._resolved_device_cache.get("device") == "cuda", timeout=2.0
+        ), "VT-002 reseed did not land"
         # VT-002: reseeded to the CONFIGURED device (cuda), not stale at the dead child's cpu.
         snap = d.status_snapshot()
         assert snap["device"] == "cuda" and snap["compute_type"] == "float16"
@@ -3762,8 +3690,7 @@ def test_status_device_reseeded_not_stale_after_idle_unload(tmp_path, monkeypatc
         feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")),
     )
     fb = Feedback(cfg.feedback)
-    cpu_device = {"device": "cpu", "compute_type": "int8",
-                  "final_model": "small.en", "realtime_model": "tiny.en"}
+    cpu_device = {"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
     factory = _fake_host_factory(spawn_result=True, device=cpu_device)
     d = daemon.VoiceTypingDaemon(
         cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
@@ -3853,13 +3780,12 @@ def test_handle_dead_host_noop_when_host_already_cleared():
 
 
 # ===========================================================================
-# P1.M1.T2.S1 — toggle/toggle_lite mode-specific arming (delta §3.4 / BUG-B)
-# (Each key toggles its own mode; cross-mode press switches = one reload.)
+# P1.M1.T2.S2 — single-path toggle (Rev 2): one recorder, one key, no modes
+# (toggle disarms iff listening; arms otherwise — one construction, no reloads.)
 # ===========================================================================
 
 def _spawning_factory(spawns):
-    """A host_factory that appends each built _FakeHost to `spawns` (so reloads are countable)
-    and respects the `mode` kwarg _load_host passes (no closure override)."""
+    """A host_factory that appends each built _FakeHost to `spawns` (so arms are countable)."""
     def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
         host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
         spawns.append(host)
@@ -3867,202 +3793,60 @@ def _spawning_factory(spawns):
     return factory
 
 
-def test_toggle_lite_while_idle_arms_in_lite():
-    """F while idle → arms in lite (mode becomes lite, one spawn)."""
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    assert not d.is_listening() and d._mode == "normal"
-    d.toggle_lite()
-    assert d.is_listening() is True
-    assert d._mode == "lite"
-    assert d._host.mode == "lite"
-    assert len(spawns) == 1                      # armed once (no reload from idle)
-
-
-def test_toggle_lite_while_armed_in_lite_disarms():
-    """F while armed-in-lite → disarms (no reload)."""
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.start_lite()                               # arm in lite
-    assert d._mode == "lite" and d.is_listening()
-    d.toggle_lite()                              # armed-in-lite → disarm
-    assert d.is_listening() is False
-    assert len(spawns) == 1                      # no reload on a same-mode disarm
-
-
-def test_toggle_lite_while_armed_in_normal_switches_to_lite():
-    """BUG-B fix: F while armed-in-NORMAL → switches to lite (exactly ONE reload)."""
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.start()                                    # arm in normal
-    assert d._mode == "normal" and d.is_listening()
-    d.toggle_lite()                              # cross-mode press → switch (not disarm!)
-    assert d.is_listening() is True              # re-armed in lite (not disarmed)
-    assert d._mode == "lite"
-    assert d._host.mode == "lite"
-    assert len(spawns) == 2                      # normal spawn + ONE lite reload
-
-
-def test_toggle_while_idle_arms_in_normal():
-    """D while idle → arms in normal (mode becomes normal, one spawn)."""
+def test_toggle_while_idle_arms():
+    """toggle while idle → arms (one spawn)."""
     spawns: list = []
     d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
     d.toggle()
     assert d.is_listening() is True
-    assert d._mode == "normal"
-    assert d._host.mode == "normal"
     assert len(spawns) == 1
 
 
-def test_toggle_while_armed_in_normal_disarms():
-    """D while armed-in-normal → disarms (no reload)."""
+def test_toggle_while_armed_disarms():
+    """toggle while armed → disarms (the bare-listening condition; no reload on the disarm path)."""
     spawns: list = []
     d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.start()                                    # arm in normal
-    d.toggle()                                   # armed-in-normal → disarm
+    d.start()                                        # arm
+    d.toggle()                                       # armed → disarm
     assert d.is_listening() is False
     assert len(spawns) == 1
 
 
-def test_toggle_while_armed_in_lite_switches_to_normal():
-    """BUG-B fix: D while armed-in-LITE → switches to normal (exactly ONE reload)."""
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.start_lite()                               # arm in lite
-    assert d._mode == "lite" and d.is_listening()
-    d.toggle()                                   # cross-mode press → switch (not disarm!)
-    assert d.is_listening() is True              # re-armed in normal (not disarmed)
-    assert d._mode == "normal"
-    assert d._host.mode == "normal"
-    assert len(spawns) == 2                      # lite spawn + ONE normal reload
+def test_dispatch_lite_commands_are_now_unknown():
+    """Rev 2: the socket lite commands are GONE — dispatch replies unknown-command.
 
-
-# --- validation Issue MEDIUM: a failed cross-mode toggle must clear stale `listening` ---
-#
-# toggle()/toggle_lite() call _load_host() for the mode switch; on failure they used to `return`
-# WITHOUT clearing _listening (set True by the previous arm). _load_host tears down the resident
-# host on failure (_host = None), so the daemon ended up reporting listening: True with NO recorder,
-# and status_snapshot (hence voicectl status) printed a misleading 'listening: on'. These tests pin
-# the fix: on a failed cross-mode reload the daemon DISARMS (listening: off, _load_error surfaced).
-
-
-def _failing_second_spawn_factory(spawns):
-    """host_factory whose FIRST spawn succeeds (arms the first mode) and whose SECOND spawn fails.
-
-    The second spawn is the cross-mode RELOAD; making it fail reproduces the MEDIUM-bug scenario
-    (resident host torn down by _load_host, _load_error set, listening left stale without the fix).
+    The daemon-side start-lite/toggle-lite arms were deleted with the two-mode machinery; the
+    generic unknown-command reply covers them (ctl.py's dead command entries are S3's cleanup).
     """
-    def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
-        host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
-        # First built host spawns True; every subsequent one fails.
-        host.spawn_result = len(spawns) == 0
-        spawns.append(host)
-        return host
-    return factory
+    d, _fb = _make_lazy_daemon(host_factory=_fake_host_factory(spawn_result=True))
+    srv = daemon.ControlServer(d)
+    resp = srv._dispatch(json.dumps({"cmd": "toggle-lite"}))
+    assert resp == {"ok": False, "error": "unknown command: 'toggle-lite'"}
+    resp = srv._dispatch(json.dumps({"cmd": "start-lite"}))
+    assert resp == {"ok": False, "error": "unknown command: 'start-lite'"}
 
 
-def test_toggle_lite_while_armed_in_normal_failed_reload_clears_listening():
-    """Failed cross-mode toggle_lite (armed-in-normal → lite reload fails) clears stale listening.
+def test_failed_toggle_stays_disarmed_and_status_is_honest():
+    """A failed load on toggle leaves the daemon disarmed with an honest status snapshot.
 
-    Regression guard for validation Issue MEDIUM: without the fix, the failed reload left
-    is_listening() == True with _host is None + models_loaded False, so status_snapshot reported
-    'listening: on' for a daemon with no recorder and never surfaced _load_error.
+    Single-path corollary of the old cross-mode stale-listening regression: toggle only attempts
+    a load from IDLE, so a failure can never strand listening: on — but the honesty contract
+    still holds (listening False, models_loaded False, _load_error surfaced).
     """
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
-    d.start()                                    # arm in normal (first spawn succeeds)
-    assert d._mode == "normal" and d.is_listening()
-    d.toggle_lite()                              # cross-mode switch → lite reload FAILS
-    assert d.is_listening() is False             # FIXED: disarmed (was stale-True without the fix)
-    assert d._host is None                       # the resident host was torn down by _load_host
-    assert d._models_loaded is False
-    assert d._load_error is not None             # surfaced so status/voicectl can report it
-    assert d._mode == "normal"                   # never flipped to lite (spawn failed)
-
-
-def test_toggle_while_armed_in_lite_failed_reload_clears_listening():
-    """Failed cross-mode toggle (armed-in-lite → normal reload fails) clears stale listening.
-
-    The lite→normal mirror of the test above.
-    """
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
-    d.start_lite()                               # arm in lite (first spawn succeeds)
-    assert d._mode == "lite" and d.is_listening()
-    d.toggle()                                   # cross-mode switch → normal reload FAILS
-    assert d.is_listening() is False             # FIXED: disarmed
-    assert d._host is None
-    assert d._models_loaded is False
-    assert d._load_error is not None
-    assert d._mode == "lite"                     # never flipped to normal (spawn failed)
-
-
-def test_failed_cross_mode_toggle_status_snapshot_is_honest():
-    """After a failed cross-mode toggle, status_snapshot() reports listening: False (not stale True).
-
-    Pins the user-visible symptom from validation Issue MEDIUM: voicectl status must NOT print
-    'listening: on' for a daemon whose recorder failed to (re)load. Also asserts load_error is
-    surfaced in the snapshot so the failure is diagnosable.
-    """
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
-    d.start()                                    # arm in normal
-    assert d.is_listening() is True
-    d.toggle_lite()                              # lite reload fails
+    d, _fb = _make_lazy_daemon(host_factory=_fake_host_factory(spawn_result=False))
+    d.toggle()
+    assert d.is_listening() is False
+    assert d._host is None and d._models_loaded is False
     snap = d.status_snapshot()
-    assert snap["listening"] is False            # honest status (was True without the fix)
+    assert snap["listening"] is False
     assert snap["models_loaded"] is False
-    assert snap["load_error"]                     # the failure reason is surfaced
+    assert snap["load_error"]
 
 
-def test_dispatch_toggle_cross_mode_lite_to_normal_failure_returns_ok_false():
-    """Cross-mode toggle (armed-in-lite → normal reload fails) surfaces ok:false+error.
-
-    Regression for bugfix Issue 1: _dispatch's toggle branch returned {ok:true, listening:false}
-    (silent) when a cross-mode reload failed, because arm_attempted was False. The fix routes a
-    FRESH _load_error through _arm_response() so voicectl prints 'error: model load failed: ...'
-    (exit 1), matching start/start-lite.
-    """
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
-    d.start_lite()                                              # arm in lite (1st spawn succeeds)
-    assert d.is_listening() and d._mode == "lite"
+def test_dispatch_failed_toggle_returns_ok_false():
+    """A toggle whose load failed surfaces ok:false + 'model load failed' on the wire."""
+    d, _fb = _make_lazy_daemon(host_factory=_fake_host_factory(spawn_result=False))
     srv = daemon.ControlServer(d)
-    resp = srv._dispatch(json.dumps({"cmd": "toggle"}))         # lite→normal, 2nd spawn FAILS
+    resp = srv._dispatch(json.dumps({"cmd": "toggle"}))
     assert resp["ok"] is False
     assert "model load failed" in resp["error"]
-
-
-def test_dispatch_toggle_lite_cross_mode_normal_to_lite_failure_returns_ok_false():
-    """Cross-mode toggle-lite (armed-in-normal → lite reload fails) surfaces ok:false+error.
-
-    The normal→lite mirror of the test above (bugfix Issue 1).
-    """
-    spawns: list = []
-    d, _fb = _make_lazy_daemon(host_factory=_failing_second_spawn_factory(spawns))
-    d.start()                                                   # arm in normal (1st spawn succeeds)
-    assert d.is_listening() and d._mode == "normal"
-    srv = daemon.ControlServer(d)
-    resp = srv._dispatch(json.dumps({"cmd": "toggle-lite"}))    # normal→lite, 2nd spawn FAILS
-    assert resp["ok"] is False
-    assert "model load failed" in resp["error"]
-
-
-# ===========================================================================
-# P1.M1.T4.S1 — toggle_lite docstring references the correct key D (bugfix Issue 4)
-# (the lite keybind is Alt+Super+D — key D, never F (hypr-binds.conf:44 / PRD §4.10). The
-#  toggle_lite docstring previously said "pressing F" 3×; this pins it at "pressing D",
-#  mirroring the sibling toggle() docstring. Pure static-text assertion on __doc__ — no
-#  instantiation, no GPU/socket/recorder.)
-# ===========================================================================
-def test_toggle_lite_docstring_says_pressing_d_not_f():
-    """toggle_lite.__doc__ references key D (the lite bind is Alt+Super+D), never F (Issue 4).
-
-    The lite keybind is SUPER ALT, D (hypr-binds.conf:44 / PRD §4.10) — key D, not F. The
-    docstring must mirror the sibling toggle() docstring, which correctly says "pressing D".
-    Before the fix this was RED: "pressing F" present (3×), "pressing D" absent.
-    """
-    doc = daemon.VoiceTypingDaemon.toggle_lite.__doc__
-    assert doc is not None, "toggle_lite is missing its docstring"
-    assert "pressing D" in doc, "toggle_lite docstring must say 'pressing D' (lite bind = Alt+Super+D)"
-    assert "pressing F" not in doc, "toggle_lite docstring must NOT reference key F (it is D)"

@@ -1,8 +1,8 @@
 """voice_typing.recorder_host — owns the AudioToTextRecorder in a managed child subprocess.
 
 (PRD §7.9 + §6 T6(d); P1.M3.T2.S2 re-plan.) The WHOLE point of this module is GPU-VRAM
-reclamation on idle-unload. RealtimeSTT v1.0.2 loads the realtime (small.en) model IN-PROCESS
-(its realtime model is driven by a threading.Thread in the constructor's process), so any
+reclamation on idle-unload. RealtimeSTT v1.0.2 loads the Whisper model IN-PROCESS (its realtime-
+partial engine is driven by a threading.Thread in the constructor's process), so any
 process that constructs an AudioToTextRecorder acquires a CUDA primary context (~100–300 MiB)
 that is UNRELEASABLE until that process exits (del/gc.collect()/torch.cuda.empty_cache() do
 NOT release it). The idle-unload teardown therefore CANNOT reach ~0 VRAM on the daemon PID
@@ -20,8 +20,8 @@ IPC PROTOCOL (two multiprocessing queues + one event):
   abort_event (daemon -> child): a multiprocessing.Event SET by the daemon to interrupt a child
       blocked in recorder.text() (the cmd_queue is NOT read while text() blocks). A separate child
       thread polls it and calls recorder.abort(). ("abort", {}) on cmd_queue is belt-and-suspenders.
-  event_queue (child -> daemon): ("ready", {device,compute_type,final_model,realtime_model}) |
-                                 ("error", {msg}) |
+  event_queue (child -> daemon): ("ready", {device,compute_type,model})     # Rev 2: ONE model
+                                 | ("error", {msg}) |
                                  ("final", {text}) |
                                  ("partial", {text}) |     # realtime stabilized partial
                                  ("speech", {}) |          # on_speech -> _touch_speech (idle auto-stop reset)
@@ -111,7 +111,6 @@ class RecorderHost:
         *,
         force_cpu: bool = False,
         is_listening: "Callable[[], bool] | None" = None,
-        mode: str = "normal",
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
@@ -120,9 +119,6 @@ class RecorderHost:
         self._on_partial = on_partial
         self._on_speech = on_speech
         self._force_cpu = force_cpu
-        # PRD §4.2ter: this child is built for ONE mode ("normal" = distil-large-v3 + small.en, or
-        # "lite" = lite_model only). The daemon reads host.mode to detect a mode mismatch and reload.
-        self._mode = mode
         # Optional listening-gate predicate (bugfix Issue 2 residual / PRD §4.6). The child may emit
         # a stray ('vad', ...) event still in the IPC queue when the mic is disarmed (a late
         # on_vad_stop/on_vad_start that raced the disarm). Relaying it to feedback.set_phase() would
@@ -161,13 +157,8 @@ class RecorderHost:
 
     @property
     def device(self) -> dict[str, str]:
-        """The resolved {device,compute_type,final_model,realtime_model} from the child's 'ready'."""
+        """The resolved {device,compute_type,model} from the child's 'ready'."""
         return dict(self._device)
-
-    @property
-    def mode(self) -> str:
-        """The mode this child's recorder was built for ("normal" | "lite", PRD §4.2ter)."""
-        return self._mode
 
     @property
     def is_alive(self) -> bool:
@@ -192,7 +183,7 @@ class RecorderHost:
         # target _worker_main is a module-level fn (picklable).
         self._proc = ctx.Process(
             target=_worker_main,
-            args=(self._cfg, self._cmd_q, self._evt_q, self._abort_event, self._force_cpu, self._mode),
+            args=(self._cfg, self._cmd_q, self._evt_q, self._abort_event, self._force_cpu),
             name="voice-typing-recorder-host",
             daemon=True,
         )
@@ -424,7 +415,6 @@ def _worker_main(
     evt_q: Any,
     abort_event: Any,
     force_cpu: bool,
-    mode: str = "normal",
 ) -> None:
     """Child-process entry point: construct the recorder + serve commands until shutdown.
 
@@ -453,10 +443,6 @@ def _worker_main(
     # This keeps the daemon process CUDA-free (the daemon imports only the RecorderHost handle).
     from voice_typing.daemon import build_recorder
 
-    # PRD §4.2ter: lite mode builds the recorder with lite=lite_model-only (the large model never
-    # constructs). mode is a spawn-time property of this child; it cannot change without a reload.
-    lite = mode == "lite"
-
     # The child's recorder callbacks RELAY events to the daemon over evt_q (they cannot touch the
     # daemon's Feedback/LatencyLog — those objects live in the daemon process). build_recorder wires
     # _build_callbacks(feedback, latency, on_speech); we pass relay stand-ins whose methods put
@@ -468,12 +454,12 @@ def _worker_main(
         _safe_put(evt_q, ("speech", {}))
 
     # Construct the recorder via the UNCHANGED production path. CPU fallback: retry once with
-    # force_cpu=True if the cuda construction fails (mirrors _load_recorder's old in-process retry,
+    # force_cpu=True if the cuda construction fails (mirrors the daemon's old in-process retry,
     # now in the child where the CUDA context lives — cleaner because only the child touches CUDA).
     recorder = None
     try:
         try:
-            recorder = build_recorder(cfg, relay_fb, relay_lat, on_speech=_child_on_speech, lite=lite)
+            recorder = build_recorder(cfg, relay_fb, relay_lat, on_speech=_child_on_speech)
         except Exception as exc:
             if force_cpu:
                 _safe_put(evt_q, ("error", {"msg": f"force_cpu build failed: {exc!r}"}))
@@ -483,7 +469,7 @@ def _worker_main(
             )
             try:
                 recorder = build_recorder(
-                    cfg, relay_fb, relay_lat, force_cpu=True, on_speech=_child_on_speech, lite=lite
+                    cfg, relay_fb, relay_lat, force_cpu=True, on_speech=_child_on_speech
                 )
             except Exception as exc2:
                 _safe_put(
@@ -492,10 +478,9 @@ def _worker_main(
                 )
                 return
         # Report the resolved device so the daemon can seed _resolved_device_cache WITHOUT probing
-        # CUDA itself (the daemon must stay CUDA-free). _child_resolved_device derives it from the
-        # cuda_check resolution the child just performed (idempotent within a boot); lite overrides
-        # the reported models to lite_model so status is accurate in lite mode.
-        resolved_device = _child_resolved_device(cfg, force_cpu, lite=lite)
+        # CUDA itself (the daemon must stay CUDA-free). _child_resolved_device derives the 3-key
+        # {device,compute_type,model} from the cuda_check resolution the child just performed.
+        resolved_device = _child_resolved_device(cfg, force_cpu)
         _safe_put(evt_q, ("ready", dict(resolved_device)))
     except Exception as exc:
         _safe_put(evt_q, ("error", {"msg": f"unexpected construction error: {exc!r}"}))
@@ -677,42 +662,30 @@ def _run_text_and_emit_final(
         _safe_put(evt_q, ("final", {"text": ""}))
 
 
-def _child_resolved_device(cfg: "VoiceTypingConfig", force_cpu: bool, lite: bool = False) -> dict[str, str]:
-    """Re-derive {device,compute_type,final_model,realtime_model} the child's recorder loaded.
+def _child_resolved_device(cfg: "VoiceTypingConfig", force_cpu: bool) -> dict[str, str]:
+    """Re-derive {device,compute_type,model} — the ONE recorder the child actually loaded.
 
-    The daemon needs this for status_snapshot()'s device/models fields WITHOUT probing CUDA itself
+    The daemon needs this for status_snapshot()'s device/model fields WITHOUT probing CUDA itself
     (the daemon must stay CUDA-free). On force_cpu it is the PRD §4.4 CPU_FALLBACK; otherwise it is
-    the cuda_check resolution the child just performed. Falls back to CPU_FALLBACK on probe error
-    (defensive — status degrades to 'cpu' rather than crashing the child). In lite mode (PRD
-    §4.2ter) the reported models are the lite model for both fields (what actually loaded) —
-    `cfg.asr.lite_model` ("small.en") on CUDA, or the CPU lite substitute "tiny.en" when
-    `d["device"] == "cpu"` (delta §3.2 BUG-A).
+    the cuda_check resolution the child just performed (which itself overrides wholesale with
+    CPU_FALLBACK — device cpu, compute_type int8, the CPU substitute model tiny.en — when no CUDA
+    is visible). Falls back to CPU_FALLBACK on probe error (defensive — status degrades to 'cpu'
+    rather than crashing the child).
     """
     from voice_typing import cuda_check  # imported in the CHILD only
 
     if force_cpu:
-        d = dict(cuda_check.CPU_FALLBACK)
-    else:
-        try:
-            d = cuda_check.resolve_device_and_models(
-                {
-                    "device": cfg.asr.device,
-                    "compute_type": "float16" if cfg.asr.device == "cuda" else "int8",
-                    "final_model": cfg.asr.final_model,
-                    "realtime_model": cfg.asr.realtime_model,
-                }
-            )
-        except Exception:
-            d = dict(cuda_check.CPU_FALLBACK)
-    if lite:
-        # CPU lite substitute is tiny.en (mirrors CPU_FALLBACK small.en→tiny.en); on CUDA keep
-        # cfg.asr.lite_model so status matches what the child actually loaded. Discriminate on
-        # d["device"] (the resolved truth — covers force_cpu, probe-failure, probe→cpu).
-        # (§4.2ter; delta §3.2 BUG-A)
-        lite_model = "tiny.en" if d["device"] == "cpu" else cfg.asr.lite_model
-        d["final_model"] = lite_model
-        d["realtime_model"] = lite_model
-    return d
+        return dict(cuda_check.CPU_FALLBACK)
+    try:
+        return cuda_check.resolve_device_and_models(
+            {
+                "device": cfg.asr.device,
+                "compute_type": "float16" if cfg.asr.device == "cuda" else "int8",
+                "model": cfg.asr.lite_model,
+            }
+        )
+    except Exception:
+        return dict(cuda_check.CPU_FALLBACK)
 
 
 class _RelayFeedback:
