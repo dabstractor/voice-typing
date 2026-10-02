@@ -1,0 +1,320 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Rev 2 — Streaming dictation + single-mode collapse",
+      "status": "Planned",
+      "description": "Land the Rev 2 delta on the mature Rev 1 codebase (HEAD 6b61db1): collapse to a single small.en mode (no distil-large-v3 anywhere), add phone-style streaming output (typed partials revised in place via a committed/tail state machine), Backspace-cancel with an evdev listener + voicectl fallback, rolling context prompts, deterministic textproc guards, the config/dep plumbing for all of it, and the verification + changeset-level docs. Everything outside this delta is implemented and verified (plan/006) — do not rebuild it. Read plan/007_cfc245548aec/architecture/system_context.md first: it lists PRD-vs-reality corrections (abort() does NOT discard audio; neither prompt kwarg is live-pokable in the single-model construction without a local patch) that override PRD prose.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Substrate — single-mode collapse, config schema, backspace primitive",
+          "status": "Planned",
+          "description": "Make the repo safe to build the streaming engine on: one recorder construction everywhere (config, cuda_check, daemon, recorder_host, ctl, prefetch, binds), the full config schema delta in one coherent edit, the evdev dependency, and the press_backspace(n) typing primitive with batched backends.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Config schema delta + evdev dependency",
+              "status": "Planned",
+              "description": "One coherent edit of the config surface (PRD R7): remove asr.final_model / asr.realtime_model, change lite_post_speech_silence_duration default to 0.8, add asr.context_prompt, output.streaming, and the [cancel] section; keep config.toml the self-documenting user-facing reference. Add the evdev dependency (R8).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "config.py + config.toml schema delta (R1/R3/R4/R5/R7 fields)",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.7", "h2.3/h3.4", "h2.3/h3.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/architecture/substrate_map.md §1: AsrConfig fields at config.py:48-116 (final_model:52, realtime_model:53, lite_model:54, lite_post_speech_silence_duration:61); __post_init__ patterns — bool-for-numeric rejection config.py:86-95, string-field guard 96-102 (remove final_model/realtime_model from that tuple at :99), value validation 103-114; from_toml _overlay unknown-key rejection config.py:249-271. config.toml keys at L31-40. tests/test_config_repo_default.py:26-46 pins the EXACT key set and :53-72 asserts comment text (lite_model line mentions SUPER+ALT+D — the bind set changes in P1.M1.T2.S4, so write comments for the END state: one CTRL SUPER ALT, D toggle bind + one SUPER ALT, Backspace cancel bind).\n2. INPUT: none (leaf subtask). Target schema per PRD §4.5.\n3. LOGIC: Remove final_model/realtime_model from AsrConfig and its validation tuple. lite_post_speech_silence_duration default 0.5 -> 0.8. Add asr.context_prompt: bool = True; output.streaming: bool = True; new CancelConfig dataclass (on_backspace: bool = True, devices: list[str] = field(default_factory=list)) + VoiceTypingConfig.cancel field + _overlay(CancelConfig, 'cancel') in from_toml. Extend __post_init__ validation to new fields following the existing patterns exactly (bools reject non-bool; devices must be a list of str; numeric pattern for none — no new numerics). Update config.toml: delete the two removed keys, set 0.8 with the comment from PRD §4.5 (endpointer only delays COMMIT under streaming; 0.5 razor-snappy, 1.0 near-zero cuts), add context_prompt / streaming / [cancel] each with a self-documenting comment. Update tests/test_config.py (removed-field asserts 43-44/75-76/109; new cases: type guards, partial-table overlay, unknown-key rejection for new fields) and tests/test_config_repo_default.py (key set, 0.8 default, comment assertions aligned to the end-state binds).\n4. OUTPUT: VoiceTypingConfig exposing cfg.asr.context_prompt, cfg.output.streaming, cfg.cancel.on_backspace, cfg.cancel.devices, with final_model/realtime_model gone — consumed by P1.M1.T2.S2 (kwargs), P1.M2.T5 (context_prompt), P1.M2.T6 (streaming flag), P1.M2.T7.S2 ([cancel]).\n5. DOCS: [Mode A] config.toml IS the user-facing reference — every new/removed/default-changed key gets its comment updated in this subtask. Do not create separate docs work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S2",
+                  "title": "Add evdev dependency (uv add + lock)",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.4", "h2.3/h3.4"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §6: pyproject [project] dependencies at :9-13; uv.lock exists; venv Python 3.12.10. external_deps.md §1: PyPI 'evdev' 1.9.3, requires-python >=3.11 — compatible. evdev NOT currently importable in .venv (probe).\n2. INPUT: current pyproject.toml dependency list.\n3. LOGIC: Run `/home/dustin/.local/bin/uv add evdev` (full path per PRD §5 alias warning; wrap in timeout 120). Verify: uv.lock diff contains evdev; `timeout 30 .venv/bin/python -c 'import evdev; print(evdev.__version__)'` succeeds. No source imports yet — the import lands with the listener in P1.M2.T7.S2. AGENTS.md: no daemon runs, no pytest needed for this subtask.\n4. OUTPUT: pyproject.toml + uv.lock with evdev; import evdev available to P1.M2.T7.S2.\n5. DOCS: none — dependency manifest only (README surface handled by the final docs task P1.M3.T10.S1)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Single-mode collapse across cuda_check, daemon, recorder_host, ctl, prefetch, binds",
+              "status": "Planned",
+              "description": "Delete the normal/two-model construction everywhere (PRD R1): the former lite construction (single lite_model, use_main_model_for_realtime=True, lite silence duration) becomes THE path. Decision recorded in system_context.md: status/state.json keep 'mode' as constant 'lite'.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "cuda_check single-model contract",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.3/h3.6", "h2.3/h3.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §2: cuda_check.py CUDA_DEFAULTS:46-52 (device/compute_type/final_model=distil-large-v3/realtime_model=small.en), CPU_FALLBACK:54-59 (final=small.en, realtime=tiny.en), resolve_device_and_models:114-130 returns the 4-key dict; _main() VERDICT print :135-165. Consumers of the dict keys (daemon.py:144-197, recorder_host.py:681-714 ready payload, ctl.py status) are rewritten in P1.M1.T2.S2 — between the two subtasks those consumers reference removed keys: intended transient, do not paper over it; keep THIS subtask's own tests green (focused: `timeout 600 .venv/bin/pytest tests/test_config.py -k 'defaults or cuda' -q` plus new focused cuda_check tests).\n2. INPUT: P1.M1.T1.S1 schema (lite_model is the only model field).\n3. LOGIC: Collapse to a single-model contract: resolve_device_and_models returns {device, compute_type, model} — CUDA: {cuda, float16, 'small.en'} (the cfg default lite_model); CPU fallback: {cpu, int8, 'tiny.en'} (existing lite fallback logic). Update CUDA_DEFAULTS/CPU_FALLBACK dicts, docstrings, and the _main() CLI VERDICT print (it names the models — user-facing CLI output). Update tests that pin the old dict shape (test_daemon.py:2747/2813-2849 CPU_FALLBACK mapping asserts, test_config.py:66-77 defaults-parity test) — the parity test pins AsrConfig defaults == CUDA_DEFAULTS, so update it to pin lite_model + the new 3-key shape.\n4. OUTPUT: resolve_device_and_models() -> {device, compute_type, model}, consumed by P1.M1.T2.S2 (daemon._resolve_device_config + cfg_to_kwargs + recorder_host ready payload + ctl display).\n5. DOCS: [Mode A] cuda_check.py module docstring + _main() printed output (CLI is user-facing). Rides with the work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "daemon.py + recorder_host.py mode collapse",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.3/h3.1", "h2.3/h3.2", "h2.3/h3.3", "h2.3/h3.6", "h2.3/h3.8"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon_control_map.md §1 (full map): cfg_to_kwargs daemon.py:158-215 (lite pre-kwargs 184-193, common kwargs 194-203, _FIXED_KWARGS:100-114 with use_main_model_for_realtime:False @101, lite overrides 205-214 incl. lite_post_speech_silence_duration @213); _load_host:710-805 (switch_mode branch 748-754); self._mode:656/778/1039/1632; start_lite:1441-1451; toggle/toggle_lite:1458-1516; _load_recorder alias:700-708; dispatch start-lite/toggle-lite:1989-2013; status_snapshot model keys:1641-1642; build_recorder/_construct lite= daemon.py:285-345 + recorder_host.py:458-478; RecorderHost mode param recorder_host.py:103-125/427. Test doubles to reuse: test_daemon.py:466-632 (_FakeHost/_fake_host_factory), 2859-2867 (_make_lazy_daemon).\n2. INPUT: P1.M1.T1.S1 schema; P1.M1.T2.S1 {device, compute_type, model} resolve contract.\n3. LOGIC: cfg_to_kwargs: the current lite branch becomes the ONLY branch — model=realtime_model_type=resolved['model'], use_main_model_for_realtime=True, post_speech_silence_duration=cfg.asr.lite_post_speech_silence_duration; delete the normal branch, the lite pre-kwargs override block, and the use_main_model_for_realtime entry in _FIXED_KWARGS. Delete self._mode, the mode-switch reload logic, _load_recorder alias, start_lite/toggle_lite methods, and the start-lite/toggle-lite dispatch cases; _load_host() builds the single construction unconditionally; toggle/start arm it, stop disarms. RecorderHost: drop the mode param (spawn-time single construction). status/state.json DECISION: keep 'mode' as constant 'lite' (feedback.set_mode('lite') at arm; §4.6 schema stays stable; ctl.py rendering untouched). status_snapshot: replace final_model/realtime_model keys with the single model. Rewrite/delete the mode/toggle_lite/start_lite/switch test family (full list in daemon_control_map.md §6: test_daemon.py ~25 tests incl. cfg_to_kwargs lite variants 138-313 and mode-switch 2964-4060; test_control_socket.py:131; test_recorder_host.py lite-flag tests; test_voicectl.py:75) into single-path equivalents (single kwargs test, toggle arms single construction, status mode constant). Implicit TDD: rewrite tests first.\n4. OUTPUT: single-path daemon+host — toggle/start arm the small.en single-model recorder; status {'ok':true,...,'mode':'lite'}; consumed by P1.M1.T2.S3/S4, P1.M2.T5/T6/T7, P1.M3.\n5. DOCS: [Mode A] voice_typing/daemon.py + voice_typing/recorder_host.py module docstrings — drop all two-mode prose. Rides with the work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S3",
+                  "title": "ctl.py command surface (drop lite commands)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S2"],
+                  "prd_selectors": ["h2.3/h3.10", "h2.3/h3.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon_control_map.md §4: ctl.py:37 _COMMANDS = (toggle, start, stop, status, quit, toggle-lite, start-lite); _EX_USAGE=64 :39; _build_parser epilog ~:158-165 lists all subcommands; main() validates cmd not in _COMMANDS -> exit 64 :174-183; arm cmds routed via _send_command_with_loading_hint; format_result prints 'mode: {mode}' :69/:90 and 'models: {final} + {realtime}' :96 (the models line dies with the removed status keys from P1.M1.T2.S2).\n2. INPUT: P1.M1.T2.S2 daemon dispatch (start-lite/toggle-lite gone server-side; status_snapshot without final_model/realtime_model).\n3. LOGIC: _COMMANDS -> ('toggle','start','stop','status','quit') (cancel is ADDED by P1.M2.T7.S1 — do not add it here); update module docstring, epilog, and the positional help string; format_result: drop the models line, keep the mode line. Update tests/test_voicectl.py (command-list tests :62/:75, format tests) and tests/test_control_socket.py lite-command tests (:131/:143 — rewrite to single-path + keep mode-in-status assert).\n4. OUTPUT: voicectl surface = 5 commands; consumed by P1.M2.T7.S1 which appends 'cancel' (final list 6).\n5. DOCS: [Mode A] ctl.py module docstring + --help/epilog text (explicitly named in PRD R1). Rides with the work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S4",
+                  "title": "Prefetch slim-down, bind collapse, ACCEPTANCE #10 rewrite",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S2"],
+                  "prd_selectors": ["h2.4", "h2.3/h3.12", "h2.3/h3.3", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §3/§8/§10: prefetch.py CORE_REPOS:36-40 (distil-large-v3 + small.en + tiny.en) and OPTIONAL_REPOS turbo :43-47, invoked only by install.sh:100-104; hypr-binds.conf binds :57 (CTRL SUPER ALT, D -> toggle) and :59 (SUPER ALT, D -> toggle-lite) with header docs :1-55; tests/ACCEPTANCE.md row 10 hardcodes the 0.5 default and two-mode claims; install.sh usage lines 205-210 mention toggle-lite.\n2. INPUT: P1.M1.T1.S1 (config.toml comments describe the end-state binds); P1.M1.T2.S2 (single-mode daemon).\n3. LOGIC: prefetch.py: CORE_REPOS = small.en + tiny.en ONLY (tiny.en stays — it is the CPU fallback), delete the distil entry and the OPTIONAL turbo entry + its _main() handling; update module docstring. hypr-binds.conf: delete :59, keep the single toggle bind :57; rewrite header comments to the end state (one mode; the SUPER ALT, Backspace cancel bind is ADDED by P1.M2.T7.S1 — leave a placeholder comment). install.sh: printed usage drops toggle-lite/start-lite and the lite bind mention (prefetch output shrinks automatically via prefetch.py). tests/ACCEPTANCE.md: rewrite row #10 to the PRD §5 form (single-model arming only — small.en sole model, no large-model worker, ~half old VRAM, drain unchanged) and amend row #4 (typed output = live partials plus commits). Keep rows #1-#3, #5-#9.\n4. OUTPUT: prefetch = 2 models; one toggle bind; acceptance table matches Rev 2 for rows #4/#10 (rows #11/#12 land with P1.M3.T9.S1).\n5. DOCS: [Mode A] prefetch.py docstring, hypr-binds.conf comments, install.sh usage lines, tests/ACCEPTANCE.md rows #4/#10 — all named in PRD §7 Mode A list. Rides with the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T3",
+              "title": "press_backspace(n) typing primitive (R2)",
+              "status": "Planned",
+              "description": "Add press_backspace(n: int) -> None to the TypingBackend ABC and every backend, batched so ~80 chars rewind in <150 ms, with the same auto-fallback contract as type_text on the wtype wrapper.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S1",
+                  "title": "ABC + batched wtype/ydotool/null implementations + fallback",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.5", "h2.3/h3.4"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §5: TypingBackend ABC :45-60 (single abstract type_text); WtypeBackend :63-72 (subprocess.run(['wtype','--',text], check=True)); YdotoolBackend :75-83 (['ydotool','type','--key-delay','2','--',text]); NullBackend :86-89; _WtypeWithFallback :92-127 (catches (CalledProcessError, OSError), retries ONCE on fallback); make_backend :130-148. external_deps.md §2-§4: wtype -k repeats within ONE invocation (man synopsis + env -i parse probe — no usage error, fails only at Wayland connect); ydotool key takes repeated '14:1 14:0' pairs with -d ms; KEY_BACKSPACE=14. Tests pin exact argv (test_typing_backends.py:89/:122) with a no-real-subprocess guard :274.\n2. INPUT: the existing ABC and backend classes above.\n3. LOGIC: Add abstract press_backspace(n: int) -> None. WtypeBackend: ONE subprocess.run(['wtype'] + ['-k','Backspace']*n, check=True) — never spawn per keystroke (80 spawns blows the <150 ms budget); n<=0 returns immediately without spawning. YdotoolBackend: ONE subprocess.run(['ydotool','key','-d','1'] + ['14:1','14:0']*n, check=True). NullBackend: no-op. _WtypeWithFallback.press_backspace: same catch/retry-once-fallback contract as type_text. Update tests/test_typing_backends.py: exact argv pins for both backends, n=0/negative no-op (no subprocess), single-invocation batching for n=80 (assert ONE subprocess.run call), fallback ordering, abstract-ness. Mock subprocess as the existing _Recorder fake does — no real keystrokes ever.\n4. OUTPUT: TypingBackend.press_backspace contract consumed by P1.M2.T6 (revise/commit rewinds), P1.M2.T7.S1 (cancel rewind), and mirrored by the T8 RecordingTypingBackend double.\n5. DOCS: none beyond docstrings — internal primitive (README streaming section lands with P1.M3.T10.S1)."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Streaming engine — state machine, cancel, context prompt, guards",
+          "status": "Planned",
+          "description": "The core Rev 2 feature work on top of the substrate: textproc guards, the committed/tail streaming state machine with freeze rules and the rollback hatch, the Backspace-cancel path (socket + evdev), and the rolling context prompt made dynamic in the recorder child.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T4",
+              "title": "Deterministic textproc guards (R6)",
+              "status": "Planned",
+              "description": "New pure functions alongside clean() (unchanged): casing guard and period guard applied at typing time on the streaming path.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T4.S1",
+                  "title": "Casing + period guard pure functions",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.3/h3.9", "h2.3/h3.4"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §6: textproc.py clean():26-69 (pure; _TRAILING_PUNCT :19; returns None for min_chars/blocklist rejections; never appends space); 21 existing tests in tests/test_textproc.py — clean() must remain byte-identical in behavior.\n2. INPUT: none (leaf, pure functions).\n3. LOGIC: Add a pure function alongside clean(), e.g. apply_streaming_guards(committed: str, fragment: str) -> str: (a) casing guard — if committed (rstripped of whitespace) does not end with a terminal '.' '!' '?', lowercase the fragment's first alphabetic character's word (first word's first cased char); (b) period guard — if the casing guard fired (we joined mid-sentence) and the fragment (rstripped) ends with '.', strip exactly one trailing '.'. Signature naming is a suggestion; it must stay pure and unit-testable. Unit tests: mid-sentence vs after-terminal cases, fragment already lowercase, fragment ending '...', only-one-period-stripped, empty/edge inputs.\n4. OUTPUT: apply_streaming_guards consumed by P1.M2.T6.S1 — applied to every typed fragment (partial deltas AND commit retypes).\n5. DOCS: none — internal (README tuning notes land with P1.M3.T10.S1 per PRD R6)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T5",
+              "title": "Rolling context prompt (R5)",
+              "status": "Planned",
+              "description": "Condition every decode on the committed text back to the last sentence boundary (~200-token cap): child-side dynamic prompt mechanism (RealtimeSTT 1.0.2's prompts are constructor-static — see research), plus daemon-side computation and shipping over cmd_q.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T5.S1",
+                  "title": "Child-side dynamic prompt mechanism + capability probe + degrade",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T2.S2"],
+                  "prd_selectors": ["h2.3/h3.4", "h2.3/h3.6", "h2.7"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE (CRITICAL — overrides PRD prose): realtimestt_internals.md: installed RealtimeSTT 1.0.2 confirmed. initial_prompt (finals) is baked into TranscriptionEngineConfig in the WORKER SUBPROCESS at worker start (installed core/transcription.py:93-107); the worker pipe protocol (audio, language, use_prompt) carries no prompt updates. initial_prompt_realtime is live-pokable ONLY via recorder.realtime_transcription_model.config.initial_prompt (base.py:163-166 reads per call) — but our single-model construction (use_main_model_for_realtime=True, from P1.M1.T2.S2) routes realtime through that SAME worker, so NEITHER plain attribute poke works. recorder_host.py seams: child command loop :549-554 (blocks in text(); the _abort_handler side-thread :517-524 is the pattern for a prompt watcher); build_recorder :458-478.\n2. INPUT: P1.M1.T1.S1 cfg.asr.context_prompt flag; P1.M1.T2.S2 single-mode child (build_recorder signature without lite).\n3. LOGIC: Add ('prompt', {'text': str}) to the child's cmd_q handling, applied between utterances (mirror the _abort_handler watcher-thread pattern if the main loop is blocked in text()). Dynamic mechanism, in preference order: (a) a fork-inherited shared value (multiprocessing.Array ~2 KB) + a monkeypatch applied in the child BEFORE AudioToTextRecorder construction that wraps the worker-side engine's transcribe (installed transcription_engines/base.py — prompt is read from self.config per call) to read from the shared value; Linux fork start method carries both the patch and the shared value into the worker process. (b) startup capability probe verifies the patch actually took effect (e.g. a sentinel round-trip or engine-config inspection); if the probe FAILS: degrade to context-free decoding and log ONCE — never crash, never wedge the child. Gate everything on cfg.asr.context_prompt (false = never patch, never ship). Report dynamic-vs-degraded status to the daemon via evt_q (new event, e.g. ('prompt_mode', {'dynamic': bool})). Unit tests with a fake recorder (copy tests/test_recorder_host.py patterns): prompt command applied to the poke seam, degrade path logs once and keeps decoding, context_prompt=false disables entirely. No CUDA loads in unit tests (monkeypatch build_recorder).\n4. OUTPUT: recorder_host applies a prompt string to BOTH partial and final decodes when dynamic mode is active, else degrades+logs; consumed by P1.M2.T5.S2 (daemon ships prompts) and asserted by P1.M3.T8.S1 (assert d).\n5. DOCS: none beyond code comments/docstrings — config.toml context_prompt comment already landed in P1.M1.T1.S1."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T5.S2",
+                  "title": "Daemon-side prompt computation + commit-time refresh",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M2.T5.S1", "P1.M2.T6.S2"],
+                  "prd_selectors": ["h2.3/h3.4", "h2.3/h3.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon_control_map.md §2: daemon->child commands ride cmd_q via RecorderHost methods (recorder_host.py:19-22: arm/disarm/text/shutdown — P1.M2.T5.S1 adds 'prompt'); the daemon owns the committed string once P1.M2.T6.S2's engine advances it at commits.\n2. INPUT: P1.M2.T5.S1's ('prompt', {'text'}) mechanism + ('prompt_mode', {'dynamic'}) status; P1.M2.T6.S2's engine commit checkpoint (engine.committed + its on_commit hook).\n3. LOGIC: Daemon computes the prompt from engine.committed: take the text after the LAST '.'/'!'/'?'; cap at ~200 tokens (Whisper's ~224-token budget — code constant, approximate tokens by whitespace words). Ship to the child on arm and refresh after every commit advance (subscribe to the engine's on_commit hook from P1.M2.T6.S2). If the child reported dynamic=false (or degraded), skip shipping entirely and log once at arm. Unit tests with the _FakeHost double: prompt shipped at arm and after each commit; cap enforced; degrade skips shipping.\n4. OUTPUT: end-to-end rolling context prompt; asserted by P1.M3.T8.S1 (assert d — child decodes carry committed context back to the last sentence boundary).\n5. DOCS: none beyond docstrings — config.toml comment landed in P1.M1.T1.S1."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T6",
+              "title": "Streaming output state machine in the daemon (R3 — the heavy task)",
+              "status": "Planned",
+              "description": "While armed with output.streaming=true (default), type partials live and revise in place: per-session committed/tail state, delta typing with rate-limited rewinds, the commit correction pass, stranded-tail and user-typing freezes, and the output.streaming=false rollback hatch (Rev 1 path kept intact).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T6.S1",
+                  "title": "StreamingOutput core — partial path (diff/extend/revise, rate limit, guards, feedback mirror)",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T3.S1", "P1.M2.T4.S1"],
+                  "prd_selectors": ["h2.3/h3.4", "h2.3/h3.8", "h2.3/h3.9"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon_control_map.md §2: partials are delivered on the evt_q reader thread to VoiceTypingDaemon._on_partial daemon.py:1094-1103 (today: feedback.update_partial + latency only — this is THE seam); feedback.update_partial is already throttled >=10 Hz (feedback.py:74-76/:109-120). Test-double pattern: test_daemon.py:466-632 _FakeHost/_StubRecorder/_FakeBackend + _make_lazy_daemon :2859-2867 with mic_prober=_ok_probe.\n2. INPUT: P1.M1.T3.S1 backend.press_backspace(n); P1.M2.T4.S1 apply_streaming_guards(committed, fragment); P1.M1.T1.S1 cfg.output.streaming.\n3. LOGIC: New engine (daemon process — e.g. class StreamingOutput in daemon.py or a small sibling module): state committed:str='', tail:str='', frozen:bool, _last_full_rewind_ts. API: on_partial(text) -> None, freeze(reason), reset_boundary(), plus accessors for tail/committed (consumed by cancel + prompt). on_partial: if frozen or streaming disabled -> current behavior (feedback mirror only). Else diff against tail: text extends tail -> type only the delta (guards applied to the delta fragment; NO trailing space while tentative); text revises it -> press_backspace(len(revised_chars)) then type the corrected tail, with FULL rewinds rate-limited >=300 ms apart (code constant, not config — a wobble cannot flicker; if rate-limited, keep the current tail this cycle). Mirror tail into feedback.update_partial on every event. Pure-python unit tests with _FakeBackend (copy the daemon test-double pattern; no CUDA, no mic): extend types delta-only, revise rewinds+retypes, rate-limit suppresses the second full rewind inside 300 ms, no trailing space while tentative, frozen suppresses typing but keeps the mirror.\n4. OUTPUT: StreamingOutput.on_partial + tail/committed accessors — wired into the daemon by P1.M2.T6.S2; freeze API extended by P1.M2.T6.S3; tail consumed by P1.M2.T7.S1 (cancel rewind max(len(tail)-1,0)).\n5. DOCS: none beyond docstrings — the daemon docstring streaming section lands with P1.M2.T6.S2; config.toml streaming comment landed in P1.M1.T1.S1."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T6.S2",
+                  "title": "Commit correction pass + rollback hatch + daemon wiring",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M2.T6.S1"],
+                  "prd_selectors": ["h2.3/h3.4", "h2.3/h3.1", "h2.3/h3.7", "h2.3/h3.9"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon_control_map.md §2: on_final daemon.py:980-1040 — listening gate :982, _on_final_lock serialization :988, textproc.clean :989 (None => rejected), payload = cleaned + ' ' if append_space :994, backend.type_text(payload) :996, feedback.record_final :1000. §3: the drain machinery (_request_stop:1105-1130, _begin_drain:1131-1140, _complete_drain:1142-1160) lets a final land before disarm — DO NOT regress it; it is consumed as-is by the streaming commit path.\n2. INPUT: P1.M2.T6.S1 StreamingOutput (tail/committed/frozen); P1.M2.T5.S1 prompt mechanism availability (hook called, wiring by P1.M2.T5.S2).\n3. LOGIC: Branch on_final on cfg.output.streaming. TRUE (default): correction pass — cleaned = textproc.clean(text); listening gate unchanged (:982); if rejected (None): FREEZE the tail as-is (no rewind, no typing; next utterance starts a fresh tail at the next boundary — committed unchanged); else: if cleaned differs from the typed tail -> press_backspace(len(tail)) + type(guarded final); apply append_space per config; committed += final + (space if append_space); tail = ''; fire an on_commit callback (engine API — P1.M2.T5.S2 subscribes to refresh the context prompt). feedback.record_final(cleaned) unchanged (existing behavior of writing finals back into 'partial' carries over). FALSE (rollback hatch): the EXACT current path (type_text(cleaned + ' ') once per final, partials to state file only) — keep the Rev 1 code intact behind the branch; this is the regression escape hatch, not dead code. Wire _on_partial daemon.py:1094-1103 -> engine.on_partial. Unit tests (fake backend + fake final stream, pure-python): differing commit rewinds exactly len(tail) then types final + trailing space; identical commit advances checkpoint silently; rejected final freezes tail; streaming=false exercises the Rev 1 path verbatim; drain mid-speech still lets the commit land. Daemon docstring gains the streaming section.\n4. OUTPUT: end-to-end streaming daemon on partials+finals with the rollback hatch; consumed by P1.M2.T5.S2 (commit hook), P1.M2.T6.S3, P1.M2.T7, P1.M3.T8.\n5. DOCS: [Mode A] daemon.py module docstring gains the §4.2quater streaming section (config.toml streaming comment landed in P1.M1.T1.S1). Rides with the work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T6.S3",
+                  "title": "Freeze rules — stranded tail, user typing, utterance boundary",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M2.T6.S1", "P1.M2.T6.S2"],
+                  "prd_selectors": ["h2.3/h3.4", "h2.3/h3.1", "h2.7"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: daemon_control_map.md §3: _drain_timeout watchdog daemon.py:1162-1176 (fires _safe_abort when a final is stuck in text(); _safe_abort skips abort unless _text_in_flight :1400-1428); _handle_dead_host daemon.py:893-940 (child death -> host None, listening cleared, phase 'unloaded'). PRD R3 rules 4-5: a stranded tail FREEZES (stays on screen, never deleted — the only deliberate deletion is cancel); any non-Backspace keypress freezes the tail and suppresses revision until the next utterance boundary (boundary = a commit landing, a cancel completing, or disarm).\n2. INPUT: P1.M2.T6.S1 engine frozen flag/reset_boundary; P1.M2.T6.S2 commit path (boundary events).\n3. LOGIC: (1) Stranded tail: hook _drain_timeout and _handle_dead_host to engine.freeze_stranded() — stop revising, NEVER rewind (typed text stays exactly as last shown). (2) User typing: engine.on_user_key() — freeze the pending tail + suppress all further partial typing for that utterance (feedback mirror keeps showing the frozen tail); un-freeze at the next boundary (commit / cancel reset / disarm — rearm engine state at each _arm). Unit tests: drain-timeout -> tail frozen not rewound; dead-host -> same; synthetic non-Backspace key mid-tail -> subsequent partials type nothing until a commit lands; boundary resets cleanly.\n4. OUTPUT: freeze API (freeze_stranded, on_user_key, reset semantics) consumed by P1.M2.T7.S2 (evdev feeds key events here); asserted by P1.M3.T8.S2 (asserts f/g).\n5. DOCS: none beyond docstrings — internal rules; README assumption note lands with P1.M3.T10.S1."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T7",
+              "title": "Backspace-cancel — socket command, daemon semantics, evdev listener (R4)",
+              "status": "Planned",
+              "description": "The only path that deliberately deletes typed text: control-socket cancel + voicectl cancel + a passive evdev listener that triggers on physical Backspace presses while a tail is pending, with the keybind fallback and log-once failure handling.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T7.S1",
+                  "title": "cancel: control socket + recorder abort/discard + ctl + keybind + install usage",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T2.S3", "P1.M1.T3.S1", "P1.M2.T6.S1", "P1.M2.T6.S3"],
+                  "prd_selectors": ["h2.3/h3.4", "h2.3/h3.10", "h2.3/h3.12"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE (overrides PRD R4 prose): daemon_control_map.md §3 — RecorderHost.abort() (recorder_host.py:237-246) does NOT discard buffered audio; discard is _clear_recorder_audio (:586-620), currently called only on DISARM (:549-554); the abort path emits a SENTINEL ('final', ...) via _run_text_and_emit_final (~:623) so host.text() never wedges. daemon_control_map.md §4 — ControlServer._dispatch daemon.py:1957-2020 ('stop' @2014 is the template; _arm_response shapes :1940-1955); ctl.py:37 _COMMANDS + epilog (post P1.M1.T2.S3: five commands).\n2. INPUT: P1.M2.T6.S1 tail state (rewind max(len(tail)-1, 0)); P1.M2.T6.S3 freeze semantics; P1.M1.T2.S3 command surface.\n3. LOGIC: (a) recorder_host: a cancel-flavored abort that (i) sets abort_event (unblocks text()), (ii) clears the child's buffered audio via _clear_recorder_audio so NO late commit can land, and (iii) marks the sentinel final so the daemon can recognize and DROP it (no typing, no record_final) — extend the abort path or add a ('cancel',{}) child command; keep the plain abort path (drain watchdog) behavior unchanged. (b) daemon cancel(): if a tail is pending -> backend.press_backspace(max(len(tail)-1, 0)) (the physical keystroke already deleted one — compensate by subtraction, never re-type), trigger the child cancel/abort+discard, reset the engine to a fresh tail at the current cursor (committed unchanged — the fragment is GONE, not committed), keep listening; response {'ok':true,'listening':true}. No pending tail -> no-op response (idempotent — further Backspaces are plain user edits, never compensated). (c) daemon _dispatch: add 'cancel' case. (d) ctl.py: add 'cancel' to _COMMANDS/epilog/help (final list: toggle, start, stop, status, quit, cancel). (e) hypr-binds.conf: add `bind = SUPER ALT, Backspace, exec, $HOME/.local/bin/voicectl cancel` + comment (fallback when evdev cannot open a keyboard). (f) install.sh: usage line gains cancel + the Backspace bind mention (R8). Tests: control-socket cancel dispatch + response shape, idempotence, sentinel-final suppression, buffered-audio discard (fake recorder), ctl command list.\n4. OUTPUT: socket-level cancel consumed by P1.M2.T7.S2 (evdev trigger) and asserted by P1.M3.T8.S2 (assert e).\n5. DOCS: [Mode A] ctl.py docstring/--help, hypr-binds.conf comment for the new bind, install.sh printed usage — all named in PRD §7. Rides with the work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T7.S2",
+                  "title": "evdev passive listener thread + synthetic parser tests",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S2", "P1.M2.T7.S1", "P1.M2.T6.S3"],
+                  "prd_selectors": ["h2.3/h3.4", "h2.3/h3.12", "h2.7"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: external_deps.md §1: evdev 1.9.3 (py>=3.11; installed by P1.M1.T1.S2); API — list_devices(), InputDevice(path) (O_RDWR|O_NONBLOCK; PermissionError/FileNotFoundError on bad nodes), capabilities() EV_KEY+KEY_BACKSPACE filter, read_loop() InputEvent (EV_KEY value 1=press, 0=release, 2=autorepeat — ignore 2), read_loop does NOT grab (EVIOCGRAB is opt-in via grab() — NEVER call it), one-reader-thread-per-device or selectors on fileno(); user already in group input (verified) — no permission changes. PRD R4/§4.2quater: gated by [cancel].on_backspace; [cancel].devices overrides enumeration; failure logged ONCE at arm, not per retry.\n2. INPUT: P1.M1.T1.S2 (import evdev available); P1.M1.T1.S1 cfg.cancel.{on_backspace, devices}; P1.M2.T7.S1 daemon cancel action; P1.M2.T6.S3 engine.on_user_key freeze hook.\n3. LOGIC: Daemon-process listener, started at arm when cfg.cancel.on_backspace (false -> never started; socket cancel still works): enumerate target nodes — explicit cfg.cancel.devices if non-empty else auto (list_devices() filtered by capabilities exposing KEY_BACKSPACE); open each passively (no grab); per-device reader threads: KEY_BACKSPACE press (value==1) while armed AND tail pending -> trigger the cancel path from P1.M2.T7.S1; ANY other key press -> engine.on_user_key() (user-typing freeze). Failure to open/enumerate -> log ONCE at arm with the voicectl-cancel fallback pointer. Structure the event interpretation as a PURE function over synthetic InputEvent-like values so unit tests need no real keyboard: parse press vs release vs autorepeat, Backspace vs non-Backspace, multi-device dispatch, device-enumeration filter (fake device list). Real-Backspace behavior stays in the T5 manual smoke (README first-run, P1.M3.T10.S1). AGENTS.md: any probe of /dev/input under timeout; never run the daemon foreground — unit tests use synthetic events only.\n4. OUTPUT: passive cancel trigger wired to cancel + freeze; asserted by P1.M3.T8.S2 (asserts e/f via synthetic events).\n5. DOCS: none beyond code comments — config.toml [cancel] comments landed in P1.M1.T1.S1; hypr-binds comment landed in P1.M2.T7.S1."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Verification & changeset-level documentation",
+          "status": "Planned",
+          "description": "Prove the delta: the new T8 streaming E2E suite, the existing-suite adjustments (idle/GPU shell tests, acceptance evidence rows), and the final Mode B documentation sweep that makes README + install usage describe the Rev 2 product.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T8",
+              "title": "T8 — tests/test_streaming.py streaming E2E (no mic, no real keystrokes)",
+              "status": "Planned",
+              "description": "Heavy CUDA suite (AGENTS.md: inner timeout 600, harness timeout above it; run the single file, never the whole suite) with a RecordingTypingBackend double and WAV fixtures, asserting PRD §6 T8 (a)-(g).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T8.S1",
+                  "title": "Harness + RecordingTypingBackend + asserts a/b/d",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M2.T6.S2", "P1.M2.T5.S2", "P1.M1.T3.S1"],
+                  "prd_selectors": ["h2.5", "h2.3/h3.4", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T8 + tests inventory in substrate_map.md §13: tests/test_feed_audio.py is the model for real-model offline feeding (use_microphone=False + feed_audio with real-time pacing, fuzzy >=80% token matching for espeak fixtures); WAV fixtures generated by tests/make_test_audio.sh into tests/out/ (utt_simple/pause/punct/multi). AGENTS.md: heavy CUDA — `timeout 600 .venv/bin/pytest tests/test_streaming.py -q` with the harness timeout set ABOVE 600; never foreground the daemon; skip cleanly when fixtures/deps absent (copy test_feed_audio.py's skip guards).\n2. INPUT: P1.M2.T6.S2 streaming daemon (partial + commit paths); P1.M2.T5.S2 prompt shipping (+ P1.M2.T5.S1's dynamic/degraded report); P1.M1.T3.S1 backend ABC (type_text + press_backspace).\n3. LOGIC: Build tests/test_streaming.py: a RecordingTypingBackend test double recording (method, arg, timestamp) for type_text/press_backspace — no real keystrokes ever; drive the daemon (or daemon-equivalent wiring) with the lite-style single-model recorder child fed WAVs via feed_audio. Asserts: (a) typing deltas arrive >=1 per 500 ms while speech streams, and ONLY the delta when a partial extends the tail; (b) a differing commit rewinds exactly the tail length then types the final text + trailing space; (d) the child's decodes carry initial_prompt = committed text back to the last sentence boundary, capped — assert via the child log/kwargs report from P1.M2.T5.S1's mechanism; when the child reported degraded, assert the degrade-log instead (per system_context.md correction 2).\n4. OUTPUT: the reusable harness (double + feeding + timing capture) consumed by P1.M3.T8.S2.\n5. DOCS: none — test code."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T8.S2",
+                  "title": "Asserts c/e/f/g — pause-join, cancel, key-freeze, stranded tail",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M3.T8.S1", "P1.M2.T7.S1", "P1.M2.T7.S2", "P1.M2.T6.S3"],
+                  "prd_selectors": ["h2.5", "h2.3/h3.4", "h2.6"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §6 T8 (c)/(e)/(f)/(g); system_context.md corrections 1-2 (cancel must drop buffered audio + suppress the sentinel final; prompt asserts conditional on dynamic mode). AGENTS.md heavy-CUDA discipline as in P1.M3.T8.S1.\n2. INPUT: P1.M3.T8.S1 harness; P1.M2.T7.S1 socket cancel + child discard; P1.M2.T7.S2 evdev parser (synthetic events); P1.M2.T6.S3 freeze rules; utt_pause.wav fixture (3 s internal silence).\n3. LOGIC: Extend tests/test_streaming.py: (c) a sentence split by a 3 s pause joins into ONE coherent commit — no mid-sentence capital, no spurious trailing period (context prompt + P1.M2.T4.S1 guards); (e) cancel with a pending tail -> press_backspace(len(tail)-1), buffered audio dropped (NO late commit lands afterwards), listening stays on; a second cancel is a no-op; (f) a synthetic non-Backspace key with a pending tail -> tail frozen, no further revision keystrokes that utterance; (g) forced drain-timeout -> tail frozen on screen, not rewound.\n4. OUTPUT: T8 complete — the evidence for acceptance row #11 (recorded into tests/ACCEPTANCE.md by P1.M3.T9.S1).\n5. DOCS: none — test code."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M3.T9",
+              "title": "Existing-suite adjustments + acceptance evidence rows",
+              "status": "Planned",
+              "description": "Fold the old T7 mode assertions into the single-model world, widen the VRAM expectation, update the shell GPU suite, and write acceptance rows #4/#10/#11/#12 against actual evidence (PRD §4/§5).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T9.S1",
+                  "title": "test_idle_and_gpu.sh + test_feed_audio.py adjustments + ACCEPTANCE.md rows",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T2.S2", "P1.M2.T7.S1", "P1.M3.T8.S2"],
+                  "prd_selectors": ["h2.5", "h2.6", "h2.3/h3.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §10/§13: tests/test_idle_and_gpu.sh T7 mode-switch roundtrip at :535-578 (polls `voicectl status | grep '^mode: lite'`); T6 armed VRAM assertion ~1-5 GB (single small.en is ~0.5-3 GB — PRD §4 says widen accordingly); tests/test_feed_audio.py lite-vs-normal comparative tests at :653/:679 (normal mode is gone); tests/ACCEPTANCE.md rows listed in substrate_map.md §10. AGENTS.md: the shell suite takes 5-8 min and refuses to start if the unit is running — give the harness timeout 900, stop the unit first, never interrupt mid-run.\n2. INPUT: P1.M1.T2.S2 (single-mode paths everywhere); P1.M2.T7.S1 (cancel in the voicectl surface); P1.M3.T8.S2 (T8 evidence to point rows at).\n3. LOGIC: test_idle_and_gpu.sh: delete the mode-switch roundtrip section (:535-578); single-model assertions in its place — exactly ONE model resident (no large-model worker), armed VRAM widened to ~0.5-3 GB, drain still honored; the old T7 >=70% fuzzy-accuracy assertion now lives in tests/test_streaming.py (verify it exists from P1.M3.T8, else add). test_feed_audio.py: rewrite the lite-vs-normal comparisons (:653/:679) as single-construction asserts (one model resident; finals still >=70% fuzzy). tests/ACCEPTANCE.md: amend #4 (typed = live partials + commits; nothing typed while off), rewrite #10 (single-model arming only — small.en sole model, ~half old VRAM via nvidia-smi, drain unchanged), ADD #11 (streaming: >=1 update/500 ms; in-place commits; no mid-paragraph capitals/spurious periods; Backspace-cancel; stranded fragments freeze; streaming=false restores Rev 1) and #12 (evdev-unavailable fallback: voicectl cancel performs the same rewind; listener failure logged once at arm), each pointing at its T8/shell evidence.\n4. OUTPUT: all suites green under the single-mode + streaming world; acceptance table rows #4/#10/#11/#12 match the PRD §5 delta.\n5. DOCS: [Mode A] tests/ACCEPTANCE.md rows — named in PRD §7 Mode A list. Rides with the work."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M3.T10",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Mode B final sweep (PRD §7): make README.md and install.sh printed usage describe the Rev 2 product end-to-end — one mode + streaming as THE behavior, Backspace-cancel + fallback bind, updated config tuning table, troubleshooting additions, first-run Backspace check, and zero residual two-mode/tmux prose.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T10.S1",
+                  "title": "README end-to-end Rev 2 sync + residual-reference sweep",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T1.S2", "P1.M1.T2.S1", "P1.M1.T2.S2", "P1.M1.T2.S3", "P1.M1.T2.S4", "P1.M1.T3.S1", "P1.M2.T4.S1", "P1.M2.T5.S1", "P1.M2.T5.S2", "P1.M2.T6.S1", "P1.M2.T6.S2", "P1.M2.T6.S3", "P1.M2.T7.S1", "P1.M2.T7.S2", "P1.M3.T8.S1", "P1.M3.T8.S2", "P1.M3.T9.S1"],
+                  "prd_selectors": ["h2.6", "h2.0", "h2.1", "h2.3", "h2.3/h3.7", "h2.3/h3.8", "h2.3/h3.10", "h2.3/h3.12", "h2.4", "h2.7"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: substrate_map.md §12 README inventory (380 lines): two-mode/lite/toggle-lite hits at L79, L100, L104, L109, L116, L119, L123-125 (lite_post_speech_silence_duration 0.5 text — now 0.8), L125, L139, L143, L161, L168, L322, L337; tmux/status.sh: ZERO grep hits (verify again, do not assume); section heads at Requirements L14 / Install L22 / First run L48 / Hotkey L77 / Lite mode L116 / Feedback surfaces L133 / Configuration L147 / Troubleshooting L227 / Logs L284 / Model lifecycle L330. install.sh usage lines 205-210 (final state after P1.M2.T7.S1: toggle|start|stop|status|quit|cancel + both binds).\n2. INPUT: ALL implementing subtasks (see dependencies) — the shipped behavior: single small.en mode, streaming typed partials + in-place commits, streaming=false hatch, Backspace-cancel (evdev + SUPER ALT,Backspace fallback bind), [cancel]/streaming/context_prompt config, 0.8 silence default, prefetch = small.en + tiny.en.\n3. LOGIC: README.md end-to-end rewrite of the affected sections: one mode + streaming output as THE behavior (not a mode); delete the Lite-mode section + ⚡ prefix semantics + all toggle-lite/two-model prose; Hotkey section = single toggle bind + Backspace-cancel bind (+ note evdev fallback); First run gains the T5 manual Backspace check (press Backspace mid-fragment -> fragment disappears, dictation stays armed); Feedback surfaces section matches state.json/toasts/voicectl status (mode constant 'lite'); Configuration table updated (lite_post_speech_silence_duration 0.8 semantics, streaming, context_prompt, [cancel] on_backspace/devices); Troubleshooting additions: backspace-in-terminals caveat (per-app Backspace semantics), evdev permission (input group / [cancel].devices override); Model lifecycle VRAM numbers halved. Sweep install.sh printed usage to the final command list; sweep any residual tmux/status.sh/final_model/realtime_model/toggle-lite references repo-wide (grep; expected none — verify). Verify every README claim against the code as landed; no new features.\n4. OUTPUT: README.md + install.sh docs consistent with the shipped Rev 2 changeset; closes the breakdown.\n5. DOCS: this IS the Mode B changeset-level docs task (PRD §7) — it depends on every implementing subtask by design."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
