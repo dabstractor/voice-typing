@@ -23,3 +23,6 @@ venv/
 
 # Agent harness artifacts (local scratch)
 .pi-subagents/
+*.tmp
+*.bak
+*.swp

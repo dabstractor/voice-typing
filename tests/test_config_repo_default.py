@@ -25,25 +25,25 @@ def test_repo_config_toml_equals_defaults():
 
 
 def test_repo_config_toml_has_no_extra_keys():
-    """The repo default must carry only the 20 schema keys (no compute_type etc.)."""
+    """The repo default must carry only the 21 schema keys (no compute_type etc.)."""
     import tomllib
 
     with open(_repo_config_path(), "rb") as fh:
         data = tomllib.load(fh)
     expected = {
         "asr": {
-            "final_model",
-            "realtime_model",
-            "lite_model",                 # PRD §4.2ter: lite-mode single model
+            "lite_model",                 # Rev 2 single-mode: THE model (partials + finals)
             "language",
             "device",
             "post_speech_silence_duration",
-            "lite_post_speech_silence_duration",   # PRD §4.2ter: lite-mode silence threshold
+            "lite_post_speech_silence_duration",   # PRD §4.2quater: commit silence under streaming
+            "context_prompt",             # PRD §4.2quater: rolling committed-context conditioning
             "realtime_processing_pause",
             "auto_stop_idle_seconds",
             "auto_unload_idle_seconds",   # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)
         },
-        "output": {"backend", "append_space"},
+        "output": {"backend", "append_space", "streaming"},  # streaming: PRD §4.2quater
+        "cancel": {"on_backspace", "devices"},  # PRD §4.2quater: Backspace-cancel section
         "feedback": {"state_file", "hypr_notify", "notify_ms", "notify_on_final"},
         "filter": {"min_chars", "blocklist"},
         "log": {"level"},
@@ -53,21 +53,30 @@ def test_repo_config_toml_has_no_extra_keys():
         assert set(data[section].keys()) == keys, (section, data[section].keys())
 
 
-def test_repo_config_lite_model_comment_names_correct_keybind():
-    """The lite_model comment must name SUPER+ALT+D (the real lite bind), not the stale SUPER+ALT+F.
+def test_repo_config_lite_model_comment_names_end_state_binds():
+    """The lite_model comment must name Ctrl+Alt+Super+D (the end-state toggle bind), not the old lite binds.
 
-    config.toml is user-facing config DOC (Mode A); a wrong keybind letter sends users to a dead
-    key (F is unbound). tomllib DROPS comments, so the value drift-guards above don't catch this —
-    assert on the RAW text. Source of truth: hypr-binds.conf `bind = SUPER ALT, D, ... toggle-lite`
-    (PRD §4.10). (bugfix Issue 2.)
+    Rev 2 collapse (PRD §4.2quater): exactly ONE toggle bind (Ctrl+Alt+Super+D) and ONE cancel
+    bind (Alt+Super+Backspace); toggle-lite is gone, so the old `voicectl toggle-lite` /
+    SUPER+ALT+D-as-lite-bind phrasing must not survive in the comments. config.toml is
+    user-facing config DOC (Mode A); tomllib DROPS comments, so the value drift-guards above
+    don't catch this — assert on the RAW text. The cancel bind must be documented somewhere in
+    the file (the [cancel] section).
     """
     with open(_repo_config_path()) as fh:
         text = fh.read()
     lite_lines = [ln for ln in text.splitlines() if ln.lstrip().startswith("lite_model")]
     assert lite_lines, "no lite_model line in config.toml"
     line = lite_lines[0]
-    assert "SUPER+ALT+D" in line, (
-        "config.toml lite_model comment must reference SUPER+ALT+D (the lite keybind, PRD §4.10 / "
-        "hypr-binds.conf), not a stale letter (Issue 2)."
+    assert "Ctrl+Alt+Super+D" in line, (
+        "config.toml lite_model comment must reference Ctrl+Alt+Super+D (the end-state toggle "
+        "bind, PRD §4.2quater), not a stale lite bind."
+    )
+    assert "toggle-lite" not in line, "config.toml lite_model comment still cites toggle-lite"
+    assert "SUPER+ALT+D" not in line, (
+        "config.toml lite_model comment still uses the old SUPER+ALT+D-as-lite-bind vocabulary"
     )
     assert "SUPER+ALT+F" not in line, "config.toml lite_model comment still has the stale SUPER+ALT+F"
+    assert "Alt+Super+Backspace" in text, (
+        "config.toml must document the end-state cancel bind Alt+Super+Backspace ([cancel] section)."
+    )

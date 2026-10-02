@@ -29,13 +29,12 @@
 
 [asr]   # speech recognition: models, device, voice-activity-detection timing
 
-final_model                  = "distil-large-v3"  # final, high-accuracy transcription model (faster-whisper). Sets the quality and latency of the text that actually gets typed.
-realtime_model               = "small.en"          # faster model used for live partial previews (shown in voicectl status while you speak).
-lite_model                   = "small.en"          # PRD §4.2ter: the SINGLE model loaded in LITE mode (`voicectl toggle-lite` / SUPER+ALT+D) — used for both partials AND finals, so the large model never loads. ~half the VRAM + faster finals, lower accuracy. Good for short quips/prompts where the big model's latency isn't worth it.
+lite_model                   = "small.en"          # the SINGLE transcription model (Rev 2 single-mode): loaded once, used for BOTH live partials AND typed finals. Dictation is armed/disarmed with Ctrl+Alt+Super+D.
 language                     = "en"                # ISO-639-1 code, e.g. "en", "es", "fr", "de".
 device                       = "cuda"              # "cuda" | "cpu". The daemon AUTO-FALLS-BACK to "cpu" (and smaller models) at startup if ctranslate2 finds no usable CUDA device; see voice_typing/cuda_check.py (PRD 4.4). Usually leave this as "cuda".
 post_speech_silence_duration = 0.6                 # seconds of silence after speech before a final is emitted. Lower = snappier but can cut off pauses; higher = fewer false finals but slower.
-lite_post_speech_silence_duration = 0.5            # PRD §4.2ter: lite-mode silence threshold (the silence gate, not the model, is the perceived-latency bottleneck). 0.3 = razor-snappy (may split a brief pause); 0.6 = safe.
+lite_post_speech_silence_duration = 0.8            # PRD §4.2quater: the endpointer only delays COMMIT under streaming (words are already typed live) — 0.8 halves mid-thought cuts for +0.3 s commit latency. 0.5 = razor-snappy; 1.0 = near-zero cuts.
+context_prompt               = true                # PRD §4.2quater: condition every decode on the rolling committed context (back to the last sentence boundary, ~200-token cap) so continuations read coherently. false = decode each utterance blind.
 realtime_processing_pause    = 0.15                # seconds between live partial updates. Lower = more responsive status; higher = less CPU.
 auto_stop_idle_seconds       = 30.0                # auto-disarm (stop listening) after this many seconds with NO recognized speech. Partials reset the clock while you talk, so it only fires when you truly go silent — prevents a forgotten hot-mic. Fires the normal stop popup + a journal line. 0 disables.
 auto_unload_idle_seconds     = 1800.0              # after this many seconds DISARMED (models loaded, NOT listening), tear down the recorder to free VRAM (~0). The clock starts on disarm (manual stop, toggle-off, or the auto-stop above) and resets on any arm; time listening does NOT count. 0 disables (models stay resident until quit). (PRD 4.2bis Idle unload)
@@ -45,6 +44,13 @@ auto_unload_idle_seconds     = 1800.0              # after this many seconds DIS
 
 backend     = "wtype"   # "wtype" (Wayland virtual keyboard, default) | "ydotool" (kernel uinput, TTY/X fallback) | "null" (types nothing; used by the headless E2E tests). The daemon auto-falls-back from wtype to ydotool on failure.
 append_space = true     # append one trailing space after each final so consecutive utterations flow as words. false = type text verbatim.
+streaming   = true      # PRD §4.2quater: type stabilized partials live + revise in place as the utterance grows. false = append-only finals (rollback hatch to the pre-Rev-2 typing behavior).
+
+
+[cancel]   # Rev 2: erase the last committed utterance (PRD §4.2quater)
+
+on_backspace = true     # enable the cancel gesture: Alt+Super+Backspace erases the last committed utterance (types Backspaces to undo it) instead of typing a literal Backspace.
+devices     = []        # keyboard device node(s) to watch for the cancel bind, e.g. ["/dev/input/event3"]. Empty list = auto-detect the keyboard device(s).
 
 
 [feedback]   # runtime state file + Hyprland notifications

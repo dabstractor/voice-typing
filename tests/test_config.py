@@ -16,6 +16,7 @@ import pytest
 import voice_typing.config as cfgmod
 from voice_typing.config import (
     AsrConfig,
+    CancelConfig,
     FeedbackConfig,
     FilterConfig,
     VoiceTypingConfig,
@@ -40,19 +41,22 @@ def test_defaults_match_prd_4_5():
     """A bare VoiceTypingConfig() must equal PRD §4.5 defaults exactly."""
     cfg = VoiceTypingConfig()
     # [asr]
-    assert cfg.asr.final_model == "distil-large-v3"
-    assert cfg.asr.realtime_model == "small.en"
-    assert cfg.asr.lite_model == "small.en"   # PRD §4.2ter: the single model loaded in lite mode
+    assert cfg.asr.lite_model == "small.en"   # the SINGLE model (Rev 2 single-mode collapse)
     assert cfg.asr.language == "en"
     assert cfg.asr.device == "cuda"
     assert cfg.asr.post_speech_silence_duration == 0.6
-    assert cfg.asr.lite_post_speech_silence_duration == 0.5  # PRD §4.2ter: lite-mode silence threshold (snugger than 0.6)
+    assert cfg.asr.lite_post_speech_silence_duration == 0.8  # PRD §4.2quater: endpointer only delays COMMIT under streaming
+    assert cfg.asr.context_prompt is True  # PRD §4.2quater: rolling committed-context conditioning
     assert cfg.asr.realtime_processing_pause == 0.15
     assert cfg.asr.auto_stop_idle_seconds == 30.0
     assert cfg.asr.auto_unload_idle_seconds == 1800.0  # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)
     # [output]
     assert cfg.output.backend == "wtype"
     assert cfg.output.append_space is True
+    assert cfg.output.streaming is True  # PRD §4.2quater: live partial typing + revise in place
+    # [cancel]
+    assert cfg.cancel.on_backspace is True  # PRD §4.2quater: Alt+Super+Backspace cancel gesture
+    assert cfg.cancel.devices == []
     # [feedback]
     assert cfg.feedback.state_file == ""
     assert cfg.feedback.hypr_notify is True
@@ -64,16 +68,16 @@ def test_defaults_match_prd_4_5():
 
 
 def test_defaults_match_cuda_check():
-    """Drift guard: asr model/device defaults must equal cuda_check.CUDA_DEFAULTS.
+    """Drift guard: the asr device default must equal cuda_check.CUDA_DEFAULTS.
 
-    config holds the DESIRED values; cuda_check holds the same values as its CUDA
+    config holds the DESIRED value; cuda_check holds the same value for its CUDA
     path. If these drift, the daemon's cuda_check override (P1.M4.T1.S1) would
-    contradict the config defaults.
+    contradict the config default. (Model defaults are no longer pinned here:
+    AsrConfig dropped the old two-model fields in the Rev 2 single-mode collapse;
+    cuda_check's model keys are collapsed in P1.M1.T2.S1.)
     """
     from voice_typing.cuda_check import CUDA_DEFAULTS
 
-    assert AsrConfig().final_model == CUDA_DEFAULTS["final_model"]
-    assert AsrConfig().realtime_model == CUDA_DEFAULTS["realtime_model"]
     assert AsrConfig().device == CUDA_DEFAULTS["device"]
 
 
@@ -81,12 +85,16 @@ def test_field_types_are_tomllib_natural_types():
     """Defaults carry the Python types tomllib yields (float for 0.6, int, bool)."""
     cfg = VoiceTypingConfig()
     assert isinstance(cfg.asr.post_speech_silence_duration, float)  # 0.6, not int 0
-    assert isinstance(cfg.asr.lite_post_speech_silence_duration, float)  # 0.5, not int 0 (PRD §4.2ter)
+    assert isinstance(cfg.asr.lite_post_speech_silence_duration, float)  # 0.8, not int 0 (PRD §4.2quater)
     assert isinstance(cfg.asr.realtime_processing_pause, float)
     assert isinstance(cfg.filter.min_chars, int)
     assert isinstance(cfg.feedback.notify_ms, int)
     assert isinstance(cfg.output.append_space, bool)
+    assert isinstance(cfg.asr.context_prompt, bool)
+    assert isinstance(cfg.output.streaming, bool)
+    assert isinstance(cfg.cancel.on_backspace, bool)
     assert isinstance(cfg.filter.blocklist, list)
+    assert isinstance(cfg.cancel.devices, list)
 
 
 def test_blocklist_not_shared_between_instances():
@@ -104,11 +112,15 @@ def test_blocklist_not_shared_between_instances():
 
 def test_from_toml_partial_table_keeps_other_defaults():
     """A TOML with only one overridden key keeps every other default."""
-    cfg = VoiceTypingConfig.from_toml({"asr": {"language": "es"}})
+    cfg = VoiceTypingConfig.from_toml(
+        {"asr": {"language": "es"}, "cancel": {"on_backspace": False}}
+    )
     assert cfg.asr.language == "es"                  # overridden
-    assert cfg.asr.final_model == "distil-large-v3"  # same-section default kept
+    assert cfg.asr.lite_model == "small.en"          # same-section default kept
     assert cfg.output.backend == "wtype"             # other section untouched
     assert cfg.filter.min_chars == 2                 # other section untouched
+    assert cfg.cancel.on_backspace is False          # overridden
+    assert cfg.cancel.devices == []                  # same-section default kept
 
 
 def test_from_toml_empty_dict_is_all_defaults():
@@ -157,6 +169,86 @@ def test_int_for_string_field_raises():
     """An int where a str is expected raises TypeError naming the field."""
     with pytest.raises(TypeError, match="device"):
         VoiceTypingConfig.from_toml({"asr": {"device": 123}})
+
+
+# ---------------------------------------------------------------------------
+# Rev 2 streaming-dictation knobs (PRD §4.2quater): asr.context_prompt, output.streaming,
+# [cancel] (on_backspace + devices). The bool fields must be GENUINE bools — int is
+# rejected (the mirror of the numeric guards rejecting bool); devices must be a list of
+# str (FilterConfig.blocklist guard style); unknown [cancel] keys raise TypeError via
+# from_toml's dataclass __init__.
+# ---------------------------------------------------------------------------
+
+_REV2_BOOL_FIELDS = (
+    ("asr", "context_prompt"),
+    ("output", "streaming"),
+    ("cancel", "on_backspace"),
+)
+
+
+def test_bool_fields_reject_int():
+    """int is NOT a valid bool for the Rev 2 flag fields (context_prompt=1 is a typo)."""
+    for section, key in _REV2_BOOL_FIELDS:
+        with pytest.raises(TypeError, match=key):
+            VoiceTypingConfig.from_toml({section: {key: 1}})
+        with pytest.raises(TypeError, match=key):
+            VoiceTypingConfig.from_toml({section: {key: 0}})
+
+
+def test_bool_fields_reject_non_bool_types():
+    """str/float/None/list are likewise rejected for the Rev 2 bool fields."""
+    for section, key in _REV2_BOOL_FIELDS:
+        for bad in ("yes", 1.0, None, [True]):
+            with pytest.raises(TypeError, match=key):
+                VoiceTypingConfig.from_toml({section: {key: bad}})
+
+
+def test_bool_fields_round_trip_through_toml():
+    """Genuine bools — including false — round-trip through TOML for the Rev 2 flags."""
+    cfg = VoiceTypingConfig.from_toml(
+        {
+            "asr": {"context_prompt": False},
+            "output": {"streaming": False},
+            "cancel": {"on_backspace": False},
+        }
+    )
+    assert cfg.asr.context_prompt is False
+    assert cfg.output.streaming is False
+    assert cfg.cancel.on_backspace is False
+
+
+def test_cancel_devices_wrong_type_raises():
+    """[cancel] devices must be a list of str; a bare str/int/set or non-str element raises."""
+    for bad in ("event3", 3, {"event3"}, ["ok", 3], [None]):
+        with pytest.raises(TypeError, match="devices"):
+            VoiceTypingConfig.from_toml({"cancel": {"devices": bad}})
+
+
+def test_cancel_devices_round_trips_through_toml():
+    """[cancel] devices accepts a list of str and keeps it verbatim."""
+    cfg = VoiceTypingConfig.from_toml({"cancel": {"devices": ["/dev/input/event3"]}})
+    assert cfg.cancel.devices == ["/dev/input/event3"]
+
+
+def test_cancel_devices_not_shared_between_instances():
+    """default_factory gives each CancelConfig its OWN devices list (mirrors blocklist)."""
+    a = CancelConfig()
+    b = CancelConfig()
+    a.devices.append("/dev/input/event9")
+    assert b.devices == []
+
+
+def test_cancel_unknown_key_raises():
+    """A typo'd [cancel] key (on_backspce) surfaces as a loud TypeError, not silent ignore."""
+    with pytest.raises(TypeError):
+        VoiceTypingConfig.from_toml({"cancel": {"on_backspce": True}})
+
+
+def test_lite_post_speech_silence_duration_default_and_round_trip_08():
+    """PRD §4.2quater: the commit silence default rises to 0.8 and 0.8 round-trips."""
+    assert VoiceTypingConfig().asr.lite_post_speech_silence_duration == 0.8
+    cfg = VoiceTypingConfig.from_toml({"asr": {"lite_post_speech_silence_duration": 0.8}})
+    assert cfg.asr.lite_post_speech_silence_duration == 0.8
 
 
 # ---------------------------------------------------------------------------
@@ -245,21 +337,21 @@ def test_filter_valid_values_load():
 
 
 # ---------------------------------------------------------------------------
-# [asr] lite_model (PRD §4.2ter) — the single model loaded in lite mode.
-# Pinned here for parity with final_model/realtime_model/device above: it is a PRD §4.2ter
-# default AND a __post_init__-validated str field.
+# [asr] lite_model (Rev 2 single-mode) — THE model: loaded once for partials + finals.
+# Pinned here for parity with the other [asr] fields above: it is a PRD §4.5 default AND a
+# __post_init__-validated str field.
 # ---------------------------------------------------------------------------
 
 
 def test_lite_model_round_trips_through_toml():
-    """[asr] lite_model parses from TOML and overrides the default (PRD §4.2ter)."""
+    """[asr] lite_model parses from TOML and overrides the default (Rev 2 single-mode)."""
     cfg = VoiceTypingConfig.from_toml({"asr": {"lite_model": "tiny.en"}})
     assert cfg.asr.lite_model == "tiny.en"               # overridden
-    assert cfg.asr.final_model == "distil-large-v3"      # other defaults kept
+    assert cfg.asr.language == "en"                      # other defaults kept
 
 
 def test_lite_model_wrong_type_raises():
-    """A non-string lite_model is rejected at load (mirrors device/final_model type guard)."""
+    """A non-string lite_model is rejected at load (mirrors the device type guard)."""
     for bad in (123, 12.0, True, None, ["small.en"]):
         with pytest.raises(TypeError, match="lite_model"):
             VoiceTypingConfig.from_toml({"asr": {"lite_model": bad}})
@@ -268,7 +360,7 @@ def test_lite_model_wrong_type_raises():
 def test_lite_post_speech_silence_duration_round_trips_through_toml():
     """[asr] lite_post_speech_silence_duration parses from TOML and overrides the default (PRD §4.2ter)."""
     cfg = VoiceTypingConfig.from_toml({"asr": {"lite_post_speech_silence_duration": 0.3}})
-    assert cfg.asr.lite_post_speech_silence_duration == 0.3   # overridden (0.5 default -> 0.3)
+    assert cfg.asr.lite_post_speech_silence_duration == 0.3   # overridden (0.8 default -> 0.3)
 
 
 def test_lite_post_speech_silence_duration_wrong_type_raises():
@@ -342,7 +434,7 @@ def test_load_with_explicit_path_bypasses_search(tmp_path):
     f.write_text('[asr]\ndevice = "cpu"\n', encoding="utf-8")
     cfg = VoiceTypingConfig.load(f)
     assert cfg.asr.device == "cpu"
-    assert cfg.asr.final_model == "distil-large-v3"  # non-overridden default kept
+    assert cfg.asr.lite_model == "small.en"  # non-overridden default kept
 
 
 def test_search_order_xdg_wins_over_repo(tmp_path, monkeypatch):

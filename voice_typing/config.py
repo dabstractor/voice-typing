@@ -49,18 +49,20 @@ from typing import Any, Mapping
 class AsrConfig:
     """[asr] — ASR model + device settings. `device` may be overridden by cuda_check."""
 
-    final_model: str = "distil-large-v3"
-    realtime_model: str = "small.en"
-    lite_model: str = "small.en"            # PRD §4.2ter: the SINGLE model loaded in lite mode
-                                          # (used for both partials + finals; large model never loads)
+    lite_model: str = "small.en"            # Rev 2 single-mode: THE model — loads once and is
+                                          # used for both partials + finals (the old two-model
+                                          # pair is gone; PRD §4.2quater collapse)
     language: str = "en"
     device: str = "cuda"  # "cuda" | "cpu" (daemon may override via cuda_check at startup)
     post_speech_silence_duration: float = 0.6  # VAD: finalize after this much silence (seconds)
-    lite_post_speech_silence_duration: float = 0.5  # PRD §4.2ter: lite-mode silence threshold —
-                                               # the silence gate, not the model, is the
-                                               # perceived-latency bottleneck (see §4.2ter).
-                                               # 0.3 = razor-snappy (may split a brief pause);
-                                               # 0.6 = safe.
+    lite_post_speech_silence_duration: float = 0.8  # PRD §4.2quater: the endpointer only delays
+                                               # COMMIT under streaming (words are already typed
+                                               # live) — 0.8 halves mid-thought cuts for +0.3 s
+                                               # commit latency. 0.5 = razor-snappy;
+                                               # 1.0 = near-zero cuts.
+    context_prompt: bool = True                # PRD §4.2quater: condition every decode on the
+                                             # rolling committed context (back to the last
+                                             # sentence boundary, ~200-token cap)
     realtime_processing_pause: float = 0.15    # partials cadence (seconds)
     auto_stop_idle_seconds: float = 30.0       # auto-disarm after this many seconds of no recognized
                                                # speech (partials reset the clock); 0 disables
@@ -96,12 +98,21 @@ class AsrConfig:
                     f"got {type(_v).__name__}: {_v!r}"
                 )
         # String fields: must be str.
-        for _name in ("final_model", "realtime_model", "lite_model", "language", "device"):
+        for _name in ("lite_model", "language", "device"):
             _v = getattr(self, _name)
             if not isinstance(_v, str):
                 raise TypeError(
                     f"[asr] {_name} expects str, got {type(_v).__name__}: {_v!r}"
                 )
+        # Bool fields: must be genuine bools. Same int/bool asymmetry as the numeric guard
+        # above, mirrored: the numerics REJECT bool (bool is an int subclass); the bools REJECT
+        # int (a bare `context_prompt = 1` in config.toml is a typo, not a flag). Raises
+        # TypeError at LOAD time instead of silently flipping the feature off.
+        if not isinstance(self.context_prompt, bool):
+            raise TypeError(
+                f"[asr] context_prompt expects bool, got "
+                f"{type(self.context_prompt).__name__}: {self.context_prompt!r}"
+            )
         # device VALUE validation (VT-005): only "cuda" | "cpu" are valid. A typo such as
         # device="cud" or device="gpu" is a valid str so it passed the type guard above, but it
         # would then flow into _resolve_device_config -> AudioToTextRecorder(device=…) and fail
@@ -121,6 +132,8 @@ class OutputConfig:
 
     backend: str = "wtype"     # "wtype" | "ydotool" | "null" (types nothing)
     append_space: bool = True  # daemon appends one trailing space to each final
+    streaming: bool = True     # PRD §4.2quater: type stabilized partials live + revise in place;
+                               # false = append-only finals (rollback hatch)
 
     def __post_init__(self) -> None:
         # backend VALUE validation (bugfix Issue 3 / VT-005 precedent): only "wtype" | "ydotool" |
@@ -133,6 +146,52 @@ class OutputConfig:
         if self.backend not in ("wtype", "ydotool", "null"):
             raise ValueError(
                 f'[output] backend must be "wtype", "ydotool", or "null", got {self.backend!r}'
+            )
+        # streaming must be a genuine bool (rejects int — `streaming = 1` is a typo, not a
+        # flag; mirrors the AsrConfig.context_prompt guard).
+        if not isinstance(self.streaming, bool):
+            raise TypeError(
+                f"[output] streaming expects bool, got "
+                f"{type(self.streaming).__name__}: {self.streaming!r}"
+            )
+
+
+@dataclass
+class CancelConfig:
+    """[cancel] — Rev 2 Backspace-cancel of the last committed utterance (PRD §4.2quater).
+
+    While dictation is armed, Alt+Super+Backspace erases the last committed utterance
+    (types Backspaces to undo it) instead of typing a literal Backspace. `on_backspace`
+    enables the gesture; `devices` optionally pins the keyboard device node(s) to watch
+    (e.g. ["/dev/input/event3"]) — an empty list means auto-detect (P1.M2.T7.S2 owns the
+    enumeration).
+    """
+
+    on_backspace: bool = True  # Alt+Super+Backspace erases the last committed utterance
+    # default_factory: each CancelConfig gets its OWN list (mutable-default guard,
+    # mirroring FilterConfig.blocklist). Empty list = auto-detect the keyboard device(s).
+    devices: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Validate field types at construction (PRD §4.5 robustness; mirrors the other sections).
+
+        on_backspace must be a genuine bool (int rejected — the same asymmetry as everywhere
+        else: numeric fields reject bool, bool fields reject int). devices must be a list of
+        str (FilterConfig.blocklist guard style): a wrong-typed value would otherwise only
+        crash at RUNTIME when the cancel listener opens/grabs the device — under systemd,
+        far from the config mistake. TypeError at LOAD time keeps the fail-fast posture.
+        """
+        if not isinstance(self.on_backspace, bool):
+            raise TypeError(
+                f"[cancel] on_backspace expects bool, got "
+                f"{type(self.on_backspace).__name__}: {self.on_backspace!r}"
+            )
+        if not isinstance(self.devices, list) or not all(
+            isinstance(_d, str) for _d in self.devices
+        ):
+            raise TypeError(
+                f"[cancel] devices expects a list of str, got "
+                f"{type(self.devices).__name__}: {self.devices!r}"
             )
 
 
@@ -257,6 +316,7 @@ class VoiceTypingConfig:
 
     asr: AsrConfig = field(default_factory=AsrConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    cancel: CancelConfig = field(default_factory=CancelConfig)
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
     filter: FilterConfig = field(default_factory=FilterConfig)
     log: LogConfig = field(default_factory=LogConfig)
@@ -267,7 +327,7 @@ class VoiceTypingConfig:
     def from_toml(cls, data: Mapping[str, Any]) -> VoiceTypingConfig:
         """Build a config from an already-parsed TOML mapping.
 
-        Each table ([asr]/[output]/[feedback]/[filter]) overlays its dataclass
+        Each table ([asr]/[output]/[cancel]/[feedback]/[filter]) overlays its dataclass
         defaults — only present keys override; missing tables/keys keep defaults.
         Unknown keys raise TypeError (dataclass __init__ rejects them) so a typo'd
         config key surfaces loudly instead of being silently ignored. Malformed
@@ -286,6 +346,7 @@ class VoiceTypingConfig:
         return cls(
             asr=_overlay(AsrConfig, "asr"),
             output=_overlay(OutputConfig, "output"),
+            cancel=_overlay(CancelConfig, "cancel"),
             feedback=_overlay(FeedbackConfig, "feedback"),
             filter=_overlay(FilterConfig, "filter"),
             log=_overlay(LogConfig, "log"),
