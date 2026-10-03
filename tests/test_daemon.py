@@ -13,6 +13,7 @@ Run:
     cd /home/dustin/projects/voice-typing
     .venv/bin/python -m pytest tests/test_daemon.py -v
 """
+
 from __future__ import annotations
 
 import logging
@@ -44,13 +45,17 @@ class _FakeFeedback:
     def set_phase(self, phase: str) -> None:
         self.phases.append(phase)
 
-    def snapshot(self) -> dict:                       # mirror Feedback.snapshot (status_snapshot reads it)
+    def snapshot(self) -> dict:  # mirror Feedback.snapshot (status_snapshot reads it)
         return {"phase": self.phases[-1] if self.phases else "unloaded"}
 
-    def set_models_loaded(self, loaded: bool) -> None:  # P1.M2.T2.S1: mirror Feedback contract (no-op stub)
+    def set_models_loaded(
+        self, loaded: bool
+    ) -> None:  # P1.M2.T2.S1: mirror Feedback contract (no-op stub)
         pass
 
-    def set_mode(self, mode: str) -> None:  # PRD §4.2ter: mirror Feedback.set_mode (no-op stub)
+    def set_mode(
+        self, mode: str
+    ) -> None:  # PRD §4.2ter: mirror Feedback.set_mode (no-op stub)
         self.modes.append(mode)
 
     def notify(self, msg: str) -> None:  # cold-load UX popup (mirrors Feedback.notify)
@@ -110,17 +115,31 @@ def cfg() -> VoiceTypingConfig:
 
 
 def test_cfg_to_kwargs_keys_are_exactly_the_non_callback_set(cfg, monkeypatch):
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: avoid the real cuda_check probe
+    _cuda_resolve(
+        monkeypatch, daemon.cuda_check.CUDA_DEFAULTS
+    )  # hermetic: avoid the real cuda_check probe
     kw = daemon.cfg_to_kwargs(cfg)
     # No on_* callbacks here (they are wired in build_recorder).
     assert not any(k.startswith("on_") for k in kw), sorted(kw)
     expected = {
-        "model", "realtime_model_type", "language", "device", "compute_type",
-        "realtime_processing_pause", "post_speech_silence_duration",
-        "enable_realtime_transcription", "use_main_model_for_realtime",
-        "min_length_of_recording", "min_gap_between_recordings", "silero_sensitivity",
-        "webrtc_sensitivity", "silero_backend", "spinner", "use_microphone",
-        "ensure_sentence_starting_uppercase", "ensure_sentence_ends_with_period",
+        "model",
+        "realtime_model_type",
+        "language",
+        "device",
+        "compute_type",
+        "realtime_processing_pause",
+        "post_speech_silence_duration",
+        "enable_realtime_transcription",
+        "use_main_model_for_realtime",
+        "min_length_of_recording",
+        "min_gap_between_recordings",
+        "silero_sensitivity",
+        "webrtc_sensitivity",
+        "silero_backend",
+        "spinner",
+        "use_microphone",
+        "ensure_sentence_starting_uppercase",
+        "ensure_sentence_ends_with_period",
         "no_log_file",
     }
     assert set(kw) == expected, sorted(set(kw) ^ expected)
@@ -140,8 +159,12 @@ def test_cfg_to_kwargs_single_model_fills_both_slots(cfg):
     )
     assert kw["model"] == "small.en"
     assert kw["realtime_model_type"] == "small.en"
-    assert kw["use_main_model_for_realtime"] is True        # skips the separate realtime engine
-    assert kw["post_speech_silence_duration"] == cfg.asr.lite_post_speech_silence_duration
+    assert (
+        kw["use_main_model_for_realtime"] is True
+    )  # skips the separate realtime engine
+    assert (
+        kw["post_speech_silence_duration"] == cfg.asr.lite_post_speech_silence_duration
+    )
     assert kw["device"] == "cuda" and kw["compute_type"] == "float16"
     assert kw["language"] == cfg.asr.language
 
@@ -200,8 +223,11 @@ def test_cfg_to_kwargs_uses_lite_post_speech_silence_duration(cfg, monkeypatch):
     """
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     # (a) default:
-    assert daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"] == \
-        cfg.asr.lite_post_speech_silence_duration == 0.8
+    assert (
+        daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"]
+        == cfg.asr.lite_post_speech_silence_duration
+        == 0.8
+    )
     # (b) override flows through (cfg fixture is function-scoped -> safe to mutate):
     cfg.asr.lite_post_speech_silence_duration = 0.3
     assert daemon.cfg_to_kwargs(cfg)["post_speech_silence_duration"] == 0.3
@@ -211,7 +237,9 @@ def test_cfg_to_kwargs_fixed_values(cfg, monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     kw = daemon.cfg_to_kwargs(cfg)
     assert kw["enable_realtime_transcription"] is True
-    assert kw["use_main_model_for_realtime"] is True   # Rev 2: the ONE model also serves partials
+    assert (
+        kw["use_main_model_for_realtime"] is True
+    )  # Rev 2: the ONE model also serves partials
     assert kw["min_length_of_recording"] == 0.3
     assert kw["min_gap_between_recordings"] == 0.0
     assert kw["silero_sensitivity"] == 0.4
@@ -256,13 +284,15 @@ def test_cfg_to_kwargs_no_device_index_overrides(cfg, monkeypatch):
 
 def test_cfg_to_kwargs_passes_through_config_values(monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
-    custom = VoiceTypingConfig(asr=AsrConfig(
-        language="es",
-        lite_post_speech_silence_duration=0.9,
-        realtime_processing_pause=0.2,
-        lite_model="large-v3-turbo",
-        device="cuda",
-    ))
+    custom = VoiceTypingConfig(
+        asr=AsrConfig(
+            language="es",
+            lite_post_speech_silence_duration=0.9,
+            realtime_processing_pause=0.2,
+            lite_model="large-v3-turbo",
+            device="cuda",
+        )
+    )
     kw = daemon.cfg_to_kwargs(custom)
     assert kw["language"] == "es"
     assert kw["post_speech_silence_duration"] == 0.9
@@ -284,7 +314,11 @@ def test_cfg_to_kwargs_calls_resolve_with_cfg_defaults(cfg, monkeypatch):
     daemon.cfg_to_kwargs(cfg)
     assert seen, "resolve_device_and_models was not called"
     d = seen[0]
-    assert set(d) == {"device", "compute_type", "model"}   # 3-key Rev 2 resolve contract (S1)
+    assert set(d) == {
+        "device",
+        "compute_type",
+        "model",
+    }  # 3-key Rev 2 resolve contract (S1)
     assert d["model"] == cfg.asr.lite_model
     assert d["device"] == cfg.asr.device
     assert d["compute_type"] == "float16"  # derived from device=='cuda'
@@ -312,11 +346,14 @@ def test_callback_partial_updates_feedback():
     assert fb.phases == []
 
 
-@pytest.mark.parametrize("attr,phase", [
-    ("on_vad_detect_start", "listening"),
-    ("on_vad_start", "speaking"),
-    ("on_vad_stop", "listening"),
-])
+@pytest.mark.parametrize(
+    "attr,phase",
+    [
+        ("on_vad_detect_start", "listening"),
+        ("on_vad_start", "speaking"),
+        ("on_vad_stop", "listening"),
+    ],
+)
 def test_callback_vad_phases(attr, phase):
     fb = _FakeFeedback()
     daemon._build_callbacks(fb)[attr]()
@@ -336,7 +373,13 @@ def test_filter_keeps_kwargs_in_signature():
 
 
 def test_filter_drops_unknown_kwargs(caplog):
-    kw = {"model": "x", "language": "en", "device": "cpu", "bogus_kw": 1, "also_bogus": 2}
+    kw = {
+        "model": "x",
+        "language": "en",
+        "device": "cpu",
+        "bogus_kw": 1,
+        "also_bogus": 2,
+    }
     with caplog.at_level(logging.WARNING, logger="voice_typing.daemon"):
         out = daemon._filter_kwargs_to_signature(kw, _StrictFakeRecorder)
     assert out == {"model": "x", "language": "en", "device": "cpu"}
@@ -375,7 +418,7 @@ def test_construct_callbacks_are_live(cfg, monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     fb = _FakeFeedback()
     rec = daemon._construct(cfg, fb, _FakeRecorder)
-    rec.kwargs["on_vad_start"]()           # simulate RealtimeSTT firing on_vad_start
+    rec.kwargs["on_vad_start"]()  # simulate RealtimeSTT firing on_vad_start
     rec.kwargs["on_realtime_transcription_stabilized"]("live partial")
     assert fb.phases == ["speaking"]
     assert fb.partials == ["live partial"]
@@ -395,11 +438,12 @@ def test_construct_wires_on_speech_into_partial_callback(cfg, monkeypatch):
     """on_speech (idle auto-stop reset hook) fires on a realtime partial, and ONLY then."""
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     fired = []
-    rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder,
-                            on_speech=lambda: fired.append(1))
-    rec.kwargs["on_realtime_transcription_stabilized"]("a partial")   # partial -> fires
+    rec = daemon._construct(
+        cfg, _FakeFeedback(), _FakeRecorder, on_speech=lambda: fired.append(1)
+    )
+    rec.kwargs["on_realtime_transcription_stabilized"]("a partial")  # partial -> fires
     assert fired == [1]
-    rec.kwargs["on_vad_start"]()                                      # VAD-only -> does NOT fire
+    rec.kwargs["on_vad_start"]()  # VAD-only -> does NOT fire
     assert fired == [1]
 
 
@@ -453,7 +497,7 @@ class _StubRecorder:
     def text(self, on_transcription_finished=None):
         self.text_calls += 1
         self.last_callback = on_transcription_finished
-        return ""   # mimic RealtimeSTT: returns "" when interrupted/idle; loop re-enters
+        return ""  # mimic RealtimeSTT: returns "" when interrupted/idle; loop re-enters
 
     def set_microphone(self, microphone_on=True):
         self.mic.append(microphone_on)
@@ -518,7 +562,19 @@ class _FakeHost:
     bounded join on the wrapped recorder's shutdown() (mirrors the legacy adapter's force-cleanup).
     """
 
-    def __init__(self, cfg, feedback, latency, on_final, on_partial, on_speech, *, force_cpu=False, is_listening=None, mode="normal"):
+    def __init__(
+        self,
+        cfg,
+        feedback,
+        latency,
+        on_final,
+        on_partial,
+        on_speech,
+        *,
+        force_cpu=False,
+        is_listening=None,
+        mode="normal",
+    ):
         # Mirror the real RecorderHost.__init__ signature so host_factory=lambda *a, **k: _FakeHost(*a, **k)
         # works. Store the callbacks (the tests do not exercise them, but the daemon wires them).
         self.cfg = cfg
@@ -529,8 +585,8 @@ class _FakeHost:
         self.on_speech = on_speech
         self.force_cpu = force_cpu
         self.is_listening = is_listening
-        self.mode = mode                     # PRD §4.2ter: the mode this fake child was built for
-        self.recorder = _StubRecorder()   # the wrapped stub the tests assert on
+        self.mode = mode  # PRD §4.2ter: the mode this fake child was built for
+        self.recorder = _StubRecorder()  # the wrapped stub the tests assert on
         self.spawn_calls = 0
         self.spawn_result = True
         self.stop_calls = 0
@@ -585,7 +641,9 @@ class _FakeHost:
         self._alive = False
         # bounded best-effort shutdown of the wrapped stub (mirrors the legacy adapter).
         import threading as _t
+
         done = _t.Event()
+
         def _do():
             try:
                 self.recorder.shutdown()
@@ -593,6 +651,7 @@ class _FakeHost:
                 pass
             finally:
                 done.set()
+
         th = _t.Thread(target=_do, daemon=True)
         th.start()
         done.wait(timeout=timeout)
@@ -604,23 +663,32 @@ def _fake_host_factory(spawn_result=True, device=None):
     (_load_host passes NO mode since the P1.M1.T2.S2 single-path collapse; the _FakeHost ctor's
     vestigial mode default is retained — fakes may keep the attr — but tests never force it.)
     """
+
     def _factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
         host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
         host.spawn_result = spawn_result
         if device is not None:
             host.device = dict(device)
         return host
+
     return _factory
 
 
-def _make_daemon(*, recorder=None, recorder_host=None, host_factory=None, backend=None, cfg=None):
+def _make_daemon(
+    *, recorder=None, recorder_host=None, host_factory=None, backend=None, cfg=None
+):
     cfg = cfg or VoiceTypingConfig()
     fb = _DaemonFakeFeedback()
     rec = recorder if recorder is not None else _StubRecorder()
     be = backend if backend is not None else _FakeBackend()
     d = daemon.VoiceTypingDaemon(
-        cfg, fb, recorder=rec, recorder_host=recorder_host, host_factory=host_factory,
-        backend=be, mic_prober=_ok_probe,
+        cfg,
+        fb,
+        recorder=rec,
+        recorder_host=recorder_host,
+        host_factory=host_factory,
+        backend=be,
+        mic_prober=_ok_probe,
     )
     return d, fb, rec, be
 
@@ -646,7 +714,7 @@ def test_on_final_gate_when_not_listening():
 
 def test_on_final_happy_path_appends_space():
     d, fb, rec, be = _make_daemon()
-    d.start()   # arm
+    d.start()  # arm
     d.on_final("hello world")
     # P1.M2.T6.S2: streaming (default) commits through the engine — the final, then
     # the trailing space as its own keystroke call. Recorded WITHOUT a trailing space.
@@ -667,7 +735,7 @@ def test_on_final_append_space_false():
 def test_on_final_rejects_hallucination():
     d, fb, rec, be = _make_daemon()
     d.start()
-    d.on_final("thank you.")   # blocklist entry → textproc.clean returns None
+    d.on_final("thank you.")  # blocklist entry → textproc.clean returns None
     assert be.typed == []
     assert fb.finals == []
 
@@ -675,9 +743,11 @@ def test_on_final_rejects_hallucination():
 def test_on_final_typing_raises_is_caught_and_record_still_happens():
     d, fb, rec, be = _make_daemon(backend=_FakeBackend(raise_on="boom"))
     d.start()
-    d.on_final("boom")   # commit's first type_text("boom") matches raise_on → raises
-    assert be.typed == []          # nothing typed (it raised)
-    assert fb.finals == ["boom"]   # record_final STILL called (recognition is final regardless)
+    d.on_final("boom")  # commit's first type_text("boom") matches raise_on → raises
+    assert be.typed == []  # nothing typed (it raised)
+    assert fb.finals == [
+        "boom"
+    ]  # record_final STILL called (recognition is final regardless)
 
 
 # --- graceful-stop drain: a premature stop lets the FINAL model finish, then disarms ---
@@ -686,20 +756,23 @@ def test_on_final_typing_raises_is_caught_and_record_still_happens():
 # _request_stop sets _drain; the run loop disarms once text() returns the natural final. A watchdog
 # (_drain_timeout) aborts the rare no-final case so the drain can't hang. Idle stops disarm at once.
 
+
 def test_stop_drains_when_utterance_in_flight():
     """stop() mid-utterance does NOT abort — it drains: lets the final finish, THEN disarms."""
     d, fb, rec, be = _make_daemon()
     d.start()
-    d._touch_speech()               # speech happened -> _final_pending=True
-    d._text_in_flight.set()         # simulate the run loop blocked inside text()
-    d.stop()                        # graceful stop -> drain (NOT abort)
-    assert d._drain is True         # draining
-    assert d.is_listening() is True # still listening — the final model is still working
-    assert rec.aborts == 0          # NOT aborted: the large model is allowed to finish
+    d._touch_speech()  # speech happened -> _final_pending=True
+    d._text_in_flight.set()  # simulate the run loop blocked inside text()
+    d.stop()  # graceful stop -> drain (NOT abort)
+    assert d._drain is True  # draining
+    assert (
+        d.is_listening() is True
+    )  # still listening — the final model is still working
+    assert rec.aborts == 0  # NOT aborted: the large model is allowed to finish
     # The run loop would let text() return the final then complete the drain; simulate that:
     d._text_in_flight.clear()
     d._complete_drain()
-    assert d.is_listening() is False   # now disarmed
+    assert d.is_listening() is False  # now disarmed
     assert d._drain is False
 
 
@@ -709,7 +782,7 @@ def test_toggle_off_drains_when_utterance_in_flight():
     d.start()
     d._touch_speech()
     d._text_in_flight.set()
-    d.toggle()                      # listening -> disarm branch -> _request_stop -> drain
+    d.toggle()  # listening -> disarm branch -> _request_stop -> drain
     assert d._drain is True
     assert rec.aborts == 0
 
@@ -718,7 +791,7 @@ def test_stop_disarms_immediately_when_idle():
     """stop() when idle (no utterance in flight) disarms immediately — nothing to wait for."""
     d, fb, rec, be = _make_daemon()
     d.start()
-    d.stop()                        # no _final_pending, not in text() -> immediate disarm
+    d.stop()  # no _final_pending, not in text() -> immediate disarm
     assert d.is_listening() is False
     assert d._drain is False
 
@@ -727,11 +800,11 @@ def test_stop_aborts_immediately_when_text_idle_no_speech():
     """stop() while text() is blocked but no speech is pending -> immediate disarm + abort."""
     d, fb, rec, be = _make_daemon()
     d.start()
-    d._text_in_flight.set()         # loop in text(), idle-waiting for the next utterance
-    d.stop()                        # _final_pending False -> immediate path
+    d._text_in_flight.set()  # loop in text(), idle-waiting for the next utterance
+    d.stop()  # _final_pending False -> immediate path
     assert d.is_listening() is False
     assert d._drain is False
-    assert rec.aborts == 1          # aborted (no utterance to finish)
+    assert rec.aborts == 1  # aborted (no utterance to finish)
 
 
 def test_drain_timeout_aborts_blocked_text():
@@ -742,9 +815,9 @@ def test_drain_timeout_aborts_blocked_text():
     d._text_in_flight.set()
     d._begin_drain()
     assert rec.aborts == 0
-    d._drain_timeout()              # simulate the watchdog firing (final never came)
-    assert rec.aborts == 1          # aborted the blocked text()
-    assert d._drain is True         # still set until the run loop completes the drain
+    d._drain_timeout()  # simulate the watchdog firing (final never came)
+    assert rec.aborts == 1  # aborted the blocked text()
+    assert d._drain is True  # still set until the run loop completes the drain
 
 
 def test_on_final_clears_final_pending():
@@ -755,7 +828,7 @@ def test_on_final_clears_final_pending():
     assert d._final_pending is True
     d.on_final("hello world")
     assert d._final_pending is False
-    assert be.typed == ["hello world", " "]   # commit: final + space (P1.M2.T6.S2)
+    assert be.typed == ["hello world", " "]  # commit: final + space (P1.M2.T6.S2)
 
 
 def test_arm_resets_stale_final_pending_from_prior_session():
@@ -769,14 +842,18 @@ def test_arm_resets_stale_final_pending_from_prior_session():
     exercising the _arm() reset as defense-in-depth.)"""
     d, fb, rec, be = _make_daemon()
     d.start()
-    d._touch_speech()                # speech -> _final_pending=True
-    d.on_final("hello world")        # final -> _final_pending=False, _utterance_finalized=True, text typed
-    d._final_pending = True          # force the stale state (a stray partial can no longer produce it)
+    d._touch_speech()  # speech -> _final_pending=True
+    d.on_final(
+        "hello world"
+    )  # final -> _final_pending=False, _utterance_finalized=True, text typed
+    d._final_pending = (
+        True  # force the stale state (a stray partial can no longer produce it)
+    )
     assert d._utterance_finalized is True
-    d.stop()                         # disarm (ends the prior session)
+    d.stop()  # disarm (ends the prior session)
     # re-arm: _arm() must reset both flags (the fix) — no utterance is in flight yet
     d.start()
-    assert d._final_pending is False       # CLEAN SLATE (fails before the fix: still True)
+    assert d._final_pending is False  # CLEAN SLATE (fails before the fix: still True)
     assert d._utterance_finalized is False  # fresh session: no final yet
 
 
@@ -785,9 +862,9 @@ def test_disarm_clears_final_pending():
     stale True into the next session/stop."""
     d, fb, rec, be = _make_daemon()
     d.start()
-    d._touch_speech()                # _final_pending=True
+    d._touch_speech()  # _final_pending=True
     assert d._final_pending is True
-    d.stop()                         # -> _disarm() (under _lock via stop)
+    d.stop()  # -> _disarm() (under _lock via stop)
     assert d._final_pending is False  # the fix in _disarm cleared it
 
 
@@ -798,14 +875,14 @@ def test_stop_after_stray_partial_in_fresh_session_disarms_immediately():
     d.start()
     d._touch_speech()
     d.on_final("hello world")
-    d._touch_speech()                # stray stale partial (prior session)
-    d.stop()                         # end prior session
-    d.start()                        # re-arm -> _arm() resets _final_pending=False (the fix)
-    d._text_in_flight.set()          # run loop blocked in text(), idle-waiting for the next utterance
-    d.stop()                         # no speech in THIS session -> immediate disarm + abort (NOT a drain)
+    d._touch_speech()  # stray stale partial (prior session)
+    d.stop()  # end prior session
+    d.start()  # re-arm -> _arm() resets _final_pending=False (the fix)
+    d._text_in_flight.set()  # run loop blocked in text(), idle-waiting for the next utterance
+    d.stop()  # no speech in THIS session -> immediate disarm + abort (NOT a drain)
     assert d.is_listening() is False
     assert d._drain is False
-    assert rec.aborts == 1           # immediate abort (before the fix: 0 — it drained instead)
+    assert rec.aborts == 1  # immediate abort (before the fix: 0 — it drained instead)
 
 
 def test_stop_within_session_stray_partial_after_final_disarms_immediately():
@@ -820,22 +897,28 @@ def test_stop_within_session_stray_partial_after_final_disarms_immediately():
     """
     d, fb, rec, be = _make_daemon()
     d.start()
-    d._touch_speech()                # speech -> _final_pending=True (utterance not yet finalized)
+    d._touch_speech()  # speech -> _final_pending=True (utterance not yet finalized)
     assert d._final_pending is True
-    d._text_in_flight.set()          # run loop blocked inside text()
-    d.on_final("hello world")        # final lands + is typed; _final_pending=False, _utterance_finalized=True
-    assert be.typed == ["hello world", " "]   # commit: final + space (P1.M2.T6.S2)
+    d._text_in_flight.set()  # run loop blocked inside text()
+    d.on_final(
+        "hello world"
+    )  # final lands + is typed; _final_pending=False, _utterance_finalized=True
+    assert be.typed == ["hello world", " "]  # commit: final + space (P1.M2.T6.S2)
     assert d._utterance_finalized is True
     # run loop re-enters text() for the next utterance (still blocked inside text()); _utterance_finalized
     # stays True until the loop resets it on the NEXT text() entry — but a stray partial fires FIRST:
     d._text_in_flight.set()
-    d._touch_speech()                # STRAY in-session partial — must NOT re-arm _final_pending
-    assert d._final_pending is False  # the within-session fix: utterance already finalized
+    d._touch_speech()  # STRAY in-session partial — must NOT re-arm _final_pending
+    assert (
+        d._final_pending is False
+    )  # the within-session fix: utterance already finalized
     assert d._text_in_flight.is_set() is True
     d.stop()
-    assert d.is_listening() is False  # immediate disarm (before the fix: stayed listening ~5s)
-    assert d._drain is False          # did NOT drain (before the fix: True)
-    assert rec.aborts == 1            # immediate abort (before the fix: 0)
+    assert (
+        d.is_listening() is False
+    )  # immediate disarm (before the fix: stayed listening ~5s)
+    assert d._drain is False  # did NOT drain (before the fix: True)
+    assert rec.aborts == 1  # immediate abort (before the fix: 0)
 
 
 def test_stop_within_session_new_speech_after_final_drains():
@@ -847,14 +930,14 @@ def test_stop_within_session_new_speech_after_final_drains():
     d.start()
     d._touch_speech()
     d._text_in_flight.set()
-    d.on_final("first phrase")        # final lands; _utterance_finalized=True
+    d.on_final("first phrase")  # final lands; _utterance_finalized=True
     # run loop re-enters text() for the next utterance: resets _utterance_finalized=False
     d._utterance_finalized = False
     d._text_in_flight.set()
-    d._touch_speech()                 # NEW utterance's partial -> _final_pending re-armed (genuinely in flight)
+    d._touch_speech()  # NEW utterance's partial -> _final_pending re-armed (genuinely in flight)
     assert d._final_pending is True
     d.stop()
-    assert d._drain is True           # genuinely in flight -> drains (lets the 2nd final finish)
+    assert d._drain is True  # genuinely in flight -> drains (lets the 2nd final finish)
     assert d.is_listening() is True
     assert rec.aborts == 0
 
@@ -867,17 +950,17 @@ def test_stop_within_session_new_speech_after_final_drains():
 
 def test_auto_stop_disarms_when_idle_beyond_threshold():
     d, _fb, _rec, _be = _make_daemon()
-    d.start()                                              # arm -> _last_speech_monotonic = now
+    d.start()  # arm -> _last_speech_monotonic = now
     assert d.is_listening() is True
-    d._last_speech_monotonic = _time.monotonic() - 31.0    # 31s silent (> 30.0 default)
+    d._last_speech_monotonic = _time.monotonic() - 31.0  # 31s silent (> 30.0 default)
     d._maybe_auto_stop()
-    assert d.is_listening() is False                       # disarmed by the idle timeout
+    assert d.is_listening() is False  # disarmed by the idle timeout
 
 
 def test_auto_stop_keeps_alive_with_recent_speech():
     d, _fb, _rec, _be = _make_daemon()
     d.start()
-    d._last_speech_monotonic = _time.monotonic() - 5.0     # only 5s silent
+    d._last_speech_monotonic = _time.monotonic() - 5.0  # only 5s silent
     d._maybe_auto_stop()
     assert d.is_listening() is True
 
@@ -885,8 +968,8 @@ def test_auto_stop_keeps_alive_with_recent_speech():
 def test_touch_speech_resets_the_idle_clock():
     d, _fb, _rec, _be = _make_daemon()
     d.start()
-    d._last_speech_monotonic = _time.monotonic() - 60.0    # would be idle
-    d._touch_speech()                                      # a partial arrived -> clock reset
+    d._last_speech_monotonic = _time.monotonic() - 60.0  # would be idle
+    d._touch_speech()  # a partial arrived -> clock reset
     d._maybe_auto_stop()
     assert d.is_listening() is True
 
@@ -898,13 +981,13 @@ def test_auto_stop_disabled_when_threshold_zero():
     d.start()
     d._last_speech_monotonic = _time.monotonic() - 9999.0  # absurdly idle
     d._maybe_auto_stop()
-    assert d.is_listening() is True                        # 0 disables -> never auto-stops
+    assert d.is_listening() is True  # 0 disables -> never auto-stops
 
 
 def test_auto_stop_noop_when_not_listening():
     d, _fb, _rec, _be = _make_daemon()
-    assert d._last_speech_monotonic is None                 # boot state
-    d._maybe_auto_stop()                                    # must be a clean no-op (no error)
+    assert d._last_speech_monotonic is None  # boot state
+    d._maybe_auto_stop()  # must be a clean no-op (no error)
     assert d.is_listening() is False
 
 
@@ -913,18 +996,19 @@ def test_disarm_clears_the_idle_clock():
     d.start()
     assert d._last_speech_monotonic is not None
     d.stop()
-    assert d._last_speech_monotonic is None                 # cleared -> stale watchdog tick is a no-op
+    assert d._last_speech_monotonic is None  # cleared -> stale watchdog tick is a no-op
 
 
 def test_idle_watchdog_actually_disarms_in_background():
     """The real watchdog thread (started as run() does) disarms after the threshold elapses."""
     cfg = VoiceTypingConfig()
-    cfg.asr.auto_stop_idle_seconds = 1.0                    # 1s for a fast test
+    cfg.asr.auto_stop_idle_seconds = 1.0  # 1s for a fast test
     d, _fb, _rec, _be = _make_daemon(cfg=cfg)
     d.start()
     threading.Thread(target=d._idle_watchdog, name="test-idle", daemon=True).start()
-    assert _wait_for(lambda: not d.is_listening(), timeout=4.0, interval=0.1), \
+    assert _wait_for(lambda: not d.is_listening(), timeout=4.0, interval=0.1), (
         "watchdog did not disarm within 4s of a 1.0s idle threshold"
+    )
 
 
 # --- on_final serialization (P1.M2.T2.S1 / bugfix Issue 5) ---
@@ -957,8 +1041,10 @@ def test_on_final_lock_held_across_type_text():
             self.typed = []
 
         def type_text(self, text):
-            started.set()                 # signal: we are inside type_text
-            release.wait(timeout=2.0)     # hold so the probe can observe the lock being held
+            started.set()  # signal: we are inside type_text
+            release.wait(
+                timeout=2.0
+            )  # hold so the probe can observe the lock being held
             self.typed.append(text)
 
     probe = _BlockingBackend()
@@ -968,11 +1054,13 @@ def test_on_final_lock_held_across_type_text():
     worker.start()
     assert _wait_for(started.is_set), "type_text never started (worker stalled)"
     assert d._on_final_lock.locked() is True, "lock must be held while type_text runs"
-    release.set()                        # let the worker finish
+    release.set()  # let the worker finish
     worker.join(timeout=2.0)
     assert not worker.is_alive(), "on_final worker did not finish"
-    assert d._on_final_lock.locked() is False, "lock must be released once on_final returns"
-    assert probe.typed == ["hello world", " "]   # commit: final, then the space
+    assert d._on_final_lock.locked() is False, (
+        "lock must be released once on_final returns"
+    )
+    assert probe.typed == ["hello world", " "]  # commit: final, then the space
 
 
 def test_on_final_serializes_two_concurrent_callbacks():
@@ -993,7 +1081,9 @@ def test_on_final_serializes_two_concurrent_callbacks():
                 self._in_flight += 1
                 if self._in_flight > self.max_in_flight:
                     self.max_in_flight = self._in_flight
-            gate.wait(timeout=2.0)        # a second call WOULD overlap here if on_final were unserialized
+            gate.wait(
+                timeout=2.0
+            )  # a second call WOULD overlap here if on_final were unserialized
             with self._guard:
                 self._in_flight -= 1
             self.typed.append(text)
@@ -1008,13 +1098,15 @@ def test_on_final_serializes_two_concurrent_callbacks():
     # Wait until one worker is blocked inside type_text (holding the lock), then give the second a
     # clear window to (wrongly) enter. Under the lock the second is blocked on _on_final_lock.
     assert _wait_for(lambda: probe.max_in_flight >= 1), "no worker reached type_text"
-    _time.sleep(0.2)                      # let the second worker attempt entry
-    assert probe.max_in_flight == 1, "type_text calls overlapped — on_final is not serialized"
-    gate.set()                            # release the blocked worker(s)
+    _time.sleep(0.2)  # let the second worker attempt entry
+    assert probe.max_in_flight == 1, (
+        "type_text calls overlapped — on_final is not serialized"
+    )
+    gate.set()  # release the blocked worker(s)
     t1.join(timeout=2.0)
     t2.join(timeout=2.0)
     assert not t1.is_alive() and not t2.is_alive(), "workers did not finish"
-    assert sorted(probe.typed) == [" ", " ", "alpha", "bravo"]   # text+space per commit
+    assert sorted(probe.typed) == [" ", " ", "alpha", "bravo"]  # text+space per commit
 
 
 # --- start / stop / toggle ---
@@ -1031,11 +1123,11 @@ def test_start_arms():
 def test_stop_disarms_and_aborts_when_text_in_flight():
     d, fb, rec, be = _make_daemon()
     d.start()
-    d._text_in_flight.set()   # simulate the run() loop blocked inside recorder.text()
+    d._text_in_flight.set()  # simulate the run() loop blocked inside recorder.text()
     d.stop()
     assert d.is_listening() is False
     assert rec.mic == [True, False]
-    assert rec.aborts >= 1     # text() was in flight -> abort() is the correct nudge
+    assert rec.aborts >= 1  # text() was in flight -> abort() is the correct nudge
     assert fb.listening_states == [True, False]
 
 
@@ -1046,10 +1138,10 @@ def test_stop_skips_abort_when_no_text_in_flight():
     # here and skipping it eliminates the voicectl stop/toggle/quit hang.
     d, fb, rec, be = _make_daemon()
     d.start()
-    assert not d._text_in_flight.is_set()   # boot: no thread in text()
+    assert not d._text_in_flight.is_set()  # boot: no thread in text()
     d.stop()
     assert d.is_listening() is False
-    assert rec.aborts == 0                   # no thread in text() -> abort() correctly skipped
+    assert rec.aborts == 0  # no thread in text() -> abort() correctly skipped
 
 
 def test_toggle_off_to_on_arms():
@@ -1063,7 +1155,7 @@ def test_toggle_off_to_on_arms():
 def test_toggle_on_to_off_disarms():
     d, fb, rec, be = _make_daemon()
     d.start()
-    d._text_in_flight.set()   # run() loop blocked inside recorder.text() -> abort() is valid
+    d._text_in_flight.set()  # run() loop blocked inside recorder.text() -> abort() is valid
     d.toggle()
     assert d.is_listening() is False
     assert rec.mic == [True, False]
@@ -1073,14 +1165,16 @@ def test_toggle_on_to_off_disarms():
 def test_toggle_is_an_invololution():
     d, _, _, _ = _make_daemon()
     before = d.is_listening()
-    d.toggle(); d.toggle()  # noqa: E702 (involution: two toggles == identity)
+    d.toggle()
+    d.toggle()  # noqa: E702 (involution: two toggles == identity)
     assert d.is_listening() is before
 
 
 def test_stop_never_calls_recorder_shutdown():
     d, fb, rec, be = _make_daemon()
-    d.start(); d.stop()  # noqa: E702 (compact arm-then-disarm setup)
-    assert rec.shutdowns == 0   # Critical #3: shutdown() is ONLY for quit (P1.M4.T2.S2)
+    d.start()
+    d.stop()  # noqa: E702 (compact arm-then-disarm setup)
+    assert rec.shutdowns == 0  # Critical #3: shutdown() is ONLY for quit (P1.M4.T2.S2)
 
 
 # --- request_shutdown ---
@@ -1092,11 +1186,13 @@ def test_request_shutdown_sets_event_aborts_and_tears_down_child():
     # voicectl quit path. _shutdown is set, abort() wakes any in-flight text(), AND the child is
     # torn down (host.stop() -> rec.shutdown() via the legacy adapter).
     d, fb, rec, be = _make_daemon()
-    d._text_in_flight.set()   # run() loop blocked inside recorder.text() -> abort() wakes it
+    d._text_in_flight.set()  # run() loop blocked inside recorder.text() -> abort() wakes it
     d.request_shutdown()
     assert d._shutdown.is_set() is True
-    assert rec.aborts >= 1        # in-flight text() -> abort() wakes it
-    assert rec.shutdowns >= 1     # BUG-1: child teardown so host.text() unblocks on child death
+    assert rec.aborts >= 1  # in-flight text() -> abort() wakes it
+    assert (
+        rec.shutdowns >= 1
+    )  # BUG-1: child teardown so host.text() unblocks on child death
 
 
 def test_request_shutdown_skips_abort_but_tears_down_when_no_text_in_flight():
@@ -1109,8 +1205,10 @@ def test_request_shutdown_skips_abort_but_tears_down_when_no_text_in_flight():
     assert not d._text_in_flight.is_set()
     d.request_shutdown()
     assert d._shutdown.is_set() is True
-    assert rec.aborts == 0        # no thread in text() -> abort() skipped (would deadlock)
-    assert rec.shutdowns >= 1     # BUG-1: child teardown runs regardless (idempotent vs quit path)
+    assert rec.aborts == 0  # no thread in text() -> abort() skipped (would deadlock)
+    assert (
+        rec.shutdowns >= 1
+    )  # BUG-1: child teardown runs regardless (idempotent vs quit path)
 
 
 # --- validation Issue 1: abort()-deadlock regression (run-loop integration) ---
@@ -1133,8 +1231,8 @@ def test_stop_while_run_loop_idle_does_not_abort_and_does_not_hang(monkeypatch):
     t.start()
     try:
         _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)  # run() booted
-        assert not d.is_listening()                      # disarmed at boot
-        assert not d._text_in_flight.is_set()            # loop idle in time.sleep(0.05)
+        assert not d.is_listening()  # disarmed at boot
+        assert not d._text_in_flight.is_set()  # loop idle in time.sleep(0.05)
         done = threading.Event()
 
         def _stop():
@@ -1143,7 +1241,7 @@ def test_stop_while_run_loop_idle_does_not_abort_and_does_not_hang(monkeypatch):
 
         threading.Thread(target=_stop, daemon=True).start()
         assert done.wait(timeout=3.0), "stop() hung >3s (abort() deadlock regression)"
-        assert rec.aborts == 0                            # idle -> abort() correctly skipped
+        assert rec.aborts == 0  # idle -> abort() correctly skipped
     finally:
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
@@ -1163,7 +1261,7 @@ def test_quit_while_run_loop_idle_returns_promptly(monkeypatch):
     t.start()
     try:
         _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)
-        assert not d._text_in_flight.is_set()            # idle
+        assert not d._text_in_flight.is_set()  # idle
         done = threading.Event()
 
         def _quit():
@@ -1171,8 +1269,10 @@ def test_quit_while_run_loop_idle_returns_promptly(monkeypatch):
             done.set()
 
         threading.Thread(target=_quit, daemon=True).start()
-        assert done.wait(timeout=3.0), "request_shutdown() hung >3s (abort() deadlock regression)"
-        assert rec.aborts == 0                            # idle -> abort() skipped
+        assert done.wait(timeout=3.0), (
+            "request_shutdown() hung >3s (abort() deadlock regression)"
+        )
+        assert rec.aborts == 0  # idle -> abort() skipped
     finally:
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0)
@@ -1191,6 +1291,7 @@ def test_stop_while_text_in_flight_aborts_and_unblocks_loop(monkeypatch):
 
     class _BlockingRecorder(_StubRecorder):
         """text() blocks until abort() is called, then returns (mimics RealtimeSTT)."""
+
         def __init__(self):
             super().__init__()
             self._abort_event = threading.Event()
@@ -1198,12 +1299,12 @@ def test_stop_while_text_in_flight_aborts_and_unblocks_loop(monkeypatch):
         def text(self, on_transcription_finished=None):
             self.text_calls += 1
             self.last_callback = on_transcription_finished
-            self._abort_event.wait(timeout=5.0)   # block until abort() (or 5s safety)
+            self._abort_event.wait(timeout=5.0)  # block until abort() (or 5s safety)
             return ""
 
         def abort(self):
             self.aborts += 1
-            self._abort_event.set()                # unblock the in-flight text()
+            self._abort_event.set()  # unblock the in-flight text()
 
     rec = _BlockingRecorder()
     d, fb, _rec, be = _make_daemon(recorder=rec)
@@ -1211,7 +1312,9 @@ def test_stop_while_text_in_flight_aborts_and_unblocks_loop(monkeypatch):
     t.start()
     try:
         d.start()
-        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), "loop did not enter text()"
+        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), (
+            "loop did not enter text()"
+        )
         done = threading.Event()
 
         def _stop():
@@ -1220,7 +1323,7 @@ def test_stop_while_text_in_flight_aborts_and_unblocks_loop(monkeypatch):
 
         threading.Thread(target=_stop, daemon=True).start()
         assert done.wait(timeout=3.0), "stop() hung >3s"
-        assert rec.aborts >= 1                      # text() was in flight -> abort() fired
+        assert rec.aborts >= 1  # text() was in flight -> abort() fired
     finally:
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0)
@@ -1251,6 +1354,7 @@ def test_request_shutdown_unblocks_loop_when_abort_does_not_fire_final(monkeypat
         abort() sets the child abort event (as in production) but the recorder does NOT fire a
         final on abort (the racy ~40% path). Only stop() (child teardown) unblocks text().
         """
+
         def __init__(self, *a, **k):
             super().__init__(*a, **k)
             self._final_evt = threading.Event()
@@ -1268,7 +1372,7 @@ def test_request_shutdown_unblocks_loop_when_abort_does_not_fire_final(monkeypat
             self.recorder.abort()  # set, but NO final fires (the race) -> text() stays blocked
 
         def stop(self, timeout=5.0):
-            self._dead = True       # child death -> host.text()'s loop returns
+            self._dead = True  # child death -> host.text()'s loop returns
             super().stop(timeout=timeout)
 
     factory = _fake_host_factory()
@@ -1287,7 +1391,9 @@ def test_request_shutdown_unblocks_loop_when_abort_does_not_fire_final(monkeypat
     t.start()
     try:
         d.start()  # first arm lazily spawns the host
-        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), "loop did not enter text()"
+        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), (
+            "loop did not enter text()"
+        )
         # SIGTERM path: request_shutdown() must unblock host.text() via child teardown (BUG-1 fix).
         d.request_shutdown()
         assert _wait_for(lambda: not t.is_alive(), timeout=3.0), (
@@ -1333,7 +1439,9 @@ def test_concurrent_request_shutdown_and_shutdown_only_one_stop(monkeypatch):
     a 2nd stop). Its text() mirrors RecorderHost.text() (blocks until final or child death), so
     run() is genuinely listening when the SIGTERM fires (same shape as the _StrandingHost test).
     """
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic (belt-and-suspenders)
+    _cuda_resolve(
+        monkeypatch, daemon.cuda_check.CUDA_DEFAULTS
+    )  # hermetic (belt-and-suspenders)
 
     class _GatedFakeHost(_FakeHost):
         """A _FakeHost whose stop() blocks on a release gate (the in-flight teardown window)
@@ -1359,9 +1467,11 @@ def test_concurrent_request_shutdown_and_shutdown_only_one_stop(monkeypatch):
         def stop(self, timeout=5.0):
             self.stop_calls += 1
             self._alive = False
-            self._dead = True          # child death -> any blocked text() returns (run() exits)
-            self.stop_entered.set()     # tell the test we are INSIDE the teardown
-            self.stop_release.wait(timeout=5.0)  # in-flight teardown window (bounded; never hangs)
+            self._dead = True  # child death -> any blocked text() returns (run() exits)
+            self.stop_entered.set()  # tell the test we are INSIDE the teardown
+            self.stop_release.wait(
+                timeout=5.0
+            )  # in-flight teardown window (bounded; never hangs)
 
     def _factory(*a, **k):
         return _GatedFakeHost(*a, **k)
@@ -1377,24 +1487,32 @@ def test_concurrent_request_shutdown_and_shutdown_only_one_stop(monkeypatch):
     try:
         _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)  # run() booted
         d.start()  # first arm lazily spawns the gated host (_load_host -> factory -> _arm)
-        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), "loop did not enter text()"
+        assert _wait_for(lambda: d._text_in_flight.is_set(), timeout=2.0), (
+            "loop did not enter text()"
+        )
         host = d._host
         assert isinstance(host, _GatedFakeHost), "arm did not spawn the gated host"
 
         # --- Thread A: the SIGTERM signal-handler analog ---
-        t_sig = threading.Thread(target=d.request_shutdown, name="sigterm-sig", daemon=True)
+        t_sig = threading.Thread(
+            target=d.request_shutdown, name="sigterm-sig", daemon=True
+        )
         t_sig.start()
         # request_shutdown claimed _shutdown_done + is INSIDE host.stop() (blocked on stop_release).
-        assert host.stop_entered.wait(timeout=2.0), "request_shutdown did not reach host.stop()"
-        assert d._shutdown_done is True            # the single-flight CLAIM
-        assert not d._teardown_done.is_set()       # teardown still in flight
+        assert host.stop_entered.wait(timeout=2.0), (
+            "request_shutdown did not reach host.stop()"
+        )
+        assert d._shutdown_done is True  # the single-flight CLAIM
+        assert not d._teardown_done.is_set()  # teardown still in flight
 
         # --- Thread B: main()'s finally-block analog (runs CONCURRENTLY with A) ---
         def _main_shutdown():
             d.shutdown()
             main_done.set()
 
-        t_main = threading.Thread(target=_main_shutdown, name="sigterm-main", daemon=True)
+        t_main = threading.Thread(
+            target=_main_shutdown, name="sigterm-main", daemon=True
+        )
         t_main.start()
         _time.sleep(0.2)  # let shutdown() reach _teardown_done.wait()
 
@@ -1402,22 +1520,34 @@ def test_concurrent_request_shutdown_and_shutdown_only_one_stop(monkeypatch):
         assert host.stop_calls == 1, (
             f"shutdown() started a SECOND host.stop() (double teardown!) stop_calls={host.stop_calls}"
         )
-        assert not main_done.is_set(), "shutdown() returned before the in-flight teardown finished"
+        assert not main_done.is_set(), (
+            "shutdown() returned before the in-flight teardown finished"
+        )
 
         # Release the in-flight teardown -> A finishes -> _teardown_done set -> B's wait returns.
         host.stop_release.set()
-        assert _wait_for(main_done.is_set, timeout=5.0), "shutdown() did not return after release"
+        assert _wait_for(main_done.is_set, timeout=5.0), (
+            "shutdown() did not return after release"
+        )
         t_sig.join(timeout=5.0)
         t_main.join(timeout=5.0)
-        assert not t_sig.is_alive() and not t_main.is_alive(), "shutdown threads did not finish"
+        assert not t_sig.is_alive() and not t_main.is_alive(), (
+            "shutdown threads did not finish"
+        )
 
         # run() exits: request_shutdown set _shutdown first; text() saw _dead -> returned.
-        assert _wait_for(lambda: not t_run.is_alive(), timeout=3.0), "run() thread did not exit cleanly"
+        assert _wait_for(lambda: not t_run.is_alive(), timeout=3.0), (
+            "run() thread did not exit cleanly"
+        )
 
         # FINAL regression asserts: still exactly ONE teardown; bounded wall time.
-        assert host.stop_calls == 1, f"double teardown after release! stop_calls={host.stop_calls}"
+        assert host.stop_calls == 1, (
+            f"double teardown after release! stop_calls={host.stop_calls}"
+        )
         wall = _time.monotonic() - wall_start
-        assert wall < 8.0, f"total wall time {wall:.2f}s >= 8s (bounded-teardown regression?)"
+        assert wall < 8.0, (
+            f"total wall time {wall:.2f}s >= 8s (bounded-teardown regression?)"
+        )
     finally:
         # ALWAYS release + signal + join so no thread is left blocked (test isolation).
         if host is not None:
@@ -1436,15 +1566,19 @@ def test_concurrent_request_shutdown_and_shutdown_only_one_stop(monkeypatch):
 
 
 def test_run_loop_not_listening_does_not_call_text(monkeypatch):
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
+    _cuda_resolve(
+        monkeypatch, daemon.cuda_check.CUDA_DEFAULTS
+    )  # hermetic: run()->_log_resolved_device() probes cuda
     d, fb, rec, be = _make_daemon()
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     try:
-        _wait_for(lambda: True, timeout=0.2)   # let it sleep-loop a moment
-        assert rec.text_calls == 0             # not listening → never calls text()
+        _wait_for(lambda: True, timeout=0.2)  # let it sleep-loop a moment
+        assert rec.text_calls == 0  # not listening → never calls text()
     finally:
-        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)  # noqa: E702
+        d.request_shutdown()
+        _wait_for(lambda: not t.is_alive(), timeout=2.0)
+        t.join(timeout=2.0)  # noqa: E702
     assert not t.is_alive()
 
 
@@ -1455,22 +1589,29 @@ def test_run_closes_capture_stream_at_boot_while_not_listening(monkeypatch):
     # capture stream, so without an explicit set_microphone(False) in run() the mic stays
     # hot-capturing (PipeWire: an uncorked source-output) while voicectl status reports listening:
     # off. run() must match the device capture state to the listening gate from boot.
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
+    _cuda_resolve(
+        monkeypatch, daemon.cuda_check.CUDA_DEFAULTS
+    )  # hermetic: run()->_log_resolved_device() probes cuda
     d, fb, rec, be = _make_daemon()
-    assert rec.mic == []                       # pre-run: no set_microphone calls yet
+    assert rec.mic == []  # pre-run: no set_microphone calls yet
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     try:
         # wait for the boot-time set_microphone(False) (the recorder is resident before the loop)
         assert _wait_for(lambda: False in rec.mic, timeout=1.0), rec.mic
     finally:
-        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)  # noqa: E702
+        d.request_shutdown()
+        _wait_for(lambda: not t.is_alive(), timeout=2.0)
+        t.join(timeout=2.0)  # noqa: E702
     assert not t.is_alive()
-    assert rec.mic[-1] is False                # boot left the capture stream closed (not listening)
-    assert rec.text_calls == 0                 # and text() was never entered (not listening)
+    assert rec.mic[-1] is False  # boot left the capture stream closed (not listening)
+    assert rec.text_calls == 0  # and text() was never entered (not listening)
+
 
 def test_run_loop_calls_text_when_listening_then_exits_on_shutdown(monkeypatch):
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
+    _cuda_resolve(
+        monkeypatch, daemon.cuda_check.CUDA_DEFAULTS
+    )  # hermetic: run()->_log_resolved_device() probes cuda
     d, fb, rec, be = _make_daemon()
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
@@ -1485,16 +1626,22 @@ def test_run_loop_calls_text_when_listening_then_exits_on_shutdown(monkeypatch):
 
 
 def test_run_sets_uptime_after_start(monkeypatch):
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # hermetic: run()->_log_resolved_device() probes cuda
+    _cuda_resolve(
+        monkeypatch, daemon.cuda_check.CUDA_DEFAULTS
+    )  # hermetic: run()->_log_resolved_device() probes cuda
     d, fb, rec, be = _make_daemon()
-    assert d.uptime_s == 0.0   # not started yet
+    assert d.uptime_s == 0.0  # not started yet
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     try:
-        _wait_for(lambda: d.uptime_s >= 0.0 and d._start_monotonic is not None, timeout=1.0)
+        _wait_for(
+            lambda: d.uptime_s >= 0.0 and d._start_monotonic is not None, timeout=1.0
+        )
         assert d.uptime_s >= 0.0
     finally:
-        d.request_shutdown(); _wait_for(lambda: not t.is_alive(), timeout=2.0); t.join(timeout=2.0)  # noqa: E702
+        d.request_shutdown()
+        _wait_for(lambda: not t.is_alive(), timeout=2.0)
+        t.join(timeout=2.0)  # noqa: E702
 
 
 # ===========================================================================
@@ -1522,10 +1669,12 @@ def test_latencylog_speech_end_and_deltas():
     lat = daemon.LatencyLog()
     t0 = _time.monotonic()
     lat.note_speech_end()
-    rec = lat.finalize_utterance(text="hi", t_final_ready=t0 + 0.600, t_typed=t0 + 0.634)
+    rec = lat.finalize_utterance(
+        text="hi", t_final_ready=t0 + 0.600, t_typed=t0 + 0.634
+    )
     assert rec["t_speech_end"] is not None
-    assert rec["speech_end_to_final_ms"] == 600.0   # 0.600s -> 600.0ms (rounded 0.1)
-    assert rec["final_to_typed_ms"] == 34.0          # 0.034s -> 34.0ms
+    assert rec["speech_end_to_final_ms"] == 600.0  # 0.600s -> 600.0ms (rounded 0.1)
+    assert rec["final_to_typed_ms"] == 34.0  # 0.034s -> 34.0ms
     assert rec["total_ms"] == 634.0
 
 
@@ -1535,16 +1684,18 @@ def test_latencylog_no_speech_end_yields_na_deltas():
     assert rec["t_speech_end"] is None
     assert rec["speech_end_to_final_ms"] is None
     assert rec["total_ms"] is None
-    assert rec["final_to_typed_ms"] == 20.0          # always present
+    assert rec["final_to_typed_ms"] == 20.0  # always present
 
 
 def test_latencylog_ring_buffer_bounded_and_snapshot_copy():
     lat = daemon.LatencyLog(ring_size=3)
     for i in range(5):
-        lat.finalize_utterance(text=str(i), t_final_ready=float(i), t_typed=float(i) + 0.01)
+        lat.finalize_utterance(
+            text=str(i), t_final_ready=float(i), t_typed=float(i) + 0.01
+        )
     snap = lat.snapshot()
-    assert [r["text"] for r in snap] == ["2", "3", "4"]   # oldest evicted; newest last
-    snap.append("mutate")                                  # snapshot is a copy
+    assert [r["text"] for r in snap] == ["2", "3", "4"]  # oldest evicted; newest last
+    snap.append("mutate")  # snapshot is a copy
     assert len(lat.snapshot()) == 3
 
 
@@ -1558,11 +1709,11 @@ def test_build_callbacks_threads_latency_into_partial_and_vad_stop():
     cb["on_realtime_transcription_stabilized"]("hello")
     cb["on_realtime_transcription_stabilized"]("hello world")
     cb["on_vad_stop"]()
-    assert fb.partials == ["hello", "hello world"]          # feedback still driven
-    assert fb.phases == ["listening"]                        # set_phase still driven
+    assert fb.partials == ["hello", "hello world"]  # feedback still driven
+    assert fb.phases == ["listening"]  # set_phase still driven
     rec = lat.finalize_utterance(text="hello world", t_final_ready=1.0, t_typed=1.02)
     assert rec["partials"] == 2
-    assert rec["t_speech_end"] is not None                  # note_speech_end fired
+    assert rec["t_speech_end"] is not None  # note_speech_end fired
 
 
 def test_build_callbacks_latency_none_is_noop():
@@ -1597,7 +1748,7 @@ def test_on_final_emits_structured_latency_line(caplog):
     assert line.startswith("voice-typing latency: event=utterance_final")
     assert "final_to_typed_ms=" in line and "total_ms=" in line and "partials=" in line
     assert "speech_end_to_final_ms=" in line and "ts_epoch=" in line
-    assert "text='hello world'" in line          # %r of cleaned text
+    assert "text='hello world'" in line  # %r of cleaned text
     # total_ms is a number (t_speech_end was set) -> not n/a
     assert re.search(r"total_ms=\d", line)
     # S2 behavior preserved (commit emits the latency line on the streaming path too):
@@ -1608,12 +1759,12 @@ def test_on_final_latency_line_na_when_no_vad_stop(caplog):
     d, fb, rec, be = _make_daemon()
     with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
         d.start()
-        d.on_final("quick")              # no note_speech_end -> t_speech_end None
+        d.on_final("quick")  # no note_speech_end -> t_speech_end None
     line = _grep_latency_line([r.getMessage() for r in caplog.records])
     assert line is not None
     assert "speech_end_to_final_ms=n/a" in line
     assert "total_ms=n/a" in line
-    assert re.search(r"final_to_typed_ms=\d", line)      # always numeric
+    assert re.search(r"final_to_typed_ms=\d", line)  # always numeric
     # ring buffer still got a record
     snap = d._latency.snapshot()
     assert len(snap) == 1 and snap[0]["text"] == "quick"
@@ -1634,7 +1785,7 @@ def test_on_final_rejected_hallucination_emits_no_latency_line(caplog):
     d, _, _, _ = _make_daemon()
     with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
         d.start()
-        d.on_final("thank you.")         # blocklist -> clean() None -> early return
+        d.on_final("thank you.")  # blocklist -> clean() None -> early return
     line = _grep_latency_line([r.getMessage() for r in caplog.records])
     assert line is None
     assert d._latency.snapshot() == []
@@ -1648,11 +1799,16 @@ def test_run_logs_resolved_device_at_startup(monkeypatch, caplog):
     # UN-PROBED config (device=cfg.asr.device + model=cfg.asr.lite_model) until a child arms.
     d, _, _, _ = _make_daemon()
     import threading
+
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     try:
-        _wait_for(lambda: any("device resolved" in r.getMessage() for r in caplog.records)
-                  if caplog.records else False, timeout=2.0) or None
+        _wait_for(
+            lambda: any("device resolved" in r.getMessage() for r in caplog.records)
+            if caplog.records
+            else False,
+            timeout=2.0,
+        ) or None
         msgs = [r.getMessage() for r in caplog.records]
     finally:
         d.request_shutdown()
@@ -1680,12 +1836,19 @@ def _make_daemon_with_feedback(tmp_path, monkeypatch, *, cuda=True):
     device values. state_file lives under tmp_path so the Feedback write never touches the OS
     runtime dir. Returns (daemon, feedback).
     """
-    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS if cuda else daemon.cuda_check.CPU_FALLBACK)
-    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    _cuda_resolve(
+        monkeypatch,
+        daemon.cuda_check.CUDA_DEFAULTS if cuda else daemon.cuda_check.CPU_FALLBACK,
+    )
+    cfg = VoiceTypingConfig(
+        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
+    )
     fb = Feedback(cfg.feedback)
     rec = _StubRecorder()
     be = _FakeBackend()
-    return daemon.VoiceTypingDaemon(cfg, fb, recorder=rec, backend=be, mic_prober=_ok_probe), fb
+    return daemon.VoiceTypingDaemon(
+        cfg, fb, recorder=rec, backend=be, mic_prober=_ok_probe
+    ), fb
 
 
 def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
@@ -1703,19 +1866,45 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
     fb.update_partial("hello")
     fb.record_final("world")
     s = d.status_snapshot()
-    assert set(s) == {"listening", "mode", "phase", "models_loaded", "load_error", "partial", "last_final",
-                      "uptime_s", "device", "compute_type", "model",
-                      "mic_ok", "mic_error"}     # P1.M1.T2.S2: 13 keys — ONE 'model' key (Rev 2)
-    assert s["listening"] is False and s["partial"] == "world" and s["last_final"] == "world"   # record_final writes the final into partial so the status matches the screen
-    assert s["phase"] == "idle" and s["models_loaded"] is True and s["load_error"] == ""  # P1.M2.T2.S1: injected recorder -> loaded
-    assert s["mode"] == "lite"                       # Rev 2: the CONSTANT mode (§4.6 schema stable)
+    assert (
+        set(s)
+        == {
+            "listening",
+            "mode",
+            "phase",
+            "models_loaded",
+            "load_error",
+            "partial",
+            "last_final",
+            "uptime_s",
+            "device",
+            "compute_type",
+            "model",
+            "mic_ok",
+            "mic_error",
+            "context_prompt",
+        }
+    )  # P1.M1.T2.S2: ONE 'model' key (Rev 2); + context_prompt (P1.M2.T5.S2, additive label)
+    assert (
+        s["listening"] is False
+        and s["partial"] == "world"
+        and s["last_final"] == "world"
+    )  # record_final writes the final into partial so the status matches the screen
+    assert (
+        s["phase"] == "idle" and s["models_loaded"] is True and s["load_error"] == ""
+    )  # P1.M2.T2.S1: injected recorder -> loaded
+    assert s["mode"] == "lite"  # Rev 2: the CONSTANT mode (§4.6 schema stable)
     # device/compute_type/model come from the UN-PROBED config (VT-001) until the child reports
     # its actual resolved device on arm. The defaults happen to equal CUDA_DEFAULTS, so this also
     # pins that the config<->cuda_check defaults have not drifted.
     assert s["device"] == "cuda" and s["compute_type"] == "float16"
     assert s["model"] == "small.en"
-    assert s["mic_ok"] is True and s["mic_error"] == ""          # S1's _ok_probe via _make_daemon_with_feedback
-    assert calls["n"] == 0, "status_snapshot must NOT call cuda_check.resolve_device_and_models (VT-001)"
+    assert (
+        s["mic_ok"] is True and s["mic_error"] == ""
+    )  # S1's _ok_probe via _make_daemon_with_feedback
+    assert calls["n"] == 0, (
+        "status_snapshot must NOT call cuda_check.resolve_device_and_models (VT-001)"
+    )
 
 
 def test_status_snapshot_reflects_listening_toggle(tmp_path, monkeypatch):
@@ -1725,7 +1914,9 @@ def test_status_snapshot_reflects_listening_toggle(tmp_path, monkeypatch):
     assert d.status_snapshot()["listening"] is True
 
 
-def test_status_snapshot_reports_configured_device_when_not_loaded(tmp_path, monkeypatch):
+def test_status_snapshot_reports_configured_device_when_not_loaded(
+    tmp_path, monkeypatch
+):
     """VT-001: before a child reports its resolved device, status reflects the CONFIGURED asr.device
     (here cpu) — NOT a cuda_check probe. The daemon must stay CUDA-free; the authoritative
     cuda-vs-cpu-fallback decision is made by the CHILD on arm (see
@@ -1734,8 +1925,10 @@ def test_status_snapshot_reports_configured_device_when_not_loaded(tmp_path, mon
     """
     calls = {"n": 0}
     monkeypatch.setattr(
-        daemon.cuda_check, "resolve_device_and_models",
-        lambda defaults=None: calls.__setitem__("n", calls["n"] + 1) or dict(daemon.cuda_check.CPU_FALLBACK),
+        daemon.cuda_check,
+        "resolve_device_and_models",
+        lambda defaults=None: calls.__setitem__("n", calls["n"] + 1)
+        or dict(daemon.cuda_check.CPU_FALLBACK),
     )
     cfg = VoiceTypingConfig(
         asr=AsrConfig(device="cpu"),
@@ -1743,11 +1936,19 @@ def test_status_snapshot_reports_configured_device_when_not_loaded(tmp_path, mon
     )
     fb = Feedback(cfg.feedback)
     d = daemon.VoiceTypingDaemon(
-        cfg, fb, recorder=_StubRecorder(), backend=_FakeBackend(), mic_prober=_ok_probe,
+        cfg,
+        fb,
+        recorder=_StubRecorder(),
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )
     s = d.status_snapshot()
-    assert s["device"] == "cpu" and s["compute_type"] == "int8"   # UN-PROBED configured values
-    assert s["model"] == "small.en"   # the CONFIGURED lite_model, NOT CPU_FALLBACK's tiny.en
+    assert (
+        s["device"] == "cpu" and s["compute_type"] == "int8"
+    )  # UN-PROBED configured values
+    assert (
+        s["model"] == "small.en"
+    )  # the CONFIGURED lite_model, NOT CPU_FALLBACK's tiny.en
     assert calls["n"] == 0, "status_snapshot must NOT call cuda_check (VT-001)"
 
 
@@ -1784,14 +1985,19 @@ def test_resolved_device_never_calls_cuda_check(tmp_path, monkeypatch):
         return dict(daemon.cuda_check.CUDA_DEFAULTS)
 
     monkeypatch.setattr(daemon.cuda_check, "resolve_device_and_models", _resolve)
-    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    cfg = VoiceTypingConfig(
+        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
+    )
     d = daemon.VoiceTypingDaemon(
-        cfg, Feedback(cfg.feedback), recorder=_StubRecorder(), backend=_FakeBackend(),
+        cfg,
+        Feedback(cfg.feedback),
+        recorder=_StubRecorder(),
+        backend=_FakeBackend(),
         mic_prober=_ok_probe,
     )
     d.status_snapshot()
     d.status_snapshot()
-    assert calls["n"] == 0                      # NEVER probed (the cache is seeded from config in __init__)
+    assert calls["n"] == 0  # NEVER probed (the cache is seeded from config in __init__)
 
 
 def test_resolved_device_unaffected_by_cuda_check_failure(tmp_path, monkeypatch):
@@ -1799,17 +2005,25 @@ def test_resolved_device_unaffected_by_cuda_check_failure(tmp_path, monkeypatch)
     it cannot raise into status. Status reports the configured device; it does not degrade to
     'unknown' (that fallback was part of the now-removed probe path).
     """
+
     def boom(defaults=None):
         raise RuntimeError("cuda exploded")
 
     monkeypatch.setattr(daemon.cuda_check, "resolve_device_and_models", boom)
-    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    cfg = VoiceTypingConfig(
+        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
+    )
     d = daemon.VoiceTypingDaemon(
-        cfg, Feedback(cfg.feedback), recorder=_StubRecorder(), backend=_FakeBackend(),
+        cfg,
+        Feedback(cfg.feedback),
+        recorder=_StubRecorder(),
+        backend=_FakeBackend(),
         mic_prober=_ok_probe,
     )
     s = d.status_snapshot()
-    assert s["device"] == "cuda"             # configured value; cuda_check never called, so no 'unknown'
+    assert (
+        s["device"] == "cuda"
+    )  # configured value; cuda_check never called, so no 'unknown'
     assert s["compute_type"] == "float16"
 
 
@@ -1822,20 +2036,33 @@ def test_status_snapshot_does_not_import_cuda_stack(tmp_path, monkeypatch):
     diagnostic / logging path that re-introduces a CUDA import would fail here).
     """
     import sys  # noqa: E402 (local; test lives above the mid-file `import sys` in the T3 section)
+
     # The daemon may legitimately resolve its device cache from the config, but it must NEVER go
     # through cuda_check (which imports ctranslate2 + calls get_cuda_device_count()).
     monkeypatch.setattr(
-        daemon.cuda_check, "resolve_device_and_models",
-        lambda defaults=None: (_ for _ in ()).throw(AssertionError(
-            "status_snapshot must NOT call cuda_check.resolve_device_and_models (VT-001/VT-008)")),
+        daemon.cuda_check,
+        "resolve_device_and_models",
+        lambda defaults=None: (_ for _ in ()).throw(
+            AssertionError(
+                "status_snapshot must NOT call cuda_check.resolve_device_and_models (VT-001/VT-008)"
+            )
+        ),
     )
     before = {m for m in ("ctranslate2", "torch") if m in sys.modules}
-    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    cfg = VoiceTypingConfig(
+        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
+    )
     d = daemon.VoiceTypingDaemon(
-        cfg, Feedback(cfg.feedback), backend=_FakeBackend(), mic_prober=_ok_probe,
+        cfg,
+        Feedback(cfg.feedback),
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )  # never-armed: recorder=None (lazy boot, the cold-cache path VT-001 reproduced)
     snap = d.status_snapshot()
-    assert snap["device"] in ("cuda", "cpu")   # a non-probing value (the configured device)
+    assert snap["device"] in (
+        "cuda",
+        "cpu",
+    )  # a non-probing value (the configured device)
     added = {m for m in ("ctranslate2", "torch") if m in sys.modules} - before
     assert not added, (
         f"status_snapshot imported the CUDA stack into the daemon process: {added} "
@@ -1896,9 +2123,11 @@ def test_stop_and_toggle_never_shutdown_but_request_shutdown_does():
     d.start()
     d.stop()
     d.toggle()
-    assert rec.shutdowns == 0   # stop/toggle NEVER tear down (models resident)
+    assert rec.shutdowns == 0  # stop/toggle NEVER tear down (models resident)
     d.request_shutdown()
-    assert rec.shutdowns >= 1   # BUG-1: request_shutdown tears down (SIGTERM-path unblock)
+    assert (
+        rec.shutdowns >= 1
+    )  # BUG-1: request_shutdown tears down (SIGTERM-path unblock)
 
 
 # P1.M1.T1.S2 — bounded teardown: _bounded_shutdown force-cleans on timeout (ADDITIVE).
@@ -1943,9 +2172,15 @@ def test_bounded_shutdown_force_cleans_on_timeout():
     start = _time.monotonic()
     d._bounded_shutdown(timeout=0.3)  # MUST return despite shutdown() blocking forever
     elapsed = _time.monotonic() - start
-    assert elapsed < 2.0, f"bounded teardown took {elapsed:.2f}s (expected < ~0.3s + slack)"
-    assert rec.transcript_process.terminated, "transcript_process not force-terminated (VRAM leak)"
-    assert rec.reader_process.terminated, "reader_process not force-terminated (VRAM leak)"
+    assert elapsed < 2.0, (
+        f"bounded teardown took {elapsed:.2f}s (expected < ~0.3s + slack)"
+    )
+    assert rec.transcript_process.terminated, (
+        "transcript_process not force-terminated (VRAM leak)"
+    )
+    assert rec.reader_process.terminated, (
+        "reader_process not force-terminated (VRAM leak)"
+    )
     assert rec.is_shut_down is True, "is_shut_down not set (idempotency marker)"
     assert rec.realtime_transcription_model is None, "realtime model ref not released"
 
@@ -1956,7 +2191,9 @@ def test_shutdown_delegates_to_bounded_shutdown():
     calls: list[float] = []
     d._bounded_shutdown = lambda timeout=5.0: calls.append(timeout)
     d.shutdown()
-    assert calls == [5.0], f"shutdown() did not delegate to _bounded_shutdown(): {calls}"
+    assert calls == [5.0], (
+        f"shutdown() did not delegate to _bounded_shutdown(): {calls}"
+    )
 
 
 def test_shutdown_is_noop_when_recorder_is_none():
@@ -1995,7 +2232,9 @@ class _GatedHost:
     def stop(self, timeout: float | None = None) -> None:
         self.stop_calls += 1
         self.entered.set()
-        self.release.wait(timeout=5.0)  # block until the test releases (bounded — no hang)
+        self.release.wait(
+            timeout=5.0
+        )  # block until the test releases (bounded — no hang)
 
 
 def test_request_shutdown_claims_and_signals_teardown_done():
@@ -2005,8 +2244,8 @@ def test_request_shutdown_claims_and_signals_teardown_done():
     assert not d._teardown_done.is_set()
     d.request_shutdown()
     assert d._shutdown_done is True
-    assert d._teardown_done.is_set()    # finally fired
-    assert host.stop_calls == 1          # exactly one teardown
+    assert d._teardown_done.is_set()  # finally fired
+    assert host.stop_calls == 1  # exactly one teardown
 
 
 def test_shutdown_does_own_teardown_when_called_first():
@@ -2041,16 +2280,22 @@ def test_shutdown_waits_for_inflight_teardown_no_second_stop():
 
     tm = threading.Thread(target=_main_shutdown, name="main", daemon=True)
     tm.start()
-    _time.sleep(0.2)                       # let shutdown() reach _teardown_done.wait()
-    assert host.stop_calls == 1, "shutdown() started a 2nd host.stop() while it should WAIT"
-    assert not main_done.is_set(), "shutdown() returned before the in-flight teardown finished"
+    _time.sleep(0.2)  # let shutdown() reach _teardown_done.wait()
+    assert host.stop_calls == 1, (
+        "shutdown() started a 2nd host.stop() while it should WAIT"
+    )
+    assert not main_done.is_set(), (
+        "shutdown() returned before the in-flight teardown finished"
+    )
     # Release the in-flight teardown -> request_shutdown finishes -> _teardown_done set ->
     # shutdown()'s wait returns -> main_done set. Exactly ONE host.stop().
     host.release.set()
     ta.join(timeout=5.0)
     tm.join(timeout=5.0)
     assert main_done.is_set(), "shutdown() did not return after the teardown finished"
-    assert host.stop_calls == 1, "exactly ONE host.stop() — shutdown() waited, no double-teardown"
+    assert host.stop_calls == 1, (
+        "exactly ONE host.stop() — shutdown() waited, no double-teardown"
+    )
 
 
 def test_shutdown_returns_immediately_when_teardown_already_done():
@@ -2058,9 +2303,9 @@ def test_shutdown_returns_immediately_when_teardown_already_done():
     already set and returns immediately (no second host.stop())."""
     host = _CountingHost()
     d, *_ = _make_daemon(recorder_host=host)
-    d.request_shutdown()                  # teardown done + _teardown_done set
+    d.request_shutdown()  # teardown done + _teardown_done set
     assert host.stop_calls == 1
-    d.shutdown()                          # the on_quit call, strictly after
+    d.shutdown()  # the on_quit call, strictly after
     assert host.stop_calls == 1, "shutdown() re-tore-down on the sequential quit path"
 
 
@@ -2070,7 +2315,7 @@ def test_request_shutdown_idempotent_vs_second_call():
     host = _CountingHost()
     d, *_ = _make_daemon(recorder_host=host)
     d.request_shutdown()
-    d.request_shutdown()                  # second call — must no-op
+    d.request_shutdown()  # second call — must no-op
     assert host.stop_calls == 1, "second request_shutdown re-tore-down"
     assert d._teardown_done.is_set()
 
@@ -2080,12 +2325,16 @@ def test_shutdown_falls_back_to_own_teardown_on_wait_timeout(monkeypatch):
     shutdown() logs a warning and falls back to its OWN _bounded_shutdown(). Safe via _stop_lock
     (P1.M1.T1.S1) on a real host; here we assert the fallback PATH fires (host.stop called twice:
     the in-flight one + the fallback one). The wait timeout is shrunk to keep the test fast."""
-    monkeypatch.setattr(daemon, "_TEARDOWN_WAIT_TIMEOUT", 0.2)   # CRITICAL #4: fast fallback
+    monkeypatch.setattr(
+        daemon, "_TEARDOWN_WAIT_TIMEOUT", 0.2
+    )  # CRITICAL #4: fast fallback
     host = _GatedHost()
     d, *_ = _make_daemon(recorder_host=host)
     ta = threading.Thread(target=d.request_shutdown, name="sig", daemon=True)
     ta.start()
-    assert host.entered.wait(timeout=2.0)     # request_shutdown's host.stop() in flight (blocked)
+    assert host.entered.wait(
+        timeout=2.0
+    )  # request_shutdown's host.stop() in flight (blocked)
     main_done = threading.Event()
 
     def _main_shutdown():
@@ -2103,7 +2352,9 @@ def test_shutdown_falls_back_to_own_teardown_on_wait_timeout(monkeypatch):
     ta.join(timeout=5.0)
     tm.join(timeout=5.0)
     assert main_done.is_set()
-    assert host.stop_calls == 2, "fallback must run its own host.stop() (the wait timed out)"
+    assert host.stop_calls == 2, (
+        "fallback must run its own host.stop() (the wait timed out)"
+    )
 
 
 # --- Layer B: install_shutdown_signal_handlers() -------------------------------------------
@@ -2127,12 +2378,14 @@ def test_install_registers_handler_for_sigterm_and_sigint():
 
 def test_handler_invocation_requests_shutdown_via_spawned_thread():
     d, _, rec, _ = _make_daemon()
-    d._text_in_flight.set()   # simulate run() blocked in text() -> request_shutdown's abort() is valid
+    d._text_in_flight.set()  # simulate run() blocked in text() -> request_shutdown's abort() is valid
     prev = _signal.getsignal(_signal.SIGUSR1)
     try:
         daemon.install_shutdown_signal_handlers(d, signals=(_signal.SIGUSR1,))
         handler = _signal.getsignal(_signal.SIGUSR1)
-        handler(_signal.SIGUSR1, None)  # invoke directly (no real signal) — spawns a thread
+        handler(
+            _signal.SIGUSR1, None
+        )  # invoke directly (no real signal) — spawns a thread
         assert _wait_for(
             lambda: d._shutdown.is_set() and rec.aborts >= 1, timeout=2.0
         ), (d._shutdown.is_set(), rec.aborts)
@@ -2194,7 +2447,9 @@ def test_resolve_log_level_valid_names():
 
 
 def test_resolve_log_level_invalid_falls_back_to_info():
-    assert daemon._resolve_log_level("VERBOSE") == logging.INFO  # getLevelName -> "Level VERBOSE"
+    assert (
+        daemon._resolve_log_level("VERBOSE") == logging.INFO
+    )  # getLevelName -> "Level VERBOSE"
     assert daemon._resolve_log_level("") == logging.INFO
     assert daemon._resolve_log_level(None) == logging.INFO  # non-str
     assert daemon._resolve_log_level(20) == logging.INFO  # non-str
@@ -2246,6 +2501,7 @@ class _MainFakeDaemon:
 
     def shutdown(self):
         self.shutdown_calls += 1
+
     # on_quit is wired to this bound method; ControlServer must receive it AS-IS
 
 
@@ -2290,7 +2546,9 @@ def _patch_main_lifecycle(
         return _restore
 
     monkeypatch.setattr(daemon, "install_shutdown_signal_handlers", _install)
-    monkeypatch.setattr(logging, "basicConfig", lambda **kw: None)  # don't touch real root
+    monkeypatch.setattr(
+        logging, "basicConfig", lambda **kw: None
+    )  # don't touch real root
     return refs, restored
 
 
@@ -2299,7 +2557,9 @@ def test_main_runs_full_lifecycle_and_returns_zero(monkeypatch):
     code = daemon.main()
     assert code == 0
     assert daemon.VoiceTypingDaemon is _MainFakeDaemon  # sanity: patch active
-    assert refs["install_arg"] is not None  # install_shutdown_signal_handlers got a daemon
+    assert (
+        refs["install_arg"] is not None
+    )  # install_shutdown_signal_handlers got a daemon
 
 
 def test_main_calls_run_start_stop_and_restore(monkeypatch):
@@ -2353,7 +2613,10 @@ def test_main_passes_config_feedback_to_daemon(monkeypatch):
     _patch_main_lifecycle(monkeypatch, daemon_cls=D)
     daemon.main()
     assert isinstance(bag["cfg"], VoiceTypingConfig)
-    assert isinstance(bag["fb"], _MainFakeFeedback) and bag["fb"].cfg is bag["cfg"].feedback
+    assert (
+        isinstance(bag["fb"], _MainFakeFeedback)
+        and bag["fb"].cfg is bag["cfg"].feedback
+    )
 
 
 # --- Layer E: fatal path -> return 1, no None-deref ---------------------------------------
@@ -2441,24 +2704,34 @@ def _install_fake_pyaudio(monkeypatch, *, device_input_channels):
 
     device_input_channels: list of maxInputChannels per device index (the probe keeps those >0).
     """
+
     class _Dev(dict):
         pass
+
     devices = [_Dev(maxInputChannels=ch) for ch in device_input_channels]
+
     class _PA:
         def get_device_count(self):
             return len(devices)
+
         def get_device_info_by_index(self, i):
             return devices[i]
+
         def terminate(self):
             pass
+
     fake = type("M", (), {"PyAudio": _PA})
     monkeypatch.setitem(sys.modules, "pyaudio", fake)
     return fake
 
 
 def test_probe_mic_ok_when_input_device_present(tmp_path, monkeypatch):
-    _install_fake_pyaudio(monkeypatch, device_input_channels=[0, 2, 0])  # index 1 is an input
-    d, *_ = _make_daemon()   # _ok_probe used at init (no real pyaudio); we call _probe_mic directly
+    _install_fake_pyaudio(
+        monkeypatch, device_input_channels=[0, 2, 0]
+    )  # index 1 is an input
+    d, *_ = (
+        _make_daemon()
+    )  # _ok_probe used at init (no real pyaudio); we call _probe_mic directly
     ok, err = d._probe_mic()
     assert ok is True and err is None
 
@@ -2475,23 +2748,28 @@ def test_probe_mic_raises_when_pyaudio_unavailable(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyaudio", None)
     d, *_ = _make_daemon()
     with pytest.raises(ImportError):
-        d._probe_mic()   # _probe_mic itself raises; _refresh_mic_status is what catches it
+        d._probe_mic()  # _probe_mic itself raises; _refresh_mic_status is what catches it
 
 
 def test_refresh_mic_status_catches_probe_exception():
     # An injected prober that raises -> _mic_ok=False, _mic_error=str(exc); never propagates.
     def boom():
         raise RuntimeError("portaudio exploded")
+
     d, *_ = _make_daemon()
     d._mic_prober = boom
-    d._refresh_mic_status(force=True)  # force: bypass TTL cache so the swapped prober actually runs
+    d._refresh_mic_status(
+        force=True
+    )  # force: bypass TTL cache so the swapped prober actually runs
     assert d._mic_ok is False and "portaudio exploded" in (d._mic_error or "")
 
 
 def test_refresh_mic_status_stores_probe_result():
     d, *_ = _make_daemon()
     d._mic_prober = lambda: (False, "no devices")
-    d._refresh_mic_status(force=True)  # force: bypass TTL cache so the swapped prober actually runs
+    d._refresh_mic_status(
+        force=True
+    )  # force: bypass TTL cache so the swapped prober actually runs
     assert d._mic_ok is False and d._mic_error == "no devices"
 
 
@@ -2499,23 +2777,30 @@ def test_init_initializes_mic_status_and_calls_probe():
     calls = []
     cfg = VoiceTypingConfig()
     d = daemon.VoiceTypingDaemon(
-        cfg, _DaemonFakeFeedback(), recorder=_StubRecorder(), backend=_FakeBackend(),
+        cfg,
+        _DaemonFakeFeedback(),
+        recorder=_StubRecorder(),
+        backend=_FakeBackend(),
         mic_prober=lambda: (calls.append(1), (True, None))[1],
     )
     assert d._mic_ok is True and d._mic_error is None
-    assert len(calls) == 1          # __init__ probed exactly once
+    assert len(calls) == 1  # __init__ probed exactly once
 
 
 def test_arm_refreshes_mic_status():
     calls = []
     d = daemon.VoiceTypingDaemon(
-        VoiceTypingConfig(), _DaemonFakeFeedback(), recorder=_StubRecorder(),
+        VoiceTypingConfig(),
+        _DaemonFakeFeedback(),
+        recorder=_StubRecorder(),
         backend=_FakeBackend(),
         mic_prober=lambda: (calls.append(1), (True, None))[1],
     )
-    assert len(calls) == 1          # init (force=True)
-    d.start()                       # -> _arm -> _refresh_mic_status (TTL-cached within 30s)
-    assert len(calls) == 1          # arm within TTL -> probe CACHED, not re-run (bugfix Issue 3)
+    assert len(calls) == 1  # init (force=True)
+    d.start()  # -> _arm -> _refresh_mic_status (TTL-cached within 30s)
+    assert (
+        len(calls) == 1
+    )  # arm within TTL -> probe CACHED, not re-run (bugfix Issue 3)
 
 
 def test_mic_probe_cached_within_ttl(monkeypatch):
@@ -2532,19 +2817,24 @@ def test_mic_probe_cached_within_ttl(monkeypatch):
         calls.append(1)
         return (True, None)
 
-    _fixed_clock(monkeypatch, 1000.0)   # non-zero base: avoid the 0.0 'never' sentinel collision
+    _fixed_clock(
+        monkeypatch, 1000.0
+    )  # non-zero base: avoid the 0.0 'never' sentinel collision
     d = daemon.VoiceTypingDaemon(
-        VoiceTypingConfig(), _DaemonFakeFeedback(), recorder=_StubRecorder(),
-        backend=_FakeBackend(), mic_prober=counting_probe,
+        VoiceTypingConfig(),
+        _DaemonFakeFeedback(),
+        recorder=_StubRecorder(),
+        backend=_FakeBackend(),
+        mic_prober=counting_probe,
     )
-    assert len(calls) == 1              # __init__ force-probed; _mic_probe_at == 1000.0
+    assert len(calls) == 1  # __init__ force-probed; _mic_probe_at == 1000.0
 
-    _fixed_clock(monkeypatch, 1005.0)   # within TTL (5s < 30s)
-    d.start()                           # _arm -> _refresh_mic_status -> CACHED
+    _fixed_clock(monkeypatch, 1005.0)  # within TTL (5s < 30s)
+    d.start()  # _arm -> _refresh_mic_status -> CACHED
     assert len(calls) == 1, "arm within TTL must NOT re-probe"
 
     _fixed_clock(monkeypatch, 1000.0 + daemon._MIC_PROBE_TTL_S + 5.0)  # past TTL (35s)
-    d.start()                           # _arm -> _refresh_mic_status -> re-probe
+    d.start()  # _arm -> _refresh_mic_status -> re-probe
     assert len(calls) == 2, "arm past TTL MUST re-probe"
 
 
@@ -2552,8 +2842,10 @@ def test_make_daemon_injection_is_hermetic_no_real_pyaudio():
     # Guard against regression: the factory must inject _ok_probe (no real pyaudio in tests).
     d, *_ = _make_daemon()
     assert d._mic_prober is _ok_probe
-    assert d._mic_ok is True        # the stub reported healthy
-    assert "pyaudio" not in sys.modules or True  # (informational; other tests may have imported it)
+    assert d._mic_ok is True  # the stub reported healthy
+    assert (
+        "pyaudio" not in sys.modules or True
+    )  # (informational; other tests may have imported it)
 
 
 # ===========================================================================
@@ -2588,9 +2880,9 @@ def _fixed_clock(monkeypatch, t):
 def test_mic_retry_filter_passes_unrelated_records_untouched():
     f = daemon.MicRetryRateLimitFilter()
     rec = _mic_retry_record(msg="Microphone connected and validated (device index: 2)")
-    assert f.filter(rec) is True          # transparent
-    assert f._count == 0                  # unrelated records do NOT increment the counter
-    assert rec.levelno == logging.ERROR    # record untouched
+    assert f.filter(rec) is True  # transparent
+    assert f._count == 0  # unrelated records do NOT increment the counter
+    assert rec.levelno == logging.ERROR  # record untouched
 
 
 def test_mic_retry_filter_first_occurrence_passes_through_unchanged(monkeypatch):
@@ -2598,7 +2890,7 @@ def test_mic_retry_filter_first_occurrence_passes_through_unchanged(monkeypatch)
     f = daemon.MicRetryRateLimitFilter()
     rec = _mic_retry_record()
     assert f.filter(rec) is True
-    assert rec.levelno == logging.ERROR            # level preserved (full error once)
+    assert rec.levelno == logging.ERROR  # level preserved (full error once)
     assert "Microphone connection failed" in rec.getMessage()  # message preserved
     assert f._count == 1
 
@@ -2615,16 +2907,16 @@ def test_mic_retry_filter_first_occurrence_preserves_traceback(monkeypatch):
         exc_info=exc_info,
     )
     assert f.filter(rec) is True
-    assert rec.exc_info is exc_info      # traceback preserved on the first pass
-    assert rec.exc_text is None           # not yet formatted/cached
+    assert rec.exc_info is exc_info  # traceback preserved on the first pass
+    assert rec.exc_text is None  # not yet formatted/cached
     assert rec.levelno == logging.ERROR
 
 
 def test_mic_retry_filter_suppresses_repeats_within_window(monkeypatch):
     f = daemon.MicRetryRateLimitFilter(dedup_seconds=60, summary_every=20)
     _fixed_clock(monkeypatch, 0.0)
-    assert f.filter(_mic_retry_record()) is True      # count=1: first (pass)
-    for i in range(2, 20):                             # every ~3s, well within the 60s window
+    assert f.filter(_mic_retry_record()) is True  # count=1: first (pass)
+    for i in range(2, 20):  # every ~3s, well within the 60s window
         _fixed_clock(monkeypatch, (i - 1) * 3.0)
         assert f.filter(_mic_retry_record()) is False  # count=2..19: suppressed
     assert f._count == 19
@@ -2633,16 +2925,16 @@ def test_mic_retry_filter_suppresses_repeats_within_window(monkeypatch):
 def test_mic_retry_filter_summary_on_nth_occurrence(monkeypatch):
     f = daemon.MicRetryRateLimitFilter(dedup_seconds=60, summary_every=20)
     _fixed_clock(monkeypatch, 0.0)
-    assert f.filter(_mic_retry_record()) is True       # count=1: first (full error)
+    assert f.filter(_mic_retry_record()) is True  # count=1: first (full error)
     for i in range(2, 20):
         _fixed_clock(monkeypatch, (i - 1) * 3.0)
         assert f.filter(_mic_retry_record()) is False  # 2..19 suppressed
-    _fixed_clock(monkeypatch, 19 * 3.0)                # 57s: within window, but count%20==0
+    _fixed_clock(monkeypatch, 19 * 3.0)  # 57s: within window, but count%20==0
     summary = _mic_retry_record()
-    assert f.filter(summary) is True                   # count=20: summary tick
+    assert f.filter(summary) is True  # count=20: summary tick
     assert summary.levelno == logging.WARNING
     assert summary.levelname == "WARNING"
-    assert summary.exc_info is None and summary.exc_text is None   # CRITICAL #2
+    assert summary.exc_info is None and summary.exc_text is None  # CRITICAL #2
     text = summary.getMessage()
     assert "Microphone still unavailable after 20 retry attempts" in text
     assert "last error: boom" in text
@@ -2653,12 +2945,12 @@ def test_mic_retry_filter_summary_after_dedup_window(monkeypatch):
     # summary_every huge so ONLY the elapsed-window triggers a summary
     f = daemon.MicRetryRateLimitFilter(dedup_seconds=60, summary_every=10_000)
     _fixed_clock(monkeypatch, 0.0)
-    assert f.filter(_mic_retry_record()) is True       # count=1 @ t=0
+    assert f.filter(_mic_retry_record()) is True  # count=1 @ t=0
     _fixed_clock(monkeypatch, 3.0)
-    assert f.filter(_mic_retry_record()) is False      # count=2 suppressed
-    _fixed_clock(monkeypatch, 70.0)                    # > 60s since last emitted record
+    assert f.filter(_mic_retry_record()) is False  # count=2 suppressed
+    _fixed_clock(monkeypatch, 70.0)  # > 60s since last emitted record
     summary = _mic_retry_record()
-    assert f.filter(summary) is True                   # window elapsed -> summary
+    assert f.filter(summary) is True  # window elapsed -> summary
     assert summary.levelno == logging.WARNING
     assert "after 3 retry attempts" in summary.getMessage()
 
@@ -2667,38 +2959,54 @@ def test_mic_retry_filter_count_is_cumulative(monkeypatch):
     # dedup_seconds=0 -> window always elapsed -> every attempt past the first is a summary
     f = daemon.MicRetryRateLimitFilter(dedup_seconds=0.0, summary_every=10_000)
     _fixed_clock(monkeypatch, 0.0)
-    assert f.filter(_mic_retry_record()) is True                    # 1: first
-    _fixed_clock(monkeypatch, 1.0); s = _mic_retry_record()  # noqa: E702 (clock-set + record-build)
+    assert f.filter(_mic_retry_record()) is True  # 1: first
+    _fixed_clock(monkeypatch, 1.0)
+    s = _mic_retry_record()  # noqa: E702 (clock-set + record-build)
     assert f.filter(s) is True and "after 2 retry attempts" in s.getMessage()
-    _fixed_clock(monkeypatch, 2.0); s = _mic_retry_record()  # noqa: E702
+    _fixed_clock(monkeypatch, 2.0)
+    s = _mic_retry_record()  # noqa: E702
     assert f.filter(s) is True and "after 3 retry attempts" in s.getMessage()
 
 
 def test_extract_mic_retry_error_parses_message():
-    assert daemon._extract_mic_retry_error(
-        "Microphone connection failed: Selected device validation failed. Retrying..."
-    ) == "Selected device validation failed"
-    assert daemon._extract_mic_retry_error(
-        "Microphone connection failed: boom. Retrying..."
-    ) == "boom"
-    assert daemon._extract_mic_retry_error("something else") == "something else"  # fallback
+    assert (
+        daemon._extract_mic_retry_error(
+            "Microphone connection failed: Selected device validation failed. Retrying..."
+        )
+        == "Selected device validation failed"
+    )
+    assert (
+        daemon._extract_mic_retry_error(
+            "Microphone connection failed: boom. Retrying..."
+        )
+        == "boom"
+    )
+    assert (
+        daemon._extract_mic_retry_error("something else") == "something else"
+    )  # fallback
 
 
 def test_setup_logging_attaches_exactly_one_rate_limit_filter(monkeypatch):
     rt = logging.getLogger("realtimestt")
     saved = list(rt.filters)
     try:
-        monkeypatch.setattr(logging, "basicConfig", lambda **kw: None)  # don't touch root
-        rt.filters[:] = []                                            # start clean
+        monkeypatch.setattr(
+            logging, "basicConfig", lambda **kw: None
+        )  # don't touch root
+        rt.filters[:] = []  # start clean
         daemon._setup_logging("INFO")
-        matches = [f for f in rt.filters if isinstance(f, daemon.MicRetryRateLimitFilter)]
+        matches = [
+            f for f in rt.filters if isinstance(f, daemon.MicRetryRateLimitFilter)
+        ]
         assert len(matches) == 1
         # idempotent: a second call must NOT double-register (CRITICAL #4)
         daemon._setup_logging("DEBUG")
-        matches = [f for f in rt.filters if isinstance(f, daemon.MicRetryRateLimitFilter)]
+        matches = [
+            f for f in rt.filters if isinstance(f, daemon.MicRetryRateLimitFilter)
+        ]
         assert len(matches) == 1
     finally:
-        rt.filters[:] = saved                                         # restore global state
+        rt.filters[:] = saved  # restore global state
 
 
 def test_rate_limit_filter_is_logger_level_chokepoint():
@@ -2718,9 +3026,9 @@ def test_rate_limit_filter_is_logger_level_chokepoint():
         log.error("Microphone connection failed: boom. Retrying...")
     # first occurrence (count=1) + summary at count=20 = exactly 2 records reach the handler
     assert len(captured) == 2
-    assert captured[0].levelno == logging.ERROR                       # the first (full)
+    assert captured[0].levelno == logging.ERROR  # the first (full)
     assert "Microphone connection failed" in captured[0].getMessage()
-    assert captured[1].levelno == logging.WARNING                     # the summary
+    assert captured[1].levelno == logging.WARNING  # the summary
     assert "after 20 retry attempts" in captured[1].getMessage()
 
 
@@ -2742,13 +3050,19 @@ def test_construct_force_cpu_uses_cpu_fallback(cfg):
     assert kw["device"] == "cpu"
     assert kw["compute_type"] == "int8"
     assert kw["model"] == "tiny.en"
-    assert kw["realtime_model_type"] == "tiny.en"  # single model fills BOTH slots (P1.M1.T2.S2)
+    assert (
+        kw["realtime_model_type"] == "tiny.en"
+    )  # single model fills BOTH slots (P1.M1.T2.S2)
 
 
 def test_construct_force_cpu_skips_resolve(cfg, monkeypatch):
     """force_cpu=True NEVER calls _resolve_device_config (the cuda_check probe is skipped)."""
+
     def _boom(_cfg=None):
-        raise AssertionError("_resolve_device_config must NOT be called when force_cpu=True")
+        raise AssertionError(
+            "_resolve_device_config must NOT be called when force_cpu=True"
+        )
+
     monkeypatch.setattr(daemon, "_resolve_device_config", _boom)
     # force_cpu=True: no raise -> the skip works (cfg_to_kwargs used the injected resolved dict)
     rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=True)
@@ -2762,9 +3076,11 @@ def test_construct_force_cpu_overrides_cuda_path(cfg, monkeypatch):
     """force_cpu wins even when cuda_check is monkeypatched to the CUDA path."""
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)  # force cuda
     rec = daemon._construct(cfg, _FakeFeedback(), _FakeRecorder, force_cpu=True)
-    assert rec.kwargs["device"] == "cpu"            # force_cpu overrides the cuda verdict
+    assert rec.kwargs["device"] == "cpu"  # force_cpu overrides the cuda verdict
     assert rec.kwargs["model"] == "tiny.en"
-    assert rec.kwargs["realtime_model_type"] == "tiny.en"   # single model fills BOTH slots
+    assert (
+        rec.kwargs["realtime_model_type"] == "tiny.en"
+    )  # single model fills BOTH slots
 
 
 def test_construct_force_cpu_keeps_non_device_kwargs(cfg):
@@ -2774,7 +3090,9 @@ def test_construct_force_cpu_keeps_non_device_kwargs(cfg):
     # non-device tunables from cfg (default cfg):
     assert kw["language"] == "en"
     assert kw["realtime_processing_pause"] == 0.15
-    assert kw["post_speech_silence_duration"] == 0.8   # §4.2quater: lite_post is THE duration
+    assert (
+        kw["post_speech_silence_duration"] == 0.8
+    )  # §4.2quater: lite_post is THE duration
     # _FIXED_KWARGS survive (P1.M1.T1.S1's no_log_file + the silero correction):
     assert kw["no_log_file"] is True
     assert kw["silero_backend"] == "auto"
@@ -2794,17 +3112,23 @@ def test_construct_force_cpu_false_is_default_behavior(cfg, monkeypatch):
     # kwargs that force_cpu controls — device/models/timing/_FIXED_KWARGS must be identical:
     _cb = {k for k in explicit.kwargs if k.startswith("on_")}
     assert {k for k in omitted.kwargs if k.startswith("on_")} == _cb
-    non_cb_explicit = {k: v for k, v in explicit.kwargs.items() if not k.startswith("on_")}
-    non_cb_omitted = {k: v for k, v in omitted.kwargs.items() if not k.startswith("on_")}
+    non_cb_explicit = {
+        k: v for k, v in explicit.kwargs.items() if not k.startswith("on_")
+    }
+    non_cb_omitted = {
+        k: v for k, v in omitted.kwargs.items() if not k.startswith("on_")
+    }
     assert non_cb_explicit == non_cb_omitted
-    assert omitted.kwargs["device"] == "cuda"       # the normal cuda path, untouched
+    assert omitted.kwargs["device"] == "cuda"  # the normal cuda path, untouched
     assert omitted.kwargs["model"] == "small.en"
 
 
 def test_cfg_to_kwargs_accepts_resolved_override(cfg, monkeypatch):
     """cfg_to_kwargs(resolved=...) uses the injected dict and skips _resolve_device_config."""
+
     def _boom(_cfg=None):
         raise AssertionError("must not resolve when resolved= is given")
+
     monkeypatch.setattr(daemon, "_resolve_device_config", _boom)
     # P1.M1.T2.S1 single-mode collapse: RED-TRANSIENT until P1.M1.T2.S2 rewires
     #  cfg_to_kwargs to map resolved['model'] to both model= and realtime_model_type=. Do NOT shim.
@@ -2824,12 +3148,27 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
     # transcription executors — defaulted None so the daemon path is unchanged; cfg_to_kwargs
     # stays executor-free (asserted below).
     assert "extra_kwargs" in sb and sb["extra_kwargs"].default is None
-    assert list(sb) == ["cfg", "feedback", "latency", "force_cpu", "on_speech", "extra_kwargs"], list(sb)
+    assert list(sb) == [
+        "cfg",
+        "feedback",
+        "latency",
+        "force_cpu",
+        "on_speech",
+        "extra_kwargs",
+    ], list(sb)
     sc = inspect.signature(daemon._construct).parameters
     assert "force_cpu" in sc and sc["force_cpu"].default is False
     assert "on_speech" in sc and sc["on_speech"].default is None
     assert "extra_kwargs" in sc and sc["extra_kwargs"].default is None
-    assert list(sc) == ["cfg", "feedback", "recorder_cls", "latency", "force_cpu", "on_speech", "extra_kwargs"], list(sc)
+    assert list(sc) == [
+        "cfg",
+        "feedback",
+        "recorder_cls",
+        "latency",
+        "force_cpu",
+        "on_speech",
+        "extra_kwargs",
+    ], list(sc)
     # cfg_to_kwargs kept the keyword-only resolved injection point (default None); the single-path
     # collapse (P1.M1.T2.S2) removed the old two-mode flag:
     sk = inspect.signature(daemon.cfg_to_kwargs).parameters
@@ -2840,12 +3179,15 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
 
 def test_log_resolved_device_reads_cache_after_cpu_fallback(caplog):
     """_log_resolved_device reports the SEEDED cpu cache, not a fresh driver probe (CRITICAL #4)."""
-    d, *_ = _make_daemon()                            # _ok_probe; no cache set
-    d._resolved_device_cache = dict(daemon.cuda_check.CPU_FALLBACK)  # simulate main()'s seed
+    d, *_ = _make_daemon()  # _ok_probe; no cache set
+    d._resolved_device_cache = dict(
+        daemon.cuda_check.CPU_FALLBACK
+    )  # simulate main()'s seed
     with caplog.at_level(logging.INFO, logger="voice_typing.daemon"):
         d._log_resolved_device()
     line = next(
-        (m for m in (r.getMessage() for r in caplog.records) if "device resolved" in m), None
+        (m for m in (r.getMessage() for r in caplog.records) if "device resolved" in m),
+        None,
     )
     assert line is not None, "no device-resolved line"
     # P1.M1.T2.S1 single-mode collapse: RED-TRANSIENT until P1.M1.T2.S2 rewires
@@ -2869,7 +3211,12 @@ def _make_lazy_daemon(cfg=None, host_factory=None):
     cfg = cfg or VoiceTypingConfig()
     fb = _DaemonFakeFeedback()
     return daemon.VoiceTypingDaemon(
-        cfg, fb, recorder=None, host_factory=host_factory, backend=_FakeBackend(), mic_prober=_ok_probe
+        cfg,
+        fb,
+        recorder=None,
+        host_factory=host_factory,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     ), fb
 
 
@@ -2877,7 +3224,7 @@ def test_lazy_daemon_boots_unloaded_with_no_recorder():
     """A recorder-less daemon boots lazy: _host None, _models_loaded False (§4.2bis)."""
     d, _fb = _make_lazy_daemon()
     assert d._host is None
-    assert d._recorder is None                        # back-compat property (None when no legacy adapter)
+    assert d._recorder is None  # back-compat property (None when no legacy adapter)
     assert d._models_loaded is False
     assert d._loading is False
     assert d._load_error is None
@@ -2891,7 +3238,7 @@ def test_load_host_success_loads_and_marks_loaded(monkeypatch):
     assert d._host is not None and d._host.spawn_calls == 1
     assert d._models_loaded is True
     assert d._load_error is None
-    assert fb.phases[-1] == "idle"          # phase driven to 'idle' on success
+    assert fb.phases[-1] == "idle"  # phase driven to 'idle' on success
 
 
 def test_load_host_is_noop_once_loaded(monkeypatch):
@@ -2899,8 +3246,8 @@ def test_load_host_is_noop_once_loaded(monkeypatch):
     factory = _fake_host_factory(spawn_result=True)
     d, _fb = _make_lazy_daemon(host_factory=factory)
     assert d._load_host() is True
-    assert d._load_host() is True       # resident -> no-op
-    assert d._host.spawn_calls == 1         # spawn called exactly ONCE
+    assert d._load_host() is True  # resident -> no-op
+    assert d._host.spawn_calls == 1  # spawn called exactly ONCE
 
 
 def test_load_host_seeds_cache_from_child_device(monkeypatch, caplog):
@@ -2912,7 +3259,9 @@ def test_load_host_seeds_cache_from_child_device(monkeypatch, caplog):
     d, _fb = _make_lazy_daemon(host_factory=factory)
     assert d._load_host() is True
     assert d._host is not None and d._models_loaded is True
-    assert d._resolved_device()["device"] == "cpu"   # cache seeded from the host's (child's) device
+    assert (
+        d._resolved_device()["device"] == "cpu"
+    )  # cache seeded from the host's (child's) device
 
 
 def test_load_host_total_failure_stays_unloaded(monkeypatch):
@@ -2920,7 +3269,7 @@ def test_load_host_total_failure_stays_unloaded(monkeypatch):
     factory = _fake_host_factory(spawn_result=False)
     d, _fb = _make_lazy_daemon(host_factory=factory)
     assert d._load_host() is False
-    assert d._host is None                           # NO half-built host
+    assert d._host is None  # NO half-built host
     assert d._models_loaded is False
     assert d._load_error is not None
 
@@ -2932,7 +3281,7 @@ def test_start_on_lazy_daemon_triggers_load_then_arms(monkeypatch):
     d.start()
     assert d._models_loaded is True
     assert d.is_listening() is True
-    assert d._host.recorder.mic == [True]            # armed (proxied to the fake host's stub)
+    assert d._host.recorder.mic == [True]  # armed (proxied to the fake host's stub)
 
 
 def test_cold_first_arm_fires_loading_toast(monkeypatch):
@@ -2947,7 +3296,7 @@ def test_cold_first_arm_fires_loading_toast(monkeypatch):
     d, fb = _make_lazy_daemon(host_factory=factory)
     d.start()
     assert d.is_listening() is True
-    assert fb.notifies == ["Loading…"]               # fired once, before the spawn
+    assert fb.notifies == ["Loading…"]  # fired once, before the spawn
 
 
 def test_warm_arm_fires_no_loading_toast(monkeypatch):
@@ -2956,13 +3305,16 @@ def test_warm_arm_fires_no_loading_toast(monkeypatch):
     Resident arms reply in ms — there is no model load to announce, so 'Loading…' never fires; only
     the 'Recording' start toast (set_listening) does. This is the every-arm-after-the-first case.
     """
-    d, fb, _rec, _be = _make_daemon()                # injected recorder -> _models_loaded True at boot
+    d, fb, _rec, _be = (
+        _make_daemon()
+    )  # injected recorder -> _models_loaded True at boot
     d.start()
     assert d.is_listening() is True
-    assert fb.notifies == []                          # no cold load -> no 'Loading…' toast
+    assert fb.notifies == []  # no cold load -> no 'Loading…' toast
 
 
 # --- Rev 2 single path (P1.M1.T2.S2): ONE recorder; start/toggle arm it, stop disarms ---
+
 
 def test_start_arms_single_construction_and_sets_lite_mode():
     """start() arms the ONE single-model recorder exactly once + publishes the constant mode.
@@ -2974,10 +3326,10 @@ def test_start_arms_single_construction_and_sets_lite_mode():
     spawns: list = []
     d, fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
     d.start()
-    assert d.is_listening() and len(spawns) == 1     # ONE construction
-    assert not hasattr(d, "_mode")                   # the two-mode daemon attr is gone
-    assert d.status_snapshot()["mode"] == "lite"     # constant on the status surface
-    assert fb.modes == ["lite"]                      # published to state.json via set_mode
+    assert d.is_listening() and len(spawns) == 1  # ONE construction
+    assert not hasattr(d, "_mode")  # the two-mode daemon attr is gone
+    assert d.status_snapshot()["mode"] == "lite"  # constant on the status surface
+    assert fb.modes == ["lite"]  # published to state.json via set_mode
 
 
 def test_toggle_is_involution_single_mode():
@@ -2988,26 +3340,29 @@ def test_toggle_is_involution_single_mode():
     """
     spawns: list = []
     d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.toggle()                                       # idle → arm
+    d.toggle()  # idle → arm
     assert d.is_listening() is True
-    d.toggle()                                       # armed → disarm (bare-listening condition)
+    d.toggle()  # armed → disarm (bare-listening condition)
     assert d.is_listening() is False
     host1 = d._host
-    d.toggle()                                       # disarmed → arm (resident → instant, no reload)
+    d.toggle()  # disarmed → arm (resident → instant, no reload)
     assert d.is_listening() is True
-    assert d._host is host1                          # SAME host object (no teardown/respawn)
+    assert d._host is host1  # SAME host object (no teardown/respawn)
     assert len(spawns) == 1
 
 
 def test_status_snapshot_has_single_model_key():
-    """status_snapshot: the CONSTANT mode 'lite' + ONE 'model' key (13 keys; no two-model pair)."""
+    """status_snapshot: the CONSTANT mode 'lite' + ONE 'model' key (no two-model pair).
+
+    14 keys since P1.M2.T5.S2 added the additive 'context_prompt' state label.
+    """
     factory = _fake_host_factory(spawn_result=True)
     d, _fb = _make_lazy_daemon(host_factory=factory)
     snap = d.status_snapshot()
-    assert snap["mode"] == "lite"                    # constant before AND after arming
+    assert snap["mode"] == "lite"  # constant before AND after arming
     assert "model" in snap
     assert "final_model" not in snap and "realtime_model" not in snap
-    assert len(snap) == 13
+    assert len(snap) == 14
     d.start()
     assert d.status_snapshot()["mode"] == "lite"
 
@@ -3021,15 +3376,17 @@ def test_start_after_idle_unload_reloads():
     """
     spawns: list = []
     d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.start()                                        # load + arm
+    d.start()  # load + arm
     assert len(spawns) == 1
-    d.stop()                                         # disarm -> _disarmed_monotonic stamped
+    d.stop()  # disarm -> _disarmed_monotonic stamped
     # Force the idle-UNLOAD condition (the _idle_unload_watchdog thread only starts in run(),
     # which these unit tests never call); mirror test_cold_arm_after_idle_unload's -9999.0 trick.
     d._disarmed_monotonic = _time.monotonic() - 9999.0
     d._maybe_idle_unload()
-    assert d._models_loaded is False and d._host is None   # host torn down -> next arm is cold again
-    d.start()                                        # reload after idle-unload
+    assert (
+        d._models_loaded is False and d._host is None
+    )  # host torn down -> next arm is cold again
+    d.start()  # reload after idle-unload
     assert len(spawns) == 2 and d._host is spawns[1] and d.is_listening()
 
 
@@ -3041,15 +3398,15 @@ def test_cold_arm_after_idle_unload_refires_loading_toast(monkeypatch):
     """
     factory = _fake_host_factory(spawn_result=True)
     d, fb = _make_lazy_daemon(host_factory=factory)
-    d.start()                                         # cold arm #1: 'Loading…'
+    d.start()  # cold arm #1: 'Loading…'
     assert fb.notifies == ["Loading…"]
-    d.stop()                                         # disarm -> _disarmed_monotonic stamped
+    d.stop()  # disarm -> _disarmed_monotonic stamped
     # Force the idle-UNLOAD condition (the _idle_unload_watchdog thread only starts in run(),
     # which these unit tests never call); mirror test_arm_resets_idle_unload_clock's -9999.0 trick.
     d._disarmed_monotonic = _time.monotonic() - 9999.0
     d._maybe_idle_unload()
-    assert d._models_loaded is False                  # host torn down -> next arm is cold again
-    d.start()                                         # cold arm #2 (reloaded): refires 'Loading…'
+    assert d._models_loaded is False  # host torn down -> next arm is cold again
+    d.start()  # cold arm #2 (reloaded): refires 'Loading…'
     assert fb.notifies == ["Loading…", "Loading…"]
 
 
@@ -3059,19 +3416,20 @@ def test_start_suppressed_when_load_fails(monkeypatch):
     d, _fb = _make_lazy_daemon(host_factory=factory)
     d.start()
     assert d._models_loaded is False
-    assert d.is_listening() is False                 # stayed unarmed
+    assert d.is_listening() is False  # stayed unarmed
 
 
 def test_injected_recorder_is_loaded_at_construction():
     """A pre-injected recorder (the _make_daemon pattern) -> _models_loaded True at boot (no lazy)."""
     d, _fb, _rec, _be = _make_daemon()
     assert d._recorder is not None
-    assert d._models_loaded is True                      # tests that inject get a loaded daemon immediately
+    assert d._models_loaded is True  # tests that inject get a loaded daemon immediately
 
 
 def test_load_host_single_flight_one_build_under_concurrency(monkeypatch):
     """Two concurrent _load_host() calls -> exactly ONE host spawn (the 2nd waits, §4.2bis)."""
     import threading as _t
+
     started = _t.Event()
     release = _t.Event()
     spawn_count = {"n": 0}
@@ -3080,11 +3438,15 @@ def test_load_host_single_flight_one_build_under_concurrency(monkeypatch):
         def spawn(self, timeout=180.0):
             spawn_count["n"] += 1
             started.set()
-            release.wait(2.0)            # make the spawn slow so the 2nd caller arrives while _loading
+            release.wait(
+                2.0
+            )  # make the spawn slow so the 2nd caller arrives while _loading
             return super().spawn(timeout)
 
     def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
-        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
+        return _SlowFakeHost(
+            cfg, feedback, latency, on_final, on_partial, on_speech, **kw
+        )
 
     d, _fb = _make_lazy_daemon(host_factory=factory)
     results = []
@@ -3095,13 +3457,13 @@ def test_load_host_single_flight_one_build_under_concurrency(monkeypatch):
     t1 = _t.Thread(target=caller)
     t2 = _t.Thread(target=caller)
     t1.start()
-    assert started.wait(2.0)         # ensure the loader is mid-spawn before the 2nd starts
+    assert started.wait(2.0)  # ensure the loader is mid-spawn before the 2nd starts
     t2.start()
-    release.set()                    # let the spawn finish
+    release.set()  # let the spawn finish
     t1.join(2.0)
     t2.join(2.0)
-    assert spawn_count["n"] == 1     # exactly ONE spawn (single-flight)
-    assert results == [True, True]   # both callers see success (2nd waited for the 1st)
+    assert spawn_count["n"] == 1  # exactly ONE spawn (single-flight)
+    assert results == [True, True]  # both callers see success (2nd waited for the 1st)
 
 
 # P1.M3.T1.S2 — teardown-vs-load race safety (PRD §4.2bis). Unit tests using fakes; NO CUDA.
@@ -3127,8 +3489,10 @@ class _ControllableShutdownRecorder(_StubRecorder):
         self._release = release
 
     def shutdown(self):  # type: ignore[override]
-        self._started.set()           # signal: _bounded_shutdown is now running under _lock
-        self._release.wait(5.0)       # bounded: never hang the suite on a forgotten release.set()
+        self._started.set()  # signal: _bounded_shutdown is now running under _lock
+        self._release.wait(
+            5.0
+        )  # bounded: never hang the suite on a forgotten release.set()
         self.shutdowns += 1
 
 
@@ -3142,10 +3506,14 @@ def _idle_unloaded_loaded_daemon(*, recorder=None, threshold=0.001, host_factory
     """
     cfg = VoiceTypingConfig()
     cfg.asr.auto_unload_idle_seconds = threshold
-    d, _fb, _rec, _be = _make_daemon(recorder=recorder, host_factory=host_factory, cfg=cfg)
+    d, _fb, _rec, _be = _make_daemon(
+        recorder=recorder, host_factory=host_factory, cfg=cfg
+    )
     with d._lock:
-        d._disarm()                       # clears _listening; stamps _disarmed_monotonic (P1.M3.T1.S1)
-        d._disarmed_monotonic = 0.0       # push the stamp far into the past -> time re-check passes NOW
+        d._disarm()  # clears _listening; stamps _disarmed_monotonic (P1.M3.T1.S1)
+        d._disarmed_monotonic = (
+            0.0  # push the stamp far into the past -> time re-check passes NOW
+        )
     assert d._models_loaded is True
     assert d.is_listening() is False
     return d
@@ -3158,7 +3526,9 @@ def test_arm_racing_unload_waits_then_loads_fresh(monkeypatch):
     release = threading.Event()
     original = _ControllableShutdownRecorder(started, release)
     # The post-unload reload uses a fake host factory (the unload tears down the legacy adapter).
-    d = _idle_unloaded_loaded_daemon(recorder=original, host_factory=_fake_host_factory())
+    d = _idle_unloaded_loaded_daemon(
+        recorder=original, host_factory=_fake_host_factory()
+    )
     assert d._recorder is original
 
     # U: the idle-unload teardown. Acquires _lock, runs the REAL _bounded_shutdown (whose adapter
@@ -3168,7 +3538,9 @@ def test_arm_racing_unload_waits_then_loads_fresh(monkeypatch):
 
     t_u = threading.Thread(target=unload, name="test-unload", daemon=True)
     t_u.start()
-    assert started.wait(2.0), "unload never entered _bounded_shutdown (lock not held yet)"
+    assert started.wait(2.0), (
+        "unload never entered _bounded_shutdown (lock not held yet)"
+    )
 
     # S: a racing arm. start() -> _load_host() -> `with self._lock:` BLOCKS (U holds it).
     armed = threading.Event()
@@ -3180,8 +3552,12 @@ def test_arm_racing_unload_waits_then_loads_fresh(monkeypatch):
     t_s = threading.Thread(target=arm, name="test-arm", daemon=True)
     t_s.start()
     _time.sleep(0.15)  # clear window: an unblocked arm would have armed by now
-    assert not armed.is_set(), "arm proceeded while teardown still held the lock (race not serialized)"
-    assert t_s.is_alive(), "arm thread should still be blocked on the single-flight lock"
+    assert not armed.is_set(), (
+        "arm proceeded while teardown still held the lock (race not serialized)"
+    )
+    assert t_s.is_alive(), (
+        "arm thread should still be blocked on the single-flight lock"
+    )
     assert d._lock.locked(), "the single-flight lock must be held by the teardown"
 
     # Release the teardown -> U nulls the host + frees the lock -> S spawns a FRESH host + arms.
@@ -3213,7 +3589,9 @@ def test_recorder_never_half_torn_down_during_race(monkeypatch):
             return super().spawn(timeout)
 
     def slow_factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
-        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
+        return _SlowFakeHost(
+            cfg, feedback, latency, on_final, on_partial, on_speech, **kw
+        )
 
     d = _idle_unloaded_loaded_daemon(
         recorder=_ControllableShutdownRecorder(started, release),
@@ -3225,7 +3603,7 @@ def test_recorder_never_half_torn_down_during_race(monkeypatch):
 
     def sampler():
         while not stop.is_set():
-            samples.append(d._host)   # atomic attribute read
+            samples.append(d._host)  # atomic attribute read
             _time.sleep(0.001)
 
     t_poll = threading.Thread(target=sampler, name="test-sampler", daemon=True)
@@ -3239,9 +3617,12 @@ def test_recorder_never_half_torn_down_during_race(monkeypatch):
     assert started.wait(2.0)
     release.set()  # let the blocking shutdown() return so the unload completes quickly
     d.start()  # racing arm (spawns fresh after the unload)
-    assert _wait_for(lambda: any(h is None for h in samples), timeout=3.0), \
+    assert _wait_for(lambda: any(h is None for h in samples), timeout=3.0), (
         "sampler never observed the torn-down None state"
-    _time.sleep(0.1)  # let the reload land + the sampler observe the fresh resident host
+    )
+    _time.sleep(
+        0.1
+    )  # let the reload land + the sampler observe the fresh resident host
     stop.set()
     t_poll.join(1.0)
 
@@ -3296,7 +3677,9 @@ def test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded(monkeypat
 
     def recording_bounded(timeout=10.0):
         calls.append(timeout)
-        return real(timeout)  # delegate so the host is actually torn down (stays hermetic)
+        return real(
+            timeout
+        )  # delegate so the host is actually torn down (stays hermetic)
 
     monkeypatch.setattr(d, "_bounded_shutdown", recording_bounded)
 
@@ -3304,8 +3687,12 @@ def test_unload_routes_through_bounded_shutdown_so_arm_wait_is_bounded(monkeypat
     d._unload_recorder()
     elapsed = _time.monotonic() - start
 
-    assert calls == [5.0], f"_unload_host did not route through _bounded_shutdown(5.0): {calls}"
-    assert elapsed < 2.0, f"unload took {elapsed:.2f}s (a racing arm would wait this long)"
+    assert calls == [5.0], (
+        f"_unload_host did not route through _bounded_shutdown(5.0): {calls}"
+    )
+    assert elapsed < 2.0, (
+        f"unload took {elapsed:.2f}s (a racing arm would wait this long)"
+    )
     assert d._models_loaded is False and d._host is None, "unload did not complete"
 
 
@@ -3321,7 +3708,9 @@ def test_armed_state_aborts_unload_via_listening_recheck():
 
     d._unload_recorder()  # re-check sees _listening.is_set() -> abort
 
-    assert d._models_loaded is True, "unload must abort when an arm raced in (listening is on)"
+    assert d._models_loaded is True, (
+        "unload must abort when an arm raced in (listening is on)"
+    )
     assert d._host is not None, "the host must stay resident (unload aborted)"
 
 
@@ -3349,7 +3738,9 @@ def test_lazy_boot_records_unloaded_phase():
     d, fb = _make_lazy_daemon()
     assert d._recorder is None
     assert d._models_loaded is False
-    assert fb.phases[-1] == "unloaded"   # __init__ -> feedback.set_phase("unloaded") for a lazy boot
+    assert (
+        fb.phases[-1] == "unloaded"
+    )  # __init__ -> feedback.set_phase("unloaded") for a lazy boot
 
 
 def test_concurrent_start_calls_build_recorder_once(monkeypatch):
@@ -3365,11 +3756,15 @@ def test_concurrent_start_calls_build_recorder_once(monkeypatch):
         def spawn(self, timeout=180.0):
             spawn_count["n"] += 1
             started.set()
-            release.wait(2.0)            # slow the spawn so the 2nd start() arrives while _loading
+            release.wait(
+                2.0
+            )  # slow the spawn so the 2nd start() arrives while _loading
             return super().spawn(timeout)
 
     def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
-        return _SlowFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
+        return _SlowFakeHost(
+            cfg, feedback, latency, on_final, on_partial, on_speech, **kw
+        )
 
     d, _fb = _make_lazy_daemon(host_factory=factory)
     errors = []
@@ -3377,7 +3772,7 @@ def test_concurrent_start_calls_build_recorder_once(monkeypatch):
     def starter():
         try:
             d.start()
-        except Exception as exc:        # never swallow silently — surface to the test
+        except Exception as exc:  # never swallow silently — surface to the test
             errors.append(exc)
 
     t1 = threading.Thread(target=starter, name="test-start-a", daemon=True)
@@ -3385,13 +3780,15 @@ def test_concurrent_start_calls_build_recorder_once(monkeypatch):
     t1.start()
     assert started.wait(2.0), "first start() never spawned the host"
     t2.start()
-    release.set()                      # let the in-flight spawn finish
+    release.set()  # let the in-flight spawn finish
     t1.join(2.0)
     t2.join(2.0)
     assert not errors, errors
-    assert spawn_count["n"] == 1, f"single-flight violated: {spawn_count['n']} spawns under two concurrent start()s"
+    assert spawn_count["n"] == 1, (
+        f"single-flight violated: {spawn_count['n']} spawns under two concurrent start()s"
+    )
     assert d._models_loaded is True
-    assert d.is_listening() is True    # armed (both starts armed; the load is shared)
+    assert d.is_listening() is True  # armed (both starts armed; the load is shared)
 
 
 # --- idle-unload lifecycle: _maybe_idle_unload() fire / disable / reset (PRD §4.2bis) ---
@@ -3402,15 +3799,17 @@ def test_concurrent_start_calls_build_recorder_once(monkeypatch):
 def test_idle_unload_fires_when_disarmed_beyond_threshold():
     """Clause (e): after auto_unload_idle_seconds (default 1800) DISARMED, _maybe_idle_unload() tears
     the recorder down -> _recorder None, _models_loaded False, phase 'unloaded' (PRD §4.2bis)."""
-    d, fb, rec, _be = _make_daemon()                       # injected _StubRecorder -> loaded
-    d.start()                                              # arm  -> _disarmed_monotonic = None
-    d.stop()                                               # disarm -> _disarmed_monotonic = now
-    d._disarmed_monotonic = _time.monotonic() - 1801.0     # past the 1800s default threshold
+    d, fb, rec, _be = _make_daemon()  # injected _StubRecorder -> loaded
+    d.start()  # arm  -> _disarmed_monotonic = None
+    d.stop()  # disarm -> _disarmed_monotonic = now
+    d._disarmed_monotonic = (
+        _time.monotonic() - 1801.0
+    )  # past the 1800s default threshold
     d._maybe_idle_unload()
-    assert d._recorder is None                             # torn down
+    assert d._recorder is None  # torn down
     assert d._models_loaded is False
-    assert fb.phases[-1] == "unloaded"                     # _unload_recorder drove phase to 'unloaded'
-    assert rec.shutdowns == 1                              # the recorder was shut down via _bounded_shutdown
+    assert fb.phases[-1] == "unloaded"  # _unload_recorder drove phase to 'unloaded'
+    assert rec.shutdowns == 1  # the recorder was shut down via _bounded_shutdown
 
 
 def test_idle_unload_keeps_resident_within_threshold():
@@ -3418,7 +3817,7 @@ def test_idle_unload_keeps_resident_within_threshold():
     d, _fb, rec, _be = _make_daemon()
     d.start()
     d.stop()
-    d._disarmed_monotonic = _time.monotonic() - 100.0      # 100s << 1800s default
+    d._disarmed_monotonic = _time.monotonic() - 100.0  # 100s << 1800s default
     d._maybe_idle_unload()
     assert d._recorder is rec
     assert d._models_loaded is True
@@ -3433,9 +3832,9 @@ def test_idle_unload_disabled_when_threshold_zero():
     d, _fb, rec, _be = _make_daemon(cfg=cfg)
     d.start()
     d.stop()
-    d._disarmed_monotonic = _time.monotonic() - 9999.0     # would fire, but 0 disables
+    d._disarmed_monotonic = _time.monotonic() - 9999.0  # would fire, but 0 disables
     d._maybe_idle_unload()
-    assert d._recorder is rec                              # stayed resident
+    assert d._recorder is rec  # stayed resident
     assert d._models_loaded is True
     assert rec.shutdowns == 0
 
@@ -3445,10 +3844,10 @@ def test_idle_unload_noop_when_listening():
     recorder down mid-dictation (the §4.2bis / §8 half-torn-down hazard). The _listening.is_set() guard
     in the lock-free pre-check aborts it."""
     d, _fb, rec, _be = _make_daemon()
-    d.start()                                              # armed -> listening ON
-    d._disarmed_monotonic = _time.monotonic() - 9999.0     # would fire by time alone...
+    d.start()  # armed -> listening ON
+    d._disarmed_monotonic = _time.monotonic() - 9999.0  # would fire by time alone...
     d._maybe_idle_unload()
-    assert d._recorder is rec                              # ...but listening aborts the unload
+    assert d._recorder is rec  # ...but listening aborts the unload
     assert d._models_loaded is True
     assert d.is_listening() is True
 
@@ -3456,7 +3855,7 @@ def test_idle_unload_noop_when_listening():
 def test_idle_unload_noop_when_never_disarmed():
     """Guard: at boot _disarmed_monotonic is None (never disarmed) -> _maybe_idle_unload() is a clean
     no-op (no error, recorder resident)."""
-    d, _fb, rec, _be = _make_daemon()                      # boot: _disarmed_monotonic is None
+    d, _fb, rec, _be = _make_daemon()  # boot: _disarmed_monotonic is None
     assert d._disarmed_monotonic is None
     d._maybe_idle_unload()
     assert d._recorder is rec
@@ -3466,10 +3865,10 @@ def test_idle_unload_noop_when_never_disarmed():
 def test_idle_unload_noop_when_not_loaded():
     """Guard: a LAZY daemon (no recorder resident) -> _maybe_idle_unload() is a no-op (nothing to
     unload; the not-_models_loaded guard short-circuits)."""
-    d, _fb = _make_lazy_daemon()                           # lazy: _models_loaded False, _recorder None
+    d, _fb = _make_lazy_daemon()  # lazy: _models_loaded False, _recorder None
     d._disarmed_monotonic = _time.monotonic() - 9999.0
     d._maybe_idle_unload()
-    assert d._recorder is None                             # still nothing resident
+    assert d._recorder is None  # still nothing resident
     assert d._models_loaded is False
 
 
@@ -3477,16 +3876,16 @@ def test_arm_resets_idle_unload_clock():
     """Clause (g): any _arm() RESETS the idle-unload clock (_disarmed_monotonic -> None), so a re-arm
     CANCELS a pending idle-unload that would otherwise fire (PRD §4.2bis 'resets on any arm')."""
     d, _fb, rec, _be = _make_daemon()
-    d.start()                                              # arm -> _disarmed_monotonic = None
+    d.start()  # arm -> _disarmed_monotonic = None
     assert d._disarmed_monotonic is None
-    d.stop()                                               # disarm -> stamps _disarmed_monotonic
+    d.stop()  # disarm -> stamps _disarmed_monotonic
     assert d._disarmed_monotonic is not None
-    d._disarmed_monotonic = _time.monotonic() - 9999.0     # would fire...
-    d.start()                                              # ...but a re-arm RESETS the clock
-    assert d._disarmed_monotonic is None                   # armed -> idle-unload clock inactive
+    d._disarmed_monotonic = _time.monotonic() - 9999.0  # would fire...
+    d.start()  # ...but a re-arm RESETS the clock
+    assert d._disarmed_monotonic is None  # armed -> idle-unload clock inactive
     # The reset cancels the pending unload: _maybe_idle_unload is now a no-op.
     d._maybe_idle_unload()
-    assert d._recorder is rec                              # stayed resident (arm reset cancelled it)
+    assert d._recorder is rec  # stayed resident (arm reset cancelled it)
     assert d._models_loaded is True
 
 
@@ -3503,10 +3902,10 @@ import json  # noqa: E402  (state.json read in the _make_daemon_with_feedback te
 def test_disarm_resets_phase_to_idle():
     """stop() -> _disarm() -> phase 'idle' (the 'loaded / not listening' state, PRD §4.2bis/§4.6)."""
     d, fb, _rec, _be = _make_daemon()
-    d.start()                                  # arm (set_microphone True, listening on)
-    d._feedback.set_phase("listening")         # simulate the child's VAD advancing phase
+    d.start()  # arm (set_microphone True, listening on)
+    d._feedback.set_phase("listening")  # simulate the child's VAD advancing phase
     assert d.is_listening() is True
-    d.stop()                                   # -> _disarm() -> set_listening(False) + set_phase("idle")
+    d.stop()  # -> _disarm() -> set_listening(False) + set_phase("idle")
     assert d.is_listening() is False
     assert fb.phases[-1] == "idle", f"phase after stop = {fb.phases[-1]!r}"
 
@@ -3515,9 +3914,9 @@ def test_toggle_off_resets_phase_to_idle():
     """toggle() while listening disarms -> phase 'idle'."""
     d, fb, _rec, _be = _make_daemon()
     d.start()
-    d._feedback.set_phase("speaking")          # VAD had reached 'speaking' before the toggle
+    d._feedback.set_phase("speaking")  # VAD had reached 'speaking' before the toggle
     assert d.is_listening() is True
-    d.toggle()                                 # listening -> disarm branch -> _disarm()
+    d.toggle()  # listening -> disarm branch -> _disarm()
     assert d.is_listening() is False
     assert fb.phases[-1] == "idle", f"phase after toggle-off = {fb.phases[-1]!r}"
 
@@ -3525,11 +3924,11 @@ def test_toggle_off_resets_phase_to_idle():
 def test_auto_stop_resets_phase_to_idle():
     """The 30s idle auto-stop (_maybe_auto_stop -> _disarm) resets phase to 'idle'."""
     d, fb, _rec, _be = _make_daemon()
-    d.start()                                  # arm -> _last_speech_monotonic = now
+    d.start()  # arm -> _last_speech_monotonic = now
     d._feedback.set_phase("speaking")
     # Idle > 30.0s default threshold (mirrors test_auto_stop_disarms_when_idle_beyond_threshold @583):
     d._last_speech_monotonic = _time.monotonic() - 31.0
-    d._maybe_auto_stop()                       # -> _disarm() -> set_phase("idle")
+    d._maybe_auto_stop()  # -> _disarm() -> set_phase("idle")
     assert d.is_listening() is False
     assert fb.phases[-1] == "idle", f"phase after auto-stop = {fb.phases[-1]!r}"
 
@@ -3538,10 +3937,12 @@ def test_state_json_phase_idle_after_stop(tmp_path, monkeypatch):
     """The REAL Feedback writes phase 'idle' to state.json on disarm (on-disk contract, PRD §4.6)."""
     d, fb = _make_daemon_with_feedback(tmp_path, monkeypatch)
     d.start()
-    fb.set_phase("listening")                  # real Feedback.set_phase (writes state.json)
+    fb.set_phase("listening")  # real Feedback.set_phase (writes state.json)
     assert fb.snapshot()["phase"] == "listening"
-    d.stop()                                   # _disarm -> set_phase("idle") -> atomic state.json write
-    state = json.load(open(tmp_path / "state.json"))   # _make_daemon_with_feedback writes here
+    d.stop()  # _disarm -> set_phase("idle") -> atomic state.json write
+    state = json.load(
+        open(tmp_path / "state.json")
+    )  # _make_daemon_with_feedback writes here
     assert state["phase"] == "idle", state
     assert state["listening"] is False
 
@@ -3569,25 +3970,29 @@ def test_run_loop_detects_dead_host_and_transitions_to_unloaded(monkeypatch):
     # _LegacyRecorderHostAdapter (is_alive always True -> undetectable death). Mirrors _make_lazy_daemon.
     fb = _DaemonFakeFeedback()
     d = daemon.VoiceTypingDaemon(
-        VoiceTypingConfig(), fb, recorder=None, host_factory=factory,
-        backend=_FakeBackend(), mic_prober=_ok_probe,
+        VoiceTypingConfig(),
+        fb,
+        recorder=None,
+        host_factory=factory,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
     try:
-        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)   # run() booted
-        d.start()                                          # _load_host spawns _FakeHost (_alive=True) + _arm
+        _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)  # run() booted
+        d.start()  # _load_host spawns _FakeHost (_alive=True) + _arm
         assert _wait_for(lambda: d._models_loaded, timeout=2.0), "host did not load+arm"
         assert d.is_listening() and d._host is not None
-        d._host._alive = False                             # simulate the child crashing
+        d._host._alive = False  # simulate the child crashing
         assert _wait_for(
             lambda: d._host is None and "died" in (d._load_error or ""), timeout=2.0
         ), "run() did not detect the dead host within 2s"
         assert d._host is None
         assert d._models_loaded is False
-        assert d.is_listening() is False                   # _listening cleared (died WHILE listening)
+        assert d.is_listening() is False  # _listening cleared (died WHILE listening)
         assert "died" in (d._load_error or ""), d._load_error
-        assert fb.phases[-1] == "unloaded"                 # _handle_dead_host -> set_phase("unloaded")
+        assert fb.phases[-1] == "unloaded"  # _handle_dead_host -> set_phase("unloaded")
         assert fb.listening_states[-1] is False
     finally:
         d.request_shutdown()
@@ -3607,8 +4012,12 @@ def test_load_host_respawns_after_dead_child(monkeypatch):
     # recorder=None => lazy boot so start()'s _load_host() spawns a _FakeHost (see test (a)).
     fb = _DaemonFakeFeedback()
     d = daemon.VoiceTypingDaemon(
-        VoiceTypingConfig(), fb, recorder=None, host_factory=factory,
-        backend=_FakeBackend(), mic_prober=_ok_probe,
+        VoiceTypingConfig(),
+        fb,
+        recorder=None,
+        host_factory=factory,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
@@ -3616,18 +4025,20 @@ def test_load_host_respawns_after_dead_child(monkeypatch):
         _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)
         d.start()
         assert _wait_for(lambda: d._models_loaded, timeout=2.0)
-        old_host = d._host                              # capture before killing
-        old_host._alive = False                         # child crashes
-        assert _wait_for(
-            lambda: d._host is None and d._load_error, timeout=2.0
-        ), "dead host not cleaned up"
+        old_host = d._host  # capture before killing
+        old_host._alive = False  # child crashes
+        assert _wait_for(lambda: d._host is None and d._load_error, timeout=2.0), (
+            "dead host not cleaned up"
+        )
         assert d._models_loaded is False
-        d.start()                                        # re-arm -> _load_host spawns a FRESH host
+        d.start()  # re-arm -> _load_host spawns a FRESH host
         assert _wait_for(lambda: d._models_loaded, timeout=2.0), "host did not re-spawn"
-        assert d._host is not old_host, "re-arm reused the dead host instead of spawning a new one"
+        assert d._host is not old_host, (
+            "re-arm reused the dead host instead of spawning a new one"
+        )
         assert d._host.spawn_calls == 1, "the new host was not spawned exactly once"
         assert d._models_loaded is True
-        assert d.is_listening() is True                 # recovery: listening again
+        assert d.is_listening() is True  # recovery: listening again
     finally:
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
@@ -3641,11 +4052,18 @@ def test_status_reports_unloaded_after_child_death(tmp_path, monkeypatch):
     from feedback.snapshot(), which the fake lacks. Asserts the §7.6 status contract.
     """
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
-    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    cfg = VoiceTypingConfig(
+        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
+    )
     fb = Feedback(cfg.feedback)
     factory = _fake_host_factory(spawn_result=True)
     d = daemon.VoiceTypingDaemon(
-        cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
+        cfg,
+        fb,
+        recorder=None,
+        host_factory=factory,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
@@ -3653,15 +4071,15 @@ def test_status_reports_unloaded_after_child_death(tmp_path, monkeypatch):
         _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)
         d.start()
         assert _wait_for(lambda: d._models_loaded, timeout=2.0)
-        d._host._alive = False                          # child crashes
+        d._host._alive = False  # child crashes
         assert _wait_for(
             lambda: d._host is None and "died" in (d._load_error or ""), timeout=2.0
         ), "dead host not cleaned up"
         snap = d.status_snapshot()
-        assert snap["listening"] is False               # is_listening()
-        assert snap["phase"] == "unloaded"              # real Feedback.set_phase("unloaded")
-        assert snap["models_loaded"] is False           # real Feedback.set_models_loaded(False)
-        assert "died" in snap["load_error"], snap["load_error"]   # self._load_error
+        assert snap["listening"] is False  # is_listening()
+        assert snap["phase"] == "unloaded"  # real Feedback.set_phase("unloaded")
+        assert snap["models_loaded"] is False  # real Feedback.set_models_loaded(False)
+        assert "died" in snap["load_error"], snap["load_error"]  # self._load_error
     finally:
         d.request_shutdown()
     assert _wait_for(lambda: not t.is_alive(), timeout=2.0), "run() thread did not exit"
@@ -3679,12 +4097,19 @@ def test_status_device_reseeded_not_stale_after_child_death(tmp_path, monkeypatc
     configured cuda, NOT stay stale at cpu.
     """
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
-    cfg = VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    cfg = VoiceTypingConfig(
+        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
+    )
     fb = Feedback(cfg.feedback)
     cpu_device = {"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
     factory = _fake_host_factory(spawn_result=True, device=cpu_device)
     d = daemon.VoiceTypingDaemon(
-        cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
+        cfg,
+        fb,
+        recorder=None,
+        host_factory=factory,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
@@ -3692,9 +4117,13 @@ def test_status_device_reseeded_not_stale_after_child_death(tmp_path, monkeypatc
         _wait_for(lambda: d._start_monotonic is not None, timeout=2.0)
         d.start()
         assert _wait_for(lambda: d._models_loaded, timeout=2.0)
-        assert d.status_snapshot()["device"] == "cpu"   # cache seeded from the child's 'ready'
-        d._host._alive = False                           # child crashes
-        assert _wait_for(lambda: d._host is None, timeout=2.0), "dead host not cleaned up"
+        assert (
+            d.status_snapshot()["device"] == "cpu"
+        )  # cache seeded from the child's 'ready'
+        d._host._alive = False  # child crashes
+        assert _wait_for(lambda: d._host is None, timeout=2.0), (
+            "dead host not cleaned up"
+        )
         # _handle_dead_host publishes host=None and the VT-002 reseed under ONE _lock hold; the
         # unlocked poll above can observe host=None mid-hold, so wait for the reseed itself to land
         # (state.json writes sit between the two assignments inside the lock block).
@@ -3726,18 +4155,25 @@ def test_status_device_reseeded_not_stale_after_idle_unload(tmp_path, monkeypatc
     cpu_device = {"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
     factory = _fake_host_factory(spawn_result=True, device=cpu_device)
     d = daemon.VoiceTypingDaemon(
-        cfg, fb, recorder=None, host_factory=factory, backend=_FakeBackend(), mic_prober=_ok_probe
+        cfg,
+        fb,
+        recorder=None,
+        host_factory=factory,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
     )
-    d.start()                                       # arm -> _load_host seeds cache=cpu from child
+    d.start()  # arm -> _load_host seeds cache=cpu from child
     assert d._models_loaded is True
-    assert d.status_snapshot()["device"] == "cpu"   # seeded from the child
-    d.stop()                                        # disarm -> _disarmed_monotonic set
+    assert d.status_snapshot()["device"] == "cpu"  # seeded from the child
+    d.stop()  # disarm -> _disarmed_monotonic set
     # Force the idle-UNLOAD condition deterministically (the _idle_unload_watchdog thread only
     # starts in run(), which this test skips) — mirror the existing idle-unload tests' past-clock
     # trick instead of relying on real time elapsing past a 0.001s threshold.
     d._disarmed_monotonic = _time.monotonic() - 9999.0
     d._maybe_idle_unload()
-    assert d._host is None and d._models_loaded is False, "idle-unload did not tear the host down"
+    assert d._host is None and d._models_loaded is False, (
+        "idle-unload did not tear the host down"
+    )
     # VT-002: reseeded to the CONFIGURED device (cuda), not stale at the unloaded child's cpu.
     snap = d.status_snapshot()
     assert snap["device"] == "cuda" and snap["compute_type"] == "float16"
@@ -3773,14 +4209,16 @@ def test_idle_unload_clears_load_error():
     would), then runs _maybe_idle_unload past the threshold and asserts the error is
     cleared alongside the teardown (host None, models_loaded False, phase unloaded).
     """
-    d, fb, _rec, _be = _make_daemon()                       # injected _StubRecorder -> loaded
-    d.start()                                              # arm
-    d.stop()                                               # disarm -> _disarmed_monotonic set
-    d._load_error = "recorder host spawn failed"           # simulate a PRIOR failed arm's error
+    d, fb, _rec, _be = _make_daemon()  # injected _StubRecorder -> loaded
+    d.start()  # arm
+    d.stop()  # disarm -> _disarmed_monotonic set
+    d._load_error = "recorder host spawn failed"  # simulate a PRIOR failed arm's error
     assert d._load_error is not None
-    d._disarmed_monotonic = _time.monotonic() - 1801.0     # past the 1800s default threshold
+    d._disarmed_monotonic = (
+        _time.monotonic() - 1801.0
+    )  # past the 1800s default threshold
     d._maybe_idle_unload()
-    assert d._host is None                                 # torn down
+    assert d._host is None  # torn down
     assert d._models_loaded is False
     assert fb.phases[-1] == "unloaded"
     assert d._load_error is None, "idle-unload did not clear the stale _load_error"
@@ -3803,7 +4241,7 @@ def test_handle_dead_host_noop_when_host_already_cleared():
     d._load_error = None
     fb.set_phase("unloaded")
     fb.set_models_loaded(False)
-    d._handle_dead_host()                                  # the racing (losing) dead-host call
+    d._handle_dead_host()  # the racing (losing) dead-host call
     assert d._host is None
     assert d._models_loaded is False
     assert d._load_error is None, (
@@ -3817,12 +4255,15 @@ def test_handle_dead_host_noop_when_host_already_cleared():
 # (toggle disarms iff listening; arms otherwise — one construction, no reloads.)
 # ===========================================================================
 
+
 def _spawning_factory(spawns):
     """A host_factory that appends each built _FakeHost to `spawns` (so arms are countable)."""
+
     def factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
         host = _FakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
         spawns.append(host)
         return host
+
     return factory
 
 
@@ -3839,8 +4280,8 @@ def test_toggle_while_armed_disarms():
     """toggle while armed → disarms (the bare-listening condition; no reload on the disarm path)."""
     spawns: list = []
     d, _fb = _make_lazy_daemon(host_factory=_spawning_factory(spawns))
-    d.start()                                        # arm
-    d.toggle()                                       # armed → disarm
+    d.start()  # arm
+    d.toggle()  # armed → disarm
     assert d.is_listening() is False
     assert len(spawns) == 1
 
@@ -3927,7 +4368,9 @@ def test_cancel_with_pending_tail_presses_len_minus_1():
     d._stream = _FakeStream(tail_len=8)
     resp = d.cancel()
     assert resp["ok"] is True and resp["listening"] is True
-    assert d._backend.typed == [("bs", 7)], d._backend.typed   # exactly one backspace batch, n=len-1
+    assert d._backend.typed == [("bs", 7)], (
+        d._backend.typed
+    )  # exactly one backspace batch, n=len-1
     assert fb.finals == [], "the cancelled fragment must NOT be recorded"
     assert d._stream.reset_calls == 1, "the stream tail must be reset to a fresh one"
 
@@ -3938,9 +4381,13 @@ def test_cancel_without_tail_is_noop_on_the_backend():
     d, fb = _make_cancel_daemon()
     resp = d.cancel()
     assert resp["ok"] is True and resp["listening"] is True
-    assert d._backend.typed == [], f"no backspace without a pending tail; got {d._backend.typed!r}"
+    assert d._backend.typed == [], (
+        f"no backspace without a pending tail; got {d._backend.typed!r}"
+    )
     assert fb.finals == []
-    assert d._host.cancel_calls == 1   # the in-flight utterance is discarded even with no tail
+    assert (
+        d._host.cancel_calls == 1
+    )  # the in-flight utterance is discarded even with no tail
 
 
 def test_cancel_len_1_tail_issues_no_backspace():
@@ -3970,7 +4417,7 @@ def test_cancel_twice_without_tail_is_idempotent():
     further Backspaces are plain user edits, never compensated)."""
     d, _fb = _make_cancel_daemon()
     r1 = d.cancel()
-    d._text_in_flight.clear()          # the first cancel unblocked text(); loop is between rounds
+    d._text_in_flight.clear()  # the first cancel unblocked text(); loop is between rounds
     r2 = d.cancel()
     assert r1["ok"] is True and r2["ok"] is True
     assert d._backend.typed == [], d._backend.typed
@@ -3983,17 +4430,21 @@ def test_cancel_suppression_drops_racing_final_and_clears_on_sentinel():
     d, fb = _make_cancel_daemon()
     be = d._backend
     host = d._host
-    d.cancel()                                  # arms _cancel_suppress_final + host.cancel()
+    d.cancel()  # arms _cancel_suppress_final + host.cancel()
     assert host.cancel_calls == 1
-    d.on_final("racing tail")                   # real final racing the cancel -> DROPPED
+    d.on_final("racing tail")  # real final racing the cancel -> DROPPED
     assert be.typed == [] and fb.finals == []
-    assert d._cancel_suppress_final is True     # still armed: the sentinel has not been seen
-    host.mark_cancel_sentinel()                 # reader relays the marked sentinel next
-    d.on_final("")                              # the sentinel itself -> DROPPED, window closes
-    assert d._cancel_suppress_final is False, "the marked sentinel must clear the suppression"
-    assert be.typed == [] and fb.finals == []   # sentinel typed/recorded nothing
-    d.on_final("fresh sentence")                # a NORMAL final afterwards flows through
-    assert be.typed == ["fresh sentence", " "]   # commit: final + space (P1.M2.T6.S2)
+    assert (
+        d._cancel_suppress_final is True
+    )  # still armed: the sentinel has not been seen
+    host.mark_cancel_sentinel()  # reader relays the marked sentinel next
+    d.on_final("")  # the sentinel itself -> DROPPED, window closes
+    assert d._cancel_suppress_final is False, (
+        "the marked sentinel must clear the suppression"
+    )
+    assert be.typed == [] and fb.finals == []  # sentinel typed/recorded nothing
+    d.on_final("fresh sentence")  # a NORMAL final afterwards flows through
+    assert be.typed == ["fresh sentence", " "]  # commit: final + space (P1.M2.T6.S2)
     assert fb.finals == ["fresh sentence"]
 
 
@@ -4010,8 +4461,8 @@ def test_arm_clears_stale_cancel_suppression():
     """Defense in depth: a cancel whose sentinel was LOST (child died mid-cancel) must not eat a
     later utterance's finals — a fresh arm re-arms the final pipeline."""
     d, _fb = _make_cancel_daemon()
-    d._cancel_suppress_final = True   # simulate the lost-sentinel residue
-    d.start()                          # start() -> _load_host() no-op -> _arm() under the lock
+    d._cancel_suppress_final = True  # simulate the lost-sentinel residue
+    d.start()  # start() -> _load_host() no-op -> _arm() under the lock
     assert d._cancel_suppress_final is False
     assert d.is_listening() is True
 
@@ -4037,8 +4488,8 @@ def test_on_final_streaming_commit_types_via_engine():
     the daemon itself never calls backend.type_text directly for the payload."""
     d, fb, rec, be = _make_daemon()
     d.start()
-    d._on_partial("hello wor")          # routes through the engine: types the tail
-    d.on_final("hello world")           # commit: extend delta "ld" + the trailing space
+    d._on_partial("hello wor")  # routes through the engine: types the tail
+    d.on_final("hello world")  # commit: extend delta "ld" + the trailing space
     assert be.typed == ["hello wor", "ld", " "]
     assert d._stream.committed == "hello world "
     assert fb.finals == ["hello world"]
@@ -4064,12 +4515,12 @@ def test_on_final_streaming_false_is_verbatim_rev1_hatch():
     cfg.output.streaming = False
     d, fb, rec, be = _make_daemon(cfg=cfg)
     d.start()
-    d._on_partial("hello wor")          # engine mirror-only: NOTHING typed
+    d._on_partial("hello wor")  # engine mirror-only: NOTHING typed
     d.on_final("hello world")
     assert be.typed == ["hello world "]  # byte-identical Rev 1: one payload+space call
     assert fb.partials == ["hello wor"]  # raw partial still mirrored (via the engine)
     assert fb.finals == ["hello world"]
-    assert d._stream.committed == ""     # the checkpoint never advances in Rev 1 mode
+    assert d._stream.committed == ""  # the checkpoint never advances in Rev 1 mode
 
 
 def test_on_final_streaming_rejected_final_freezes_tail_and_keeps_bookkeeping():
@@ -4080,12 +4531,12 @@ def test_on_final_streaming_rejected_final_freezes_tail_and_keeps_bookkeeping():
     cfg.filter.blocklist = ["hello"]
     d, fb, rec, be = _make_daemon(cfg=cfg)
     d.start()
-    d._on_partial("hello world")        # typed tail on screen
-    d.on_final("hello")                 # blocklisted -> clean() -> None
+    d._on_partial("hello world")  # typed tail on screen
+    d.on_final("hello")  # blocklisted -> clean() -> None
     assert be.typed == ["hello world"]  # frozen as-is: NO rewind, NO retype, NO space
     assert d._stream.frozen is True
-    assert d._stream.committed == ""    # checkpoint NOT advanced
-    assert d._final_pending is False    # bookkeeping ran despite the rejection
+    assert d._stream.committed == ""  # checkpoint NOT advanced
+    assert d._final_pending is False  # bookkeeping ran despite the rejection
     assert d._utterance_finalized is True
     assert fb.finals == []
 
@@ -4097,10 +4548,10 @@ def test_on_final_streaming_false_rejected_final_is_plain_early_return():
     cfg.filter.blocklist = ["hello"]
     d, fb, rec, be = _make_daemon(cfg=cfg)
     d.start()
-    d._on_partial("hello world")        # mirror-only (no typing in Rev 1)
+    d._on_partial("hello world")  # mirror-only (no typing in Rev 1)
     d.on_final("hello")
     assert be.typed == []
-    assert d._stream.frozen is False    # the engine is never touched in Rev 1 mode
+    assert d._stream.frozen is False  # the engine is never touched in Rev 1 mode
     assert fb.finals == []
 
 
@@ -4125,25 +4576,33 @@ def test_on_partial_streaming_false_mirror_only():
 
 
 def test_on_final_streaming_pushes_context_prompt_to_host():
-    """After the commit, _refresh_context_prompt sends the committed text since the
-    last sentence boundary to the host's set_prompt seam."""
+    """After the commit, _refresh_context_prompt sends the formal rolling context
+    (prompt_engine.rolling_context_prompt) to the host's set_prompt seam (P1.M2.T5.S2).
+    The pre-built host reports context_prompt=True in its ready device dict — the
+    daemon-side gate requires a capability-reporting child."""
     cfg = VoiceTypingConfig()
-    host = _PromptRecordingHost(cfg, _DaemonFakeFeedback(), daemon.LatencyLog(), None, None, None)
-    host.spawn()   # mark the pre-built host alive so _load_host() fast-paths (keeps OUR host)
+    host = _PromptRecordingHost(
+        cfg, _DaemonFakeFeedback(), daemon.LatencyLog(), None, None, None
+    )
+    host.device["context_prompt"] = True  # S1's additive ready flag: executor armed
+    host.spawn()  # mark the pre-built host alive so _load_host() fast-paths (keeps OUR host)
     d, fb, rec, be = _make_daemon(cfg=cfg, recorder_host=host)
     d.start()
     d._on_partial("First one. sec")
-    d.on_final("First one. second")     # commit -> committed "First one. second "
+    d.on_final("First one. second")  # commit -> committed "First one. second "
     assert be.typed == ["First one. sec", "ond", " "]
-    assert host.prompts == ["second"]   # text since the last '.', whitespace-stripped
+    assert host.prompts == [
+        "",
+        "second",
+    ]  # arm-time clear, then text since the last '.'
 
 
 def test_refresh_context_prompt_missing_host_seam_is_silent_noop():
     """A host WITHOUT set_prompt (the legacy recorder adapter here) is a silent DEBUG
     no-op — on_final must complete normally."""
-    d, fb, rec, be = _make_daemon()     # legacy adapter host: no set_prompt attr
+    d, fb, rec, be = _make_daemon()  # legacy adapter host: no set_prompt attr
     d.start()
-    d.on_final("hello world")           # commit + refresh: must not raise
+    d.on_final("hello world")  # commit + refresh: must not raise
     assert fb.finals == ["hello world"]
     assert be.typed == ["hello world", " "]
 
@@ -4154,13 +4613,13 @@ def test_arm_and_disarm_reset_the_stream_session():
     d, fb, rec, be = _make_daemon()
     d.start()
     d._on_partial("hello")
-    d.on_final("hello world")           # committed "hello world "
+    d.on_final("hello world")  # committed "hello world "
     assert d._stream.committed == "hello world "
-    d._disarm()                         # session over -> strings reset (tail stays typed)
+    d._disarm()  # session over -> strings reset (tail stays typed)
     assert d._stream.committed == "" and d._stream.tail == ""
-    d.start()                           # fresh arm: the engine types again from scratch
+    d.start()  # fresh arm: the engine types again from scratch
     d._on_partial("Next")
-    assert be.typed[-1] == "Next"       # fresh session start: case preserved, typed anew
+    assert be.typed[-1] == "Next"  # fresh session start: case preserved, typed anew
 
 
 # --- P1.M2.T6.S3: user-keypress seam + stranded-tail freeze wiring (PRD rules 4/5) ---
@@ -4199,7 +4658,7 @@ def test_note_user_keypress_without_stream_is_noop():
     """Defensive getattr seam style (_pending_tail_len): a missing stream must not raise."""
     d, fb = _make_cancel_daemon()
     del d._stream
-    d.note_user_keypress()              # must not raise
+    d.note_user_keypress()  # must not raise
 
 
 def test_on_final_user_keypress_frozen_commit_absorbs_then_unfreezes():
@@ -4213,11 +4672,11 @@ def test_on_final_user_keypress_frozen_commit_absorbs_then_unfreezes():
     d.note_user_keypress()
     assert d._stream.frozen is True
     d.on_final("hello world")
-    assert be.typed == ["hello wor"]            # frozen-absorb: no further keystrokes
+    assert be.typed == ["hello wor"]  # frozen-absorb: no further keystrokes
     assert d._stream.committed == "hello wor"
-    assert d._stream.frozen is False            # lifted at the boundary, after the commit
+    assert d._stream.frozen is False  # lifted at the boundary, after the commit
     d._on_partial("next")
-    assert be.typed == ["hello wor", "next"]    # the next utterance types normally
+    assert be.typed == ["hello wor", "next"]  # the next utterance types normally
 
 
 def test_drain_timeout_freezes_pending_tail_session_class():
@@ -4227,13 +4686,13 @@ def test_drain_timeout_freezes_pending_tail_session_class():
     d, fb, rec, be = _make_daemon()
     d.start()
     d._touch_speech()
-    d._on_partial("hello wor")          # typed tail pending
+    d._on_partial("hello wor")  # typed tail pending
     d._text_in_flight.set()
     d._begin_drain()
-    d._drain_timeout()                  # simulate the watchdog firing (final never came)
-    assert rec.aborts == 1              # the watchdog still aborts (unchanged behavior)
+    d._drain_timeout()  # simulate the watchdog firing (final never came)
+    assert rec.aborts == 1  # the watchdog still aborts (unchanged behavior)
     assert d._stream.frozen is True and d._stream.frozen_session is True
-    assert be.typed == ["hello wor"]    # frozen as-is: nothing rewound or retyped
+    assert be.typed == ["hello wor"]  # frozen as-is: nothing rewound or retyped
 
 
 def test_drain_timeout_without_pending_tail_does_not_freeze():
@@ -4284,8 +4743,8 @@ def test_child_death_branch_freezes_pending_tail_before_handle_dead_host():
     # The run-loop liveness branch, executed verbatim (run() holds no lock here):
     d._freeze_stranded_tail("recorder-host child died: stranded tail")
     d._handle_dead_host()
-    assert d._listening.is_set() is False       # _handle_dead_host ran (gate cleared)
+    assert d._listening.is_set() is False  # _handle_dead_host ran (gate cleared)
     assert d._stream.frozen is True and d._stream.frozen_session is True
-    assert be.typed == ["hello wor"]            # zero keystrokes for the stranded tail
+    assert be.typed == ["hello wor"]  # zero keystrokes for the stranded tail
     d._disarm()  # the next disarm/arm cycle: engine strings reset, still no keystrokes
     assert be.typed == ["hello wor"]

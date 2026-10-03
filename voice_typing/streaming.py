@@ -58,6 +58,7 @@ PURE STDLIB (logging, threading, time + textproc). No torch / ctranslate2 /
 realtimestt / pyaudio — imports cleanly in CPU-only and unit-test contexts.
 Nothing typed at import time; the engine starts no threads.
 """
+
 from __future__ import annotations
 
 import logging
@@ -80,14 +81,17 @@ _CONTEXT_BOUNDARY_CHARS = ".!?"
 
 
 def context_after_last_boundary(committed: str) -> str:
-    """Text after the last sentence terminator in `committed` (rolling context prompt).
+    """Text after the last sentence terminator in `committed` (casing-guard slicer).
 
-    The daemon's thin P1.M2.T6.S2 seam: after every commit it pushes this slice to
-    the recorder-host child so the NEXT small.en decode starts primed with the
-    current partial sentence (the formal daemon-side computation is P1.M2.T5.S2's).
-    Returns "" when `committed` has no '.', '!' or '?' at all, or when the last
-    terminator sits at the very end (nothing after it). Surrounding whitespace is
-    stripped. PURE: no I/O, no state, deterministic.
+    P1.M2.T6.S2 thin-seam helper. SUPERSEDED for prompt computation (P1.M2.T5.S2):
+    the formal daemon-side rolling-context computation now lives in
+    prompt_engine.rolling_context_prompt — which does its OWN rfind because this
+    slicer's ""-on-no-boundary contract is ambiguous for prompts ("" means both
+    'committed ends with a terminator' and 'no terminator anywhere'). This slicer
+    KEEPS that contract — it is pinned by tests and used for casing-guard context,
+    not prompts. Returns "" when `committed` has no '.', '!' or '?' at all, or when
+    the last terminator sits at the very end (nothing after it). Surrounding
+    whitespace is stripped. PURE: no I/O, no state, deterministic.
     """
     last = max(committed.rfind(ch) for ch in _CONTEXT_BOUNDARY_CHARS)
     return committed[last + 1 :].strip() if last >= 0 else ""
@@ -148,7 +152,9 @@ class StreamingOutput:
         self._committed: str = ""
         self._tail: str = ""
         self._frozen: bool = False
-        self._frozen_session: bool = False  # True = survives reset_boundary() (P1.M2.T6.S3)
+        self._frozen_session: bool = (
+            False  # True = survives reset_boundary() (P1.M2.T6.S3)
+        )
         self._suppressed: bool = False
         # None = no full rewind has happened yet (first revise is always allowed).
         # A plain 0.0 sentinel would break a fake clock starting at 0.0 (and read
@@ -325,7 +331,9 @@ class StreamingOutput:
                 if not delta:
                     self._feedback.update_partial(self._tail)
                     return
-                guarded = textproc.apply_streaming_guards(self._guard_context_delta(), delta)
+                guarded = textproc.apply_streaming_guards(
+                    self._guard_context_delta(), delta
+                )
                 if guarded:
                     # Never rate-limited: additive, flicker-free by construction.
                     if not self._safe_type(guarded):
@@ -409,7 +417,9 @@ class StreamingOutput:
                 # rstrip the base: committed normally ends with the appended inter-
                 # final space, and the join must not double it (the space typed between
                 # committed and tail is already on screen).
-                self._committed = " ".join(p for p in (self._committed.rstrip(), self._tail) if p)
+                self._committed = " ".join(
+                    p for p in (self._committed.rstrip(), self._tail) if p
+                )
                 self._tail = ""
                 self._suppressed = False
                 self._feedback.update_partial(self._committed)
@@ -419,7 +429,9 @@ class StreamingOutput:
                 delta = text[len(self._tail) :]
                 guarded = ""
                 if delta:
-                    guarded = textproc.apply_streaming_guards(self._guard_context_delta(), delta)
+                    guarded = textproc.apply_streaming_guards(
+                        self._guard_context_delta(), delta
+                    )
                     if guarded and not self._safe_type(guarded):
                         return  # frozen by the fail-safe; tail frozen on screen
                     self._tail += guarded
@@ -439,7 +451,9 @@ class StreamingOutput:
                 return  # frozen: checkpoint stays at the pre-commit boundary
             # rstrip the base so the join never doubles the previous commit's
             # trailing space (it is already on screen exactly once).
-            self._committed = " ".join(p for p in (self._committed.rstrip(), typed) if p) + space
+            self._committed = (
+                " ".join(p for p in (self._committed.rstrip(), typed) if p) + space
+            )
             self._tail = ""
             self._suppressed = False
             self._feedback.update_partial(self._committed)
@@ -461,9 +475,7 @@ class StreamingOutput:
             self._backend.type_text(s)
             return True
         except Exception as exc:  # noqa: BLE001 — the reader thread must survive
-            logger.warning(
-                "streaming type_text(%r) failed (%s); freezing tail", s, exc
-            )
+            logger.warning("streaming type_text(%r) failed (%s); freezing tail", s, exc)
             # SESSION-class freeze (P1.M2.T6.S3): on-screen state unknown — survives
             # reset_boundary(); only reset_session() (fresh arm) lifts it.
             self._frozen = True
@@ -478,7 +490,9 @@ class StreamingOutput:
             self._backend.press_backspace(n)
             return True
         except Exception as exc:  # noqa: BLE001 — the reader thread must survive
-            logger.warning("streaming press_backspace(%d) failed (%s); freezing", n, exc)
+            logger.warning(
+                "streaming press_backspace(%d) failed (%s); freezing", n, exc
+            )
             # SESSION-class freeze (P1.M2.T6.S3): on-screen state unknown — see _safe_type.
             self._frozen = True
             self._frozen_session = True

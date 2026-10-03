@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 # decoder window on even long utterances.
 _PROMPT_TOKEN_CAP = 200
 
+# Sentence terminators that end the rolling context window (P1.M2.T5.S2). Pinned
+# verbatim to textproc._SENTENCE_TERMINALS (repo convention — streaming.py pins
+# the same copy for its slicer); the three sets must never drift apart.
+_CONTEXT_BOUNDARY_CHARS = ".!?"
+
 # Capability-probe warmup: 1 s of 16 kHz float32 zeros — enough to force the model build +
 # CUDA context init + one full encode/decode pass, so probe failures surface at READY time
 # instead of on the first arm.
@@ -109,6 +114,30 @@ def trim_prompt(text: str, cap: int = _PROMPT_TOKEN_CAP) -> str:
     if len(tokens) <= cap:
         return " ".join(tokens)
     return " ".join(tokens[-cap:])
+
+
+def rolling_context_prompt(committed: str) -> str:
+    """The formal daemon-side rolling context prompt (PRD §4.2quater; P1.M2.T5.S2).
+
+    The committed text back to the last sentence boundary, whitespace-normalized,
+    capped to the NEWEST _PROMPT_TOKEN_CAP tokens (via trim_prompt — the child
+    caps again in set_prompt: defense in depth, same constant):
+      - terminator mid-string       -> the text after it (the in-progress sentence);
+      - committed ENDS with one     -> "" (fresh sentence — decoder may capitalize);
+      - NO terminator anywhere      -> the WHOLE committed text (capped). This is
+        the T8c pause-join case: a long unpunctuated run still conditions the
+        next decode (the old thin-seam slicer returned "" here — superseded).
+
+    PURE: no I/O, no state, deterministic, stdlib-only. Never raises — None or
+    empty input degrades to "". The rfind lives HERE, not in the caller: the
+    composition `context_after_last_boundary(c) or trim_prompt(c)` is WRONG
+    because "" is ambiguous between the ends-with-terminator case (prompt stays
+    empty) and the no-boundary case (prompt must be everything).
+    """
+    committed = committed or ""
+    last = max(committed.rfind(ch) for ch in _CONTEXT_BOUNDARY_CHARS)
+    source = committed[last + 1 :] if last >= 0 else committed
+    return trim_prompt(source)
 
 
 class PromptedExecutor:

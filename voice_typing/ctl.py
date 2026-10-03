@@ -23,6 +23,7 @@ Usage:  voicectl <toggle|start|stop|status|cancel|quit>
 
 Stdlib-only: argparse, json, socket, sys + the shared socket-path resolver from voice_typing.daemon.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -31,9 +32,18 @@ import socket
 import sys
 import threading
 
-from voice_typing.daemon import _default_control_socket_path  # canonical resolver (P1.M4.T2.S1); reuse, do not duplicate
+from voice_typing.daemon import (
+    _default_control_socket_path,
+)  # canonical resolver (P1.M4.T2.S1); reuse, do not duplicate
 
-_COMMANDS: tuple[str, ...] = ("toggle", "start", "stop", "status", "quit", "cancel")  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' = Backspace-cancel fallback (P1.M2.T7.S1)
+_COMMANDS: tuple[str, ...] = (
+    "toggle",
+    "start",
+    "stop",
+    "status",
+    "quit",
+    "cancel",
+)  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' = Backspace-cancel fallback (P1.M2.T7.S1)
 # BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
 # so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
 _EX_USAGE: int = 64
@@ -59,20 +69,36 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
     """
     if response.get("ok") is not True:
         return f"error: {response.get('error', 'unknown error')}", 1
-    if response.get("shutting_down"):           # quit reply (no listening key) -> branch BEFORE .get("listening")
+    if response.get(
+        "shutting_down"
+    ):  # quit reply (no listening key) -> branch BEFORE .get("listening")
         return "shutting down", 0
     if cmd == "status":
         listening = "on" if response.get("listening") else "off"
-        phase = response.get("phase", "") or ""                       # P1.M2.T2.S1: lifecycle phase (§4.2bis)
-        mode = response.get("mode", "normal") or "normal"              # Rev 2: daemon constant "lite" (P1.M1.T2.S2); default kept defensive
+        phase = (
+            response.get("phase", "") or ""
+        )  # P1.M2.T2.S1: lifecycle phase (§4.2bis)
+        mode = (
+            response.get("mode", "normal") or "normal"
+        )  # Rev 2: daemon constant "lite" (P1.M1.T2.S2); default kept defensive
         partial = response.get("partial", "") or ""
         last_final = response.get("last_final", "") or ""
         uptime = response.get("uptime_s", 0.0)
         device = response.get("device", "unknown")
         compute_type = response.get("compute_type", "unknown")
-        load_error = response.get("load_error", "") or ""            # P1.M2.T2.S1: last load failure
-        mic_ok = response.get("mic_ok", True)             # bugfix Issue 2 / P1.M1.T2.S2: default True
-        mic_error = response.get("mic_error", "") or ""   #   so a missing key never looks broken
+        load_error = (
+            response.get("load_error", "") or ""
+        )  # P1.M2.T2.S1: last load failure
+        mic_ok = response.get(
+            "mic_ok", True
+        )  # bugfix Issue 2 / P1.M1.T2.S2: default True
+        mic_error = (
+            response.get("mic_error", "") or ""
+        )  #   so a missing key never looks broken
+        # P1.M2.T5.S2: rolling context-prompt state — the daemon sends the human label
+        # (on / off (disabled by config) / off (degraded — context-free decoding) /
+        # off (models not loaded)); a missing key (old daemon) reads as 'unknown'.
+        context_prompt = response.get("context_prompt", "") or "unknown"
         if mic_ok:
             mic_line = "mic: ok"
         elif mic_error:
@@ -87,9 +113,10 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
             f"last: {last_final}\n"
             f"uptime: {uptime}s\n"
             f"device: {device} ({compute_type})\n"
-            f"{mic_line}"
+            f"{mic_line}\n"
+            f"context-prompt: {context_prompt}"
         )
-        if load_error:                                     # surface §4.2bis load failures (absent on the happy path)
+        if load_error:  # surface §4.2bis load failures (absent on the happy path)
             text += f"\nload error: {load_error}"
         return text, 0
     # toggle / start / stop / cancel (cancel is NOT an arm command: no loading hint, falls through
@@ -107,13 +134,15 @@ def send_command(socket_path: str, cmd: str) -> dict:
     then closes (voicectl is one-shot).
     """
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.connect(socket_path)   # raises FileNotFoundError/ConnectionRefusedError/PermissionError
+        sock.connect(
+            socket_path
+        )  # raises FileNotFoundError/ConnectionRefusedError/PermissionError
         sock.sendall((json.dumps({"cmd": cmd}) + "\n").encode("utf-8"))
         with sock.makefile("r", encoding="utf-8", newline="\n") as rfile:
             line = rfile.readline()
     if not line:
         raise ValueError("daemon closed the connection without replying")
-    return json.loads(line)         # json.JSONDecodeError is a ValueError subclass
+    return json.loads(line)  # json.JSONDecodeError is a ValueError subclass
 
 
 def _send_command_with_loading_hint(socket_path: str, cmd: str) -> dict:
@@ -128,7 +157,9 @@ def _send_command_with_loading_hint(socket_path: str, cmd: str) -> dict:
     """
     timer = threading.Timer(
         _LOADING_HINT_DELAY,
-        lambda: print("loading models… (first arm, ~1–3 s)", file=sys.stderr, flush=True),
+        lambda: print(
+            "loading models… (first arm, ~1–3 s)", file=sys.stderr, flush=True
+        ),
     )
     timer.daemon = True
     timer.start()
@@ -169,19 +200,27 @@ def main(argv: list[str] | None = None) -> int:
     to daemon-not-running (PRD §4.8, bugfix Issue 7). --help still exits 0 via argparse as usual.
     """
     args = _build_parser().parse_args(argv)
-    cmd: str | None = args.cmd          # None when no command given (positional is nargs='?')
-    if cmd not in _COMMANDS:            # missing (None) or unknown string -> usage error
+    cmd: str | None = args.cmd  # None when no command given (positional is nargs='?')
+    if cmd not in _COMMANDS:  # missing (None) or unknown string -> usage error
         if cmd is None:
-            print(f"voicectl: a command is required; choose from {', '.join(_COMMANDS)}", file=sys.stderr)
+            print(
+                f"voicectl: a command is required; choose from {', '.join(_COMMANDS)}",
+                file=sys.stderr,
+            )
         else:
-            print(f"voicectl: invalid command {cmd!r}; choose from {', '.join(_COMMANDS)}", file=sys.stderr)
+            print(
+                f"voicectl: invalid command {cmd!r}; choose from {', '.join(_COMMANDS)}",
+                file=sys.stderr,
+            )
         return _EX_USAGE
 
     # 1. Resolve the socket path. XDG_RUNTIME_DIR unset -> RuntimeError -> daemon can't be running.
     try:
         socket_path = _default_control_socket_path()
     except RuntimeError:
-        print("voicectl: daemon not running (XDG_RUNTIME_DIR is not set)", file=sys.stderr)
+        print(
+            "voicectl: daemon not running (XDG_RUNTIME_DIR is not set)", file=sys.stderr
+        )
         return 2
 
     # 2. Talk to the daemon. Connect OSError -> exit 2; protocol ValueError -> exit 1.
@@ -194,10 +233,12 @@ def main(argv: list[str] | None = None) -> int:
             response = _send_command_with_loading_hint(socket_path, cmd)
         else:
             response = send_command(socket_path, cmd)
-    except OSError as exc:                       # FileNotFoundError / ConnectionRefusedError / PermissionError
+    except (
+        OSError
+    ) as exc:  # FileNotFoundError / ConnectionRefusedError / PermissionError
         print(f"voicectl: daemon not running ({exc.strerror or exc})", file=sys.stderr)
         return 2
-    except ValueError as exc:                    # empty / malformed response line
+    except ValueError as exc:  # empty / malformed response line
         print(f"voicectl: {exc}", file=sys.stderr)
         return 1
 

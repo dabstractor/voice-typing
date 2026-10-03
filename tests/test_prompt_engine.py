@@ -33,6 +33,7 @@ from voice_typing.prompt_engine import (
     PromptProbeResult,
     PromptedExecutor,
     probe_prompt_executor,
+    rolling_context_prompt,
     trim_prompt,
 )
 from voice_typing.recorder_host import _ready_payload, augment_kwargs_with_executor
@@ -138,6 +139,57 @@ def test_trim_prompt_empty_or_blank_is_empty():
 def test_trim_prompt_nonpositive_cap_is_empty():
     assert trim_prompt("hello world", cap=0) == ""
     assert trim_prompt("hello world", cap=-1) == ""
+
+
+# ---------------------------------------------------------------------------
+# rolling_context_prompt (P1.M2.T5.S2 — the formal daemon-side computation)
+# ---------------------------------------------------------------------------
+
+
+def test_rolling_prompt_midstring_boundary_slices_in_progress_sentence():
+    # Last '.' sits mid-string: the prompt is ONLY the text after it (whitespace-normalized).
+    assert rolling_context_prompt("done first. now the second") == "now the second"
+    # '!' and '?' are boundaries too.
+    assert rolling_context_prompt("really! tell me more") == "tell me more"
+    assert rolling_context_prompt("what now? I think") == "I think"
+
+
+def test_rolling_prompt_ends_with_terminator_is_empty():
+    # Committed ends at a boundary: fresh sentence — the decoder may capitalize.
+    assert rolling_context_prompt("a full sentence.") == ""
+    assert rolling_context_prompt("one. two!") == ""
+    assert rolling_context_prompt("done? ") == ""
+
+
+def test_rolling_prompt_no_terminator_is_whole_committed():
+    # The T8c pause-join case (the thin seam's bug): an unpunctuated run conditions
+    # the next decode with its WHOLE text, not "".
+    assert (
+        rolling_context_prompt("I want to test whether this system")
+        == "I want to test whether this system"
+    )
+
+
+def test_rolling_prompt_run_on_over_cap_keeps_newest_200():
+    words = [f"w{i}" for i in range(250)]  # 250-token run-on: no boundary anywhere
+    out = rolling_context_prompt(" ".join(words))
+    assert out.split() == words[-200:]  # newest kept, oldest dropped (trim_prompt)
+
+    # Same cap applies after a boundary slice: 250 fresh tokens since the last '.'.
+    tail_words = [f"t{i}" for i in range(250)]
+    out2 = rolling_context_prompt("done. " + " ".join(tail_words))
+    assert out2.split() == tail_words[-200:]
+
+
+def test_rolling_prompt_normalizes_whitespace():
+    assert rolling_context_prompt("done.  spaced \t out\n") == "spaced out"
+    assert rolling_context_prompt("a\tb   c") == "a b c"
+
+
+def test_rolling_prompt_empty_or_none_is_empty():
+    assert rolling_context_prompt("") == ""
+    assert rolling_context_prompt("   ") == ""
+    assert rolling_context_prompt(None) == ""  # type: ignore[arg-type] — defensive degrade
 
 
 # ---------------------------------------------------------------------------

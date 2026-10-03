@@ -154,7 +154,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Streaming engine — state machine, cancel, context prompt, guards",
-          "status": "Planned",
+          "status": "Complete",
           "description": "The core Rev 2 feature work on top of the substrate: textproc guards, the committed/tail streaming state machine with freeze rules and the rollback hatch, the Backspace-cancel path (socket + evdev), and the rolling context prompt made dynamic in the recorder child.",
           "tasks": [
             {
@@ -183,7 +183,7 @@
               "type": "Task",
               "id": "P1.M2.T5",
               "title": "Rolling context prompt (R5)",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Condition every decode on the committed text back to the last sentence boundary (~200-token cap): child-side dynamic prompt mechanism (RealtimeSTT 1.0.2's prompts are constructor-static — see research), plus daemon-side computation and shipping over cmd_q.",
               "subtasks": [
                 {
@@ -207,7 +207,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T5.S2",
                   "title": "Daemon-side prompt computation + commit-time refresh",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T5.S1",

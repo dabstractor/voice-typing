@@ -66,6 +66,7 @@ already-landed pure-stdlib modules). RealtimeSTT is imported LAZILY inside build
 imported only under TYPE_CHECKING. The daemon class holds self._recorder as a REFERENCE, never
 importing AudioToTextRecorder (so import purity holds).
 """
+
 from __future__ import annotations
 
 import collections
@@ -81,15 +82,19 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
+import voice_typing.prompt_engine as prompt_engine
 import voice_typing.streaming as streaming
 import voice_typing.textproc as textproc
 import voice_typing.typing_backends as typing_backends
 from voice_typing import cuda_check
 from voice_typing.config import VoiceTypingConfig
+
 # P1.M2.T7.S2: passive evdev Backspace-cancel listener (PRD §4.2quater). Pure-python import —
 # evdev pulls no torch/RealtimeSTT into the daemon process (import-purity rule, §4.2bis).
 from voice_typing.key_listener import KeyListener
-from voice_typing.recorder_host import RecorderHost  # P1.M3.T2.S2: child-subprocess recorder owner
+from voice_typing.recorder_host import (
+    RecorderHost,
+)  # P1.M3.T2.S2: child-subprocess recorder owner
 
 if TYPE_CHECKING:
     # Type hint only — never executed at runtime, so importing daemon.py is safe even while
@@ -106,12 +111,12 @@ logger = logging.getLogger(__name__)
 _FIXED_KWARGS: dict[str, Any] = {
     "enable_realtime_transcription": True,
     "min_length_of_recording": 0.3,
-    "min_gap_between_recordings": 0.0,      # resume listening immediately
+    "min_gap_between_recordings": 0.0,  # resume listening immediately
     "silero_sensitivity": 0.4,
     "webrtc_sensitivity": 3,
-    "silero_backend": "auto",               # item correction (a); avoids torch-hub download
+    "silero_backend": "auto",  # item correction (a); avoids torch-hub download
     "spinner": False,
-    "use_microphone": True,                 # False + feed_audio() in tests (P1.M7.T2.S1)
+    "use_microphone": True,  # False + feed_audio() in tests (P1.M7.T2.S1)
     "ensure_sentence_starting_uppercase": False,  # item correction (b); textproc owns cleanup
     "ensure_sentence_ends_with_period": False,
     "no_log_file": True,  # bugfix Issue 1: suppress RealtimeSTT's unbounded realtimesst.log (PRD §4.2 sole path = stderr→journald)
@@ -161,7 +166,9 @@ def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     return cuda_check.resolve_device_and_models(defaults)
 
 
-def cfg_to_kwargs(cfg: VoiceTypingConfig, *, resolved: dict[str, str] | None = None) -> dict[str, Any]:
+def cfg_to_kwargs(
+    cfg: VoiceTypingConfig, *, resolved: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Build the AudioToTextRecorder kwargs from cfg (CPU fallback already applied).
 
     Returns the NON-callback kwargs (model/device/timing/VAD/silero). The on_* callbacks are wired
@@ -202,7 +209,8 @@ def cfg_to_kwargs(cfg: VoiceTypingConfig, *, resolved: dict[str, str] | None = N
 
 
 def _build_callbacks(
-    feedback: "Feedback", latency: "LatencyLog | None" = None,
+    feedback: "Feedback",
+    latency: "LatencyLog | None" = None,
     on_speech: "Callable[[], None] | None" = None,
 ) -> dict[str, Callable[..., None]]:
     """Wire RealtimeSTT callbacks -> Feedback (+ optional LatencyLog; PRD §4.2; P1.M4.T1.S3).
@@ -217,6 +225,7 @@ def _build_callbacks(
     the partial/on_vad_stop callbacks behave exactly as S1 (no extra side effect). VoiceTypingDaemon
     passes its LatencyLog so the per-utterance latency log gets t_speech_end + partial count.
     """
+
     def _partial(text: str) -> None:
         feedback.update_partial(text)
         if latency is not None:
@@ -338,10 +347,19 @@ def build_recorder(
     cuda_check.CPU_FALLBACK without probing CUDA — the construction-failure retry hook for
     main() (P1.M1.T3.S2). Default False (the normal CUDA/CPU-fallback path).
     """
-    from RealtimeSTT import AudioToTextRecorder  # lazy: keeps `import voice_typing.daemon` cheap
+    from RealtimeSTT import (
+        AudioToTextRecorder,
+    )  # lazy: keeps `import voice_typing.daemon` cheap
 
-    return _construct(cfg, feedback, AudioToTextRecorder, latency, force_cpu=force_cpu,
-                      on_speech=on_speech, extra_kwargs=extra_kwargs)
+    return _construct(
+        cfg,
+        feedback,
+        AudioToTextRecorder,
+        latency,
+        force_cpu=force_cpu,
+        on_speech=on_speech,
+        extra_kwargs=extra_kwargs,
+    )
 
 
 # --- Control socket path resolution (P1.M4.T2.S1; PRD §4.2(3)) -------------------------------
@@ -374,7 +392,9 @@ def _default_control_socket_path() -> str:
 # A bounded ring buffer of recent utterance records + a structured log line the latency tests parse.
 # t_speech_end comes from the on_vad_stop callback (threaded in via _build_callbacks); t_final_ready
 # / t_typed come from on_final. All delta timestamps are time.monotonic() (NTP-safe); ts is wall epoch.
-_LATENCY_LOG_PREFIX = "voice-typing latency:"   # STABLE prefix — T1 greps this (do not rename)
+_LATENCY_LOG_PREFIX = (
+    "voice-typing latency:"  # STABLE prefix — T1 greps this (do not rename)
+)
 _LATENCY_RING_SIZE = 64
 
 # P1.M1.T2.S1 / bugfix Issue 1: bounded wait shutdown() uses for an in-flight teardown claimed
@@ -419,7 +439,9 @@ class LatencyLog:
         with self._lock:
             self._t_speech_end = time.monotonic()
 
-    def finalize_utterance(self, *, text: str, t_final_ready: float, t_typed: float) -> dict:
+    def finalize_utterance(
+        self, *, text: str, t_final_ready: float, t_typed: float
+    ) -> dict:
         """Build + store the per-utterance record; reset counters; return the record for logging.
 
         t_speech_end may be None (no on_vad_stop seen) → the two *_ms fields derived from it are None
@@ -436,9 +458,12 @@ class LatencyLog:
             "t_final_ready": t_final_ready,
             "t_typed": t_typed,
             "speech_end_to_final_ms": _ms(t_final_ready - t_speech_end)
-                if t_speech_end is not None else None,
+            if t_speech_end is not None
+            else None,
             "final_to_typed_ms": _ms(t_typed - t_final_ready),
-            "total_ms": _ms(t_typed - t_speech_end) if t_speech_end is not None else None,
+            "total_ms": _ms(t_typed - t_speech_end)
+            if t_speech_end is not None
+            else None,
             "partials": partials,
             "text": text,
             "ts": time.time(),
@@ -509,7 +534,9 @@ class _LegacyRecorderHostAdapter:
                 rec.shutdown()
                 logger.info("recorder shutdown complete (GPU workers released)")
             except Exception:
-                logger.exception("recorder.shutdown() failed during teardown (best-effort; ignored)")
+                logger.exception(
+                    "recorder.shutdown() failed during teardown (best-effort; ignored)"
+                )
             finally:
                 done.set()
 
@@ -528,7 +555,9 @@ class _LegacyRecorderHostAdapter:
                 if proc is not None and proc.is_alive():
                     proc.terminate()
             except Exception:
-                logger.debug("force-terminate of %s failed (best-effort)", attr, exc_info=True)
+                logger.debug(
+                    "force-terminate of %s failed (best-effort)", attr, exc_info=True
+                )
         try:
             rec.is_shut_down = True
         except Exception:
@@ -597,8 +626,10 @@ class VoiceTypingDaemon:
         # (nor do _arm/_disarm call on_final) -> no lock-ordering deadlock. Held across clean→
         # type→record→log; the gate check stays OUTSIDE (read-only race guard).
         self._on_final_lock = threading.Lock()
-        self._listening = threading.Event()   # cleared → NOT listening at boot (PRD §4.9)
-        self._shutdown = threading.Event()    # cleared → keep looping
+        self._listening = (
+            threading.Event()
+        )  # cleared → NOT listening at boot (PRD §4.9)
+        self._shutdown = threading.Event()  # cleared → keep looping
         # P1.M1.T2.S1 / bugfix Issue 1: signaled when the in-flight _bounded_shutdown() finishes, so
         #   a concurrent shutdown() (main-thread finally, on the SIGTERM path) can WAIT for it
         #   instead of starting a second teardown (SIGTERM double-teardown fix). Set in
@@ -612,7 +643,9 @@ class VoiceTypingDaemon:
         # gates abort() on this flag so it can NEVER block the control-socket response. Set/cleared
         # ONLY by run() on the single main thread; read by _safe_abort() on control/worker threads
         # (a stale True during the brief teardown window is harmless — abort() is then a valid nudge).
-        self._text_in_flight = threading.Event()   # cleared → no thread in text() at boot
+        self._text_in_flight = (
+            threading.Event()
+        )  # cleared → no thread in text() at boot
         # P1.M2.T7.S1 (PRD §4.2quater Backspace-cancel): set by cancel() while it aborts the
         # in-flight utterance; while set, on_final DROPS every final (the real final that raced
         # the cancel AND the marked sentinel). Cleared ONLY by the cancelled sentinel
@@ -674,6 +707,25 @@ class VoiceTypingDaemon:
             self._host = None
             loaded = False
         self._models_loaded = loaded
+        # P1.M2.T5.S2 — rolling context prompt, daemon side. _context_prompt_active is the
+        # loaded child's ready-payload capability flag: None = no child loaded yet,
+        # True = the PromptedExecutor armed (probe passed), False = degraded (config-off
+        # OR probe failure — the child built stock context-free kwargs). Captured from
+        # the child's 'ready' dict in _load_host(); mirrored HERE for a pre-built
+        # recorder_host= injection (which short-circuits _load_host — the legacy
+        # recorder= adapter has no ready payload, so it stays None there). This flag
+        # gates every daemon-side prompt push/clear; status labels disabled vs degraded
+        # vs not-loaded from it + the config key.
+        self._context_prompt_active: bool | None = (
+            bool(getattr(recorder_host, "device", {}).get("context_prompt", False))
+            if recorder_host is not None
+            else None
+        )
+        # Rev 1 rollback hatch (output.streaming=false): the daemon-side committed-text
+        # accumulator. StreamingOutput is deliberately NOT touched in that mode (T6.S2
+        # pinned the hatch keystroke-identical), so the commit-time prompt refresh
+        # sources from here instead. Reset at every _arm().
+        self._rev1_committed: str = ""
         self._loading = False
         self._load_error: str | None = None
         # Single-flight load wait (PRD §4.2bis "waits on the in-flight one"): a Condition over the SAME _lock so a
@@ -733,14 +785,18 @@ class VoiceTypingDaemon:
         # (P1.M1.T2.S2) can surface it instead of silently reporting "listening: on". Injectable
         # (mic_prober=) so unit tests stay hermetic — NO real PyAudio/CUDA in the test suite
         # (production leaves mic_prober=None -> self._probe_mic, which imports pyaudio LAZILY).
-        self._mic_ok: bool = True            # default True: never-probed != broken (PRD §4.4 spirit)
+        self._mic_ok: bool = (
+            True  # default True: never-probed != broken (PRD §4.4 spirit)
+        )
         self._mic_error: str | None = None
         self._mic_prober = mic_prober
         # TTL cache stamp for _refresh_mic_status (bugfix Issue 3 / P1.M2.T2.S1): time.monotonic()
         # of the last probe; 0.0 == never (sentinel matching MicRetryRateLimitFilter._last_seen).
         # Read/written ONLY under self._lock (via _arm) or here in single-threaded __init__.
         self._mic_probe_at: float = 0.0
-        self._refresh_mic_status(force=True)   # construction always probes (sets the initial stamp)
+        self._refresh_mic_status(
+            force=True
+        )  # construction always probes (sets the initial stamp)
 
     def _load_host(self) -> bool:
         """Single-flight lazy SPAWN of the recorder-host child (PRD §4.2bis). True iff ready.
@@ -759,10 +815,12 @@ class VoiceTypingDaemon:
             if self._models_loaded and self._host is not None and self._host.is_alive:
                 return True
             if self._loading:
-                while self._loading:               # wait for the in-flight spawn (spurious-wake safe)
+                while (
+                    self._loading
+                ):  # wait for the in-flight spawn (spurious-wake safe)
                     self._load_cond.wait()
                 return self._models_loaded
-            self._loading = True                   # we are the loader
+            self._loading = True  # we are the loader
             self._load_error = None
             self._feedback.set_phase("loading")
             self._feedback.set_models_loaded(False)  # models not resident while loading
@@ -777,14 +835,22 @@ class VoiceTypingDaemon:
         # Test fakes (self._host_factory) keep the old surface; only the real RecorderHost takes it.
         if self._host_factory is None:
             host = factory(
-                self._cfg, self._feedback, self._latency,
-                self.on_final, self._on_partial, self._touch_speech,
+                self._cfg,
+                self._feedback,
+                self._latency,
+                self.on_final,
+                self._on_partial,
+                self._touch_speech,
                 is_listening=self.is_listening,
             )
         else:
             host = factory(
-                self._cfg, self._feedback, self._latency,
-                self.on_final, self._on_partial, self._touch_speech,
+                self._cfg,
+                self._feedback,
+                self._latency,
+                self.on_final,
+                self._on_partial,
+                self._touch_speech,
             )
         ok = host.spawn()
         # --- re-acquire _lock to publish the result + wake any waiters ---
@@ -798,8 +864,17 @@ class VoiceTypingDaemon:
                 # CUDA itself — the child owns the cuda_check resolution now). Replaces the old in-process
                 # _resolved_device() probe at load time.
                 self._resolved_device_cache = host.device
+                # P1.M2.T5.S2: the SAME 'ready' dict carries the additive context_prompt
+                # flag (True iff the child's PromptedExecutor armed; False on the
+                # config-off/probe-failure degrade). Gates every prompt push/clear;
+                # a missing key (test fakes predating S1) degrades to False.
+                self._context_prompt_active = bool(
+                    host.device.get("context_prompt", False)
+                )
                 self._feedback.set_phase("idle")
-                self._feedback.set_models_loaded(True)  # P1.M2.T2.S1: models now resident
+                self._feedback.set_models_loaded(
+                    True
+                )  # P1.M2.T2.S1: models now resident
                 self._load_cond.notify_all()
                 success = True
             else:
@@ -807,29 +882,47 @@ class VoiceTypingDaemon:
                 try:
                     host.stop()
                 except Exception:
-                    logger.exception("failed to stop a half-spawned host (best-effort; ignored)")
-                self._load_error = "recorder host spawn failed"  # child reports the detail in its log
+                    logger.exception(
+                        "failed to stop a half-spawned host (best-effort; ignored)"
+                    )
+                self._load_error = (
+                    "recorder host spawn failed"  # child reports the detail in its log
+                )
                 self._models_loaded = False
                 self._host = None
+                self._context_prompt_active = (
+                    None  # P1.M2.T5.S2: no child -> no capability
+                )
                 self._feedback.set_phase("unloaded")
-                self._feedback.set_models_loaded(False)  # P1.M2.T2.S1: models not resident
+                self._feedback.set_models_loaded(
+                    False
+                )  # P1.M2.T2.S1: models not resident
                 self._load_cond.notify_all()
                 success = False
         # Log OUTSIDE _lock (status/logging is ~ms; don't hold the lock for it).
         if success:
-            self._log_resolved_device()   # log the ACTUAL loaded device (CRITICAL #8 — now from the child)
-            logger.info("voice-typing models loaded (recorder-host child ready); resident")
+            self._log_resolved_device()  # log the ACTUAL loaded device (CRITICAL #8 — now from the child)
+            logger.info(
+                "voice-typing models loaded (recorder-host child ready); resident"
+            )
         else:
-            logger.error("voice-typing model load failed (%s); staying unloaded", self._load_error)
+            logger.error(
+                "voice-typing model load failed (%s); staying unloaded",
+                self._load_error,
+            )
         return success
 
     def run(self) -> None:
         """The listen-forever loop (main thread, BLOCKS until shutdown)."""
         self._start_monotonic = time.monotonic()
-        self._configure_log_level()           # PRD §4.2: DEBUG via config (namespace logger; T3 adds handler)
-        if self._host is not None:        # lazy load (§4.2bis): no device to log at boot; _load_host logs it
-            self._log_resolved_device()           # PRD §4.2/acceptance T6: prove CUDA residency (at LOAD time now)
-        self._feedback.set_listening(False)   # PRD §4.9: starts NOT listening (no hot-mic on boot)
+        self._configure_log_level()  # PRD §4.2: DEBUG via config (namespace logger; T3 adds handler)
+        if (
+            self._host is not None
+        ):  # lazy load (§4.2bis): no device to log at boot; _load_host logs it
+            self._log_resolved_device()  # PRD §4.2/acceptance T6: prove CUDA residency (at LOAD time now)
+        self._feedback.set_listening(
+            False
+        )  # PRD §4.9: starts NOT listening (no hot-mic on boot)
         # Stop queueing captured audio into the VAD pipeline while idle (validation Issue 2). The
         # child's recorder is constructed with use_microphone=True (PRD §4.4 / _FIXED_KWARGS), so at boot the
         # "listening" Event is cleared but that gate only suppresses recorder.text() OUTPUT.
@@ -853,13 +946,21 @@ class VoiceTypingDaemon:
             self._host.set_microphone(False)
         logger.info(
             "voice-typing daemon ready (not listening); %s",
-            "recorder resident" if self._host is not None else "models lazy (not yet loaded)",
+            "recorder resident"
+            if self._host is not None
+            else "models lazy (not yet loaded)",
         )
         # Idle auto-stop watchdog: disarms after cfg.asr.auto_stop_idle_seconds of no speech.
-        threading.Thread(target=self._idle_watchdog, name="voice-typing-idle", daemon=True).start()
+        threading.Thread(
+            target=self._idle_watchdog, name="voice-typing-idle", daemon=True
+        ).start()
         # Idle UNLOAD watchdog (P1.M3.T1.S1 / PRD §4.2bis): reclaims VRAM after cfg.asr.auto_unload_idle_seconds
         # DISARMED. Mirrors the idle-watchdog start above; same _shutdown.wait(1.0) tick + daemon thread.
-        threading.Thread(target=self._idle_unload_watchdog, name="voice-typing-idle-unload", daemon=True).start()
+        threading.Thread(
+            target=self._idle_unload_watchdog,
+            name="voice-typing-idle-unload",
+            daemon=True,
+        ).start()
         # P1.M2.T7.S2: passive evdev Backspace-cancel listener (daemon reader threads). Started
         # here, NOT at the first _arm() — see _start_key_listener's docstring for why (test-suite
         # hermeticity; is_active gating makes the timing behaviorally identical).
@@ -885,7 +986,9 @@ class VoiceTypingDaemon:
                 self._handle_dead_host()
                 continue
             if self._host is None:
-                time.sleep(0.05)   # no models loaded yet → idle, ~0 VRAM (PRD §4.2(1)/§4.2bis)
+                time.sleep(
+                    0.05
+                )  # no models loaded yet → idle, ~0 VRAM (PRD §4.2(1)/§4.2bis)
                 continue
             if self._drain:
                 # A graceful stop is pending and text() just returned (the final was emitted, or the
@@ -955,6 +1058,9 @@ class VoiceTypingDaemon:
                 return
             self._host = None
             self._models_loaded = False
+            self._context_prompt_active = (
+                None  # P1.M2.T5.S2: dead child -> capability gone
+            )
             self._listening.clear()
             self._feedback.set_phase("unloaded")
             self._feedback.set_models_loaded(False)
@@ -980,7 +1086,9 @@ class VoiceTypingDaemon:
         try:
             logging.getLogger("voice_typing").setLevel(level_name)
         except (ValueError, TypeError):
-            logger.warning("invalid log level %r; leaving default", getattr(log_cfg, "level", None))
+            logger.warning(
+                "invalid log level %r; leaving default", getattr(log_cfg, "level", None)
+            )
 
     def _log_resolved_device(self) -> None:
         """Log the resolved device/models once at startup (CUDA residency proof; PRD acceptance T6).
@@ -1001,13 +1109,17 @@ class VoiceTypingDaemon:
                 resolved["model"],
             )
         except Exception:
-            logger.info("voice-typing device resolved: (resolution failed; see cuda_check logs)")
+            logger.info(
+                "voice-typing device resolved: (resolution failed; see cuda_check logs)"
+            )
 
     def on_final(self, text: str) -> None:
         """Gate → clean → type → record + log latency. Fired by RealtimeSTT in a NEW thread."""
-        t_final_ready = time.monotonic()       # entry stamp (PRD §4.2 latency logging)
-        if not self._listening.is_set():       # GATE: race guard (PRD §4.2/§8 — utterance may
-            return                             #   complete right after stop)
+        t_final_ready = time.monotonic()  # entry stamp (PRD §4.2 latency logging)
+        if (
+            not self._listening.is_set()
+        ):  # GATE: race guard (PRD §4.2/§8 — utterance may
+            return  #   complete right after stop)
         # Serialize clean→type→record→log across concurrent on_final worker threads (bugfix Issue 5 /
         # P1.M2.T2.S1). The gate above stays OUTSIDE the lock (read-only race guard); the lock is
         # SEPARATE from _lock (see __init__) so this never stalls toggle/start/stop and never deadlocks.
@@ -1020,10 +1132,12 @@ class VoiceTypingDaemon:
             if self._cancel_suppress_final:
                 consume = getattr(self._host, "consume_cancel_mark", None)
                 if callable(consume) and consume():
-                    self._cancel_suppress_final = False  # sentinel seen; pipeline re-armed
-                return            # dropped: no clean, no type_text, no record_final
+                    self._cancel_suppress_final = (
+                        False  # sentinel seen; pipeline re-armed
+                    )
+                return  # dropped: no clean, no type_text, no record_final
             cleaned = textproc.clean(text, self._cfg.filter)
-            if not cleaned:                    # rejected: blocklist hallucination / below min_chars
+            if not cleaned:  # rejected: blocklist hallucination / below min_chars
                 # P1.M2.T6.S2: under streaming a rejected final FREEZES the tail as-is
                 # (PRD §4.2quater rule 2 — nothing authoritative was decoded, so nothing
                 # is rewound) and resets the boundary; the drain/idle flags still run so
@@ -1037,13 +1151,21 @@ class VoiceTypingDaemon:
                     # lifted by it immediately, so the freeze must survive every boundary
                     # until reset_session() (fresh arm). The landed S2 test pins frozen=True
                     # across this call — do not retag to per-utterance.
-                    self._stream.freeze("rejected final (blocklist/min_chars)", session=True)
+                    self._stream.freeze(
+                        "rejected final (blocklist/min_chars)", session=True
+                    )
                     self._stream.reset_boundary()
-                    self._final_pending = False  # finalized-by-rejection: a drain can finish
-                    self._utterance_finalized = True  # validation Issue 2: this text() is done
+                    self._final_pending = (
+                        False  # finalized-by-rejection: a drain can finish
+                    )
+                    self._utterance_finalized = (
+                        True  # validation Issue 2: this text() is done
+                    )
                 return
             self._final_pending = False  # the in-flight utterance is finalized; a pending drain can finish
-            self._utterance_finalized = True  # validation Issue 2: mark this text() invocation done
+            self._utterance_finalized = (
+                True  # validation Issue 2: mark this text() invocation done
+            )
             if self._cfg.output.streaming:
                 # P1.M2.T6.S2 streaming commit path (the correction pass): the engine
                 # corrects the on-screen tail in place (rewind+retype only when the
@@ -1057,17 +1179,35 @@ class VoiceTypingDaemon:
                     self._stream.commit(cleaned)
                 except Exception:
                     logger.exception("streaming commit failed for final %r", cleaned)
-                t_typed = time.monotonic()             # right after commit typing (PRD §4.2)
+                t_typed = time.monotonic()  # right after commit typing (PRD §4.2)
             else:
                 # Rev 1 rollback hatch (output.streaming=false): the pre-S2 body
                 # VERBATIM — no StreamingOutput backend call can occur in this mode.
                 payload = cleaned + (" " if self._cfg.output.append_space else "")
                 try:
-                    self._backend.type_text(payload)   # may raise → caught so the on_final thread survives
+                    self._backend.type_text(
+                        payload
+                    )  # may raise → caught so the on_final thread survives
                 except Exception:
                     logger.exception("typing backend failed for final %r", cleaned)
-                t_typed = time.monotonic()             # right after type_text (PRD §4.2 latency logging)
-            self._feedback.record_final(cleaned)   # recognition is final regardless of typing success
+                t_typed = (
+                    time.monotonic()
+                )  # right after type_text (PRD §4.2 latency logging)
+                # P1.M2.T5.S2: Rev 1 committed accumulator — asr.context_prompt=true +
+                # output.streaming=false is a legal combination and must not silently
+                # disable conditioning. StreamingOutput is deliberately NOT touched in
+                # this mode (T6.S2 pinned the rollback hatch keystroke-identical), so
+                # the daemon accumulates the committed text itself, mirroring
+                # StreamingOutput.commit's join discipline (single-space join, then the
+                # trailing space iff append_space).
+                self._rev1_committed = (
+                    self._rev1_committed.rstrip() + " " + cleaned
+                ).lstrip()
+                if self._cfg.output.append_space:
+                    self._rev1_committed += " "
+            self._feedback.record_final(
+                cleaned
+            )  # recognition is final regardless of typing success
             record = self._latency.finalize_utterance(
                 text=cleaned, t_final_ready=t_final_ready, t_typed=t_typed
             )
@@ -1079,7 +1219,9 @@ class VoiceTypingDaemon:
                 "partials=%d ts_epoch=%.3f text=%r",
                 _LATENCY_LOG_PREFIX,
                 record["event"],
-                record["speech_end_to_final_ms"] if record["speech_end_to_final_ms"] is not None else "n/a",
+                record["speech_end_to_final_ms"]
+                if record["speech_end_to_final_ms"] is not None
+                else "n/a",
                 record["final_to_typed_ms"],
                 record["total_ms"] if record["total_ms"] is not None else "n/a",
                 record["partials"],
@@ -1099,9 +1241,18 @@ class VoiceTypingDaemon:
                 # next utterance streams. Behavior-neutral on the healthy path (commit()
                 # already cleared tail/suppression internally).
                 self._stream.reset_boundary()
-                # P1.M2.T6.S2: refresh the rolling context-prompt seam AFTER the commit
-                # (streaming.context_after_last_boundary -> host.set_prompt; the thin S2
-                # seam — P1.M2.T5.S2 formalizes the full daemon-side computation).
+                # P1.M2.T5.S2: refresh the rolling context prompt AFTER the commit —
+                # prompt_engine.rolling_context_prompt(self._stream.committed) pushed
+                # via host.set_prompt (formalizes the thin T6.S2 seam). Deliberate
+                # NO-OPs elsewhere (documented on _refresh_context_prompt): rejected
+                # finals (blocklist/min_chars — committed unchanged, early return
+                # above), cancel() (the fragment is never committed), and unload
+                # teardown (a respawned child starts prompt-free).
+                self._refresh_context_prompt()
+            else:
+                # P1.M2.T5.S2: the Rev 1 hatch refreshes too (the accumulator was
+                # appended in the type branch above) — BOTH output modes condition
+                # the next decode on the rolling committed context.
                 self._refresh_context_prompt()
 
     def _arm(self) -> None:
@@ -1112,16 +1263,49 @@ class VoiceTypingDaemon:
         """
         self._listening.set()
         self._final_pending = False  # Issue 2: fresh arm = no utterance in flight (clear stale stray partials)
-        self._utterance_finalized = False  # validation Issue 2: fresh arm = no final yet for this session
-        self._cancel_suppress_final = False  # P1.M2.T7.S1: a fresh arm re-arms the final pipeline
-        stream_reset = getattr(self._stream, "reset_session", None)  # P1.M2.T6.S2: NEW session
+        self._utterance_finalized = (
+            False  # validation Issue 2: fresh arm = no final yet for this session
+        )
+        self._cancel_suppress_final = (
+            False  # P1.M2.T7.S1: a fresh arm re-arms the final pipeline
+        )
+        stream_reset = getattr(
+            self._stream, "reset_session", None
+        )  # P1.M2.T6.S2: NEW session
         if callable(stream_reset):
             stream_reset()  # a fresh arm legitimately unfreezes; engine strings reset for the session
-        self._last_speech_monotonic = time.monotonic()  # start the idle auto-stop clock fresh
-        self._disarmed_monotonic = None                  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
+        # P1.M2.T5.S2: fresh session = fresh rolling context. Reset the daemon-side
+        # trackers, then queue the child prompt CLEAR *before* the arm/mic cmd below:
+        # the child reads its cmd queue FIFO between utterances, so this ordering is
+        # what guarantees a warm re-arm (the child stays resident across disarm/arm,
+        # §4.2bis) never conditions the session's FIRST decode on the previous
+        # session's text — the child blocks in text() right after arming. An
+        # idle-unload respawn starts a fresh child (prompt already None), so the
+        # clear is a harmless no-op there. Gated like the commit-time push (config
+        # AND the child's ready flag); the put is best-effort (S1 contract) — no retries.
+        self._rev1_committed = ""
+        if self._cfg.asr.context_prompt and self._context_prompt_active is True:
+            clearer = getattr(self._host, "set_prompt", None)
+            if callable(clearer):
+                try:
+                    clearer("")
+                except Exception:
+                    logger.debug("context-prompt clear failed (ignored)", exc_info=True)
+            else:
+                logger.debug(
+                    "context-prompt clear skipped: host has no set_prompt seam"
+                )
+        self._last_speech_monotonic = (
+            time.monotonic()
+        )  # start the idle auto-stop clock fresh
+        self._disarmed_monotonic = (
+            None  # armed -> idle-UNLOAD clock inactive (P1.M3.T1.S1)
+        )
         if self._host is not None:
             self._host.set_microphone(True)
-        self._feedback.set_mode("lite")   # Rev 2 single-mode constant (§4.6 schema stable; ctl renders it)
+        self._feedback.set_mode(
+            "lite"
+        )  # Rev 2 single-mode constant (§4.6 schema stable; ctl renders it)
         self._feedback.set_listening(True)
         self._refresh_mic_status()  # TTL-cached (Issue 3 / P1.M2.T2.S1): re-probes at most once / 30s
         # P1.M2.T7.S2: once-only zero-keyboard WARNING (latched — see _warn_no_keyboards_once).
@@ -1147,16 +1331,24 @@ class VoiceTypingDaemon:
         """
         self._listening.clear()
         self._final_pending = False  # Issue 2: disarm clears any stale stray-partial flag (defense in depth)
-        self._utterance_finalized = False  # validation Issue 2: session ends -> no final on record
+        self._utterance_finalized = (
+            False  # validation Issue 2: session ends -> no final on record
+        )
         self._last_speech_monotonic = None  # not listening → idle clock is inactive
-        self._disarmed_monotonic = time.monotonic()  # start the idle-UNLOAD clock (P1.M3.T1.S1)
-        stream_reset = getattr(self._stream, "reset_session", None)  # P1.M2.T6.S2: session over
+        self._disarmed_monotonic = (
+            time.monotonic()
+        )  # start the idle-UNLOAD clock (P1.M3.T1.S1)
+        stream_reset = getattr(
+            self._stream, "reset_session", None
+        )  # P1.M2.T6.S2: session over
         if callable(stream_reset):
             stream_reset()  # engine strings reset; the pending tail simply stays typed (T6.S3 owns cleanup)
         if self._host is not None:
             self._host.set_microphone(False)
         self._feedback.set_listening(False)
-        self._feedback.set_phase("idle")  # Issue 2 / P1.M2.T1.S1: 'loaded / not listening' ⇒ phase idle (PRD §4.2bis, §4.6)
+        self._feedback.set_phase(
+            "idle"
+        )  # Issue 2 / P1.M2.T1.S1: 'loaded / not listening' ⇒ phase idle (PRD §4.2bis, §4.6)
         # NOTE: caller MUST call self._safe_abort() AFTER releasing _lock (see start/stop/toggle).
 
     def _touch_speech(self) -> None:
@@ -1214,7 +1406,11 @@ class VoiceTypingDaemon:
         Issue 2 within-session residual): a stray post-final realtime partial cannot resurrect a
         ~5s drain the way it could when _final_pending was set on every partial.
         """
-        if self._host is not None and self._text_in_flight.is_set() and self._final_pending:
+        if (
+            self._host is not None
+            and self._text_in_flight.is_set()
+            and self._final_pending
+        ):
             self._begin_drain()
         else:
             with self._lock:
@@ -1229,7 +1425,9 @@ class VoiceTypingDaemon:
         must land standalone and keep working before AND after T6's real StreamingOutput API
         arrives — T6 snaps onto this single call site.
         """
-        stream = getattr(self, "_stream", None)          # StreamingOutput (P1.M2.T6) — may not exist yet
+        stream = getattr(
+            self, "_stream", None
+        )  # StreamingOutput (P1.M2.T6) — may not exist yet
         if stream is None or not self._listening.is_set():
             return 0
         getter = getattr(stream, "pending_tail_len", None)
@@ -1244,7 +1442,7 @@ class VoiceTypingDaemon:
         stream = getattr(self, "_stream", None)
         reset = getattr(stream, "reset_after_cancel", None)
         if callable(reset):
-            reset()   # T6: clears the tail, suppresses partial typing until the next boundary
+            reset()  # T6: clears the tail, suppresses partial typing until the next boundary
         self._feedback.update_partial("")
 
     def note_user_keypress(self) -> None:
@@ -1310,7 +1508,11 @@ class VoiceTypingDaemon:
             )
             return
         if watched:
-            logger.info("voice-typing cancel-listener watching %d keyboard(s): %s", len(watched), watched)
+            logger.info(
+                "voice-typing cancel-listener watching %d keyboard(s): %s",
+                len(watched),
+                watched,
+            )
 
     def _warn_no_keyboards_once(self) -> None:
         """P1.M2.T7.S2 fail-safe (PRD §4.2quater): if the listener started with ZERO readable
@@ -1351,23 +1553,48 @@ class VoiceTypingDaemon:
             freeze(reason, session=True)
 
     def _refresh_context_prompt(self) -> None:
-        """Push the rolling context prompt to the recorder-host child (P1.M2.T6.S2 seam).
+        """Push the rolling context prompt to the recorder-host child (P1.M2.T5.S2 — formal).
 
-        Sends the committed text since the last sentence boundary
-        (streaming.context_after_last_boundary) so the child's small.en decode of the
-        NEXT utterance starts primed with the current partial sentence (PRD
-        §4.2quater). THIN S2 SEAM, kept minimal on purpose: P1.M2.T5.S2 owns the full
-        daemon-side prompt computation; the child already dispatches ("prompt", ...)
-        between utterances and safely ignores it when its executor is degraded.
-        Defensive getattr mirrors the _pending_tail_len seam style: a host without
+        THE daemon-side brain feeding S1's child mechanism: after every commit it sends
+        prompt_engine.rolling_context_prompt(source) so the child's small.en decode of the
+        NEXT utterance starts primed with the current in-progress sentence (PRD
+        §4.2quater). GATES (both must pass — the gates ARE the spec, do not push "for
+        safety" when either fails):
+          - cfg.asr.context_prompt is true (config-off -> zero pushes, status 'disabled');
+          - self._context_prompt_active is True — the loaded child's ready payload
+            reported the executor armed. None (no child loaded) or False (probe
+            degraded) -> zero pushes, status 'degraded'.
+        SOURCE: self._stream.committed under streaming; self._rev1_committed (the
+        daemon-side accumulator) in the Rev 1 rollback hatch — StreamingOutput is NOT
+        touched in that mode (T6.S2 pinned it keystroke-identical).
+
+        Defensive getattr seam (unchanged from the T6.S2 thin version): a host without
         set_prompt (unit-test fakes, the legacy recorder adapter) is a silent DEBUG
-        no-op. NEVER raises — the on_final reader thread must survive.
+        no-op. NEVER raises — the on_final reader thread must survive. The prompt TEXT
+        is never logged above DEBUG (it is user dictation).
+
+        Deliberate NO-OPs (do not 'fix'): rejected finals (blocklist/min_chars —
+        committed is unchanged), cancel() (the fragment is never committed), and
+        unload teardown (a respawned child starts with no prompt).
         """
         try:
-            text = streaming.context_after_last_boundary(self._stream.committed)
+            if (
+                not self._cfg.asr.context_prompt
+                or self._context_prompt_active is not True
+            ):
+                return
+            source = (
+                self._stream.committed
+                if self._cfg.output.streaming
+                else self._rev1_committed
+            )
+            text = prompt_engine.rolling_context_prompt(source)
             setter = getattr(self._host, "set_prompt", None)
             if callable(setter):
                 setter(text)
+                logger.debug(
+                    "context-prompt: pushed %d words to child", len(text.split())
+                )
             else:
                 logger.debug("context-prompt push skipped: host has no set_prompt seam")
         except Exception:
@@ -1394,8 +1621,8 @@ class VoiceTypingDaemon:
                 # Not armed: nothing pending — idempotent no-op (never touch backend/host).
                 return {"ok": True, **self.status_snapshot()}
             tail_len = self._pending_tail_len()
-            n = max(tail_len - 1, 0)          # the keystroke already deleted 1 char
-            if n > 0:                         # backends no-op at n<=0 too; the guard is the contract
+            n = max(tail_len - 1, 0)  # the keystroke already deleted 1 char
+            if n > 0:  # backends no-op at n<=0 too; the guard is the contract
                 self._backend.press_backspace(n)
             if self._text_in_flight.is_set() and self._host is not None:
                 # Same gate as _safe_abort: touching the recorder while NO text() is in flight can
@@ -1405,7 +1632,7 @@ class VoiceTypingDaemon:
                     # Drop the racing real final AND the marked sentinel (on_final suppression).
                     self._cancel_suppress_final = True
                     host_cancel()
-            self._reset_stream_after_cancel()   # fresh tail at the cursor; committed unchanged
+            self._reset_stream_after_cancel()  # fresh tail at the cursor; committed unchanged
         return {"ok": True, "listening": True, **self.status_snapshot()}
 
     def _begin_drain(self) -> None:
@@ -1417,7 +1644,9 @@ class VoiceTypingDaemon:
         self._drain_timer = threading.Timer(_DRAIN_TIMEOUT_S, self._drain_timeout)
         self._drain_timer.daemon = True
         self._drain_timer.start()
-        logger.info("voice-typing drain: letting the final model finish the utterance before stop")
+        logger.info(
+            "voice-typing drain: letting the final model finish the utterance before stop"
+        )
 
     def _complete_drain(self) -> None:
         """Finish a drain: disarm now that text() returned the final (or the watchdog aborted it).
@@ -1480,7 +1709,8 @@ class VoiceTypingDaemon:
                 return
             logger.info(
                 "voice-typing auto-stop: %.1fs of no recognized speech; disarming "
-                "(set [asr] auto_stop_idle_seconds=0 to disable)", threshold,
+                "(set [asr] auto_stop_idle_seconds=0 to disable)",
+                threshold,
             )
             self._disarm()
             disarmed = True
@@ -1568,15 +1798,17 @@ class VoiceTypingDaemon:
         threshold = self._cfg.asr.auto_unload_idle_seconds
         with self._lock:
             if (
-                not self._models_loaded                     # nothing resident (or a load/unload beat us)
-                or self._listening.is_set()                 # user armed — abort the unload (race guard)
-                or self._disarmed_monotonic is None         # never disarmed (shouldn't happen here)
-                or threshold <= 0                           # disabled
+                not self._models_loaded  # nothing resident (or a load/unload beat us)
+                or self._listening.is_set()  # user armed — abort the unload (race guard)
+                or self._disarmed_monotonic
+                is None  # never disarmed (shouldn't happen here)
+                or threshold <= 0  # disabled
                 or time.monotonic() - self._disarmed_monotonic < threshold  # not yet
             ):
                 return
             logger.info(
-                "voice-typing idle-unload: %.1fs disarmed; unloading models", threshold,
+                "voice-typing idle-unload: %.1fs disarmed; unloading models",
+                threshold,
             )
             # _bounded_shutdown terminates the child PROCESS GROUP (releases ALL VRAM) — routed
             # through here so the existing teardown-routing test (test_unload_routes_through_
@@ -1585,8 +1817,13 @@ class VoiceTypingDaemon:
             self._bounded_shutdown(timeout=5.0)
             self._host = None
             self._models_loaded = False
-            self._feedback.set_phase("unloaded")          # P1.M2.T2.S1 surface (CONSUME, don't re-add)
-            self._feedback.set_models_loaded(False)       # P1.M2.T2.S1 surface
+            self._context_prompt_active = (
+                None  # P1.M2.T5.S2: torn-down child -> capability gone
+            )
+            self._feedback.set_phase(
+                "unloaded"
+            )  # P1.M2.T2.S1 surface (CONSUME, don't re-add)
+            self._feedback.set_models_loaded(False)  # P1.M2.T2.S1 surface
             # Validation Issue 1: a successful idle-unload is NOT a load failure. Clear any stale
             # _load_error so voicectl status does not surface a scary "load error" after ordinary
             # idle behavior. (A racing _handle_dead_host() — invoked from run()'s liveness check
@@ -1621,9 +1858,11 @@ class VoiceTypingDaemon:
         Thread safety: called only under self._lock (via _arm) or in single-threaded __init__, so
         _mic_probe_at/_mic_ok/_mic_error need NO extra locking.
         """
-        if not force and self._mic_probe_at != 0.0 and (
-            time.monotonic() - self._mic_probe_at
-        ) < _MIC_PROBE_TTL_S:
+        if (
+            not force
+            and self._mic_probe_at != 0.0
+            and (time.monotonic() - self._mic_probe_at) < _MIC_PROBE_TTL_S
+        ):
             return  # cached: last probe is within the TTL window -> keep _mic_ok/_mic_error
         prober = self._probe_mic if self._mic_prober is None else self._mic_prober
         try:
@@ -1673,7 +1912,8 @@ class VoiceTypingDaemon:
             raise
         try:
             inputs = [
-                i for i in range(pa.get_device_count())
+                i
+                for i in range(pa.get_device_count())
                 if (pa.get_device_info_by_index(i).get("maxInputChannels") or 0) > 0
             ]
         finally:
@@ -1746,7 +1986,7 @@ class VoiceTypingDaemon:
         with self._lock:
             listening = self._listening.is_set()
         if listening:
-            self._request_stop()           # armed → disarm
+            self._request_stop()  # armed → disarm
             return
         if not self._load_host():
             return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
@@ -1795,7 +2035,7 @@ class VoiceTypingDaemon:
             self._shutdown_done = True
         # abort() gated on _text_in_flight (validation Issue 1; see _safe_abort): when no thread is
         # blocked in text() there is nothing to wake — abort() would hang forever.
-        self._safe_abort()    # break any blocked text() so run() can return promptly (NOT under _lock)
+        self._safe_abort()  # break any blocked text() so run() can return promptly (NOT under _lock)
         # Tear down the child (BUG-1): kills the process group so host.text()'s wait-loop detects
         # child death and returns, unblocking the run() loop for a prompt, bounded SIGTERM exit.
         # _bounded_shutdown() is best-effort + never re-raises; safe to run alongside main()'s
@@ -1847,38 +2087,65 @@ class VoiceTypingDaemon:
 
     # --- control-socket status surface (P1.M4.T2.S1; additive — no existing-method edit) ---
 
+    def _context_prompt_label(self) -> str:
+        """Human label for the rolling context-prompt state (P1.M2.T5.S2 status surface).
+
+        Precedence: config-off > models-not-loaded > degraded > on. Config-off wins so
+        a deliberate [asr] context_prompt=false is never misread as a probe failure;
+        None (no child loaded) and False (probe degraded) are distinct states. Never
+        raises.
+        """
+        if not self._cfg.asr.context_prompt:
+            return "off (disabled by config)"
+        if self._context_prompt_active is None:
+            return "off (models not loaded)"
+        if self._context_prompt_active is False:
+            return "off (degraded — context-free decoding)"
+        return "on"
+
     def status_snapshot(self) -> dict:
         """The status payload for the control socket `status`/`toggle`/`start`/`stop` cmds.
 
         Returns {listening, mode, phase, models_loaded, load_error, partial, last_final, uptime_s,
-        device, compute_type, model, mic_ok, mic_error} — 13 keys. `mode` is the Rev 2 CONSTANT
-        "lite" (§4.6 schema stability: state.json/ctl rendering unchanged; there is only one mode).
-        phase/models_loaded come from the LIVE in-memory Feedback state (the lazy-load lifecycle,
+        device, compute_type, model, mic_ok, mic_error, context_prompt} — 14 keys. `mode` is the
+        Rev 2 CONSTANT "lite" (§4.6 schema stability: state.json/ctl rendering unchanged; there is
+        only one mode). phase/models_loaded come from the LIVE in-memory Feedback state (the lazy-load lifecycle,
         §4.2bis — unloaded/loading/idle/listening/speaking + models resident bool); load_error is
         the daemon attr _load_host sets on failure. mic_ok/mic_error come from S1's PyAudio probe
         (self._mic_ok/self._mic_error), refreshed in __init__/_arm — lets voicectl status + JSON
         consumers see a dead mic without journalctl. partial/last_final come from the LIVE in-memory
         Feedback state (NOT the throttled state.json, which lags >=10 Hz); device/compute_type/model
         come from the cached resolution (the child's 'ready' dict once armed — status matches the
-        actually-loaded model). Safe to call from the socket thread; never raises (device probe
-        failures degrade to 'unknown').
+        actually-loaded model). context_prompt (P1.M2.T5.S2) is a human label for the rolling
+        prompt state: on / off (disabled by config) / off (degraded — context-free decoding) /
+        off (models not loaded) — ADDITIVE key, existing readers ignore it. Safe to call from the
+        socket thread; never raises (device probe failures degrade to 'unknown').
         """
         snap = self._feedback.snapshot()
         dev = self._resolved_device()
         return {
             "listening": self.is_listening(),
-            "mode": "lite",                         # Rev 2 constant (§4.6 schema stable)
-            "phase": snap.get("phase", "unloaded"),          # P1.M2.T2.S1: lifecycle phase (§4.2bis)
-            "models_loaded": snap.get("models_loaded", False),  # P1.M2.T2.S1: models resident?
-            "load_error": self._load_error or "",            # P1.M2.T2.S1: last load failure (None -> "")
+            "mode": "lite",  # Rev 2 constant (§4.6 schema stable)
+            "phase": snap.get(
+                "phase", "unloaded"
+            ),  # P1.M2.T2.S1: lifecycle phase (§4.2bis)
+            "models_loaded": snap.get(
+                "models_loaded", False
+            ),  # P1.M2.T2.S1: models resident?
+            "load_error": self._load_error
+            or "",  # P1.M2.T2.S1: last load failure (None -> "")
             "partial": snap.get("partial", ""),
             "last_final": snap.get("last_final", ""),
             "uptime_s": round(self.uptime_s, 3),
             "device": dev.get("device", "unknown"),
             "compute_type": dev.get("compute_type", "unknown"),
-            "model": dev.get("model", "unknown"),   # P1.M1.T2.S2: ONE model key (the two-model pair is gone)
-            "mic_ok": self._mic_ok,            # bugfix Issue 2 / P1.M1.T2.S2: surface mic health (S1 detects)
-            "mic_error": self._mic_error or "",  # None -> "" so JSON always carries a string
+            "model": dev.get(
+                "model", "unknown"
+            ),  # P1.M1.T2.S2: ONE model key (the two-model pair is gone)
+            "mic_ok": self._mic_ok,  # bugfix Issue 2 / P1.M1.T2.S2: surface mic health (S1 detects)
+            "mic_error": self._mic_error
+            or "",  # None -> "" so JSON always carries a string
+            "context_prompt": self._context_prompt_label(),  # P1.M2.T5.S2: rolling-prompt state label
         }
 
     def _resolved_device(self) -> dict[str, str]:
@@ -1943,7 +2210,9 @@ class VoiceTypingDaemon:
         try:
             self._host.stop(timeout=timeout)
         except Exception:
-            logger.exception("host.stop() raised during teardown (best-effort; ignored)")
+            logger.exception(
+                "host.stop() raised during teardown (best-effort; ignored)"
+            )
 
     def shutdown(self) -> None:
         """Full recorder teardown — BOUNDED (PRD §4.2; §4.2bis idle-unload prerequisite; §8 risk row).
@@ -1988,15 +2257,19 @@ class VoiceTypingDaemon:
             try:
                 self._key_listener.stop()
             except Exception:  # pylint: disable=broad-except — teardown is best-effort
-                logger.debug("key-listener stop raised during shutdown (ignored)", exc_info=True)
+                logger.debug(
+                    "key-listener stop raised during shutdown (ignored)", exc_info=True
+                )
         with self._lock:
             already_claimed = getattr(self, "_shutdown_done", False)
             if not already_claimed:
-                self._shutdown_done = True        # WE claim the teardown (called-first / normal path)
+                self._shutdown_done = (
+                    True  # WE claim the teardown (called-first / normal path)
+                )
         if already_claimed:
             # Another path is doing (or did) the teardown — wait for it, do NOT start a second one.
             if self._teardown_done.wait(timeout=_TEARDOWN_WAIT_TIMEOUT):
-                return                           # in-flight teardown finished -> done (no second teardown)
+                return  # in-flight teardown finished -> done (no second teardown)
             logger.warning(
                 "shutdown(): in-flight teardown did not signal within %.1fs; proceeding with fallback",
                 _TEARDOWN_WAIT_TIMEOUT,
@@ -2094,7 +2367,9 @@ class ControlServer:
                 raise RuntimeError(
                     f"cannot bind control socket {self._socket_path!r}: {exc}"
                 ) from exc
-            os.chmod(self._socket_path, 0o600)   # owner-only (belt-and-suspenders on the 0700 dir)
+            os.chmod(
+                self._socket_path, 0o600
+            )  # owner-only (belt-and-suspenders on the 0700 dir)
             sock.listen(8)
             self._sock = sock
             self._stop = threading.Event()
@@ -2147,9 +2422,7 @@ class ControlServer:
             except OSError:
                 break  # socket closed between select and accept
             # one daemon worker per connection (voicectl is one-shot; a persistent client also works)
-            threading.Thread(
-                target=self._handle, args=(conn,), daemon=True
-            ).start()
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn: Any) -> None:
         """Per-connection readline loop: parse JSON, dispatch, write one JSON line per request."""
@@ -2158,15 +2431,15 @@ class ControlServer:
             rfile = conn.makefile("r", encoding="utf-8", newline="\n")
             wfile = conn.makefile("w", encoding="utf-8", newline="\n")
             try:
-                for line in rfile:                 # one JSON object per line (PRD §4.2(3))
+                for line in rfile:  # one JSON object per line (PRD §4.2(3))
                     line = line.strip()
                     if not line:
-                        continue                   # empty line -> skip (no response)
+                        continue  # empty line -> skip (no response)
                     response = self._dispatch(line)
                     wfile.write(json.dumps(response) + "\n")
-                    wfile.flush()                  # CRITICAL: makefile("w") buffers; flush every reply
+                    wfile.flush()  # CRITICAL: makefile("w") buffers; flush every reply
                     if response.get("shutting_down"):
-                        break                      # quit -> reply sent, then close this connection
+                        break  # quit -> reply sent, then close this connection
             finally:
                 for f in (rfile, wfile):
                     if f is not None:
@@ -2220,7 +2493,9 @@ class ControlServer:
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd == "start":
             self._daemon.start()
-            return self._arm_response()      # ok:false+error if the first arm's model load failed (§4.2bis)
+            return (
+                self._arm_response()
+            )  # ok:false+error if the first arm's model load failed (§4.2bis)
         if cmd == "stop":
             self._daemon.stop()
             return {"ok": True, **self._daemon.status_snapshot()}
@@ -2314,7 +2589,7 @@ def _extract_mic_retry_error(message: str) -> str:
     suffix = ". Retrying..."
     text = message
     if text.startswith(prefix):
-        text = text[len(prefix):]
+        text = text[len(prefix) :]
     if text.endswith(suffix):
         text = text[: -len(suffix)]
     return text
@@ -2371,7 +2646,9 @@ class MicRetryRateLimitFilter(logging.Filter):
         self.dedup_seconds = float(dedup_seconds)
         self.summary_every = max(1, int(summary_every))
         self._count = 0
-        self._last_seen = 0.0  # time.monotonic() of the last EMITTED record; 0.0 == never
+        self._last_seen = (
+            0.0  # time.monotonic() of the last EMITTED record; 0.0 == never
+        )
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
@@ -2380,7 +2657,9 @@ class MicRetryRateLimitFilter(logging.Filter):
         self._count += 1
         now = time.monotonic()
         if self._count == 1:
-            self._last_seen = now  # first ever: let the full ERROR + traceback through once
+            self._last_seen = (
+                now  # first ever: let the full ERROR + traceback through once
+            )
             return True
         if (
             now - self._last_seen >= self.dedup_seconds
@@ -2404,7 +2683,9 @@ def _install_mic_retry_rate_limiter(logger_name: str = "realtimestt") -> None:
     cannot leave stale state from a prior run.
     """
     target = logging.getLogger(logger_name)
-    for existing in [f for f in target.filters if isinstance(f, MicRetryRateLimitFilter)]:
+    for existing in [
+        f for f in target.filters if isinstance(f, MicRetryRateLimitFilter)
+    ]:
         target.removeFilter(existing)
     target.addFilter(MicRetryRateLimitFilter())
 
@@ -2467,9 +2748,9 @@ def main() -> int:
     _setup_logging(cfg.log.level)
     logger.info("voice-typing daemon starting (pid=%s)", os.getpid())
 
-    daemon = None        # type: VoiceTypingDaemon | None
-    server = None        # type: ControlServer | None
-    restore = None       # type: Callable[[], None] | None
+    daemon = None  # type: VoiceTypingDaemon | None
+    server = None  # type: ControlServer | None
+    restore = None  # type: Callable[[], None] | None
     try:
         # Lazy import: keeps the module-top change to just `import sys`, and stays monkeypatchable
         # (tests patch voice_typing.feedback.Feedback; `from X import Y` resolves the live attr).
@@ -2480,7 +2761,9 @@ def main() -> int:
         # daemon's on_final.finalize_utterance. (bugfix Issue 3 CPU-fallback now lives in the recorder-host child — P1.M2.T1.S1
         # lazy load — so main() no longer retries here; construction is fast and model-free.)
         latency = LatencyLog()
-        daemon = VoiceTypingDaemon(cfg, feedback, latency=latency)   # FAST — no models loaded (lazy, §4.2bis)
+        daemon = VoiceTypingDaemon(
+            cfg, feedback, latency=latency
+        )  # FAST — no models loaded (lazy, §4.2bis)
         # quit path: ControlServer._dispatch("quit") -> request_shutdown() (blocks until text()
         #   returns) -> on_quit=daemon.shutdown() -> recorder.shutdown() (release VRAM).
         server = ControlServer(daemon, on_quit=daemon.shutdown)
@@ -2512,7 +2795,9 @@ def main() -> int:
             try:
                 server.stop()  # close socket + unlink + join accept thread (main thread only).
             except Exception:
-                logger.exception("ControlServer.stop() failed during teardown (ignored)")
+                logger.exception(
+                    "ControlServer.stop() failed during teardown (ignored)"
+                )
     return 0
 
 
