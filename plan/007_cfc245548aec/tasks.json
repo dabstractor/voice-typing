@@ -366,7 +366,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T8.S2",
                   "title": "Asserts c/e/f/g — pause-join, cancel, key-freeze, stranded tail",
-                  "status": "Failed",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T8.S1",

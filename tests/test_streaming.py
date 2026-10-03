@@ -196,6 +196,10 @@ pytestmark = pytest.mark.skipif(
 SIMPLE_TEXT = "The quick brown fox jumps over the lazy dog."
 PAUSE_A = "I want to test whether this system"
 PAUSE_B = "keeps listening after a pause."
+# T8(d): terminator-free seed committed through the REAL commit glue BEFORE any audio —
+# the deterministic mid-paragraph state (see test_d_decode_prompts: whether small.en
+# period-terminates PAUSE_A is a warm-state-biased coin that full-file order kept losing).
+T8D_SEED = "the seeded fragment has no terminator yet"
 PUNCT_TEXT = "Hello, world! Does punctuation, like commas, question marks? It should."
 MULTI_TEXTS = (
     "The weather looks good today.",
@@ -1206,7 +1210,6 @@ def test_c_pause_join(
         "the mid-sentence guard branch was never exercised across "
         f"{len(harness.commit_log)} pause commits\n" + _dump_events(harness)
     )
-    logger.warning("T8c pause pieces: %r", [p for _t, p, _ec in harness.commit_log])
 
     # Typed pieces from the ENGINE's committed truth (prefix diff). The commit join
     # collapses the previous commit's trailing space, so diff against its rstripped form.
@@ -1271,26 +1274,25 @@ def test_d_decode_prompts(
     rolling_context_prompt(ENGINE-committed-at-decode-time) — non-empty mid-paragraph
     (when the committed tail has no terminator yet), empty after a commit whose committed
     truth ends a sentence, always <=200 tokens. See module docstring: the oracle is the
-    engine's TYPED truth, and the empty/non-empty case per window follows it."""
+    engine's TYPED truth, and the empty/non-empty case per window follows it.
+
+    The mid-paragraph window is DETERMINISTIC: a terminator-free fragment (T8D_SEED) is
+    committed through the REAL commit glue (on_final -> stream.commit -> set_prompt)
+    BEFORE any audio — exactly the state production is in when a user has dictated half
+    a sentence — so the next real decodes must carry it as their prompt no matter how the
+    model punctuates the fixture. (The natural-only variant depended on small.en NOT
+    period-terminating PAUSE_A: a coin that went 0-for-9 in full-file order — warm-state
+    biased, so bounded re-feed retries could not fix it; that is what failed S2.)"""
     rec, harness = stream_recorder
     assert harness.executor is not None
     harness.reset()
+    harness.listening.set()  # on_final's gate: the daemon only commits while armed
+    harness.on_final(T8D_SEED)  # no terminator BY CONSTRUCTION -> non-empty rolling prompt
+    assert harness.commit_log and prompt_engine.rolling_context_prompt(
+        harness.commit_log[-1][2]
+    ) == T8D_SEED, f"seed did not land mid-paragraph: {harness.commit_log!r}"
     _run_streamed(rec, harness, _WAVS["pause"], want_finals=2)  # PAUSE_A has NO terminator
     _run_streamed(rec, harness, _WAVS["multi"], want_finals=3)  # every sentence ends '.'
-    for _retry in range(2):  # bounded: up to 2 re-rolls of the model's punctuation dice
-        if any(
-            prompt_engine.rolling_context_prompt(ec) for _t, _p, ec in harness.commit_log
-        ):
-            break
-        # Model nondeterminism (S1 observed small.en ADD a period to PAUSE_A in one run):
-        # when that happens every commit's ENGINE truth ends a sentence, so the non-empty
-        # mid-paragraph window can never occur — the PRP's bounded re-feed retry (the
-        # test_b / test_c precedent for the identical nondeterminism) re-rolls the model's
-        # punctuation with ONE more utt_pause pass in the SAME session. The per-window
-        # oracle below is unchanged; it simply runs over more (real) commits.
-        _run_streamed(rec, harness, _WAVS["pause"], want_finals=2)
-
-    logger.warning("T8d pieces: %r", [p for _t, p, _ec in harness.commit_log])
     ex = harness.executor
     assert ex.prompts_set, "set_prompt never ran (the commit glue did not refresh)\n" + _dump_events(
         harness
@@ -1324,8 +1326,9 @@ def test_d_decode_prompts(
     # prompt there is empty or not follows the ENGINE truth (model punctuation of espeak
     # audio is nondeterministic), so each window is asserted per its own expected value; the
     # mid-paragraph non-empty case must occur >=1 time across the pause+multi session.
-    assert len(harness.commit_log) >= 5, (
-        f"expected 2 pause + 3 multi commits, got {harness.commit_log!r}\n" + _dump_events(harness)
+    assert len(harness.commit_log) >= 6, (
+        f"expected seed + 2 pause + 3 multi commits, got {harness.commit_log!r}\n"
+        + _dump_events(harness)
     )
     stamps = [ct for ct, _, _ in harness.commit_log]
     nonempty_windows = 0
@@ -1344,9 +1347,10 @@ def test_d_decode_prompts(
                 f"window {k}: expected non-empty prompts {expected_k!r}, got {win!r}\n"
                 + _dump_events(harness)
             )
-            if k == 0:  # utt_pause's first half -> the committed-first-half fuzzy case
-                assert _token_overlap(" ".join(p for _, p in win), PAUSE_A) >= 0.80, (
-                    f"window 0 prompts {win!r} vs {PAUSE_A!r}\n" + _dump_events(harness)
+            if k == 0:  # the SEEDED window: its prompt IS the committed fragment, exactly
+                assert all(p == T8D_SEED for _, p in win), (
+                    f"window 0 prompts {win!r} != seeded {T8D_SEED!r}\n"
+                    + _dump_events(harness)
                 )
         else:
             assert all(not p for _, p in win), (
