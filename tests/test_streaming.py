@@ -1,4 +1,5 @@
-"""tests/test_streaming.py — PRD §6 T8 streaming-dictation E2E harness (P1.M3.T8.S1).
+"""tests/test_streaming.py — PRD §6 T8 streaming-dictation E2E harness (P1.M3.T8;
+S1 landed the harness + asserts a/b/d; P1.M3.T8.S2 landed asserts c/e/f/g).
 
 Heavy, real-model integration test: drives the REAL decode stream (small.en) through the REAL
 StreamingOutput engine (voice_typing.streaming) and the REAL context-prompt executor
@@ -7,9 +8,9 @@ in-file RecordingTypingBackend — NO real keystrokes, NO mic, NO daemon/child p
 (no make_backend, no RecorderHost spawn; fixtures are passed `use_microphone=False` and fed
 tests/out/*.wav via feed_audio at real-time pacing).
 
-PRD §6 T8 spec mapping — THIS file implements asserts (a), (b), (d) only; (c)/(e)/(f)/(g)
-belong to P1.M3.T8.S2 and will extend THIS file (fixtures + helpers are deliberately
-reusable; do not loosen them when S2 lands):
+PRD §6 T8 spec mapping — THIS file implements ALL SEVEN T8 asserts (S1 landed a/b/d;
+P1.M3.T8.S2 landed c/e/f/g on top of the SAME harness — fixtures + helpers stayed
+reusable, nothing loosened):
   (a) test_a_delta_cadence     — while speech streams, typed deltas arrive >=1 per 500 ms
                                  (suppress-aware: a gap is legitimate iff a feedback-mirror
                                  partial arrived in it — a rate-limited/suppressed revise
@@ -22,6 +23,14 @@ reusable; do not loosen them when S2 lands):
                                  EXACT check, not fuzzy); every rewind deletes EXACTLY the
                                  pending tail; >=1 revising commit occurs (bounded retry with
                                  utt_punct.wav before failing).
+  (c) test_c_pause_join       — PAUSE_A + 3.0 s silence + PAUSE_B joins into coherent
+                                 committed text: per-commit deterministic-guard
+                                 postconditions (textproc.apply_streaming_guards) checked
+                                 against the ENGINE's committed truth — never the pinned
+                                 reference (model punctuation of espeak audio is
+                                 nondeterministic); join token-overlap >= 0.80 (G-FUZZY);
+                                 the mid-sentence branch (lowercase start + no trailing
+                                 '.') exercised >= 1 time (bounded one-re-feed retry).
   (d) test_d_decode_prompts    — every post-warmup decode of the RecordingPromptedExecutor
                                  carries initial_prompt == prompt_engine.rolling_context_prompt(
                                  ENGINE-committed-at-decode-time): empty after a commit whose
@@ -36,6 +45,32 @@ reusable; do not loosen them when S2 lands):
                                  to PAUSE_A in one run and dropped multi's periods), so the
                                  empty/non-empty case per window FOLLOWS the engine truth;
                                  only >=1 non-empty window across pause+multi is required.
+  (e) test_e_cancel           — Backspace-cancel mid-utterance through the S2 DAEMON-SEAM
+                                 MIRRORS (StreamingHarness re-implements the daemon bodies
+                                 — cancel / note_user_keypress / freeze_stranded_tail —
+                                 never imports them; the mirror is the point): the test
+                                 plays the user's physical keystroke
+                                 (backend.press_backspace(1)) BEFORE the seam, then exactly
+                                 one compensation press_backspace(len(tail)-1) lands (by
+                                 subtraction — the keystroke is invisible to the engine),
+                                 the screen returns to exactly committed, the in-flight
+                                 utterance's audio is discarded (no commit, ever),
+                                 listening stays on, a second cancel is a no-op, and a
+                                 follow-up utterance commits normally.
+  (f) test_f_user_key_freeze  — a NON-Backspace keypress with a tail pending: zero
+                                 revision keystrokes for that utterance; its commit
+                                 absorbs the tail with NO keystrokes (no rewind, no
+                                 retype, no trailing space — scoped asserts only, NOT
+                                 _assert_commit_invariants whose check #2 would
+                                 false-fail); the freeze lifts at the boundary and the
+                                 NEXT utterance types live again.
+  (g) test_g_stranded_tail    — the daemon drain-timeout sequence forced DIRECTLY (freeze
+                                 SESSION-class BEFORE the abort — never the 5 s
+                                 _DRAIN_TIMEOUT_S timer; tests/test_daemon.py owns that
+                                 machinery): the tail freezes on screen and is never
+                                 rewound (PRD §4.2quater rule 4), a late commit absorbs
+                                 it without keystrokes, and the session freeze survives
+                                 the commit's boundary.
 
 "lite recorder child" interpretation (in-process): the production child build path is
 replicated IN THIS PROCESS — daemon.cfg_to_kwargs + recorder_host.augment_kwargs_with_executor
@@ -76,7 +111,7 @@ a REAL hang/flake that already bit this repo):
 Run explicitly (CUDA box; first model load is tens of seconds):
     cd /home/dustin/projects/voice-typing
     ./tests/make_test_audio.sh          # ensure tests/out/*.wav exist
-    timeout 600 .venv/bin/python -m pytest tests/test_streaming.py -v
+    timeout 900 .venv/bin/python -m pytest tests/test_streaming.py -v
 """
 
 from __future__ import annotations
@@ -299,15 +334,18 @@ class TimestampedFeedback:
 
 
 class StreamingHarness:
-    """Faithful extraction of daemon.on_final's streaming branch (daemon.py ~L1112-1256).
+    """Faithful extraction of daemon.on_final's streaming branch (daemon.py ~L1112-1256)
+    PLUS the S2 daemon-seam mirrors (cancel / note_user_keypress / freeze_stranded_tail):
+    the daemon BODIES are re-implemented here harness-flavor — behavior mirrors, never
+    imports — with the daemon's method names verbatim and its ORDER intact, so the S2
+    asserts read exactly the production seams.
 
-    The daemon-level wiring itself (locks, feedback.record_final, latency log, cancel
-    window, drain flags) is unit-tested in tests/test_daemon.py; T8 adds the REAL decode
-    stream through the REAL engine. Kept in the daemon's shape so S2 can extend with
-    freeze/cancel semantics (asserts e/f/g) without rewiring:
-      gate (listening) -> textproc.clean -> [rejected-final early return — S2 extends with
-      the daemon's session-freeze] -> stream.commit -> stream.reset_boundary ->
-      executor.set_prompt(rolling_context_prompt(stream.committed)) -> commit_log stamp.
+    The remaining daemon-level wiring (locks, feedback.record_final, latency log, drain
+    Timer machinery) is unit-tested in tests/test_daemon.py; T8 adds the REAL decode
+    stream through the REAL engine. on_final keeps the daemon's shape:
+      gate (listening) -> S2 cancel window -> textproc.clean -> [rejected final: SESSION
+      freeze + reset_boundary, daemon L1146-1165] -> stream.commit -> commit_log stamp ->
+      stream.reset_boundary -> executor.set_prompt(rolling_context_prompt(stream.committed)).
     """
 
     def __init__(self, cfg: "VoiceTypingConfig") -> None:
@@ -321,6 +359,11 @@ class StreamingHarness:
         self.t_first_feed: float | None = None  # warmup-decode filter bound for (d)
         self.t_vad_start: float | None = None
         self.t_vad_stop: float | None = None
+        # --- S2: daemon-seam mirrors (asserts c/e/f/g) --------------------------------
+        self._rec: "AudioToTextRecorder | None" = None  # attach_recorder (cancel's abort)
+        self._text_generation = 0  # bumped per rec.text() entry (consume_once)
+        self._cancel_generation: int | None = None  # drop finals of this generation
+        self._text_in_flight = False  # the consume thread is inside rec.text()
         self._build_stream()
 
     def _build_stream(self) -> None:
@@ -335,6 +378,29 @@ class StreamingHarness:
 
     def attach_executor(self, executor: RecordingPromptedExecutor) -> None:
         self.executor = executor
+
+    def attach_recorder(self, rec: "AudioToTextRecorder") -> None:
+        """Give cancel() the recorder handle its helper-thread abort needs (G-ABORT).
+
+        Idempotent; called by the feed/consume plumbing (_run_streamed and
+        _stream_with_mid_action) — the daemon holds its host the same way.
+        """
+        self._rec = rec
+
+    def consume_once(self, rec: "AudioToTextRecorder", cb: "Callable[[str], None]") -> None:
+        """Thin consume wrapper (S2): the _consume loop routes every rec.text() through
+        THIS so the text-generation bookkeeping wraps each entry — the in-process mirror
+        of the daemon's _cancel_suppress_final sentinel window (daemon.py L1131-1140).
+        cancel() records the in-flight generation; on_final drops finals whose generation
+        is unchanged; the NEXT rec.text() entry (here) re-arms the pipeline.
+        """
+        self._text_generation += 1
+        self._cancel_generation = None  # next text() entry closes the previous window
+        self._text_in_flight = True
+        try:
+            rec.text(cb)
+        finally:
+            self._text_in_flight = False
 
     # --- recorder callbacks (G-REALTIME-CB) -----------------------------------------------------
 
@@ -359,11 +425,25 @@ class StreamingHarness:
         """daemon.on_final's streaming branch (see class docstring for the mapping)."""
         if not self.listening.is_set():  # GATE: race guard parity with the daemon
             return
+        # S2 cancel window (daemon.py L1131-1140): every final whose generation matches
+        # the one cancel() recorded races the cancelled utterance's abort — drop it (no
+        # clean, no commit, no keystrokes). The next rec.text() entry re-arms.
+        if (
+            self._cancel_generation is not None
+            and self._cancel_generation == self._text_generation
+        ):
+            return
         cleaned = textproc.clean(text, self.cfg.filter)
         if not cleaned:
-            # Rejected final (blocklist/min_chars). The daemon freezes (session) + resets the
-            # boundary here; kept as a plain early return for S1 — S2 owns freeze/cancel
-            # semantics (asserts e/f/g) and will mirror the daemon shape exactly.
+            # Rejected final (blocklist/min_chars): the daemon shape (daemon.py L1146-1165)
+            # — a deliberately SESSION-class freeze (a rejected final is an UNTRUSTWORTHY
+            # decode: nothing authoritative was decoded, so nothing is rewound — PRD
+            # §4.2quater rule 4) followed by this utterance's boundary event (clears the
+            # tail so late stragglers mirror instead of type; a per-utterance freeze would
+            # be lifted by that immediately, hence session-class).
+            if self.cfg.output.streaming:
+                self.stream.freeze("rejected final (blocklist/min_chars)", session=True)
+                self.stream.reset_boundary()
             return
         self.stream.commit(cleaned)
         # Stamp BEFORE reset_boundary/set_prompt: any decode starting after this stamp must
@@ -374,6 +454,66 @@ class StreamingHarness:
         self.stream.reset_boundary()
         if self.executor is not None:
             self.executor.set_prompt(prompt_engine.rolling_context_prompt(engine_committed))
+
+    # --- S2: daemon-seam mirrors (asserts c/e/f/g) --------------------------------------------
+    # Daemon BODIES re-implemented harness-flavor: daemon method names verbatim, daemon
+    # ORDER intact (the mirror is the point — the asserts read the production seams).
+
+    def cancel(self) -> dict:
+        """daemon.cancel() mirror (daemon.py L1603-1636). The ORDER is the spec: the
+        physical Backspace already deleted the FIRST tail char (the TEST plays the user's
+        part via backend.press_backspace(1) BEFORE calling this), so the compensation is
+        by SUBTRACTION off the engine's still-full tail — press_backspace(max(len-1, 0))
+        DIRECTLY on the backend (bypasses the engine: the physical keystroke is invisible
+        to it, so the engine tail is stale-by-design and the compensation is arithmetic).
+        Then an audio-DISCARDING abort of the in-flight utterance — gated on the consume
+        thread actually being inside rec.text() (the daemon's _text_in_flight gate;
+        touching the recorder with no text() in flight can block forever, G-ABORT) — with
+        the cancel-window generation armed so a racing final is dropped. Finally
+        reset_after_cancel() (fresh tail at the cursor; mirror-only until the next
+        boundary) + the feedback partial clear. Idempotent: disarmed, or no pending tail
+        -> no backspace, still ok (further Backspaces are plain user edits).
+        """
+        if not self.listening.is_set():
+            # Not armed: nothing pending — idempotent no-op (never touches backend/rec).
+            return {"ok": True}
+        tail_len = self.stream.pending_tail_len()  # engine truth — STILL the full tail
+        n = max(tail_len - 1, 0)  # the user's keystroke already deleted 1 char
+        if n > 0:
+            self.backend.press_backspace(n)  # daemon calls its backend DIRECTLY
+        if self._text_in_flight and self._rec is not None:
+            # Same gate as the daemon's host.cancel(): drop the racing final AND abort
+            # the in-flight text() + discard the buffered audio — from a HELPER thread
+            # (G-ABORT), never the caller. _abort_and_clear is the child's cancel handler
+            # mirror: plain abort() leaves the captured frames queued and the NEXT text()
+            # transcribes the stale audio.
+            self._cancel_generation = self._text_generation
+            threading.Thread(target=_abort_and_clear, args=(self._rec,), daemon=True).start()
+        self.stream.reset_after_cancel()  # fresh tail at the cursor; committed unchanged
+        self.feedback.update_partial("")
+        return {"ok": True}
+
+    def note_user_keypress(self) -> None:
+        """daemon.note_user_keypress() mirror (daemon.py L1448): a NON-Backspace keypress
+        while listening freezes a pending tail PER-UTTERANCE (PRD §4.2quater rule 5 —
+        never type over the user's cursor). The daemon's defensive getattr seam collapses
+        to a direct call: the harness always holds a real StreamingOutput.
+        """
+        if not self.listening.is_set():
+            return
+        self.stream.note_user_keypress()
+
+    def freeze_stranded_tail(self, reason: str) -> None:
+        """daemon._freeze_stranded_tail() mirror (daemon.py L1532): a typed tail that can
+        never be committed (drain-timeout abort, recorder death) freezes SESSION-class —
+        it stays on screen exactly as last shown, never rewound, never deleted (PRD
+        §4.2quater rule 4); only reset_session() (fresh arm) lifts it.
+        """
+        if not self.cfg.output.streaming:
+            return
+        if self.stream.pending_tail_len() <= 0:
+            return
+        self.stream.freeze(reason, session=True)
 
     # --- assert-(d) oracle helpers -----------------------------------------------------------
 
@@ -403,6 +543,9 @@ class StreamingHarness:
         self.t_first_feed = None
         self.t_vad_start = None
         self.t_vad_stop = None
+        self._text_generation = 0
+        self._cancel_generation = None
+        self._text_in_flight = False
         if self.executor is not None:
             self.executor.set_prompt(None)  # fresh session starts prompt-free (daemon parity)
             with self.executor._rec_lock:
@@ -422,6 +565,28 @@ def _safe_abort(rec: "AudioToTextRecorder") -> None:
         rec.abort()
     except Exception:  # pragma: no cover — best-effort teardown
         pass
+
+
+def _abort_and_clear(rec: "AudioToTextRecorder") -> None:
+    """rec.abort() + discard buffered/queued audio (G-ABORT: call from a HELPER thread).
+
+    The in-process mirror of the child's cancel handling (recorder_host.py's abort-handler
+    thread: recorder.abort() THEN _clear_recorder_audio(recorder)). A plain abort()
+    interrupts only the in-flight DECODE — the captured frames and any queued recording
+    PERSIST, and the next text() transcribes that STALE audio (the documented double-type
+    bug in _clear_recorder_audio's docstring). Production drops the buffers child-side on
+    cancel and on disarm; the harness mirrors it through the SAME production helper
+    (lazily loaded — G-SKIP-GUARDS: recorder_host arrives inside _DEPS), defensively
+    skipped if the seam is absent.
+    """
+    _safe_abort(rec)
+    host_mod = _DEPS.get("recorder_host") if _DEPS is not None else None
+    clear = getattr(host_mod, "_clear_recorder_audio", None)
+    if callable(clear):
+        try:
+            clear(rec)
+        except Exception:  # pragma: no cover — best-effort, never break the caller
+            pass
 
 
 def _safe_shutdown(rec: "AudioToTextRecorder") -> None:
@@ -498,6 +663,7 @@ def _run_streamed(
     assert _DEPS is not None
     sf = _DEPS["sf"]
     harness.listening.set()
+    harness.attach_recorder(rec)  # S2: cancel()'s helper-abort needs the recorder handle
     samples, _sr = sf.read(str(wav), dtype="int16")  # 16k mono int16 (soxi-confirmed)
     n0 = len(harness.raw_finals)
     stop = threading.Event()
@@ -511,7 +677,7 @@ def _run_streamed(
         return len(harness.raw_finals)
 
     cons = threading.Thread(
-        target=_consume, args=(rec, cb, stop, _count, n0 + want_finals), daemon=True
+        target=_consume, args=(rec, cb, stop, _count, n0 + want_finals, harness), daemon=True
     )
     cons.start()  # G-ORDER: consume arms listening BEFORE feed
     feed = threading.Thread(
@@ -527,7 +693,7 @@ def _run_streamed(
         stop.set()
         # G-ABORT: abort() from a HELPER thread (blocks on was_interrupted.wait(), which is
         # only set INSIDE text()); the test thread joins it with a timeout.
-        abort_thread = threading.Thread(target=_safe_abort, args=(rec,), daemon=True)
+        abort_thread = threading.Thread(target=_abort_and_clear, args=(rec,), daemon=True)
         abort_thread.start()
         abort_thread.join(timeout=10.0)
         cons.join(timeout=5.0)
@@ -540,10 +706,154 @@ def _consume(
     stop: threading.Event,
     count: Callable[[], int],
     want: int,
+    harness: "StreamingHarness | None" = None,
 ) -> None:
     while count() < want and not stop.is_set():
         # text(cb) BLOCKS until ONE utterance finalizes; cb fires async with the RAW text.
-        rec.text(cb)
+        # S2: with a harness, route through consume_once so every rec.text() entry bumps
+        # the text generation (the cancel-window mirror) — same blocking shape, and the
+        # G-ORDER semantics are unchanged (this loop still starts before the first feed).
+        if harness is not None:
+            harness.consume_once(rec, cb)
+        else:
+            rec.text(cb)
+
+
+@dataclasses.dataclass
+class MidActionSnapshot:
+    """Pre-act engine/screen state captured by _stream_with_mid_action (S2 oracles)."""
+
+    t_act: float  # time.monotonic() immediately before the act
+    tail_before: str  # engine tail at the act (what a compensation rewind is computed from)
+    committed_before: str  # engine committed at the act
+    screen_before: str  # simulated screen at the act
+    n_events: int  # len(backend.events) at the act
+    n_commits: int  # len(commit_log) at the act
+    n_finals: int  # len(raw_finals) at the act
+    n_partials: int  # len(feedback.partials) at the act
+
+
+def _stream_with_mid_action(
+    rec: "AudioToTextRecorder",
+    harness: StreamingHarness,
+    wav: Path,
+    act: Callable[["StreamingHarness"], object],
+    *,
+    consume_want: int = 2,
+    first_final_gate: bool = True,
+    act_timeout: float = 30.0,
+    want_finals_after_act: int = 0,
+    settle_s: float = 0.5,
+    stop_feed_after_act: bool = False,
+    feed_timeout: float = 90.0,
+) -> "tuple[bool, MidActionSnapshot]":
+    """Feed one WAV and invoke act(harness) EXACTLY once mid-utterance, on a live tail
+    (S2's asserts e/f/g all act while a typed tail is pending).
+
+    Composes the EXISTING _consume/_feed_paced plumbing (G-ORDER: the consume thread
+    starts before the first feed; G-PACE / G-TRAILING-SILENCE live inside _feed_paced).
+    With first_final_gate (the utt_pause shape) the act also waits for the pass's FIRST
+    raw final to land, so it fires during the SECOND utterance — the post-act final wait
+    (want_finals_after_act, a RELATIVE count) then covers the LAST utterance and nothing
+    can commit behind the helper's back. An aborting act drops the in-flight utterance's
+    final (count RAW finals, never commits — G-ABORT note), so those acts pass 0.
+    stop_feed_after_act stops the feeder at the act (mirrors cancel()'s audio discard:
+    the leftover WAV slices must not produce a late utterance); settle_s idles before
+    teardown so post-act stragglers surface while the consumer is still alive. Teardown
+    mirrors _run_streamed's finally (stop -> helper-thread abort -> joins with timeouts).
+
+    Returns (acted_on_pending_tail, snapshot): acted_on_pending_tail is False when the
+    tail was already empty at act time — the known mid-utterance race (the commit landed
+    between the readiness wait and the act); the caller re-feeds ONCE (bounded) instead
+    of flaking.
+    """
+    assert _DEPS is not None
+    sf = _DEPS["sf"]
+    harness.listening.set()
+    harness.attach_recorder(rec)
+    samples, _sr = sf.read(str(wav), dtype="int16")  # 16k mono int16 (soxi-confirmed)
+    n0 = len(harness.raw_finals)
+    stop = threading.Event()
+
+    def cb(text: str) -> None:
+        # RAW final first (count for the consume loop), then the daemon-equivalent path.
+        harness.raw_finals.append(text)
+        harness.on_final(text)
+
+    def _count() -> int:
+        return len(harness.raw_finals)
+
+    def _ready() -> bool:
+        if harness.stream.pending_tail_len() <= 0:
+            return False
+        if first_final_gate and len(harness.raw_finals) < n0 + 1:
+            return False
+        return True
+
+    snap = MidActionSnapshot(
+        t_act=0.0,
+        tail_before="",
+        committed_before="",
+        screen_before="",
+        n_events=0,
+        n_commits=0,
+        n_finals=0,
+        n_partials=0,
+    )
+    acted = False
+
+    cons = threading.Thread(
+        target=_consume,
+        args=(rec, cb, stop, _count, n0 + consume_want, harness),
+        daemon=True,
+    )
+    cons.start()  # G-ORDER: consume arms listening BEFORE feed
+    feed = threading.Thread(
+        target=_feed_paced, args=(rec, samples, harness), kwargs={"stop": stop}, daemon=True
+    )
+    feed.start()
+    try:
+        if not _wait_for(_ready, timeout=act_timeout):
+            raise AssertionError(
+                f"no pending typed tail within {act_timeout}s (no live typing?)\n"
+                + _dump_events(harness)
+            )
+        # Snapshot THEN act immediately — the race window is the snapshot line itself.
+        snap = MidActionSnapshot(
+            t_act=time.monotonic(),
+            tail_before=harness.stream.tail,
+            committed_before=harness.stream.committed,
+            screen_before=harness.backend.screen,
+            n_events=len(harness.backend.events),
+            n_commits=len(harness.commit_log),
+            n_finals=len(harness.raw_finals),
+            n_partials=len(harness.feedback.partials),
+        )
+        acted = harness.stream.pending_tail_len() > 0
+        if acted:
+            act(harness)  # EXACTLY once
+        if stop_feed_after_act:
+            stop.set()  # the feeder exits before its next slice; leftover audio never fed
+        if acted and want_finals_after_act > 0:
+            assert _wait_for(
+                lambda: len(harness.raw_finals) >= snap.n_finals + want_finals_after_act,
+                timeout=feed_timeout,
+            ), (
+                f"expected {want_finals_after_act} finals after the act, "
+                f"got {harness.raw_finals!r}"
+            )
+        if settle_s > 0:
+            time.sleep(settle_s)  # post-act stragglers surface while the consumer lives
+    finally:
+        stop.set()
+        # G-ABORT: abort() from a HELPER thread (blocks on was_interrupted.wait(), which is
+        # only set INSIDE text()); the test thread joins it with a timeout.
+        abort_thread = threading.Thread(target=_abort_and_clear, args=(rec,), daemon=True)
+        abort_thread.start()
+        abort_thread.join(timeout=10.0)
+        cons.join(timeout=5.0)
+        feed.join(timeout=5.0)
+    return acted, snap
 
 
 # ================================================================================================
@@ -559,8 +869,8 @@ def _dump_events(harness: StreamingHarness, limit: int = 300) -> str:
     for t, s in harness.feedback.partials[-limit:]:
         lines.append(f"  t={t:.3f} {s!r}")
     lines.append("--- commit log ---")
-    for t, s in harness.commit_log:
-        lines.append(f"  t={t:.3f} {s!r}")
+    for t, s, _ec in harness.commit_log:  # (t, cleaned piece, ENGINE committed truth)
+        lines.append(f"  t={t:.3f} piece={s!r} engine_committed={_ec!r}")
     if harness.executor is not None:
         lines.append("--- executor decodes (tail) ---")
         for t, p, u in harness.executor.decodes[-limit:]:
@@ -568,7 +878,10 @@ def _dump_events(harness: StreamingHarness, limit: int = 300) -> str:
     lines.append("--- engine state ---")
     lines.append(
         f"  committed={harness.stream.committed!r} tail={harness.stream.tail!r} "
-        f"frozen={harness.stream.frozen} screen={harness.backend.screen!r}"
+        f"frozen={harness.stream.frozen} "
+        f"frozen_session={harness.stream.frozen_session} "
+        f"suppressed={getattr(harness.stream, '_suppressed', '?')} "
+        f"screen={harness.backend.screen!r}"
     )
     return "\n".join(lines)
 
@@ -852,6 +1165,101 @@ def test_b_commit_rewind_exact(
 
 
 # ================================================================================================
+# T8 (c): pause-join coherence + deterministic-guard postconditions (S2).
+# ================================================================================================
+
+
+def test_c_pause_join(
+    stream_recorder: "tuple[AudioToTextRecorder, StreamingHarness]",
+) -> None:
+    """T8(c): PAUSE_A + 3.0 s silence + PAUSE_B joins into coherent committed text.
+
+    Per commit k, with typed piece p_k and the ENGINE's committed truth C right before it
+    (committed_state_at — the S1 helper): when C is mid-sentence (non-empty, no
+    terminator), the deterministic guard's postconditions hold — p_k's first cased char is
+    lowercase AND p_k has no trailing '.' (voice_typing.textproc.apply_streaming_guards
+    L82-134). When C starts a sentence/paragraph, p_k's casing is whatever the model
+    produced (no assertion — the guard returns the fragment verbatim there). The join of
+    the pieces fuzzy-matches PAUSE_A + ' ' + PAUSE_B at >= 0.80 (G-FUZZY), and the
+    mid-sentence branch must FIRE >= 1 time — bounded one-re-feed retry, because model
+    punctuation of espeak audio is nondeterministic (S1 saw small.en add a period to
+    PAUSE_A in one run); if the retry still misses the branch, FAIL with diagnostics
+    (never a silent pass).
+    """
+    rec, harness = stream_recorder
+    harness.reset()
+    _run_streamed(rec, harness, _WAVS["pause"], want_finals=2)  # 3 s pause > 0.8 s endpointer
+
+    def _mid_branch_fired() -> bool:
+        for ct, _piece, _ec in harness.commit_log:
+            context = harness.committed_state_at(ct).rstrip()
+            if context and context[-1] not in ".!?":
+                return True
+        return False
+
+    if not _mid_branch_fired():
+        # The model put a period on PAUSE_A (observed in S1 runs) — every context then
+        # ends a sentence. Bounded retry: ONE more utt_pause pass in the SAME session
+        # (test_b's same-session retry precedent).
+        _run_streamed(rec, harness, _WAVS["pause"], want_finals=2)
+    assert _mid_branch_fired(), (
+        "the mid-sentence guard branch was never exercised across "
+        f"{len(harness.commit_log)} pause commits\n" + _dump_events(harness)
+    )
+    logger.warning("T8c pause pieces: %r", [p for _t, p, _ec in harness.commit_log])
+
+    # Typed pieces from the ENGINE's committed truth (prefix diff). The commit join
+    # collapses the previous commit's trailing space, so diff against its rstripped form.
+    commits = harness.commit_log
+    assert len(commits) >= 2, (
+        f"expected >=2 pause commits, got {commits!r}\n" + _dump_events(harness)
+    )
+    pieces: list[str] = []
+    prev = ""
+    for _ct, _piece, ec in commits:
+        base = prev.rstrip()
+        assert base == "" or ec.startswith(base), (
+            f"engine committed not append-monotone: {base!r} -> {ec!r}\n"
+            + _dump_events(harness)
+        )
+        pieces.append(ec[len(base):].strip())
+        prev = ec
+
+    mid_fired = 0
+    for k, (ct, _piece, _ec) in enumerate(commits):
+        context = harness.committed_state_at(ct).rstrip()  # ENGINE truth BEFORE commit k
+        piece = pieces[k]
+        if not (context and context[-1] not in ".!?"):
+            continue  # sentence-start context: the guard returns the fragment verbatim
+        mid_fired += 1
+        first_cased = next((ch for ch in piece if ch.isalpha()), "")
+        assert first_cased and first_cased.islower(), (
+            f"commit {k}: mid-sentence piece {piece!r} does not start lowercase "
+            f"(context {context!r})\n" + _dump_events(harness)
+        )
+        assert not piece.rstrip().endswith("."), (
+            f"commit {k}: mid-sentence piece {piece!r} kept a trailing period "
+            f"(context {context!r})\n" + _dump_events(harness)
+        )
+    assert mid_fired >= 1, (
+        "no commit ran under a mid-sentence context (the guard branch never typed)\n"
+        + _dump_events(harness)
+    )
+
+    # Join coherence across the 3 s pause (G-FUZZY vs the pinned fixture concatenation).
+    joined = " ".join(pieces)
+    assert _token_overlap(joined, PAUSE_A + " " + PAUSE_B) >= 0.80, (
+        f"pause join {joined!r} vs {PAUSE_A + ' ' + PAUSE_B!r}\n" + _dump_events(harness)
+    )
+
+    # End state: the engine's own public invariant (screen == committed + pending tail).
+    assert harness.backend.screen == harness.stream.committed + harness.stream.tail, (
+        f"screen {harness.backend.screen!r} != committed+tail "
+        f"{harness.stream.committed + harness.stream.tail!r}\n" + _dump_events(harness)
+    )
+
+
+# ================================================================================================
 # T8 (d): the rolling context prompt on decodes.
 # ================================================================================================
 
@@ -869,7 +1277,20 @@ def test_d_decode_prompts(
     harness.reset()
     _run_streamed(rec, harness, _WAVS["pause"], want_finals=2)  # PAUSE_A has NO terminator
     _run_streamed(rec, harness, _WAVS["multi"], want_finals=3)  # every sentence ends '.'
+    for _retry in range(2):  # bounded: up to 2 re-rolls of the model's punctuation dice
+        if any(
+            prompt_engine.rolling_context_prompt(ec) for _t, _p, ec in harness.commit_log
+        ):
+            break
+        # Model nondeterminism (S1 observed small.en ADD a period to PAUSE_A in one run):
+        # when that happens every commit's ENGINE truth ends a sentence, so the non-empty
+        # mid-paragraph window can never occur — the PRP's bounded re-feed retry (the
+        # test_b / test_c precedent for the identical nondeterminism) re-rolls the model's
+        # punctuation with ONE more utt_pause pass in the SAME session. The per-window
+        # oracle below is unchanged; it simply runs over more (real) commits.
+        _run_streamed(rec, harness, _WAVS["pause"], want_finals=2)
 
+    logger.warning("T8d pieces: %r", [p for _t, p, _ec in harness.commit_log])
     ex = harness.executor
     assert ex.prompts_set, "set_prompt never ran (the commit glue did not refresh)\n" + _dump_events(
         harness
@@ -936,4 +1357,351 @@ def test_d_decode_prompts(
         "every inter-commit window ran with an empty prompt — the non-empty "
         "mid-paragraph case (PRD §4.2quater rule 2) was never exercised\n"
         + _dump_events(harness)
+    )
+
+
+# ================================================================================================
+# T8 (e): Backspace-cancel mid-utterance (S2, via the daemon-seam mirrors).
+# ================================================================================================
+
+
+def test_e_cancel(
+    stream_recorder: "tuple[AudioToTextRecorder, StreamingHarness]",
+) -> None:
+    """T8(e): Backspace while a tail is pending cancels the fragment and KEEPS listening.
+
+    The test plays the user's half of the gesture (backend.press_backspace(1)) BEFORE the
+    daemon seam — the documented production order (daemon.cancel L1603: the physical
+    keystroke already deleted the FIRST tail char and is invisible to the engine, so the
+    compensation is press_backspace(len(tail) - 1), by subtraction, DIRECT on the
+    backend). Asserts: exactly that one compensation keystroke; the screen returns to
+    exactly the pre-cancel committed; the in-flight utterance's audio is discarded (no
+    raw final and no commit for it, ever — the 3 s settle proves the negative while the
+    consumer is still alive); the tail is gone; listening stays on; a second cancel is a
+    no-op (zero backend events — further Backspaces are plain user edits); and a
+    follow-up utterance commits normally (the recorder survived the abort), streamed as
+    mirror-only partials until its commit (post-cancel suppression — engine design,
+    asserted, not fought)."""
+    rec, harness = stream_recorder
+    harness.reset()
+
+    def cancel_act(h: StreamingHarness) -> None:
+        # The user's physical keystroke FIRST (deletes 1 screen char), THEN the daemon
+        # seam — the engine tail must still be full when cancel() computes n.
+        h.backend.press_backspace(1)
+        h.cancel()
+
+    acted, snap = _stream_with_mid_action(
+        rec,
+        harness,
+        _WAVS["pause"],
+        cancel_act,
+        consume_want=2,
+        want_finals_after_act=0,  # the aborted utterance yields NO raw final
+        stop_feed_after_act=True,  # leftover WAV slices must not produce a late utterance
+        settle_s=3.0,  # bounded negative watch: a racing final would have to land inside it
+    )
+    if not acted:
+        # Mid-utterance race (the commit landed between the readiness wait and the act):
+        # bounded retry — ONE more utt_pause pass in the same session (PRP gotcha).
+        acted, snap = _stream_with_mid_action(
+            rec,
+            harness,
+            _WAVS["pause"],
+            cancel_act,
+            consume_want=2,
+            want_finals_after_act=0,
+            stop_feed_after_act=True,
+            settle_s=3.0,
+        )
+    assert acted, "cancel never caught a pending tail (raced twice)\n" + _dump_events(harness)
+
+    # Exactly the simulated physical keystroke + the subtraction compensation.
+    new_events = harness.backend.events[snap.n_events:]
+    expected_bs = 1 + (1 if len(snap.tail_before) > 1 else 0)
+    assert len(new_events) == expected_bs and all(e.kind == "bs" for e in new_events), (
+        f"expected {expected_bs} backspace event(s) after the gesture, got {new_events!r}\n"
+        + _dump_events(harness)
+    )
+    assert new_events[0].n == 1, (
+        "the simulated physical keystroke was not bs(1)\n" + _dump_events(harness)
+    )
+    if len(new_events) == 2:  # len(tail)-1 > 0 -> the compensation keystroke was recorded
+        assert new_events[1].n == len(snap.tail_before) - 1, (
+            f"compensation n={new_events[1].n} != len(tail)-1={len(snap.tail_before) - 1}\n"
+            + _dump_events(harness)
+        )
+        assert new_events[1].screen_after == snap.committed_before, (
+            f"screen after compensation {new_events[1].screen_after!r} != committed "
+            f"{snap.committed_before!r}\n" + _dump_events(harness)
+        )
+    assert harness.backend.screen == snap.committed_before, (
+        f"settled screen {harness.backend.screen!r} != committed {snap.committed_before!r}\n"
+        + _dump_events(harness)
+    )
+    assert harness.stream.tail == "", "engine tail survived the cancel\n" + _dump_events(harness)
+    assert harness.listening.is_set(), "cancel disarmed the listener\n" + _dump_events(harness)
+
+    # The dropped utterance is gone for good: no raw final, no commit (ever).
+    assert len(harness.raw_finals) == snap.n_finals, (
+        f"a final leaked from the cancelled utterance: {harness.raw_finals!r}\n"
+        + _dump_events(harness)
+    )
+    assert len(harness.commit_log) == snap.n_commits, (
+        "a commit landed for the cancelled utterance\n" + _dump_events(harness)
+    )
+
+    # Idempotence: a second cancel with no pending tail is a no-op (zero new events).
+    n_events_before = len(harness.backend.events)
+    n_commits_before = len(harness.commit_log)
+    result = harness.cancel()
+    assert result.get("ok") is True, f"second cancel not ok: {result!r}\n" + _dump_events(harness)
+    assert len(harness.backend.events) == n_events_before, (
+        "second cancel issued keystrokes (must be a plain no-op)\n" + _dump_events(harness)
+    )
+    assert len(harness.commit_log) == n_commits_before
+    assert harness.stream.tail == ""
+
+    # Keep listening, say it again: the recorder survived the abort and the follow-up
+    # commits normally. Post-cancel suppression funnels THIS utterance into its commit
+    # (mirror-only partials until the boundary), so the commit carries the typed text.
+    partials_before = len(harness.feedback.partials)
+    t_followup = time.monotonic()  # suppression is ON from here until the commit lands
+    _run_streamed(rec, harness, _WAVS["simple"], want_finals=1)
+    assert harness.commit_log, "follow-up utterance never committed\n" + _dump_events(harness)
+    ct, piece, _ec = harness.commit_log[-1]
+    assert _token_overlap(piece, SIMPLE_TEXT) >= 0.80, (
+        f"follow-up commit {piece!r} vs {SIMPLE_TEXT!r}\n" + _dump_events(harness)
+    )
+    # Suppression is on for this whole utterance, so the ONLY typing in (t_followup, ct]
+    # is the commit's own (guarded final + trailing space).
+    win = [e for e in harness.backend.events if t_followup < e.t <= ct]
+    assert any(e.kind == "type" and e.text.strip() for e in win), (
+        "the follow-up commit did not type its text at the boundary\n" + _dump_events(harness)
+    )
+    assert len(harness.feedback.partials) > partials_before, (
+        "no feedback-mirror partials streamed during the follow-up utterance\n"
+        + _dump_events(harness)
+    )
+
+
+# ================================================================================================
+# T8 (f): user-keypress freeze mid-utterance (S2).
+# ================================================================================================
+
+
+def test_f_user_key_freeze(
+    stream_recorder: "tuple[AudioToTextRecorder, StreamingHarness]",
+) -> None:
+    """T8(f): a NON-Backspace keypress while a tail is pending freezes that utterance.
+
+    daemon.note_user_keypress (L1448) -> stream.note_user_keypress: the engine's next
+    keystrokes would land on top of the user's edit, so the tail freezes PER-UTTERANCE —
+    zero revision keystrokes until the boundary, the commit absorbs the tail with NO
+    keystrokes (no rewind, no retype, not even the trailing space), reset_boundary lifts
+    the freeze, and the NEXT utterance types live again. Scoped asserts only:
+    _assert_commit_invariants would false-fail here (its check #2 expects every commit to
+    type a trailing space — frozen absorbs type none)."""
+    rec, harness = stream_recorder
+    harness.reset()
+    frozen_at_act: "list[tuple[bool, bool]]" = []
+
+    def keypress_act(h: StreamingHarness) -> None:
+        h.note_user_keypress()
+        # Capture the freeze state INSIDE the act: the helper's want_finals wait covers
+        # this utterance's final, whose reset_boundary LIFTS a per-utterance freeze — by
+        # assert time the lift already happened (that is the lifecycle under test).
+        frozen_at_act.append((h.stream.frozen, h.stream.frozen_session))
+
+    acted, snap = _stream_with_mid_action(
+        rec,
+        harness,
+        _WAVS["pause"],
+        keypress_act,
+        consume_want=2,
+        want_finals_after_act=1,  # the acting utterance's own final (the pass's last)
+    )
+    if not acted:
+        acted, snap = _stream_with_mid_action(
+            rec,
+            harness,
+            _WAVS["pause"],
+            keypress_act,
+            consume_want=2,
+            want_finals_after_act=1,
+        )
+    assert acted, "keypress never caught a pending tail (raced twice)\n" + _dump_events(harness)
+
+    # The freeze was active right after the keypress, PER-UTTERANCE (not session-class).
+    assert frozen_at_act == [(True, False)], (
+        f"frozen state at the keypress {frozen_at_act!r} != [(True, False)]\n"
+        + _dump_events(harness)
+    )
+
+    # The acting utterance finalized (want_finals_after_act=1 waited for its raw final).
+    assert len(harness.commit_log) == snap.n_commits + 1, (
+        f"expected exactly 1 commit after the act, got {harness.commit_log!r}\n"
+        + _dump_events(harness)
+    )
+    ct, _piece, engine_committed = harness.commit_log[-1]
+
+    # ZERO backend events in (t_act, commit]: no revision keystrokes for that utterance,
+    # and the frozen commit typed NOTHING (no rewind, no retype, no trailing space).
+    stragglers = [e for e in harness.backend.events if snap.t_act < e.t <= ct]
+    assert not stragglers, (
+        f"backend events between the keypress and the commit: {stragglers!r}\n"
+        + _dump_events(harness)
+    )
+    replay = ""
+    for e in harness.backend.events:
+        if e.t > ct:
+            break
+        replay = e.screen_after
+    assert replay == snap.screen_before, (
+        f"screen at commit {replay!r} != screen at the keypress {snap.screen_before!r}\n"
+        + _dump_events(harness)
+    )
+
+    # The engine committed absorbed exactly committed + tail (the frozen path's join).
+    expected = " ".join(p for p in (snap.committed_before.rstrip(), snap.tail_before) if p)
+    assert engine_committed == expected, (
+        f"absorbed committed {engine_committed!r} != expected {expected!r}\n"
+        + _dump_events(harness)
+    )
+
+    # The freeze lifted at the commit's reset_boundary (per-utterance class).
+    assert not harness.stream.frozen and not harness.stream.frozen_session, (
+        "per-utterance freeze survived the boundary\n" + _dump_events(harness)
+    )
+
+    # Phase 2 — the next utterance types live again (>= 1 type event before its commit).
+    _run_streamed(rec, harness, _WAVS["simple"], want_finals=1)
+    assert len(harness.commit_log) >= snap.n_commits + 2, (
+        f"follow-up utterance never committed: {harness.commit_log!r}\n" + _dump_events(harness)
+    )
+    ct2 = harness.commit_log[-1][0]
+    live = [e for e in harness.backend.events if e.kind == "type" and ct < e.t < ct2]
+    assert live, (
+        "the next utterance typed nothing before its commit (freeze not lifted? "
+        f"{[e.kind for e in harness.backend.events if ct < e.t < ct2]!r})\n"
+        + _dump_events(harness)
+    )
+
+
+# ================================================================================================
+# T8 (g): stranded-tail freeze at the forced drain timeout (S2).
+# ================================================================================================
+
+
+def test_g_stranded_tail(
+    stream_recorder: "tuple[AudioToTextRecorder, StreamingHarness]",
+) -> None:
+    """T8(g): the stranded-tail freeze (PRD §4.2quater rule 4; daemon._drain_timeout
+    L1671: freeze SESSION-class BEFORE the abort — forced directly here, never the 5 s
+    production Timer; tests/test_daemon.py owns that machinery).
+
+    Asserts: the frozen tail stays on screen exactly as last shown over a bounded watch
+    (typed text is NEVER rewound — no backspace after the freeze stamp); frozen and
+    frozen_session are both True; a late commit absorbs the tail WITHOUT keystrokes
+    (screen unchanged across its stamp); and the SESSION freeze survives the commit's
+    reset_boundary (only reset_session at a fresh arm lifts it — unit-pinned in
+    tests/test_streaming_freeze.py, here proven on the real pipeline)."""
+    rec, harness = stream_recorder
+
+    harness.reset()
+    post_act: "list[tuple[str, bool, bool]]" = []
+
+    def drain_timeout_act(h: StreamingHarness) -> None:
+        # daemon._drain_timeout's exact sequence, forced (NO _DRAIN_TIMEOUT_S wait):
+        # freeze SESSION-class FIRST, then abort — the production order. Plain abort()
+        # (NOT _abort_and_clear): the daemon's drain path deliberately leaves the buffers'
+        # fate to the frozen-absorb path — a final that raced the watchdog is absorbed by
+        # commit()'s frozen path with zero keystrokes (daemon.py _drain_timeout docstring).
+        h.freeze_stranded_tail("drain timeout: stranded tail")
+        abort_t = threading.Thread(target=_safe_abort, args=(rec,), daemon=True)
+        abort_t.start()
+        abort_t.join(timeout=10.0)  # G-ABORT: helper thread, joined with a timeout
+        post_act.append((h.backend.screen, h.stream.frozen, h.stream.frozen_session))
+
+    harness.reset()
+    acted, snap = _stream_with_mid_action(
+        rec,
+        harness,
+        _WAVS["pause"],
+        drain_timeout_act,
+        consume_want=2,
+        want_finals_after_act=0,  # the aborted utterance yields NO raw final
+        stop_feed_after_act=True,
+        settle_s=2.0,
+    )
+    if not acted:
+        acted, snap = _stream_with_mid_action(
+            rec,
+            harness,
+            _WAVS["pause"],
+            drain_timeout_act,
+            consume_want=2,
+            want_finals_after_act=0,
+            stop_feed_after_act=True,
+            settle_s=2.0,
+        )
+    assert acted, "freeze never caught a pending tail (raced twice)\n" + _dump_events(harness)
+
+    # Frozen, SESSION-class, immediately after the forced drain timeout; the screen right
+    # then is the frozen on-screen truth (the typed tail, exactly as last shown).
+    assert post_act and post_act[0][1] and post_act[0][2], (
+        f"frozen state after the forced drain timeout {post_act!r}\n" + _dump_events(harness)
+    )
+    screen_frozen = post_act[0][0]
+    assert screen_frozen, "no frozen on-screen content\n" + _dump_events(harness)
+
+    # Bounded 2 s watch: the frozen screen stays untouched; nothing rewinds (the engine
+    # never issues a keystroke while frozen — the frozen commit absorbs, keystroke-free).
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        assert harness.backend.screen == screen_frozen, (
+            f"screen drifted during the freeze watch: {harness.backend.screen!r} != "
+            f"{screen_frozen!r}\n" + _dump_events(harness)
+        )
+        assert harness.stream.frozen and harness.stream.frozen_session, (
+            "freeze lifted during the watch\n" + _dump_events(harness)
+        )
+        time.sleep(0.2)
+    rewind = [e for e in harness.backend.events if e.t > snap.t_act and e.kind == "bs"]
+    assert not rewind, (
+        f"backspace after the freeze stamp (rule 4 violation): {rewind!r}\n"
+        + _dump_events(harness)
+    )
+
+    # Phase 2 — a late/racing commit absorbs frozen: types NOTHING; session freeze
+    # survives the commit's reset_boundary. NOTE: a final that raced the phase-1 abort may
+    # already have been absorbed during the settle (the daemon's documented drain race —
+    # commit()'s frozen path clears the tail but keeps the screen byte-identical), so the
+    # engine truth is captured HERE, right before the late utterance.
+    committed_pre = harness.stream.committed
+    tail_pre = harness.stream.tail
+    screen_pre = harness.backend.screen
+    _run_streamed(rec, harness, _WAVS["simple"], want_finals=1)
+    assert len(harness.commit_log) >= snap.n_commits + 1, (
+        f"no commit after the freeze: {harness.commit_log!r}\n" + _dump_events(harness)
+    )
+    ct, _piece, engine_committed = harness.commit_log[-1]
+    # The keystroke-free window starts at the ACT STAMP (never prev_commit: with only the
+    # first half committed before the act, a prev_commit-based window would span the whole
+    # session and catch the utterance's legitimate pre-freeze typing). After the session
+    # freeze NOTHING may type — any event here is a rule-4 violation.
+    win = [e for e in harness.backend.events if snap.t_act < e.t <= ct]
+    assert not win, f"the frozen commit typed keystrokes: {win!r}\n" + _dump_events(harness)
+    assert harness.backend.screen == screen_pre, (
+        f"screen changed across the frozen commit: {harness.backend.screen!r} != "
+        f"{screen_pre!r}\n" + _dump_events(harness)
+    )
+    expected = " ".join(p for p in (committed_pre.rstrip(), tail_pre) if p)
+    assert engine_committed == expected, (
+        f"absorbed committed {engine_committed!r} != expected {expected!r}\n"
+        + _dump_events(harness)
+    )
+    # The SESSION freeze SURVIVED the boundary (only reset_session at a fresh arm lifts it).
+    assert harness.stream.frozen and harness.stream.frozen_session, (
+        "session freeze did not survive the commit's reset_boundary\n" + _dump_events(harness)
     )
