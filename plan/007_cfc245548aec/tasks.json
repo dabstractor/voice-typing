@@ -348,7 +348,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T8.S1",
                   "title": "Harness + RecordingTypingBackend + asserts a/b/d",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T6.S2",
