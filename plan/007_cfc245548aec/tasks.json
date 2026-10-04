@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Rev 2 — Streaming dictation + single-mode collapse",
-      "status": "Planned",
+      "status": "Complete",
       "description": "Land the Rev 2 delta on the mature Rev 1 codebase (HEAD 6b61db1): collapse to a single small.en mode (no distil-large-v3 anywhere), add phone-style streaming output (typed partials revised in place via a committed/tail state machine), Backspace-cancel with an evdev listener + voicectl fallback, rolling context prompts, deterministic textproc guards, the config/dep plumbing for all of it, and the verification + changeset-level docs. Everything outside this delta is implemented and verified (plan/006) — do not rebuild it. Read plan/007_cfc245548aec/architecture/system_context.md first: it lists PRD-vs-reality corrections (abort() does NOT discard audio; neither prompt kwarg is live-pokable in the single-model construction without a local patch) that override PRD prose.",
       "milestones": [
         {
@@ -334,7 +334,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Verification & changeset-level documentation",
-          "status": "Planned",
+          "status": "Complete",
           "description": "Prove the delta: the new T8 streaming E2E suite, the existing-suite adjustments (idle/GPU shell tests, acceptance evidence rows), and the final Mode B documentation sweep that makes README + install usage describe the Rev 2 product.",
           "tasks": [
             {
@@ -414,14 +414,14 @@
               "type": "Task",
               "id": "P1.M3.T10",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Mode B final sweep (PRD §7): make README.md and install.sh printed usage describe the Rev 2 product end-to-end — one mode + streaming as THE behavior, Backspace-cancel + fallback bind, updated config tuning table, troubleshooting additions, first-run Backspace check, and zero residual two-mode/tmux prose.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T10.S1",
                   "title": "README end-to-end Rev 2 sync + residual-reference sweep",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",
