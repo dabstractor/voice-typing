@@ -50,36 +50,37 @@ When install.sh finishes, the daemon is **running, NOT listening, and NOT loaded
 A real-microphone smoke you run by hand. Full paths are used because the desktop zsh
 aliases `python3` and `pip`.
 
-The first `voicectl toggle` (or `start`) each session takes ~1-3s to load the
-models — `voicectl` prints `loading models… (first arm, ~1–3 s)` to stderr while
-it loads. Subsequent arms are instant (models stay resident until `quit` or 30 min
-disarmed; see [Model lifecycle & VRAM](#model-lifecycle--vram)).
+The first `voicectl toggle` (or `start`) each session takes ~1-3s to load the model —
+`voicectl` prints `loading models… (first arm, ~1–3 s)` to stderr while it loads.
+Subsequent arms are instant (the model stays resident until `quit` or 30 min disarmed;
+see [Model lifecycle & VRAM](#model-lifecycle--vram)).
 
 ```
 systemctl --user start voice-typing
 /home/<you>/projects/voice-typing/.venv/bin/voicectl toggle   # arms the mic
-# speak. Watch the hyprctl toasts, or poll `voicectl status` / `state.json` for live partials:
+# speak. Words are typed into the focused window LIVE, revised in place as you talk.
+# Watch the hyprctl toasts, or poll `voicectl status` / `state.json` for the live tail:
 #   the first arm shows "Loading…" then "Recording"; later arms just "Recording";
 #   disarming shows "Recording Stopped" (the ✔ final popup is optional — see feedback.notify_on_final).
 /home/<you>/projects/voice-typing/.venv/bin/voicectl toggle   # disarms
 ```
 
-Expected behavior while listening: hyprctl toasts track Recording / Recording Stopped
-and the finalized text is typed into the
-focused window as you pause. A pause does **not** end the session. The recognizer segments
-utterances and keeps listening; only `voicectl stop` (or toggle off) disarms the
-mic.
+Expected behavior while listening: hyprctl toasts track Recording / Recording Stopped,
+and stabilized text is typed into the focused window **as you speak** and revised in
+place (see [Streaming dictation](#streaming-dictation)). A pause triggers the
+commit/correction pass on the typed tail (plus the trailing space) but does **not** end
+the session — the recognizer keeps listening; only `voicectl stop` (or toggle off)
+disarms the mic. **Backspace** while a fragment is in flight cancels it.
 
-If the mic never arms or finals never appear, the two knobs to reach for are the
-microphone default source (Troubleshooting) and `post_speech_silence_duration`
+If the mic never arms or no text appears, the two knobs to reach for are the
+microphone default source (Troubleshooting) and `asr.lite_post_speech_silence_duration`
 (Configuration).
 
 ## Hotkey (Hyprland)
 
-Bind **Ctrl+Alt+Super+D** for the big model (normal mode) and **Alt+Super+D** for **lite mode**
-(small model only — faster, lower accuracy, for short quips). Add this one line to
-`~/.config/hypr/hyprland.conf` (install.sh prints it; the repo never edits your
-hyprland.conf):
+Bind **Ctrl+Alt+Super+D** to arm/disarm dictation, and **Super+Alt+Backspace** to
+cancel the in-flight fragment. Add this one line to `~/.config/hypr/hyprland.conf`
+(install.sh prints it; the repo never edits your hyprland.conf):
 
 ```
 source = /home/<you>/projects/voice-typing/hypr-binds.conf
@@ -97,38 +98,71 @@ through `/bin/sh -c`, so `$HOME` expands), so they work regardless of user / rep
 
 ```
 bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle
-bind = SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle-lite
+bind = SUPER ALT, Backspace, exec, $HOME/.local/bin/voicectl cancel
 ```
 
-**Normal / big mode** (`Ctrl+Alt+Super+D`) loads `distil-large-v3` + `small.en` — high accuracy,
-slower finals. **Lite / little mode** (`Alt+Super+D`) loads ONLY `small.en` (the large model never
-runs) — ~half the VRAM and markedly faster finals, at lower accuracy. Good for short snippets
-(URLs, shell commands, quick replies) where the big model's latency isn't worth it. Each key
-toggles its own mode on/off; to switch modes, press the active key to stop, then the other key to
-start in its mode (switching reloads the model set, ~1–3 s, same as a cold first arm). The mode is
-shown in `voicectl status` (a `⚡` prefix marks lite).
+The first bind arms the mic; pressing it again disarms it (the graceful drain lets the
+in-flight commit land first). The second runs the same cancel path as the daemon's
+physical-Backspace listener — see
+[Backspace-cancel](#backspace-cancel-erase-the-in-flight-fragment).
 
 Hyprland uses the last matching bind for a given MODS+key. Source this file LAST
 (at the bottom of `hyprland.conf`) so its binds win. If a bind is inert, your config may
 already bind that MODS+key elsewhere. Check `~/.config/hypr/custom/keybinds.conf`,
 or rebind to a free combo in `hypr-binds.conf`.
 
-## Lite mode
+## Streaming dictation
 
-A second arming mode for short, speed-critical snippets (URLs, shell commands, quick
-replies) where latency matters more than accuracy. Lite mode loads **only** `asr.lite_model`
-(default `small.en`) and uses it for both live partials AND finals — the large
-`distil-large-v3` never loads — so it takes ~half the VRAM and produces markedly faster
-finals, at lower accuracy. It also uses its own shorter silence threshold
-(`asr.lite_post_speech_silence_duration`, default `0.5` s vs the normal `0.6`) — the silence
-gate, not the model, is the perceived-latency bottleneck, so shortening it is what makes lite
-feel instant rather than merely transcribing a little faster. Arm it with `voicectl toggle-lite` / `start-lite`, or the
-**Alt+Super+D** keybind (`voicectl stop` disarms either mode). Arming the *other* mode while
-one is resident tears the recorder down and respawns it (~1–3 s reload, same as a cold first
-arm) — so switching modes costs one reload. Both modes share the graceful drain on stop
-(§4.2 #2), the 30 s auto-stop, and idle-unload. The armed mode shows in `voicectl status`
-(`mode:`) and `state.json` (`mode`). See
-[Hotkey](#hotkey-hyprland) for the binds and [Model lifecycle & VRAM](#model-lifecycle--vram).
+Rev 2 has exactly one dictation mode: a single resident model (`asr.lite_model`, default
+`small.en`) produces BOTH the live text and the committed finals. Dictation is
+phone-style: **words are typed into the focused window as they are spoken, revised in
+place, and the mic never pauses for decoding.**
+
+While you speak:
+
+- **Partials are typed live.** Each stabilized partial is diffed against what is on
+  screen: an extension types only the delta; a revision deletes and retypes the changed
+  tail. Full rewind-and-retype cycles are rate-limited (≥300 ms apart — a code constant,
+  not a config key) so a wobbling decode cannot flicker.
+- **Silence trips the commit/correction pass.** After `asr.lite_post_speech_silence_duration`
+  (default `0.8` s) of silence, the model re-decodes the complete utterance; if the
+  correction differs from what is on screen, the tail is rewound and retyped, then the
+  trailing space is appended (`output.append_space`). Under streaming, the silence gate
+  only delays this commit — the words are already visible.
+- **Continuations read coherently.** Every decode is conditioned on the rolling committed
+  context (`asr.context_prompt`, back to the last sentence boundary, ~200-token cap), so
+  a mid-paragraph fragment doesn't start capitalized or gain a spurious trailing period.
+- **A pause never ends the session.** Only `voicectl stop` (or toggle off) disarms the
+  mic; the graceful drain lets the in-flight commit land first.
+
+Safety rails:
+
+- **Stranded tails freeze, never auto-delete.** If a commit can never land (a crash, an
+  aborted teardown), the typed tail stays on screen exactly as last shown. The only thing
+  that ever deletes typed text is an explicit cancel (below).
+- **Your keystrokes win.** Any non-Backspace keypress while a fragment is pending freezes
+  it immediately and stops revising that utterance — the daemon never types over your
+  cursor.
+- **Rollback hatch:** `output.streaming = false` restores append-only behavior (only
+  finalized text typed, one append per utterance).
+
+### Backspace-cancel (erase the in-flight fragment)
+
+While dictating — a tentative fragment on screen — a physical **Backspace** press cancels
+it: the fragment is erased (by subtraction: the rewind compensates `len(tail) − 1`,
+because the keystroke itself already deleted one character), the buffered audio of the
+in-flight utterance is dropped, and the mic stays hot — just say the sentence again.
+
+- **Idempotent:** Backspace presses with no pending fragment are plain user edits and are
+  never compensated; `voicectl cancel` with nothing in flight is a no-op.
+- The listener is a passive, read-only evdev watcher over keyboard nodes exposing
+  KEY_BACKSPACE. `[cancel].devices` overrides the auto-detection (e.g.
+  `["/dev/input/event3"]`); virtual uinput/ydotool devices are always excluded, so the
+  daemon's own typing can never self-cancel.
+- If no keyboard node is readable, the daemon logs ONE journal warning at the first arm
+  and stays silent after that.
+- Fallback: the **Super+Alt+Backspace** bind (`voicectl cancel`) runs the identical
+  cancel path regardless of evdev, and doubles as the automated-test seam.
 
 ## Feedback surfaces
 
@@ -136,11 +170,12 @@ The daemon publishes its live state to a JSON file, written atomically on every 
 
 - **State file** — `$XDG_RUNTIME_DIR/voice-typing/state.json` (override with
   `feedback.state_file`). Fields: `listening`, `phase` (`unloaded`/`loading`/`idle`/
-  `listening`/`speaking`), `models_loaded`, `mode` (`normal`/`lite`), `partial` (the
-  latest live partial; overwritten with the finalized text when an utterance finalizes),
-  `last_final`, and `ts`. Poll it with `jq` for your own UI (waybar, conky, …).
-- **`voicectl status`** — human-readable one-shot of the same state (adds the loaded
-  model names and the `⚡` lite marker).
+  `listening`/`speaking`), `models_loaded`, `mode` (always `"lite"` — a fixed constant;
+  Rev 2 has a single dictation mode), `partial` (mirrors the live typed tail; overwritten
+  with the committed text when an utterance finalizes), `last_final`, and `ts`. Poll it
+  with `jq` for your own UI (waybar, conky, …).
+- **`voicectl status`** — human-readable one-shot of the same state (adds the resolved
+  device/compute type, mic health, and the context-prompt line).
 - **hyprctl toasts** — `Loading…` on a cold first arm, `Recording` / `Recording
   Stopped` on arm/disarm, and (optional, `feedback.notify_on_final`) `✔ <text>` per final.
 
@@ -157,24 +192,29 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 
 | Section.key | Default | Effect |
 | --- | --- | --- |
-| `asr.post_speech_silence_duration` | `0.6` | seconds of silence before a final is emitted. Lower is snappier but can cut deliberate pauses. |
-| `asr.lite_post_speech_silence_duration` | `0.5` | lite-mode silence threshold — seconds of silence before a final in **lite mode**. Lower is snappier (0.3 = razor-snappy, may split a brief pause; 0.6 = safe). The silence gate, not the model size, is the perceived-latency bottleneck — this is what makes lite **feel** instant. |
+| `asr.lite_model` | `"small.en"` | the SINGLE transcription model (Rev 2): loaded once, used for BOTH the live typed partials AND the committed finals. |
+| `asr.lite_post_speech_silence_duration` | `0.8` | THE silence gate — seconds of silence before the commit/correction pass. Under streaming this only delays the commit (words are already typed live), so 0.8 halves mid-thought cuts for +0.3 s commit latency. `0.5` = razor-snappy (may split a brief pause); `1.0` = near-zero cuts. |
+| `asr.context_prompt` | `true` | condition every decode on the rolling committed context (back to the last sentence boundary, ~200-token cap) so continuations read coherently. `false` = decode each utterance blind. |
 | `asr.realtime_processing_pause` | `0.15` | cadence of the live partial previews. Lower is more responsive; higher uses less CPU. |
 | `asr.auto_stop_idle_seconds` | `30.0` | auto-disarm (stop listening) after this many seconds with no recognized speech — partials reset the clock while you talk, so it only fires when you truly go silent (a forgotten hot-mic guard, not a mid-thought cut). `0` disables. Fires the normal `Recording Stopped` toast + a journal line. |
 | `asr.auto_unload_idle_seconds` | `1800.0` | after this many seconds DISARMED (models loaded, not listening), tear down the recorder to free VRAM (~0). The clock starts on disarm (manual stop, toggle-off, or the 30s auto-stop) and resets on any arm; time listening doesn't count. `0` disables (models then stay resident until `quit`). The next arm reloads (~1-3s). See Model lifecycle. |
 | `asr.device` | `"cuda"` | `"cuda"` or `"cpu"`. Auto-falls-back to `cpu` if no CUDA device is visible. |
-| `asr.final_model` | `"distil-large-v3"` | the model whose output gets typed. |
-| `asr.realtime_model` | `"small.en"` | the fast model that produces live partials. |
-| `asr.lite_model` | `"small.en"` | the SINGLE model loaded in **lite mode** (`toggle-lite` / Alt+Super+D) — used for both partials AND finals, so the large model never loads. ~half VRAM + faster finals, lower accuracy. |
 | `asr.language` | `"en"` | ISO-639-1 code. |
 | `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"null"` (types nothing; used by the headless E2E tests). `wtype` auto-falls-back to `ydotool`. |
-| `output.append_space` | `true` | append one trailing space after each final. |
-| `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each final's text (`✔ <text>`). Set `false` to keep only the brief `Recording` / `Recording Stopped` toasts — the text is already typed into the focused window, so the final popup is redundant. |
+| `output.append_space` | `true` | append one trailing space after each commit. |
+| `output.streaming` | `true` | type stabilized partials live + revise in place as the utterance grows. `false` = append-only finals (rollback hatch to the pre-Rev-2 typing behavior). |
+| `cancel.on_backspace` | `true` | enable the physical-Backspace cancel gesture while a fragment is pending. Any other keypress freezes the fragment instead (never typed over). |
+| `cancel.devices` | `[]` | keyboard device node(s) to watch for the Backspace gesture, e.g. `["/dev/input/event3"]`. Empty list = auto-detect keyboards exposing KEY_BACKSPACE (uinput/ydotool virtual devices always excluded). Nothing readable → one journal warning at the first arm; the Super+Alt+Backspace bind still works. |
+| `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each commit's text (`✔ <text>`). Set `false` to keep only the brief `Recording` / `Recording Stopped` toasts — the text is already typed into the focused window, so the popup is redundant. |
 | `feedback.notify_ms` | `2500` | how long hyprctl popups stay on screen (ms). Lower for a brief start/stop flash. |
 | `feedback.hypr_notify` | `true` | master on/off for ALL hyprctl popups. `false` suppresses the start/stop toasts too (`notify_on_final` only adds the per-final ✔ popup; this is the global kill switch). |
-| `filter.min_chars` | `2` | finals shorter than this are dropped. |
+| `filter.min_chars` | `2` | commits shorter than this are dropped. |
 | `filter.blocklist` | list | exact, case-insensitive phrases dropped (classic Whisper silence hallucinations). |
 | `log.level` | `"INFO"` | `"INFO"` (per-utterance latency line) or `"DEBUG"` (raw timestamps). |
+
+`asr.post_speech_silence_duration` still exists in `config.toml`/`config.py`, but the
+daemon does not consume it — the `lite_` key above is THE silence gate. Tuning the base
+key changes nothing.
 
 ### Voice-activity constants are NOT config keys
 
@@ -202,11 +242,11 @@ of crash-looping later.
 There are three ways the daemon ends up on CPU.
 
 1. You force it. Set `[asr] device = "cpu"` in `config.toml` and restart. The daemon
-   derives `compute_type="int8"`. If a GPU is present, it still uses your configured
-   `final_model` and `realtime_model`, just on CPU with int8 quantization.
+   derives `compute_type="int8"` and runs your configured `asr.lite_model` (the single
+   model) on CPU with int8 quantization.
 2. Auto-fallback. When `ctranslate2` sees zero CUDA devices at startup, the daemon
-   overrides to `device="cpu"`, `compute_type="int8"`, and the smaller models
-   `small.en` (final) and `tiny.en` (realtime), regardless of config.
+   overrides to `device="cpu"`, `compute_type="int8"`, and the smaller CPU-substitute
+   model `tiny.en` (the single model, substituted in one place), regardless of config.
 3. Construction-failure fallback. The check in #2 only asks whether `ctranslate2` can
    *see* a GPU; it does not load cuDNN. If a GPU is visible but CUDA/cuDNN init then fails
    while building the recorder (for example a missing `libcudnn_ops.so.9` after a stale
@@ -217,7 +257,7 @@ There are three ways the daemon ends up on CPU.
    `device: cpu (int8)`. Fix the library path (see the cuDNN section under Troubleshooting)
    and restart to return to the GPU.
 
-`voicectl status` reports the resolved device and models (see Logs below), so you
+`voicectl status` reports the resolved device and compute type (see Logs below), so you
 can tell which path you are on:
 
 ```
@@ -305,51 +345,52 @@ Check live state and the resolved device:
 /home/<you>/projects/voice-typing/.venv/bin/voicectl status
 ```
 
-Typical CUDA output:
+Typical CUDA output while dictating:
 
 ```
 listening: on
-mode: normal
-phase: listening
+mode: lite
+phase: speaking
 partial: this is what i am say
 last: Previous sentence.
 uptime: 42.3s
 device: cuda (float16)
-models: distil-large-v3 + small.en (loaded)
 mic: ok
+context-prompt: on
 ```
 
-`mode:` is `normal` (the two-model high-accuracy set) or `lite` (the single small model — see
-[Hotkey](#hotkey-hyprland)); `phase:` is `unloaded` at boot (no models), `loading` on the first arm, then
-`idle`/`listening`; the `(loaded)`/`(not loaded)` marker on the `models:` line
-tells you whether models are resident. On CPU fallback, `device` shows `cpu (int8)`
-and `models` shows `small.en + tiny.en (loaded)` once the CPU recorder is built.
-If the mic is unavailable, the last line reads `mic: unavailable (<reason>)`
+`mode:` is always `lite` — a fixed daemon constant; Rev 2 has exactly one dictation mode.
+`phase:` is `unloaded` at boot (nothing loaded), `loading` on the first arm, then
+`idle`/`listening` (`speaking` while a fragment is pending). On CPU fallback, `device`
+shows `cpu (int8)` and the journal's `voice-typing device resolved:` line names the
+substituted model (`tiny.en`). `context-prompt:` is `on`, or one of:
+`off (disabled by config)` (you set `asr.context_prompt = false`),
+`off (models not loaded)` (before the first arm),
+`off (degraded — context-free decoding)` (the rolling-context arm failed; decoding
+continues without it), or `unknown` (an older daemon without the field).
+If the mic is unavailable, the mic line reads `mic: unavailable (<reason>)`
 instead.
 
 ### Model lifecycle & VRAM
 
-At boot the daemon is **unloaded**: no recorder, no CUDA context, **~0 VRAM** —
-models do NOT load at boot. The first `voicectl start`/`toggle` (or hotkey) each
-session loads `small.en` + `distil-large-v3` onto the GPU (~1-3s); `voicectl`
-prints `loading models… (first arm, ~1–3 s)` to stderr while it loads. After that
-first arm the recorder stays **resident** (~1.5-3 GB VRAM) so later arms are
-instant. In **lite mode** the resident set is just `small.en` (~half the VRAM of normal);
-idle-unload tears down whichever mode is resident, and the next arm reloads in whatever mode
-that arm requests. It is torn down on `quit`/shutdown AND after
-`asr.auto_unload_idle_seconds` (default 1800s = 30 min) DISARMED — so the load cost
-is paid once per ~30 min of actual use, not once per boot. The clock starts on
-disarm (manual stop, toggle-off, or the 30s auto-stop) and resets on any arm; time
-listening doesn't count. The next arm then reloads (~1-3s) like a session's first
-arm.
+At boot the daemon is **unloaded**: no recorder, no CUDA context, **~0 VRAM** — nothing
+loads at boot. The first `voicectl start`/`toggle` (or hotkey) each session loads the
+single model (`small.en` on CUDA; `tiny.en` after a CPU fallback) onto the GPU (~1-3s);
+`voicectl` prints `loading models… (first arm, ~1–3 s)` to stderr while it loads. After
+that first arm the recorder stays **resident** (~0.5-3 GB VRAM) so later arms are
+instant. It is torn down on `quit`/shutdown AND after `asr.auto_unload_idle_seconds`
+(default 1800s = 30 min) DISARMED — so the load cost is paid once per ~30 min of actual
+use, not once per boot. The clock starts on disarm (manual stop, toggle-off, or the 30s
+auto-stop) and resets on any arm; time listening doesn't count. The next arm then
+reloads (~1-3s) like a session's first arm.
 
 `voicectl status` surfaces the lifecycle: `phase:` is `unloaded` (boot /
 idle-unloaded), `loading` (first arm), `idle` (loaded, disarmed), or `listening`
-(armed); the `models:` line ends in `(loaded)` or `(not loaded)`. Disarming the mic
-— a manual `stop`, a `toggle` off, or the 30 s auto-stop — transitions `phase` back
-to **`idle`** (loaded, not listening), so a stopped daemon never reports a stale
-`listening`/`speaking` while `listening:` is off. The journal logs
-`voice-typing models loaded (lazy load complete); recorder resident` on load and
+(armed). Disarming the mic — a manual `stop`, a `toggle` off, or the 30 s auto-stop —
+transitions `phase` back to **`idle`** (loaded, not listening), so a stopped daemon never
+reports a stale `listening`/`speaking` while `listening:` is off. The journal logs
+`voice-typing device resolved: device=… compute_type=… model=…` at startup,
+`voice-typing models loaded (recorder-host child ready); resident` on load, and
 `voice-typing idle-unload: 1800.0s disarmed; unloading models` on idle teardown.
 
 Check VRAM by state:
@@ -359,7 +400,7 @@ nvidia-smi --query-compute-apps=pid,used_memory --format=csv
 ```
 
 At boot / after idle-unload this lists nothing (~0 VRAM); while loaded it shows
-the daemon's process tree (~1.5-3 GB).
+the daemon's process tree (~0.5-3 GB).
 
 Stop or disable the daemon:
 
