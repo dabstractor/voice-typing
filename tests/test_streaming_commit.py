@@ -238,23 +238,26 @@ def test_commit_append_space_false_revise_path():
 
 
 # ---------------------------------------------------------------------------
-# Frozen commit: zero backend calls, tail absorbed into committed
+# Frozen commit: tail absorbed into committed + the append_space separator
+# typed (BUG-003 fix) — no revision keystrokes (no rewind, no retype)
 # ---------------------------------------------------------------------------
 
-def test_commit_frozen_touches_no_backend_and_absorbs_tail():
+def test_commit_frozen_absorbs_tail_and_types_separator():
     stream, be, fb = _make_stream()
     stream.on_partial("hello wor")          # typed tail
     stream.freeze("test freeze")
     stream.commit("hello world")
-    assert be.calls == [("type", "hello wor")]        # NO delta/space keystrokes
-    assert stream.committed == "hello wor"            # typed tail absorbed (screen truth)
+    assert be.calls == [("type", "hello wor"), ("type", " ")]  # separator only
+    assert stream.committed == "hello wor "           # tail + separator (screen truth)
     assert stream.tail == ""
-    assert fb.partials[-1] == "hello wor"
+    assert fb.partials[-1] == "hello wor "
     assert stream.frozen is True                      # freeze lifecycle untouched (T6.S3)
 
 
 def test_commit_frozen_with_empty_tail():
-    stream, be, fb = _make_stream()
+    # append_space=False keeps this the pure empty-absorb semantics (nothing to
+    # type at all: no tail to absorb, no separator to send).
+    stream, be, fb = _make_stream(append_space=False)
     stream.freeze("test freeze")
     stream.commit("hello world")
     assert be.calls == []
@@ -386,3 +389,64 @@ def test_context_strips_surrounding_whitespace():
 def test_context_after_committed_with_trailing_space():
     # The real post-commit shape: committed always ends with the appended space.
     assert context_after_last_boundary("First one. second ") == "second"
+
+
+# ---------------------------------------------------------------------------
+# P1.M1.T3.S1 / BUG-003 — frozen commit types the append_space separator
+# (the frozen-absorb path previously sent NO keystrokes at all, so after a
+# user-keypress freeze + reset_boundary() the next utterance's first word
+# glued onto the absorbed tail: '…the quicknew sentence'.)
+# ---------------------------------------------------------------------------
+
+
+def test_frozen_commit_types_separator_prd_sequence():
+    # The bug report's exact Steps-to-Reproduce (PRD h3.2), end to end: a normal
+    # commit, then a user-keypress freeze (any non-Backspace key) whose fragment
+    # commits absorbed, then reset_boundary() lifts the freeze and the next
+    # utterance must land SPACE-SEPARATED. The casing guard lowercases 'New'
+    # (committed has no terminal punctuation) -> 'new sentence'.
+    stream, be, _fb = _make_stream(append_space=True)
+    stream.on_partial("Hello world")
+    stream.commit("Hello world")
+    stream.reset_boundary()
+    stream.on_partial("the quick")
+    stream.note_user_keypress()          # freeze the pending fragment
+    stream.commit("the quick")          # frozen-ABSORB branch — must still type ' '
+    assert stream.committed == "Hello world the quick "   # checkpoint gained the space
+    stream.reset_boundary()              # the daemon's post-commit lift
+    # reset_boundary()'s own frozen-absorb rstrips the checkpoint (the separator is
+    # already ON SCREEN; the next commit re-appends it) — the SCREEN is the contract:
+    assert stream.frozen is False
+    stream.on_partial("New sentence")
+    screen = "".join(t for m, t in be.calls if m == "type")
+    assert screen == "Hello world the quick new sentence"
+    assert stream.committed == "Hello world the quick"
+
+
+def test_frozen_commit_append_space_false_stays_space_free():
+    # append_space=False: the frozen absorb must not invent a separator either.
+    stream, be, _fb = _make_stream(append_space=False)
+    stream.on_partial("Hello world")
+    stream.commit("Hello world")
+    stream.reset_boundary()
+    stream.on_partial("the quick")
+    stream.note_user_keypress()
+    stream.commit("the quick")
+    stream.reset_boundary()
+    stream.on_partial("New sentence")
+    assert ("type", " ") not in be.calls
+
+
+def test_frozen_commit_space_type_failure_absorbs_nothing():
+    # Fail-safe mirror of the non-frozen discipline: if typing the separator
+    # fails, the engine freezes SESSION-class and absorbs NOTHING — the
+    # checkpoint stays at the pre-commit boundary, no exception.
+    stream, be, _fb = _make_stream()
+    stream.on_partial("hello wor")
+    stream.note_user_keypress()
+    be._fail_type = True                 # the separator type_text will fail
+    stream.commit("hello world")         # must NOT raise
+    assert stream.frozen is True
+    assert stream.frozen_session is True # _safe_type's promote-only fail-safe
+    assert stream.committed == ""        # nothing absorbed
+    assert stream.tail == "hello wor"    # tail intact on screen

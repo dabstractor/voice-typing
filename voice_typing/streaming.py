@@ -483,12 +483,19 @@ class StreamingOutput:
                 return  # Rev 1 rollback hatch: engine is a mirror-only pass-through
             text = " ".join(final_text.split())
             if self._frozen:
-                # Absorb WITHOUT keystrokes: the tail is already on screen and stays.
-                # rstrip the base: committed normally ends with the appended inter-
-                # final space, and the join must not double it (the space typed between
-                # committed and tail is already on screen).
-                self._committed = " ".join(
-                    p for p in (self._committed.rstrip(), self._tail) if p
+                # BUG-003 (P1.M1.T3.S1): absorb WITHOUT revision keystrokes, but still
+                # honor append_space — type the separator so the next utterance's first
+                # word does not glue onto the absorbed tail once reset_boundary() lifts
+                # a per-utterance freeze (PRD §4.2quater rule 2). Space exactly once
+                # (rstrip base + " + space"), the non-frozen path's discipline.
+                # Fail-safe: a space-type failure freezes SESSION-class (promote-only)
+                # — acceptable (the tail is stranded anyway); absorb nothing then.
+                space = " " if self._append_space else ""
+                if space and not self._safe_type(space):
+                    return  # frozen (session); checkpoint stays at the pre-commit boundary
+                self._committed = (
+                    " ".join(p for p in (self._committed.rstrip(), self._tail) if p)
+                    + space
                 )
                 self._tail = ""
                 self._suppressed = False

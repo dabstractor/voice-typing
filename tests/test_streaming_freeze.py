@@ -196,21 +196,24 @@ def test_note_user_keypress_cannot_demote_session_freeze():
 
 def test_note_user_keypress_frozen_commit_absorbs_then_boundary_lifts_and_next_types():
     """The S3 daemon sequence (PRP gotcha — do not reorder): keypress freezes the
-    tail -> the final arrives -> commit() takes the frozen-ABSORB branch (zero
-    keystrokes, tail into committed) -> reset_boundary() lifts the per-utterance
-    freeze -> the NEXT utterance types normally."""
+    tail -> the final arrives -> commit() takes the frozen-ABSORB branch (tail
+    into committed + the append_space separator — BUG-003 fix; no revision
+    keystrokes) -> reset_boundary() lifts the per-utterance freeze -> the NEXT
+    utterance types normally, space-separated from the absorbed tail."""
     stream, be, _fb = _make_stream()
     stream.on_partial("hello wor")
     stream.note_user_keypress()
     stream.commit("hello world")
-    assert be.calls == [("type", "hello wor")], "a frozen commit must absorb, not type"
-    assert stream.committed == "hello wor"
+    assert be.calls == [("type", "hello wor"), ("type", " ")], (
+        "a frozen commit must absorb (no revision keystrokes) but still type the separator"
+    )
+    assert stream.committed == "hello wor "
     assert stream.tail == ""
     assert stream.frozen is True, "commit() must not unfreeze; the boundary does"
     stream.reset_boundary()                   # the daemon's post-commit boundary call
     assert stream.frozen is False
     stream.on_partial("next")
-    assert be.calls == [("type", "hello wor"), ("type", "next")]
+    assert be.calls == [("type", "hello wor"), ("type", " "), ("type", "next")]
 
 
 def test_note_user_keypress_logs_warning(caplog):
@@ -225,16 +228,17 @@ def test_note_user_keypress_logs_warning(caplog):
 # Stranded-tail semantics (PRD rule 4): drain timeout / child death class
 # ---------------------------------------------------------------------------
 
-def test_session_frozen_tail_late_commit_absorbs_without_keystrokes_and_stays_frozen():
+def test_session_frozen_tail_late_commit_absorbs_plus_separator_and_stays_frozen():
     """Race case: the watchdog froze a stranded tail but the final fires anyway —
-    commit() must absorb (no rewind, no retype) and the session freeze must
-    survive the daemon's post-commit reset_boundary()."""
+    commit() must absorb (no rewind, no retype) + the append_space separator
+    (BUG-003 fix), and the session freeze must survive the daemon's post-commit
+    reset_boundary()."""
     stream, be, _fb = _make_stream()
     stream.on_partial("hello wor")
     stream.freeze("drain timeout: stranded tail", session=True)
     stream.commit("hello world")
-    assert be.calls == [("type", "hello wor")]
-    assert stream.committed == "hello wor"
+    assert be.calls == [("type", "hello wor"), ("type", " ")]
+    assert stream.committed == "hello wor "
     stream.reset_boundary()
     assert stream.frozen is True and stream.frozen_session is True
 

@@ -59,18 +59,18 @@ reusable, nothing loosened):
                                  follow-up utterance commits normally.
   (f) test_f_user_key_freeze  — a NON-Backspace keypress with a tail pending: zero
                                  revision keystrokes for that utterance; its commit
-                                 absorbs the tail with NO keystrokes (no rewind, no
-                                 retype, no trailing space — scoped asserts only, NOT
-                                 _assert_commit_invariants whose check #2 would
-                                 false-fail); the freeze lifts at the boundary and the
-                                 NEXT utterance types live again.
+                                 absorbs the tail (no rewind, no retype) typing ONLY the
+                                 append_space separator (BUG-003 fix — scoped asserts pin
+                                 exactly that event set); the freeze lifts at the
+                                 boundary and the NEXT utterance types live again.
   (g) test_g_stranded_tail    — the daemon drain-timeout sequence forced DIRECTLY (freeze
                                  SESSION-class BEFORE the abort — never the 5 s
                                  _DRAIN_TIMEOUT_S timer; tests/test_daemon.py owns that
                                  machinery): the tail freezes on screen and is never
                                  rewound (PRD §4.2quater rule 4), a late commit absorbs
-                                 it without keystrokes, and the session freeze survives
-                                 the commit's boundary.
+                                 it typing only the append_space separator (BUG-003
+                                 fix), and the session freeze survives the commit's
+                                 boundary.
 
 "lite recorder child" interpretation (in-process): the production child build path is
 replicated IN THIS PROCESS — daemon.cfg_to_kwargs + recorder_host.augment_kwargs_with_executor
@@ -1501,11 +1501,11 @@ def test_f_user_key_freeze(
 
     daemon.note_user_keypress (L1448) -> stream.note_user_keypress: the engine's next
     keystrokes would land on top of the user's edit, so the tail freezes PER-UTTERANCE —
-    zero revision keystrokes until the boundary, the commit absorbs the tail with NO
-    keystrokes (no rewind, no retype, not even the trailing space), reset_boundary lifts
-    the freeze, and the NEXT utterance types live again. Scoped asserts only:
-    _assert_commit_invariants would false-fail here (its check #2 expects every commit to
-    type a trailing space — frozen absorbs type none)."""
+    zero REVISION keystrokes until the boundary; the commit absorbs the tail (no rewind,
+    no retype) typing ONLY the append_space separator (BUG-003 fix — without it the next
+    utterance's first word glues onto the absorbed tail), reset_boundary lifts the
+    freeze, and the NEXT utterance types live again. Scoped asserts keep the scenario
+    precise: the only backend event in (keypress, commit] must be the separator itself."""
     rec, harness = stream_recorder
     harness.reset()
     frozen_at_act: "list[tuple[bool, bool]]" = []
@@ -1549,11 +1549,12 @@ def test_f_user_key_freeze(
     )
     ct, _piece, engine_committed = harness.commit_log[-1]
 
-    # ZERO backend events in (t_act, commit]: no revision keystrokes for that utterance,
-    # and the frozen commit typed NOTHING (no rewind, no retype, no trailing space).
-    stragglers = [e for e in harness.backend.events if snap.t_act < e.t <= ct]
-    assert not stragglers, (
-        f"backend events between the keypress and the commit: {stragglers!r}\n"
+    # Between the keypress and the commit: NO revision keystrokes. The frozen commit
+    # itself types ONLY the append_space separator (BUG-003 fix).
+    frozen_events = [e for e in harness.backend.events if snap.t_act < e.t <= ct]
+    assert [(e.kind, e.text) for e in frozen_events] == [("type", " ")], (
+        f"between the keypress and the commit the engine must send ONLY the "
+        f"append_space separator (BUG-003), got {frozen_events!r}\n"
         + _dump_events(harness)
     )
     replay = ""
@@ -1561,13 +1562,19 @@ def test_f_user_key_freeze(
         if e.t > ct:
             break
         replay = e.screen_after
-    assert replay == snap.screen_before, (
-        f"screen at commit {replay!r} != screen at the keypress {snap.screen_before!r}\n"
-        + _dump_events(harness)
+    # Screen at the commit = the keypress screen + exactly one appended separator:
+    # nothing revised, nothing deleted.
+    assert replay == snap.screen_before + " ", (
+        f"screen at commit {replay!r} != keypress screen + separator "
+        f"{snap.screen_before + ' '!r}\n" + _dump_events(harness)
     )
 
-    # The engine committed absorbed exactly committed + tail (the frozen path's join).
-    expected = " ".join(p for p in (snap.committed_before.rstrip(), snap.tail_before) if p)
+    # The engine committed absorbed committed + tail + the separator (the frozen
+    # path's join, stamped BEFORE reset_boundary's rstrip of the on-screen space).
+    expected = (
+        " ".join(p for p in (snap.committed_before.rstrip(), snap.tail_before) if p)
+        + " "
+    )
     assert engine_committed == expected, (
         f"absorbed committed {engine_committed!r} != expected {expected!r}\n"
         + _dump_events(harness)
@@ -1606,10 +1613,11 @@ def test_g_stranded_tail(
 
     Asserts: the frozen tail stays on screen exactly as last shown over a bounded watch
     (typed text is NEVER rewound — no backspace after the freeze stamp); frozen and
-    frozen_session are both True; a late commit absorbs the tail WITHOUT keystrokes
-    (screen unchanged across its stamp); and the SESSION freeze survives the commit's
-    reset_boundary (only reset_session at a fresh arm lifts it — unit-pinned in
-    tests/test_streaming_freeze.py, here proven on the real pipeline)."""
+    frozen_session are both True; a late commit absorbs the tail (no rewind, no retype)
+    typing ONLY the append_space separator (BUG-003 fix — a raced final may type its
+    separator during the settle, the documented drain race); and the SESSION freeze
+    survives the commit's reset_boundary (only reset_session at a fresh arm lifts it —
+    unit-pinned in tests/test_streaming_freeze.py, here proven on the real pipeline)."""
     rec, harness = stream_recorder
 
     harness.reset()
@@ -1659,13 +1667,15 @@ def test_g_stranded_tail(
     screen_frozen = post_act[0][0]
     assert screen_frozen, "no frozen on-screen content\n" + _dump_events(harness)
 
-    # Bounded 2 s watch: the frozen screen stays untouched; nothing rewinds (the engine
-    # never issues a keystroke while frozen — the frozen commit absorbs, keystroke-free).
+    # Bounded 2 s watch: the frozen screen stays untouched except that a raced final's
+    # frozen commit may already have typed its ONE append_space separator during the
+    # settle (the documented drain race); nothing else may ever change (typed text is
+    # NEVER rewound — the engine never issues a REVISION keystroke while frozen).
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        assert harness.backend.screen == screen_frozen, (
-            f"screen drifted during the freeze watch: {harness.backend.screen!r} != "
-            f"{screen_frozen!r}\n" + _dump_events(harness)
+        assert harness.backend.screen in (screen_frozen, screen_frozen + " "), (
+            f"screen drifted during the freeze watch: {harness.backend.screen!r} not in "
+            f"{screen_frozen!r} / {screen_frozen + ' '!r}\n" + _dump_events(harness)
         )
         assert harness.stream.frozen and harness.stream.frozen_session, (
             "freeze lifted during the watch\n" + _dump_events(harness)
@@ -1677,11 +1687,12 @@ def test_g_stranded_tail(
         + _dump_events(harness)
     )
 
-    # Phase 2 — a late/racing commit absorbs frozen: types NOTHING; session freeze
-    # survives the commit's reset_boundary. NOTE: a final that raced the phase-1 abort may
-    # already have been absorbed during the settle (the daemon's documented drain race —
-    # commit()'s frozen path clears the tail but keeps the screen byte-identical), so the
-    # engine truth is captured HERE, right before the late utterance.
+    # Phase 2 — a late/racing commit absorbs frozen: types ONLY the append_space
+    # separator (BUG-003 fix); session freeze survives the commit's reset_boundary.
+    # NOTE: a final that raced the phase-1 abort may already have been absorbed during
+    # the settle (the daemon's documented drain race — commit()'s frozen path clears the
+    # tail and appends exactly one separator), so the engine truth is captured HERE,
+    # right before the late utterance.
     committed_pre = harness.stream.committed
     tail_pre = harness.stream.tail
     screen_pre = harness.backend.screen
@@ -1690,17 +1701,25 @@ def test_g_stranded_tail(
         f"no commit after the freeze: {harness.commit_log!r}\n" + _dump_events(harness)
     )
     ct, _piece, engine_committed = harness.commit_log[-1]
-    # The keystroke-free window starts at the ACT STAMP (never prev_commit: with only the
+    # The frozen window starts at the ACT STAMP (never prev_commit: with only the
     # first half committed before the act, a prev_commit-based window would span the whole
     # session and catch the utterance's legitimate pre-freeze typing). After the session
-    # freeze NOTHING may type — any event here is a rule-4 violation.
+    # freeze the ONLY permitted keystroke is the append_space separator (BUG-003) —
+    # any rewind or retype here is a rule-4 violation.
     win = [e for e in harness.backend.events if snap.t_act < e.t <= ct]
-    assert not win, f"the frozen commit typed keystrokes: {win!r}\n" + _dump_events(harness)
-    assert harness.backend.screen == screen_pre, (
-        f"screen changed across the frozen commit: {harness.backend.screen!r} != "
-        f"{screen_pre!r}\n" + _dump_events(harness)
+    assert all(e.kind == "type" and e.text == " " for e in win), (
+        f"the frozen window sent keystrokes beyond the append_space separator(s): "
+        f"{win!r}\n" + _dump_events(harness)
     )
-    expected = " ".join(p for p in (committed_pre.rstrip(), tail_pre) if p)
+    # Screen across the frozen commit(s): nothing but separator(s) appended.
+    screen_post = harness.backend.screen
+    assert screen_post.startswith(screen_pre) and set(screen_post[len(screen_pre):]) <= {" "}, (
+        f"screen changed across the frozen commit: {screen_post!r} vs {screen_pre!r}\n"
+        + _dump_events(harness)
+    )
+    expected = (
+        " ".join(p for p in (committed_pre.rstrip(), tail_pre) if p) + " "
+    )
     assert engine_committed == expected, (
         f"absorbed committed {engine_committed!r} != expected {expected!r}\n"
         + _dump_events(harness)
