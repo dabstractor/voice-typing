@@ -4799,9 +4799,11 @@ def test_on_final_streaming_false_rejected_final_is_plain_early_return():
 def test_rejected_final_recovers_at_next_speech_with_cue(caplog):
     """BUG-001 / P1.M1.T1.S2 — the PRD h2.1/h3.0 repro at daemon level: a rejected final
     freezes the tail and cues the user (WARNING log + feedback.notify toast); a stray late
-    partial of the REJECTED utterance stays mirror-only and does NOT lift the freeze; the
-    NEXT utterance's speech event (_touch_speech -> engine resume()) unfreezes so the next
-    partial TYPES and the next final COMMITS (PRD h2.5: never a silent output death)."""
+    partial of the REJECTED utterance stays mirror-only and does NOT lift the freeze —
+    neither does its PAIRED ('speech', {}) event (production pairs one speech event with
+    EVERY partial, so resume() must refuse the echo-guarded freeze — ISSUE-002); the
+    first NON-echo partial (genuinely-new speech) unfreezes so it TYPES and the next
+    final COMMITS (PRD h2.5: never a silent output death)."""
     cfg = VoiceTypingConfig()
     cfg.filter.blocklist = ["thank you."]
     d, fb, rec, be = _make_daemon(cfg=cfg)
@@ -4822,9 +4824,12 @@ def test_rejected_final_recovers_at_next_speech_with_cue(caplog):
     n0 = len(be.typed)
     d._on_partial("ank you")  # stray late partial of the REJECTED utterance
     assert len(be.typed) == n0 and d._stream.frozen is True  # mirror-only, still frozen
-    d._touch_speech()  # the NEXT utterance's ('speech', {}) event
-    assert d._stream.frozen is False  # resume() lifted the non-backend freeze
-    d._on_partial("The next real sentence")
+    d._touch_speech()  # its PAIRED ('speech', {}) event — every partial fires one
+    assert d._stream.frozen is True, (
+        "a stray partial's paired speech event must not lift the echo-guarded freeze"
+    )
+    d._on_partial("The next real sentence")  # first NON-echo partial: genuinely new
+    assert d._stream.frozen is False  # the engine lifted at the non-echo partial
     # Case-tolerant: the rejected final folds its unclean tail into the committed
     # context ("Hello world thank you" — no terminal), so §4.2quater R1a lowercases
     # the next fragment's first letter. The BEHAVIOR under test: typing resumed live.
@@ -4836,6 +4841,53 @@ def test_rejected_final_recovers_at_next_speech_with_cue(caplog):
     assert (
         "the next real sentence" in d._stream.committed.lower()
     )  # checkpoint advanced
+
+
+def test_user_keypress_freeze_survives_paired_speech_events():
+    """ISSUE-001 (Rev-2 validation), daemon level, PRODUCTION event order: the host
+    reader dispatches ('partial', text) FOLLOWED BY the paired ('speech', {}) for
+    every stabilized partial, so the user-keypress freeze (PRD §4.2quater rule 5)
+    must survive partial+speech cycles until this utterance's commit+boundary —
+    never typing over the user's cursor."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("hello wor")
+    assert be.typed == ["hello wor"]
+    d.note_user_keypress()  # a non-Backspace keypress over the pending tail
+    assert d._stream.frozen is True
+    d._on_partial("hello world")  # next partial: mirror-only (one cycle)
+    d._touch_speech()  # ...and its PAIRED speech event — must NOT lift
+    assert d._stream.frozen is True, (
+        "the paired speech event lifted the user-keypress freeze (ISSUE-001)"
+    )
+    d._on_partial("hello world again")  # the cycle after: still mirror-only
+    assert be.typed == ["hello wor"], (
+        f"the engine typed over the user's edit: {be.typed!r}"
+    )
+
+
+def test_rejected_final_stray_pairs_stay_untyped_in_production_order():
+    """ISSUE-002 (Rev-2 validation), daemon level, PRODUCTION event order: stray
+    hallucination partials after a rejected final arrive as (partial, speech) PAIRS;
+    neither element may lift the echo-guarded session freeze, so the blocklist text
+    stays untyped — while a genuinely-new partial still recovers live (BUG-001)."""
+    cfg = VoiceTypingConfig()
+    cfg.filter.blocklist = ["thank you."]
+    d, fb, rec, be = _make_daemon(cfg=cfg)
+    d.start()
+    d._on_partial("Real words")
+    d.on_final("Real words")  # commits + types
+    d.on_final("Thank you.")  # blocklist hallucination -> rejected -> freeze + guard
+    assert d._stream.frozen is True
+    n0 = len(be.typed)
+    for _ in range(2):  # two hallucination cycles: (partial, paired speech) each
+        d._on_partial("thank you")
+        d._touch_speech()
+    assert d._stream.frozen is True, "a stray pair lifted the rejected-final freeze"
+    assert len(be.typed) == n0, f"stray hallucination text typed: {be.typed[n0:]!r}"
+    d._on_partial("The next real sentence")  # genuinely new speech recovers live
+    assert d._stream.frozen is False
+    assert len(be.typed) > n0, "the next real utterance must stream live (BUG-001)"
 
 
 def test_on_partial_routes_through_engine_in_streaming_mode():

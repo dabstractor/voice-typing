@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 2,
+  "summary": "All 8 PRD bugs verified fixed (regression-probed at daemon level; 401 fast tests + ruff clean; 23/25 E2E probes pass), but the BUG-001/002 fix delta introduced 2 major regressions: resume() fires on every partial's paired speech event, defeating the user-keypress freeze (types over the user's cursor, PRD rule 5) and the rejected-final session freeze (stray hallucination partials get typed)."
+}

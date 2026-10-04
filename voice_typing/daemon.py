@@ -1168,6 +1168,18 @@ class VoiceTypingDaemon:
                         "rejected final (blocklist/min_chars)", session=True
                     )
                     self._stream.reset_boundary()
+                    # ISSUE-002 (Rev-2 validation): arm the engine's stray-echo guard with
+                    # the REJECTED decode. Every partial is relayed with a PAIRED
+                    # ('speech', {}) event (the child fires on_speech inside the partial
+                    # callback to reset the idle clock), so strays of the dead utterance
+                    # DO reach _touch_speech -> resume(). The guard makes resume() — and
+                    # the frozen partial path — hold the freeze until the first partial
+                    # that is NOT an echo of this text (genuinely-new speech) lifts it
+                    # inside the engine and streams live (BUG-001's "next utterance
+                    # types", now with the hallucination actually suppressed).
+                    arm_guard = getattr(self._stream, "arm_stray_echo_guard", None)
+                    if callable(arm_guard):
+                        arm_guard(text)
                     self._final_pending = (
                         False  # finalized-by-rejection: a drain can finish
                     )
@@ -1175,12 +1187,11 @@ class VoiceTypingDaemon:
                         True  # validation Issue 2: this text() is done
                     )
                     # BUG-001 / P1.M1.T1.S2: never a silent rejection (PRD h2.5). The tail
-                    # is frozen as-is and typing resumes at the next genuinely-new speech
-                    # (_touch_speech -> self._stream.resume()). notify() self-gates on
-                    # cfg.hypr_notify — no second gate here.
+                    # is frozen as-is and typing resumes at the first non-echo partial
+                    # (genuinely-new speech; engine on_partial lifts the guarded freeze).
                     logger.warning(
                         "streaming: final rejected by filter (blocklist/min_chars); tail frozen "
-                        "as-is, typing resumes at next speech"
+                        "as-is, typing resumes at the first non-echo partial (new speech)"
                     )
                     self._feedback.notify(
                         "filtered hallucination — not typed; keep dictating"
@@ -1393,15 +1404,23 @@ class VoiceTypingDaemon:
         text() for the NEXT one). _utterance_finalized is reset False only when the run loop
         (re-)enters text(), so a stray late partial cannot resurrect a ~5s drain.
         """
-        # BUG-001 / P1.M1.T1.S2: genuinely-new speech lifts a rejected-final freeze (and
-        # any post-cancel suppression, via the engine's resume()) so the NEW utterance
-        # streams live. Idempotent, no keystrokes, engine-internal lock only. Must run
-        # BEFORE the _final_pending guard: after a rejected final _utterance_finalized is
-        # already True, and resuming is needed precisely then. A stray late partial of the
-        # rejected utterance never reaches this hook — it arrives via _on_partial.
+        # BUG-001 / P1.M1.T1.S2 (re-scoped by the Rev-2 validation, ISSUE-001/ISSUE-002):
+        # this hook fires on EVERY stabilized partial (the child's on_speech hook lives
+        # inside the partial callback to reset the idle auto-stop clock), so resume() is
+        # the per-partial seam — deliberately stray-safe BY ENGINE CONTRACT, not by
+        # event ordering: resume() never lifts a per-utterance (user-keypress) freeze
+        # (that one lifts only at reset_boundary()), and never lifts a rejected-final
+        # freeze while the engine's stray-echo guard holds (that one lifts at the first
+        # non-echo partial, inside engine on_partial). What it DOES do here, every
+        # partial: clear post-cancel suppression, and lift a stranded non-backend
+        # session freeze. Must run BEFORE the _final_pending guard: after a rejected
+        # final _utterance_finalized is already True, and clearing post-cancel
+        # suppression is needed precisely then. (The old claim that a stray late partial
+        # never reaches this hook was FALSE — it arrives right here, paired with its
+        # partial.)
         # BUG-002 / P1.M1.T2.S2: this is the ONE post-cancel lift point — the on_final
         # sentinel branch deliberately does NOT resume (a stray late final of the cancelled
-        # utterance must not lift suppression; only genuinely-new speech may).
+        # utterance must not lift suppression; only new speech may).
         self._stream.resume()
         self._last_speech_monotonic = time.monotonic()
         if not self._utterance_finalized:

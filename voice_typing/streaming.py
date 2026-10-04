@@ -112,6 +112,35 @@ def _ci_startswith(text: str, prefix: str) -> bool:
     )
 
 
+def _echo_norm(text: str) -> str:
+    """Normalize for the stray-echo comparison (ISSUE-002 fix): lowercase, drop
+    non-alphanumerics, collapse runs to single spaces, strip the ends. "Thank you."
+    and "thank  you" fold to the same key. PURE: no I/O, no state."""
+    out: list[str] = []
+    for ch in text.lower():
+        if ch.isalnum():
+            out.append(ch)
+        elif out and out[-1] != " ":
+            out.append(" ")
+    return "".join(out).strip()
+
+
+def _is_stray_echo(partial: str, rejected: str) -> bool:
+    """True iff `partial` looks like a stray of the REJECTED decode `rejected` (ISSUE-002).
+
+    Echo iff the normalized partial is non-empty and contained in the normalized
+    rejected text with no extra words — a Whisper hallucination cycle repeats the
+    dead utterance's own words (often truncated mid-word: "ank you"), while
+    genuinely-new speech grows past the rejected decode ("the next real sentence"
+    shares nothing, or is LONGER). A contentless (silence) partial always counts as
+    an echo: it must never lift a freeze. PURE: no I/O, no state."""
+    p = _echo_norm(partial)
+    r = _echo_norm(rejected)
+    if not p:
+        return True
+    return len(p) <= len(r) and p in r
+
+
 class StreamingOutput:
     """Per-armed-session streaming output state machine (PRD §4.2quater R1).
 
@@ -178,6 +207,15 @@ class StreamingOutput:
         # state cannot be trusted). A fresh freeze()/reset_session() clears it;
         # the promote-only path never touches it.
         self._frozen_backend_failure: bool = False
+        # Stray-echo guard (ISSUE-002): the RAW rejected decode, armed by the daemon
+        # right after a rejected final's freeze(session=True). While set, resume()
+        # refuses to lift the freeze (every partial fires the per-partial speech seam
+        # the daemon calls resume() from, so strays of the dead utterance reach it
+        # too), and on_partial holds echo partials mirror-only until the first
+        # NON-echo partial — genuinely-new speech — lifts the freeze and streams.
+        # Cleared exactly with the freeze it guards: the on_partial lift and
+        # reset_session(); a later reject overwrites it.
+        self._echo_guard: str | None = None
         self._suppressed: bool = False
         # None = no full rewind has happened yet (first revise is always allowed).
         # A plain 0.0 sentinel would break a fake clock starting at 0.0 (and read
@@ -284,6 +322,7 @@ class StreamingOutput:
             self._suppressed = False
             self._frozen = False
             self._frozen_session = False
+            self._echo_guard = None  # a fresh arm clears the rejected-final guard too
             # A fresh arm trusts the screen again: clear the backend-failure origin
             # tag too, so a later non-backend freeze in the new session is liftable
             # by resume() (the tag must imply frozen; this unfreeze clears it).
@@ -291,23 +330,31 @@ class StreamingOutput:
             self._last_full_rewind = None
 
     def resume(self) -> None:
-        """Lift a rejected-final (non-backend) freeze + clear suppression (BUG-001).
+        """Class-aware lift: clears suppression ALWAYS; lifts ONLY a stranded
+        (session-class, non-backend, non-echo) freeze (BUG-001, re-scoped by the Rev-2
+        validation, ISSUE-001/ISSUE-002).
 
-        The engine seam the daemon calls at the NEXT utterance's genuinely-new speech
-        (P1.M1.T1.S2 wires the call): a blocklist/min_chars-rejected final freezes
-        with session=True — so stray late partials of the dead utterance cannot
-        revise the frozen tail — and resume() is the only way that freeze lifts
-        mid-session. Semantics, all under self._lock:
+        The daemon fires this from the PER-PARTIAL speech seam (_touch_speech — the
+        child's on_speech hook fires on EVERY stabilized partial, because that is how
+        the idle auto-stop clock resets), so it must be stray-safe by contract, not
+        by event ordering:
           - `_suppressed` = False ALWAYS (also the post-cancel seam; P1.M1.T2.S1 /
             BUG-002 reuses exactly this).
-          - frozen AND NOT backend-failure-origin: lift (_frozen/_frozen_session
-            False).
+          - frozen AND NOT backend-failure-origin AND NOT echo-guarded AND
+            session-class: lift (a stranded-tail freeze recovers at new speech).
           - frozen WITH backend-failure origin (tagged internally by _safe_type/
             _safe_backspace): leave frozen, log at INFO — after a backend failure
             the on-screen state cannot be trusted, so only reset_session() (fresh
-            arm) may recover. A public freeze() landing ON TOP of a backend failure
-            takes the promote-only path, which never clears the origin tag, so the
-            refusal holds there too.
+            arm) may recover.
+          - frozen WITH the stray-echo guard armed (a rejected final — ISSUE-002):
+            leave frozen, log at INFO. Every partial — a stray of the dead utterance
+            included — reaches this seam via its paired speech event, so lifting
+            here would let hallucination text type (the exact filed regression).
+            That freeze lifts at the first NON-echo partial (see on_partial) or at
+            reset_session().
+          - frozen PER-UTTERANCE (a user keypress — ISSUE-001): leave frozen, log
+            at INFO. The keypress freeze must hold until reset_boundary() absorbs
+            the tail (PRD §4.2quater rule 5: never type over the user's cursor).
         Idempotent; sends NO keystrokes; does not touch _committed/_tail/
         _last_full_rewind.
         """
@@ -319,9 +366,40 @@ class StreamingOutput:
                         "streaming resume(): refusing to lift backend-failure freeze "
                         "(on-screen state untrusted; re-arm to recover)"
                     )
+                elif self._echo_guard is not None:
+                    logger.info(
+                        "streaming resume(): rejected-final freeze survives (stray "
+                        "partials of the dead utterance reach this seam; lifts at the "
+                        "first non-echo partial or a fresh arm)"
+                    )
+                elif not self._frozen_session:
+                    logger.info(
+                        "streaming resume(): per-utterance (user-keypress) freeze "
+                        "survives — it lifts only at reset_boundary()"
+                    )
                 else:
                     self._frozen = False
                     self._frozen_session = False
+
+    def arm_stray_echo_guard(self, rejected_text: str) -> None:
+        """Arm the stray-echo guard with the REJECTED decode (ISSUE-002; BUG-001 seam).
+
+        The daemon calls this right after a rejected final's freeze(session=True) +
+        reset_boundary() pair, passing the RAW decode text. Until the freeze lifts:
+          - on_partial holds an echo of `rejected_text` (same hallucination cycle —
+            possibly truncated mid-word) mirror-only WITHOUT lifting, and
+          - resume() refuses to lift the freeze (its daemon call site fires on every
+            partial's paired speech event).
+        The first NON-echo partial — genuinely-new speech — lifts the freeze inside
+        on_partial and streams live (BUG-001: the next real utterance types). The
+        guard is cleared exactly with the freeze it guards: the on_partial lift and
+        reset_session(); arming again overwrites (the newest reject wins). A
+        whitespace/punctuation-only decode arms nothing. Sends NO keystrokes.
+        """
+        if not _echo_norm(rejected_text):
+            return
+        with self._lock:
+            self._echo_guard = rejected_text
 
     def freeze(self, reason: str = "", *, session: bool = False) -> None:
         """Stop typing (mirror-only); log why. `session=True` freezes survive reset_boundary().
@@ -401,9 +479,29 @@ class StreamingOutput:
                 self._feedback.update_partial(text)
                 return
             if self._frozen:
-                # Frozen (freeze() or a backend failure): mirror the typed tail only.
-                self._feedback.update_partial(self._tail)
-                return
+                # Frozen (freeze() or a backend failure): mirror the typed tail only —
+                # EXCEPT an echo-guarded rejected-final freeze met by genuinely-new
+                # speech (ISSUE-002 fix): a partial that is NOT an echo of the
+                # rejected decode lifts that freeze right here and falls through to
+                # the live streaming path below (BUG-001: the next real utterance
+                # types, starting with THIS partial). Strays of the dead utterance
+                # (echoes) and all other freezes stay mirror-only.
+                if (
+                    self._echo_guard is not None
+                    and self._frozen_session
+                    and not self._frozen_backend_failure
+                    and not _is_stray_echo(text, self._echo_guard)
+                ):
+                    self._frozen = False
+                    self._frozen_session = False
+                    self._echo_guard = None
+                    logger.info(
+                        "streaming: partial is not an echo of the rejected decode — "
+                        "rejected-final freeze lifted, streaming live again"
+                    )
+                else:
+                    self._feedback.update_partial(self._tail)
+                    return
 
             # Stable normalization: collapse any whitespace run to single spaces and
             # strip the ends — the same shape textproc.clean produces, so prefix

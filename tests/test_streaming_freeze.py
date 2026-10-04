@@ -268,10 +268,14 @@ def test_session_frozen_disarm_sends_no_keystrokes_and_next_session_types():
 
 # ---------------------------------------------------------------------------
 # BUG-001 (PRD h3.0): a single rejected final (blocklist/min_chars) freezes with
-# session=True and used to silence typed output until the next re-arm. The NEW
-# engine contract: an explicit resume() lifts a non-backend freeze (and clears
-# post-cancel suppression); reset_boundary() under freeze ABSORBS the tail into
-# the checkpoint; backend-failure freezes stay un-liftable (fail-safe).
+# session=True and used to silence typed output until the next re-arm. The
+# engine contract (re-scoped by the Rev-2 validation, ISSUE-001/ISSUE-002):
+# resume() is fired on EVERY partial's paired speech event, so it is class-aware
+# — it clears post-cancel suppression always, lifts a stranded non-backend
+# session freeze, and REFUSES per-utterance (user-keypress) and echo-guarded
+# (rejected-final) freezes. A guarded rejected-final freeze lifts at the first
+# NON-echo partial inside on_partial; reset_boundary() under freeze ABSORBS the
+# tail into the checkpoint; backend-failure freezes stay un-liftable (fail-safe).
 # ---------------------------------------------------------------------------
 
 
@@ -392,3 +396,96 @@ def test_cancel_then_resume_restores_live_delta_typing():
     assert all(c[0] == "type" for c in be.calls), "no backspaces: nothing to rewind"
     assert stream.committed == "Hello world " and stream.tail == "the quick brown fox jumps"
     assert (stream.committed + stream.tail) == "Hello world the quick brown fox jumps"
+
+
+# ---------------------------------------------------------------------------
+# Rev-2 validation ISSUE-001 / ISSUE-002: resume() is the PER-PARTIAL speech
+# seam (the child's on_speech fires on every stabilized partial), so it must be
+# class-aware, and a rejected-final freeze needs the stray-echo guard + the
+# non-echo-partial lift inside on_partial.
+# ---------------------------------------------------------------------------
+
+
+def test_resume_never_lifts_per_utterance_keypress_freeze():
+    """ISSUE-001: resume() is fired by the per-partial speech seam, so it must NEVER
+    lift a user-keypress (per-utterance) freeze — that one lifts only at
+    reset_boundary(), after the frozen commit absorbs the tail (PRD rule 5)."""
+    stream, be, _fb = _make_stream()
+    stream.on_partial("hello wor")
+    assert be.calls == [("type", "hello wor")]
+    stream.note_user_keypress()
+    assert stream.frozen is True
+    stream.resume()
+    assert stream.frozen is True, "per-utterance freeze must survive resume()"
+    stream.on_partial("hello world")  # mirror-only: nothing over the user's edit
+    assert be.calls == [("type", "hello wor")]
+    stream.commit("hello world")     # frozen absorb (separator only) ...
+    stream.reset_boundary()          # ...then the boundary lifts the freeze
+    assert stream.frozen is False
+    stream.on_partial("New sentence")
+    assert any("new sentence" in t.lower() for _, t in be.calls)
+
+
+def test_stray_echo_guard_holds_until_first_non_echo_partial():
+    """ISSUE-002 + BUG-001 together: after a rejected final the daemon arms the
+    stray-echo guard; echo strays of the dead utterance (their paired speech event
+    included) hold the freeze mirror-only; the first NON-echo partial lifts the
+    freeze inside on_partial and streams live."""
+    stream, be, fb = _make_stream()
+    stream.on_partial("Hello world")
+    stream.commit("Hello world")
+    stream.reset_boundary()
+    stream.freeze("rejected final (blocklist/min_chars)", session=True)
+    stream.reset_boundary()
+    stream.arm_stray_echo_guard("Thank you.")
+    n0 = len(be.calls)
+    for _ in range(2):  # two hallucination cycles: stray partial + paired speech
+        stream.on_partial("thank you")
+        assert stream.frozen is True
+        assert fb.partials[-1] == "", "an echo stray mirrors the (empty) frozen tail"
+        stream.resume()  # the paired ('speech', {}) event
+        assert stream.frozen is True, "resume() must refuse an echo-guarded freeze"
+    assert len(be.calls) == n0, "echo strays must type nothing"
+    stream.on_partial("ank you")  # a mid-word truncation is still an echo
+    assert stream.frozen is True and len(be.calls) == n0
+    stream.on_partial("The next real sentence")  # genuinely new: lifts + types live
+    assert stream.frozen is False
+    assert any("the next real sentence" in t.lower() for _, t in be.calls)
+    stream.on_partial("The next real sentence rocks")  # guard gone: normal extends
+    assert any("rocks" in t for _, t in be.calls)
+
+
+def test_reset_session_clears_stray_echo_guard():
+    """The guard is cleared exactly with the freeze it guards: a fresh arm
+    (reset_session) must leave no residue — the new session streams normally."""
+    stream, be, _fb = _make_stream()
+    stream.freeze("rejected final (blocklist/min_chars)", session=True)
+    stream.arm_stray_echo_guard("Thank you.")
+    stream.reset_session()
+    assert stream.frozen is False
+    stream.on_partial("thank you")  # would be an echo — but the guard is gone
+    assert any("thank you" in t for _, t in be.calls), (
+        "a fresh session must not inherit the echo guard"
+    )
+
+
+def test_resume_lifts_stranded_session_freeze_but_not_guarded_or_per_utterance():
+    """resume()'s exact class matrix: lifts a stranded non-backend SESSION freeze;
+    refuses a guarded one, a per-utterance one, and a backend-failure one."""
+    # stranded session freeze (no guard): lifts
+    s1, _b1, _f1 = _make_stream()
+    s1.freeze("drain-timeout stranded tail", session=True)
+    s1.resume()
+    assert s1.frozen is False
+    # guarded rejected-final freeze: refused
+    s2, _b2, _f2 = _make_stream()
+    s2.freeze("rejected final", session=True)
+    s2.arm_stray_echo_guard("thank you.")
+    s2.resume()
+    assert s2.frozen is True
+    # backend-failure freeze: still refused (fail-safe, unchanged)
+    s3, _b3, _f3 = _make_stream(RecordingBackend(fail_type=True))
+    s3.on_partial("hello")  # raises -> freeze
+    assert s3.frozen is True
+    s3.resume()
+    assert s3.frozen is True
