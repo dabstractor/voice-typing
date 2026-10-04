@@ -152,6 +152,36 @@ def test_extend_period_only_delta_types_nothing():
     assert fb.partials[-1] == "hello"
 
 
+def test_mid_sentence_capitalized_partials_extend_case_insensitively():
+    # BUG-008: the casing guard lowercases a fresh mid-sentence fragment's first
+    # word ("Hello there" lands as "hello there"), while decoder partials keep
+    # the capital — the extend test must compare case-insensitively (comparison
+    # ONLY: deltas are still sliced from the originals) or every subsequent
+    # partial becomes a rate-limited full rewind+retype (flicker churn).
+    stream, be, _fb = _make_stream()
+    stream.commit("and then he said")            # seeds mid-sentence committed
+    stream.on_partial("Hello there")             # fresh start; guard lowercases
+    stream.on_partial("Hello there friend")      # BUG-008: EXTEND, not full rewind
+    stream.on_partial("Hello there friend how")  # EXTEND " how"
+    assert _typed(be) == ["and then he said", " ", "hello there", " friend", " how"]
+    # ZERO backspaces after the first cycle:
+    assert not [c for c in be.calls if c[0] == "bs"]
+    assert stream.tail == "hello there friend how"
+
+
+def test_capitalized_partial_equal_length_case_only_diff_is_noop():
+    # A partial identical to the tail except casing is a no-op mirror: the
+    # case-insensitive prefix match yields an empty delta -> no keystrokes.
+    stream, be, fb = _make_stream()
+    stream.commit("and then he said")
+    stream.on_partial("Hello there")          # types guarded "hello there"
+    calls_after_first = list(be.calls)
+    stream.on_partial("HELLO THERE")          # case-only, equal length -> empty delta
+    stream.on_partial("Hello there")          # identical partial -> no-op too
+    assert be.calls == calls_after_first      # no new backend calls at all
+    assert fb.partials[-1] == "hello there"   # mirror still updates (TYPED tail)
+
+
 # ---------------------------------------------------------------------------
 # Revise path: exact-length rewind + guarded retype
 # ---------------------------------------------------------------------------
@@ -174,9 +204,11 @@ def test_revise_guard_context_is_committed_alone():
     stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.5, 1.0))
     stream._committed = "Done."
     stream.on_partial("new")
-    stream.on_partial("New sentence")
-    # after "Done." a new sentence keeps its capital, including on revise
-    assert _typed(be) == ["new", "New sentence"]
+    # "Fine wording" retracts the tail's first word (genuine non-prefix even
+    # case-insensitively — post-BUG-008 a capitalized matching partial extends).
+    stream.on_partial("Fine wording")
+    # after "Done." a new sentence keeps its capital on revise
+    assert _typed(be) == ["new", "Fine wording"]
 
 
 def test_revise_to_empty_deletes_everything():
@@ -336,10 +368,11 @@ def test_backspace_failure_freezes_and_does_not_propagate(caplog):
         RecordingBackend(fail_backspace=True), clock=FakeClock(0.0, 0.4)
     )
     stream.on_partial("hello wor")     # fresh start succeeds
-    # "Hello world" re-capitalizes -> NOT a prefix of the tail -> true revise,
-    # whose press_backspace raises.
+    # "hello wrl" retracts a mid-word letter ('o' -> 'l') -> NOT a prefix even
+    # case-insensitively (BUG-008 fixed the casing route to REVISE) -> true
+    # revise, whose press_backspace raises.
     with caplog.at_level(logging.WARNING, logger="voice_typing.streaming"):
-        stream.on_partial("Hello world")
+        stream.on_partial("hello wrl")
     assert stream.frozen is True              # engine froze itself
     assert stream.tail == "hello wor"         # tail untouched (retype never landed)
     assert _typed(be) == ["hello wor"]        # no partial retype happened

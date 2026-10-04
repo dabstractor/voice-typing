@@ -125,6 +125,25 @@ def test_commit_empty_delta_types_only_the_space():
     assert stream.committed == "hello world "
 
 
+def test_commit_extend_matches_case_insensitively():
+    # BUG-008 mirror: a capitalized final over a guard-lowercased tail commits
+    # as a delta + trailing space — no rewind (screen text is identical either
+    # way because the delta guard re-applies the same casing policy).
+    stream, be, _fb = _make_stream()
+    stream.commit("and then he said")        # seeds mid-sentence committed
+    stream.on_partial("The quick")           # guard lowercases -> "the quick"
+    stream.commit("The quick brown fox")     # capital final over guarded tail: EXTEND
+    assert not [c for c in be.calls if c[0] == "bs"]
+    assert be.calls == [
+        ("type", "and then he said"),
+        ("type", " "),
+        ("type", "the quick"),
+        ("type", " brown fox"),
+        ("type", " "),
+    ]
+    assert stream.committed == "and then he said the quick brown fox "
+
+
 # ---------------------------------------------------------------------------
 # Commit: revise / fresh path (exact rewind + retype)
 # ---------------------------------------------------------------------------

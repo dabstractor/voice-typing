@@ -4,7 +4,9 @@ Turns stabilized realtime partials from the recorder-host child into live typed
 dictation. On every stabilized partial, diff it against the tentatively typed
 tail:
 
-  - EXTEND (old tail is a prefix of the new partial): type ONLY the delta, with
+  - EXTEND (old tail is a prefix of the new partial, compared case-insensitively
+    — the casing guard lowercases a fresh mid-sentence fragment while decoder
+    partials stay capitalized; BUG-008): type ONLY the delta, with
     textproc.apply_streaming_guards() applied (mid-sentence casing + one spurious
     '.' stripped). Additive and flicker-free by construction — never rate-limited.
   - REVISE (anything else — RealtimeSTT may re-capitalize, retract or rewrite
@@ -95,6 +97,19 @@ def context_after_last_boundary(committed: str) -> str:
     """
     last = max(committed.rfind(ch) for ch in _CONTEXT_BOUNDARY_CHARS)
     return committed[last + 1 :].strip() if last >= 0 else ""
+
+
+def _ci_startswith(text: str, prefix: str) -> bool:
+    """True iff `prefix` is a case-insensitive prefix of `text` (BUG-008).
+
+    Per-character casefold comparison over the ORIGINAL strings — never builds a
+    folded string, so a length-changing casefold ('ß'.casefold() == 'ss') cannot
+    desynchronize the comparison from the original lengths. Callers slice deltas
+    from the originals: delta = text[len(prefix):]. PURE: no I/O, no state.
+    """
+    return len(text) >= len(prefix) and all(
+        a.casefold() == b.casefold() for a, b in zip(text, prefix)
+    )
 
 
 class StreamingOutput:
@@ -395,8 +410,9 @@ class StreamingOutput:
             # diffing is stable and a trailing-space waffle is a no-op.
             text = " ".join(text.split())
 
-            if self._tail and text.startswith(self._tail):
-                # EXTEND: tail is a prefix -> type only the guarded delta.
+            if self._tail and _ci_startswith(text, self._tail):
+                # EXTEND: tail is a case-insensitive prefix -> type only the
+                # guarded delta (sliced from the ORIGINALS, not folded text).
                 delta = text[len(self._tail) :]
                 if not delta:
                     self._feedback.update_partial(self._tail)
@@ -501,8 +517,9 @@ class StreamingOutput:
                 self._suppressed = False
                 self._feedback.update_partial(self._committed)
                 return
-            if self._tail and text.startswith(self._tail):
-                # EXTEND: the final confirms the tail — type only the guarded delta.
+            if self._tail and _ci_startswith(text, self._tail):
+                # EXTEND: the final confirms the tail (case-insensitively) — type
+                # only the guarded delta (sliced from the ORIGINALS).
                 delta = text[len(self._tail) :]
                 guarded = ""
                 if delta:

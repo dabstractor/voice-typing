@@ -157,7 +157,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Minor robustness fixes (BUG-005..BUG-008)",
-          "status": "Planned",
+          "status": "Complete",
           "description": "Control-socket empty-line hang, unknown config-table rejection, immediate stop after cancel, and case-insensitive extend matching. Four independent small fixes; the stop-after-cancel fix is sequenced after the cancel-path rework in P1.M1.T2 because they touch the same on_final suppression branch.",
           "tasks": [
             {
@@ -238,14 +238,14 @@
               "type": "Task",
               "id": "P1.M2.T8",
               "title": "BUG-008: Case-insensitive prefix matching in the EXTEND path",
-              "status": "Planned",
+              "status": "Complete",
               "description": "on_partial's EXTEND test is case-sensitive (streaming.py:328) while the casing guard lowercases fresh mid-sentence fragments, so capitalized decoder partials can never extend the guarded tail — every cycle becomes a rate-limited full rewind. PRD h2.3/h3.7 + h2.5.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T8.S1",
                   "title": "Engine: normalize case for the extend comparison only",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1"
