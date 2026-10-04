@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Rev 2 Streaming Delta Bugfix — Output Reliability Recovery",
-      "status": "Planned",
+      "status": "Complete",
       "description": "Fix the 8 validated defects in the Rev 2 streaming delta (PRD h2.0): one critical silent-output-death bug (rejected-final session freeze), three major sequencing bugs (post-cancel suppression, frozen-commit separator, missing partial-path listening gate), four minor robustness bugs (empty-line control hang, unknown config tables, 5s stop-after-cancel drain, guard-induced rewind churn). All fixes are confined to voice_typing/{streaming,daemon,config,textproc}.py plus fast double-based tests; no new dependencies, no CUDA suites required. Research findings for downstream agents live in plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/ (system_context.md, streaming_engine.md, daemon_flow.md, config_tests_docs.md, external_deps.md).",
       "milestones": [
         {
@@ -266,14 +266,14 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Changeset-level documentation & acceptance sync (Mode B)",
-          "status": "Planned",
+          "status": "Complete",
           "description": "Final catch-all so the coherent delta ships with truthful docs: sweep README.md feature prose and refresh the tests/ACCEPTANCE.md evidence matrix once every implementing subtask has landed (per SOW §5 Mode B).",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T9",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Update README.md §Streaming dictation / §Backspace-cancel / §Configuration for the corrected behaviors and refresh tests/ACCEPTANCE.md rows 4/11/12 evidence to cite the new regression tests. Runs LAST — depends on every implementing subtask.",
               "subtasks": [
                 {
@@ -316,7 +316,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T9.S2",
                   "title": "tests/ACCEPTANCE.md: refresh rows 4/11/12 evidence",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M3.T9.S1",
