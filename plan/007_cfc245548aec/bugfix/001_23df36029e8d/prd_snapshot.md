@@ -1,0 +1,120 @@
+# Bug Fix Requirements
+
+## Overview
+Creative end-to-end PRD validation of the Rev 2 streaming delta. Ran all 627 fast unit tests (all pass), probed the live daemon's control socket safely (status/cancel/malformed/unknown commands; voicectl exit codes 0/2/64), verified config/docs/README/hypr-binds/prefetch consistency, and adversarially exercised the streaming state machine, guards, cancel path, freeze classes, and config/CLI edge cases with the repo's own test doubles and direct engine probes (no CUDA suites needed to expose the logic bugs). Found 8 issues, all in the Rev 2 delta: one critical (a single blocklist/min_chars-rejected final permanently silences all typed output for the rest of the armed session — triggered by the hallucinations the filter exists to catch), three major (post-cancel suppression strips live typing from the next utterance; frozen-commit omits append_space and glues words; no listening gate on the partial path so stale partials type while toggled off, contradicting acceptance #4's own claim in ACCEPTANCE.md), and four minor (empty-line socket request hangs, unknown config table silently ignored, 5s stop delay after cancel, guard-induced rewind churn). The unit suites pass because they drive engine methods directly and even manually invoke reset_boundary(), masking the daemon-level sequencing bugs; the E2E harness mirrors the daemon flow but asserts none of the next-utterance-after-cancel/freeze behaviors. The overall architecture (subprocess recorder host, bounded teardown, prompt executor, evdev listener) is solid; the defects are concentrated in freeze/suppression scoping and the missing partial-path gate.
+
+
+## Critical Issues (Must Fix)
+Issues that prevent core functionality from working.
+
+### Issue 1: One rejected final (blocklist/min_chars) permanently kills all typed output for the rest of the armed session
+**Severity**: Critical
+**ID**: BUG-001
+**Location**: voice_typing/daemon.py:1154 (freeze(session=True) on rejected final); voice_typing/streaming.py:415 (commit frozen-absorb types nothing)
+
+**Description**:
+In on_final, a rejected final (textproc.clean returns None: a blocklist hallucination like 'thank you.' or a sub-min_chars final) freezes the StreamingOutput with session=True (daemon.py:1154). A session-class freeze is lifted ONLY by reset_session() (next arm/disarm). While frozen, on_partial does mirror-only and commit()'s frozen path absorbs finals WITHOUT typing anything. So after a single hallucination-filter hit — an event the PRD explicitly expects ('Whisper hallucinates on silence' is a top-3 risk, PRD §8, and the blocklist exists precisely because it happens) — every subsequent utterance of the session produces ZERO typed output until the user toggles off and on again. This contradicts PRD §4.2quater rule 2, which scopes the freeze to the tail ('a rejected final freezes the `tail` as-is' — i.e. that utterance's fragment stays on screen; nothing says future utterances stop typing). The in-code justification ('a rejected final is an UNTRUSTWORTHY decode') does not hold: a hallucinated 'thank you.' says nothing about the trustworthiness of the next real utterance's decode. Silent, unrecoverable-without-retoggle loss of the core feature, triggered by an expected event class. Reproduced with the real StreamingOutput engine: after freeze('rejected final', session=True), the next utterance's partials AND commit both produce zero backend calls.
+
+**Steps to Reproduce**:
+1) Arm dictation (streaming=true). 2) Dictate 'Hello world' — commits and types fine. 3) Let Whisper emit a hallucinated/blocked final (say 'thank you.' on silence, or any final < min_chars=2). 4) Keep dictating real speech: nothing is ever typed again (partials mirror-only, finals absorbed silently) until voicectl stop + start. Minimal code repro (see probe): construct StreamingOutput(fake_backend, fake_feedback, streaming=True); on_partial('Hello world'); commit('Hello world'); reset_boundary(); on_partial('Thank you'); freeze('rejected final', session=True); reset_boundary(); then on_partial('The next real sentence') and commit('The next real sentence') — backend receives zero calls.
+
+
+## Major Issues (Should Fix)
+Issues that significantly impact user experience or functionality.
+
+### Issue 1: After Backspace-cancel, the re-said sentence loses live streaming: partials are suppressed until its commit (append-only Rev 1 behavior)
+**Severity**: Major
+**ID**: BUG-002
+**Location**: voice_typing/streaming.py:206 (reset_after_cancel sets _suppressed); voice_typing/daemon.py:1132 (sentinel dropped before any reset_boundary fires)
+
+**Description**:
+PRD §4.2quater Backspace-cancel: 'rewind that fragment's typed text ..., drop its buffered audio, keep listening — just say the sentence again.' Under streaming (the only mode), the re-said sentence's words should type live. Instead, daemon.cancel() calls engine.reset_after_cancel() which sets _suppressed=True until 'the next utterance boundary' — but the only boundary event is reset_boundary() invoked from on_final after a commit/rejection (daemon.py:1157/1243). The cancelled utterance's sentinel final is DROPPED at the suppression branch (daemon.py:1132) BEFORE it can reach commit()/reset_boundary(), so no boundary fires between the cancel and the next real final. Every partial of the re-said sentence is mirror-only: nothing types until the commit pass lands ~0.8s+ after the user stops speaking. Net effect: every use of the flagship Backspace-cancel feature silently degrades the very next utterance from phone-style live typing to Rev 1 append-only. The unit test suite masks this by calling stream.reset_boundary() MANUALLY (tests/test_streaming_core.py:291 'stream.reset_boundary() # next utterance begins') — no daemon-level test covers cancel→next-utterance live typing.
+
+**Steps to Reproduce**:
+Code repro (real engine): on_partial('Hello world'); commit('Hello world'); on_partial('the quick brown'); press_backspace(max(pending_tail_len()-1,0)); reset_after_cancel(); then on_partial('the quick brown fox') and on_partial('the quick brown fox jumps') — zero type_text calls; only commit('the quick brown fox jumps') finally types. Live repro: arm, speak a fragment, press Backspace mid-fragment, immediately say the sentence again — no live partial typing until you pause and the commit fires.
+
+### Issue 2: User-keypress frozen commit omits the trailing space — next utterance's first word glues onto the previous tail
+**Severity**: Major
+**ID**: BUG-003
+**Location**: voice_typing/streaming.py:415-425 (commit frozen path — no append_space)
+
+**Description**:
+PRD §4.2quater rule 2: on commit, 'append the trailing space (output.append_space); advance the checkpoint.' StreamingOutput.commit()'s frozen-absorb path (streaming.py:415-425) joins committed+tail but NEVER types/appends the trailing space — append_space is only applied in the non-frozen paths. The per-utterance freeze (PRD rule 5, user keypress) is lifted right after this commit by the daemon's reset_boundary() (daemon.py:1243), so the engine resumes typing — and the next utterance's fresh fragment is typed directly against the absorbed tail with NO separator. On-screen text corrupts: 'Hello world the quicknew sentence' instead of '... the quick new sentence'. Trigger: ANY non-Backspace keypress while a fragment is pending — the evdev listener routes modifier keys (Shift/Ctrl/CapsLock — which insert nothing) to the same OTHER_PRESS freeze path — followed by the utterance committing and dictation continuing. Reproduced with the real engine following the daemon's exact call sequence: screen = 'Hello world the quicknew sentence'.
+
+**Steps to Reproduce**:
+StreamingOutput(backend, feedback, streaming=True, append_space=True); on_partial('Hello world'); commit('Hello world'); reset_boundary(); on_partial('the quick'); note_user_keypress(); commit('the quick'); reset_boundary(); on_partial('New sentence') → backend receives ('type', 'new sentence') with no preceding space: screen reads '...the quicknew sentence'.
+
+### Issue 3: No listening gate on the partial typing path — stale partials around toggle-off type text while the daemon is toggled off
+**Severity**: Major
+**ID**: BUG-004
+**Location**: voice_typing/daemon.py:1376 (_on_partial — no listening gate)
+
+**Description**:
+PRD acceptance #4: 'nothing typed while toggled off (the `listening` gates on partial and commit paths are unchanged).' The commit path gates (on_final's first line, daemon.py:1121), but the partial path does not: _on_partial (daemon.py:1376) routes the reader thread's partial straight into StreamingOutput.on_partial with no is_listening() check, the engine has no listening awareness, and the host reader dispatches 'partial' events ungated (recorder_host._dispatch gates only 'vad' events). A partial that was already computed/in the IPC queue when the user toggled off (RealtimeSTT emits partials continuously; the codebase itself documents 'stray post-final partials') is typed into the focused window AFTER the disarm — and because _disarm reset the session (committed=''), the stale fragment is typed case-preserved as a fresh session start. Verified at daemon level with the repo's own test doubles: after d.stop(), d._on_partial('stray words') still calls backend.type_text('stray words'). tests/ACCEPTANCE.md row 4 claims 'the `listening` flag gates BOTH the partial and commit paths' — that claim is false against the code.
+
+**Steps to Reproduce**:
+Daemon-level repro with tests/test_daemon.py doubles: d = VoiceTypingDaemon(cfg, _DaemonFakeFeedback(), recorder=_StubRecorder(), backend=_FakeBackend(), mic_prober=_ok_probe); d.start(); d._on_partial('hello there') (types); d.stop(); assert not d.is_listening(); d._on_partial('stray words') → backend.typed gains 'stray words'. Live repro: toggle off immediately after speaking — a trailing partial can land after the disarm and type into the focused window.
+
+
+## Minor Issues (Nice to Fix)
+Small improvements or polish items.
+
+### Issue 1: Control socket: an empty request line gets no response, hanging clients on a socket with no read timeout
+**Severity**: Minor
+**ID**: BUG-005
+**Location**: voice_typing/daemon.py:2453
+
+**Description**:
+ControlServer._handle skips empty lines without replying (daemon.py:2453-2454 'continue # empty line -> skip (no response)'). Every other malformed request gets a JSON error line ('malformed JSON: ...'), but a client that sends a bare newline (or a line of only whitespace, since line.strip() runs first) gets NOTHING and blocks forever reading — dangerous in this repo specifically because the control socket has no read timeout (AGENTS.md documents the wedged-control-lock hazard class). Verified live against the running daemon: sending b'\n' yields no reply within 5s while 'not json at all\n' returns an error object.
+
+**Steps to Reproduce**:
+printf '\n' | timeout 5 nc -U $XDG_RUNTIME_DIR/voice-typing/control.sock — no response, times out. (Any client that writes an empty line then reads will hang.)
+
+### Issue 2: Unknown top-level config TABLE is silently accepted while unknown KEYS are rejected — typo'd section name silently disables a feature
+**Severity**: Minor
+**ID**: BUG-006
+**Location**: voice_typing/config.py:327-354 (from_toml — no unknown-table check)
+
+**Description**:
+config.toml's header documents 'Unknown keys are REJECTED at load time (a typo raises an error instead of being silently ignored)', and from_toml enforces that per-key. But an unknown top-level TABLE (e.g. '[outpt]' instead of '[output]', or '[cancell]') is silently ignored — from_toml only overlays the six known table names and never checks for extras. Verified: a doc containing {'outpt': {'backend': 'ydotool'}} loads successfully with defaults. A typo'd table name silently disables an entire feature section (worse blast radius than a typo'd key, which fails loudly) — contradicting the documented fail-fast contract.
+
+**Steps to Reproduce**:
+VoiceTypingConfig.from_toml({'asr': {...all valid...}, 'outpt': {'backend': 'ydotool'}}) → loads OK, backend stays default 'wtype'; whereas {'output': {'bakend': 'ydotool'}} raises TypeError.
+
+### Issue 3: Stop immediately after a Backspace-cancel blocks ~5s in a pointless drain
+**Severity**: Minor
+**ID**: BUG-007
+**Location**: voice_typing/daemon.py:1132-1137 (early return skips _final_pending=False at :1165)
+
+**Description**:
+The cancelled sentinel final takes the _cancel_suppress_final early-return (daemon.py:1132-1137) BEFORE 'self._final_pending = False' (daemon.py:1165), so after a cancel the daemon still believes an utterance is in flight (that flag is only cleared by a real final or an arm/disarm). If the user then presses stop, _request_stop sees _text_in_flight + _final_pending and starts a graceful drain — waiting _DRAIN_TIMEOUT_S (~5s) for a final that can never come (the audio was discarded) before the watchdog aborts and disarms. Cancelling then stopping — a natural 'scratch that, done' sequence — hangs disarm for the watchdog duration instead of stopping immediately.
+
+**Steps to Reproduce**:
+Arm; speak a fragment; press Backspace (cancel) then immediately voicectl stop → disarm completes only after the ~5s drain-timeout abort instead of instantly. Code-level: after cancel(), _final_pending remains True because the sentinel's on_final returned at the suppression branch before line 1165.
+
+### Issue 4: Casing guard makes the guarded tail permanently mismatch capitalized partials — mid-sentence utterances revise by rate-limited full rewinds instead of clean deltas
+**Severity**: Minor
+**ID**: BUG-008
+**Location**: voice_typing/streaming.py:328 (case-sensitive startswith) + voice_typing/textproc.py:107-115 (guard lowercases fresh fragment)
+
+**Description**:
+The extend test is case-sensitive ('text.startswith(self._tail)', streaming.py:328), but apply_streaming_guards lowercases the first word of a fresh mid-sentence fragment (committed not ending in ./!/?). From then on the decoder's subsequent partials — which keep their capitalized first word ('The quick brown...') — can never prefix-match the guarded tail ('the quick'), so every partial cycle becomes a full rewind+retype, throttled only by the 300ms rate limiter: ~3 screen-wide delete/retype flickers per second for the rest of the utterance, growing with its length. This is exactly the 'Revision flicker (rewind/retype storms)' risk the PRD §8 row aims to minimize via 'type deltas by default' — the guard defeats delta-typing precisely in its own target scenario (mid-paragraph continuations whose decoder output stays capitalized). Verified: with committed='and then he said ', partials ['Hello there','Hello there friend','Hello there friend how',...] produce ('type','hello there'), ('bs',11), ('type','hello there friend'), then repeated suppressed/rewind cycles instead of extends. A case-insensitive prefix match (or applying the casing guard only to the visible delta with a normalized compare) would restore clean extends.
+
+**Steps to Reproduce**:
+StreamingOutput with committed text lacking terminal punctuation (e.g. commit('and then he said'); reset_boundary()); feed partials 'Hello there', 'Hello there friend', 'Hello there friend how', ... at natural ~300ms cadence — each post-first cycle rewinds the whole tail and retypes it (rate-limited), never a delta extend.
+
+## Testing Summary
+- Total bugs found: 8
+- Critical: 1
+- Major: 3
+- Minor: 4
+
+## Recommendations
+- Scope the rejected-final freeze to the tail/utterance (per-utterance class or explicit unfreeze at the next utterance's first partial), or at minimum log a user-visible warning when output freezes — silent output death is the worst failure mode for a dictation tool.
+- Add a listening gate to _on_partial (mirror the on_final gate) so stale partials can never type while toggled off, then make ACCEPTANCE.md row 4's claim true.
+- Fix the post-cancel boundary: have daemon.cancel() (or the sentinel-suppression branch) lift engine suppression at the next utterance start (e.g. clear _suppressed on the child's next 'speech'/first partial after the sentinel), so the re-said sentence streams live.
+- Append the trailing space in commit()'s frozen-absorb path (or type it before reset_boundary lifts the freeze) to prevent glued words.
+- Clear _final_pending when consuming the cancelled sentinel so stop-after-cancel disarms immediately.
+- Add daemon-level regression tests for the four sequencing bugs (rejected-final recovery, cancel→next-utterance live typing, frozen-commit separator, stale-partial-after-disarm) — the current unit tests manually invoke reset_boundary() and so encode the buggy sequencing.
+- Reply with a malformed-JSON error to empty request lines, and reject unknown top-level config tables like unknown keys.
+- Consider a case-insensitive prefix match (normalizing only for comparison) to stop guard-induced full-rewind churn on mid-sentence continuations.

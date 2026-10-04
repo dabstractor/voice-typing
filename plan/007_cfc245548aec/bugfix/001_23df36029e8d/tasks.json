@@ -1,0 +1,241 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "Rev 2 Streaming Delta Bugfix — Output Reliability Recovery",
+      "status": "Ready",
+      "description": "Fix the 8 validated defects in the Rev 2 streaming delta (PRD h2.0): one critical silent-output-death bug (rejected-final session freeze), three major sequencing bugs (post-cancel suppression, frozen-commit separator, missing partial-path listening gate), four minor robustness bugs (empty-line control hang, unknown config tables, 5s stop-after-cancel drain, guard-induced rewind churn). All fixes are confined to voice_typing/{streaming,daemon,config,textproc}.py plus fast double-based tests; no new dependencies, no CUDA suites required. Research findings for downstream agents live in plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/ (system_context.md, streaming_engine.md, daemon_flow.md, config_tests_docs.md, external_deps.md).",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Critical & major streaming state-machine fixes (BUG-001..BUG-004)",
+          "status": "Planned",
+          "description": "Restore correct engine/daemon sequencing: rejected finals must not kill the session's output, the re-said sentence after Backspace-cancel must stream live, frozen commits must separate words, and stale partials must never type while toggled off. Engine work is sequenced (shared resume seam, then frozen-path space, then case-insensitive extends) to avoid conflicts in streaming.py.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "BUG-001: Scope the rejected-final freeze to the utterance (recover typed output after a blocklist/min_chars rejection)",
+              "status": "Planned",
+              "description": "A single rejected final currently freezes StreamingOutput session-class (daemon.py:1154) — every later utterance of the armed session types nothing until re-arm. Introduce an explicit engine resume seam that a session-class rejected-final freeze does not survive, wire it to the daemon's next-speech signal, and add the user-visible rejection cue. Per PRD h2.1/h3.0 and h2.5; the fix must NOT be a naive session=False retag (daemon.py:1150-1153 comment explains why: reset_boundary() fires on the next line and stray late partials must stay inert).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Engine: utterance-scoped rejected-final freeze + explicit resume() API",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.0", "h2.1", "h2.1/h3.0", "h2.4", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Read plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/streaming_engine.md and system_context.md first. Verified: daemon.py:1154 calls self._stream.freeze('rejected final (blocklist/min_chars)', session=True); while frozen, on_partial (streaming.py:318) mirrors only and commit()'s frozen-absorb path (:415-425) types nothing; only reset_session() lifts. The in-code comment at daemon.py:1150-1153 pins a test asserting frozen==True across the rejected-final sequence and forbids retagging to per-utterance.\n2. INPUT: StreamingOutput (voice_typing/streaming.py:100) as-is: ctor(backend, feedback, streaming, *, append_space, rate_limit_s, clock); freeze(reason, *, session) :248; reset_boundary() :208; reset_session() :226. Test doubles: fake backend with type_text/press_backspace + fake feedback with update_partial (patterns in tests/test_streaming_freeze.py, tests/test_streaming_core.py).\n3. LOGIC: Implement the PRD h2.5 fix 'explicit unfreeze at the next utterance's first partial/speech': add ONE explicit engine resume API (e.g. resume()) that clears _suppressed and lifts ONLY a rejected-final freeze — backend-failure session freezes (_safe_type/_safe_backspace, streaming.py:472/:485) must still survive every boundary; keep freeze() promote-only semantics. Track the freeze REASON/class so resume() cannot lift a backend-failure freeze. Additionally: when the daemon resets the boundary after a rejected final, absorb the frozen tail into _committed (same rstrip-join discipline as commit()'s frozen path) so guards/context/mirror stay truthful — today reset_boundary() :221 orphans the on-screen fragment from the checkpoint. Update the pinned test in tests/test_streaming_freeze.py to the NEW contract: frozen survives reset_boundary() AND stray late partials, lifts at resume(), and the next utterance's on_partial + commit then produce real backend calls. Write the failing test FIRST using the PRD h3.0 'Minimal code repro' sequence. Do NOT modify daemon.py in this subtask. Verify: timeout 600 uv run pytest tests/test_streaming_freeze.py tests/test_streaming_core.py -q (set the harness/bash tool timeout above 600).\n4. OUTPUT: StreamingOutput exposing the new resume method (exact name + semantics documented in its docstring), for consumption by P1.M1.T1.S2 (daemon wiring) and reuse by P1.M1.T2.S1; engine tests green.\n5. DOCS: [Mode A] Update the in-code docstrings touched (freeze/reset_boundary/new resume method) to state the new lift semantics — no user-facing/config/API surface beyond that; README/ACCEPTANCE sweeps are Mode B (P1.M3.T9)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S2",
+                  "title": "Daemon: wire resume at next speech + user-visible rejected-final cue",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.0", "h2.1", "h2.1/h3.0", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/daemon_flow.md — _touch_speech (daemon.py:1354) is fed by the child's ungated ('speech', {}) IPC event (recorder_host.py:447-448) and fires exactly when genuinely new speech begins; the rejected-final branch is daemon.py:1137-1165 with the freeze call at :1154.\n2. INPUT: The engine resume API from P1.M1.T1.S1 (consume its exact method name and semantics); VoiceTypingDaemon internals: self._stream, _touch_speech, on_final, feedback object.\n3. LOGIC: Replace the session=True freeze at daemon.py:1154 with the utterance-scoped mechanism from P1.M1.T1.S1, and call the engine resume from _touch_speech() so the next utterance types live (PRD h2.1/h3.0 + h2.5 recommendation). Keep a WARNING log on rejection; add a user-visible cue ONLY through an existing voice_typing/feedback.py method if one fits (read feedback.py first; do not invent a new surface — log-only is acceptable). Daemon-level regression test in tests/test_daemon.py using the :684 construction pattern (cfg with output.streaming=True, _DaemonFakeFeedback, _StubRecorder, _FakeBackend, _ok_probe): drive d.on_final() with a blocklisted/min_chars string -> output frozen; d._touch_speech(); d._on_partial('The next real sentence') -> backend.typed gains the text (the PRD h3.0 repro at daemon level). Mock the recorder host with _StubRecorder/_FakeHost (incl. consume_cancel_mark); NO real audio, NO CUDA, never run the daemon in the foreground (AGENTS.md).\n4. OUTPUT: daemon.py wiring + green daemon-level rejected-final-recovery test; behavior contract consumed by P1.M3.T9 documentation sweep.\n5. DOCS: none per-subtask beyond in-code comments — README/ACCEPTANCE changes are Mode B (P1.M3.T9)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "BUG-002: Restore live streaming for the re-said sentence after Backspace-cancel",
+              "status": "Planned",
+              "description": "daemon.cancel() sets engine _suppressed until 'the next utterance boundary', but the cancelled sentinel final is dropped at on_final's suppression branch before any reset_boundary() fires — so every partial of the re-said sentence is mirror-only until its commit (Rev 1 append-only degradation). Lift the suppression at the next utterance START (speech event), per PRD h2.2/h3.1 and h2.5.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Engine: resume() also clears post-cancel suppression",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.0", "h2.2", "h2.2/h3.1", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/streaming_engine.md — reset_after_cancel (streaming.py:197-206) sets _suppressed=True; it is cleared only at reset_boundary (:221) or in commit (:424/:458); the daemon never fires a boundary between a cancel and the next real final (daemon_flow.md: the sentinel is dropped at daemon.py:1130-1137 before commit can run).\n2. INPUT: The resume API introduced by P1.M1.T1.S1 — REUSE the same method (one resume seam clearing both _suppressed and the rejected-final freeze); do not add a second API.\n3. LOGIC: Extend resume() so it also clears _suppressed, restoring live delta typing for the re-said sentence per PRD h2.2/h3.1 + h2.5 ('clear _suppressed on the child's next speech/first partial after the sentinel'). Write the failing test FIRST from the PRD h3.1 code repro: on_partial('Hello world'); commit('Hello world'); on_partial('the quick brown'); reset_after_cancel(); on_partial('the quick brown fox') -> zero type_text calls (stale-partial guard HOLDS without resume); resume(); on_partial('the quick brown fox jumps') -> delta type call lands (live typing restored). The stale-partial safety must not be weakened: suppression persists until resume() fires. Verify: timeout 600 uv run pytest tests/test_streaming_core.py tests/test_streaming_freeze.py -q.\n4. OUTPUT: Updated engine semantics + green tests, consumed by P1.M1.T2.S2 (daemon wiring).\n5. DOCS: [Mode A] update the reset_after_cancel()/resume() docstrings to state the lift point; no external doc surface."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S2",
+                  "title": "Daemon: lift post-cancel suppression at next utterance start (daemon-level regression test)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.0", "h2.2", "h2.2/h3.1", "h2.4", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/daemon_flow.md — cancel() (daemon.py:1603) sets _cancel_suppress_final=True and calls host.cancel(); the marked sentinel is consumed in on_final's suppression branch (:1130-1137); _touch_speech (:1354) is the daemon's next-utterance-start signal. tests/test_streaming_core.py:292 manually invokes stream.reset_boundary() ('next utterance begins') — the exact masking pattern this task replaces with daemon-event-driven coverage.\n2. INPUT: The engine resume() (clears _suppressed) from P1.M1.T2.S1; daemon seams _touch_speech/_on_partial/cancel/_reset_stream_after_cancel (:1437).\n3. LOGIC: PRD h2.2/h3.1 + h2.5: call the engine resume from _touch_speech() (preferred — fires on real speech start) and/or when the sentinel is consumed in on_final's suppression branch; pick ONE wiring point and record why in a comment. Add the daemon-level regression test the PRD h2.4/h2.5 demands (doubles only, tests/test_daemon.py :684 pattern): arm; d._on_partial('the quick brown') types; d.cancel(); assert the stale window (d._on_partial('late partial') types NOTHING); d._touch_speech(); d._on_partial('the quick brown fox') -> backend receives the live delta type call BEFORE any commit — the re-said sentence streams live. Mock the recorder with _StubRecorder/_FakeHost(consume_cancel_mark); no CUDA; AGENTS.md timeouts apply.\n4. OUTPUT: green daemon-level cancel-to-live-typing test + wiring; the same on_final branch is then touched by P1.M2.T7.S1 (sequence it after this).\n5. DOCS: none per-subtask — README §Backspace-cancel prose sweep is Mode B (P1.M3.T9)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T3",
+              "title": "BUG-003: Frozen commit omits the trailing space (glued words)",
+              "status": "Planned",
+              "description": "commit()'s frozen-absorb path (streaming.py:415-425) joins committed+tail without typing the append_space separator; after the daemon's post-commit reset_boundary lifts the user-keypress freeze, the next utterance's first word glues onto the tail. PRD h2.2/h3.2 + h2.5: append the trailing space in the frozen-absorb path.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T3.S1",
+                  "title": "Engine: type the trailing space in commit()'s frozen-absorb path",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h2.0", "h2.2", "h2.2/h3.2", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/streaming_engine.md — commit()'s frozen path (streaming.py:415-425) absorbs the tail with NO keystrokes and NO trailing space; the space is typed only in the non-frozen paths (:444 _safe_type(space), join +space). Trigger chain: note_user_keypress (:279, per-utterance freeze; the evdev listener routes ALL non-Backspace keys incl. Shift/Ctrl/CapsLock to it) -> frozen commit -> daemon reset_boundary (~:1243) lifts the freeze -> next utterance types flush against the absorbed tail.\n2. INPUT: StreamingOutput with the _append_space ctor flag; the freeze-class machinery as reworked by P1.M1.T1.S1; fake backend/feedback.\n3. LOGIC: PRD h2.2/h3.2 + h2.5: in the frozen-absorb path, when self._append_space, type the trailing space via _safe_type(' ') and account for it exactly once in the committed join (reuse the non-frozen path's rstrip discipline). Fail-safe note: _safe_type failure freezes SESSION-class (promote-only) — acceptable, state it in a comment. Write the failing test FIRST using the PRD h3.2 exact call sequence: StreamingOutput(backend, feedback, streaming=True, append_space=True); on_partial('Hello world'); commit('Hello world'); reset_boundary(); on_partial('the quick'); note_user_keypress(); commit('the quick'); reset_boundary(); on_partial('New sentence') -> screen reads 'Hello world the quick new sentence' (a space precedes the new fragment). Also assert append_space=False stays space-free. Verify: timeout 600 uv run pytest tests/test_streaming_commit.py tests/test_streaming_core.py -q.\n4. OUTPUT: corrected frozen-commit separator + green engine tests (consumed by P1.M3.T9 doc sweep).\n5. DOCS: none — no user-facing surface change (README already promises space-separated words)."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T4",
+              "title": "BUG-004: Add the listening gate to the partial typing path",
+              "status": "Planned",
+              "description": "_on_partial (daemon.py:1376) lacks the is_listening() race guard on_final has (:1121-1123), so a stale partial computed before a toggle-off types into the focused window while disarmed. PRD h2.2/h3.3 + h2.5; also makes tests/ACCEPTANCE.md row 4's existing claim true.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T4.S1",
+                  "title": "Daemon: gate _on_partial on is_listening; daemon-level stale-partial regression test",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.0", "h2.2", "h2.2/h3.3", "h2.4", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/daemon_flow.md — _on_partial (daemon.py:1376-1389) routes reader-thread partials straight into self._stream.on_partial(text) + self._latency.note_partial(text) with NO gate, while on_final's first statement (:1121-1123) is the listening race guard; recorder_host._dispatch relays 'partial' ungated (recorder_host.py:444-446). tests/ACCEPTANCE.md row 4 (:35) claims the flag 'gates BOTH the partial and commit paths' — false against the code until this lands.\n2. INPUT: VoiceTypingDaemon._listening (threading.Event), _on_partial, _latency.note_partial, engine.on_partial; test doubles _DaemonFakeFeedback/_StubRecorder/_FakeBackend/_ok_probe and the :684 construction pattern from tests/test_daemon.py.\n3. LOGIC: PRD h2.2/h3.3 + h2.5: add the same first-line guard on_final has — 'if not self._listening.is_set(): return' — BEFORE the engine routing and the latency note (a stray post-disarm partial must neither type nor count into latency). Write the failing test FIRST (PRD repro, daemon level, doubles only): d.start(); d._on_partial('hello there') -> backend.typed gains it; d.stop(); assert not d.is_listening(); d._on_partial('stray words') -> backend.typed UNCHANGED. Mock recorder/backend with the existing doubles; no CUDA; never run the daemon foreground (AGENTS.md). Verify: timeout 600 uv run pytest tests/test_daemon.py -k 'partial or listening' -q plus the new test name.\n4. OUTPUT: gated partial path + green daemon test; ACCEPTANCE row 4 becomes truthful.\n5. DOCS: [Mode A] Update tests/ACCEPTANCE.md row 4 evidence text to cite the new regression test (the claim itself is unchanged — now actually true). No README change (Mode B sweep re-verifies)."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Minor robustness fixes (BUG-005..BUG-008)",
+          "status": "Planned",
+          "description": "Control-socket empty-line hang, unknown config-table rejection, immediate stop after cancel, and case-insensitive extend matching. Four independent small fixes; the stop-after-cancel fix is sequenced after the cancel-path rework in P1.M1.T2 because they touch the same on_final suppression branch.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T5",
+              "title": "BUG-005: Control socket — reply to empty request lines",
+              "status": "Planned",
+              "description": "ControlServer._handle silently skips empty lines (daemon.py:2453-2454), hanging clients forever on a socket with no read timeout. Reply with the malformed-JSON error shape instead. PRD h2.3/h3.4 + h2.5.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T5.S1",
+                  "title": "Daemon: empty-line request gets a malformed-JSON error reply",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.0", "h2.3", "h2.3/h3.4", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/daemon_flow.md — ControlServer._handle (daemon.py:2444) strips each line and runs 'if not line: continue' (:2453-2454, comment: 'empty line -> skip (no response)'); malformed JSON is answered {'ok': False, 'error': 'malformed JSON: <exc>'} at :2496-2497; the control socket has NO read timeout (voice_typing/ctl.py send_command + AGENTS.md hazard table) — which is exactly why silence hangs clients.\n2. INPUT: ControlServer._handle/_dispatch as-is; round-trip test fixtures in tests/test_control_socket.py (test_round_trip_status :190 pattern uses an in-process ControlServer over a real socketpair/unix socket).\n3. LOGIC: PRD h2.3/h3.4 + h2.5: replace the silent continue with a reply in the SAME error shape, e.g. {'ok': False, 'error': 'malformed JSON: empty request line'}; keep serving subsequent lines on the same connection (do not close/break). Write the failing test FIRST at ROUND-TRIP level (the continue lives in _handle, not _dispatch): one connection sends an empty line (b'\\n') and a whitespace-only line (b'   \\n'), then a valid status request — each empty line must yield exactly one JSON error reply line and the status must still answer. No live daemon, no voicectl; in-process ControlServer only.\n4. OUTPUT: fixed _handle + green round-trip test.\n5. DOCS: [Mode A] Update the ControlServer class docstring behavior table (daemon.py ~:2338, 'malformed JSON -> ...' row) to document the empty-line reply; check README 'Logs, status, stopping' (:339) and update ONLY if it documents request framing."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T6",
+              "title": "BUG-006: Reject unknown top-level config tables",
+              "status": "Planned",
+              "description": "from_toml overlays only the six known tables and silently ignores a typo'd table name (e.g. [outpt]), disabling an entire feature section — contradicting config.toml's documented fail-fast contract. PRD h2.3/h3.5 + h2.5.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T6.S1",
+                  "title": "Config: unknown top-level table raises TypeError like unknown keys",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.0", "h2.3", "h2.3/h3.5", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/config_tests_docs.md — VoiceTypingConfig.from_toml (voice_typing/config.py:329-354) builds via _overlay(section_cls, table_name) for exactly six tables: asr, output, cancel, feedback, filter, log; data.get(table_name, {}) never inspects the remaining keys of data, so an unknown TABLE is silently dropped, while unknown KEYS raise TypeError via the dataclass __init__ (existing test: tests/test_config.py:135 test_from_toml_unknown_key_raises). config.toml header (:22) promises 'Unknown keys are REJECTED at load time'.\n2. INPUT: from_toml(data: Mapping) classmethod; callers from_toml_file (:356) and load (:361) are unaffected by the change.\n3. LOGIC: PRD h2.3/h3.5 + h2.5: compute the unknown top-level names as set(data) minus the six known table names and raise TypeError naming them (mirror the existing unknown-key message style so '[outpt]' fails as loudly as a typo'd key); run the check even when all known tables are valid. Write the failing test FIRST in tests/test_config.py next to :135: from_toml({'asr': <valid>, 'outpt': {'backend': 'ydotool'}}) raises TypeError (the PRD repro), while a fully-valid document still loads and partial documents keep working. Verify: timeout 600 uv run pytest tests/test_config.py tests/test_config_repo_default.py -q.\n4. OUTPUT: loud from_toml + green tests.\n5. DOCS: [Mode A] Extend the config.toml header comment (:22) and the from_toml docstring to state that unknown [table] names are rejected at load time too."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T7",
+              "title": "BUG-007: Stop immediately after a Backspace-cancel",
+              "status": "Planned",
+              "description": "The cancelled sentinel's early return in on_final skips _final_pending=False, so stop-after-cancel takes a pointless ~5s graceful-drain abort for a final that can never come. PRD h2.3/h3.6 + h2.5.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T7.S1",
+                  "title": "Daemon: clear _final_pending when the cancelled sentinel is consumed",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S2"],
+                  "prd_selectors": ["h2.0", "h2.3", "h2.3/h3.6", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/daemon_flow.md — on_final's suppression branch (daemon.py:1130-1137) returns BEFORE 'self._final_pending = False' (:1165); _request_stop (:1391) drains iff host is not None AND _text_in_flight.is_set() AND _final_pending — after a cancel all three hold, so stop waits the _DRAIN_TIMEOUT_S=5.0 watchdog (:149, timer at :1644) for a final whose audio was discarded.\n2. INPUT: The suppression branch as reworked by P1.M1.T2.S2; cancel() (:1603) and _reset_stream_after_cancel (:1437); existing mocked drain tests in tests/test_daemon.py (29 per ACCEPTANCE row 10) for assertion style.\n3. LOGIC: PRD h2.3/h3.6 + h2.5: clear _final_pending exactly when the cancelled sentinel is consumed (inside the suppression branch when consume_cancel_mark() returns True) — NOT unconditionally in cancel(), so a racing REAL final dropped by the same window cannot leave a stale pending flag either way; the sentinel closes the window, and only then is nothing pending. Do not change _request_stop's condition itself. Write the failing test FIRST (doubles only): arm; d._touch_speech() (flags the in-flight utterance); d.cancel(); then d._request_stop() -> the IMMEDIATE branch runs (disarm without _begin_drain — assert no drain timer / no watchdog arming, mirroring existing drain tests' style). Mock recorder with _StubRecorder/_FakeHost(consume_cancel_mark); no CUDA.\n4. OUTPUT: immediate stop-after-cancel + green daemon test.\n5. DOCS: none — no user-facing surface change."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T8",
+              "title": "BUG-008: Case-insensitive prefix matching in the EXTEND path",
+              "status": "Planned",
+              "description": "on_partial's EXTEND test is case-sensitive (streaming.py:328) while the casing guard lowercases fresh mid-sentence fragments, so capitalized decoder partials can never extend the guarded tail — every cycle becomes a rate-limited full rewind. PRD h2.3/h3.7 + h2.5.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T8.S1",
+                  "title": "Engine: normalize case for the extend comparison only",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S1"],
+                  "prd_selectors": ["h2.0", "h2.3", "h2.3/h3.7", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/streaming_engine.md — the EXTEND test 'if self._tail and text.startswith(self._tail)' (streaming.py:328) is case-sensitive, but textproc.apply_streaming_guards (textproc.py:107-134, rule (a)) lowercases the first cased character of a fresh mid-sentence fragment (committed not ending ./!?), so the guarded tail ('the quick') never prefix-matches the decoder's capitalized partials ('The quick brown...') -> full rewind+retype each cycle, throttled only by the 300ms rate limiter. commit()'s extend branch uses the same startswith pattern (~:417).\n2. INPUT: StreamingOutput.on_partial EXTEND/REVISE branches (as they exist after P1.M1.T1.S1/P1.M1.T2.S1 landed); _guard_context_delta (:463); fake backend recording type_text/press_backspace calls.\n3. LOGIC: PRD h2.5 recommendation: normalize case for the prefix COMPARISON ONLY — typed output keeps the decoder's casing; delta = text[len(self._tail):] guarded as today. Use a LENGTH-PRESERVING normalization (beware casefold changing lengths, e.g. 'İ'; if the lowered prefix slice does not match by length, fall back to the REVISE path). Mirror the same comparison in commit()'s extend branch only if it keeps commit behavior consistent. Write the failing test FIRST from the PRD h3.7 repro: commit('and then he said'); reset_boundary(); partials 'Hello there' -> type 'hello there' (guarded); 'Hello there friend' -> EXTEND types ' friend' with ZERO press_backspace calls; 'Hello there friend how' -> EXTEND again; assert no full rewinds after the first cycle. Verify: timeout 600 uv run pytest tests/test_streaming_core.py tests/test_textproc.py -q.\n4. OUTPUT: case-insensitive extends + green tests.\n5. DOCS: none — internal flicker fix; README §Streaming dictation already promises delta typing."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Changeset-level documentation & acceptance sync (Mode B)",
+          "status": "Planned",
+          "description": "Final catch-all so the coherent delta ships with truthful docs: sweep README.md feature prose and refresh the tests/ACCEPTANCE.md evidence matrix once every implementing subtask has landed (per SOW §5 Mode B).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T9",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Update README.md §Streaming dictation / §Backspace-cancel / §Configuration for the corrected behaviors and refresh tests/ACCEPTANCE.md rows 4/11/12 evidence to cite the new regression tests. Runs LAST — depends on every implementing subtask.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T9.S1",
+                  "title": "README.md: sweep streaming/cancel/configuration prose",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T1.S2", "P1.M1.T2.S1", "P1.M1.T2.S2", "P1.M1.T3.S1", "P1.M1.T4.S1", "P1.M2.T5.S1", "P1.M2.T6.S1", "P1.M2.T7.S1", "P1.M2.T8.S1"],
+                  "prd_selectors": ["h1.0", "h2.0", "h2.1", "h2.1/h3.0", "h2.2", "h2.2/h3.1", "h2.2/h3.2", "h2.2/h3.3", "h2.3", "h2.3/h3.4", "h2.3/h3.5", "h2.3/h3.6", "h2.3/h3.7", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/config_tests_docs.md — README.md sections: Streaming dictation :129, Backspace-cancel :164, Configuration :197 (no docs/ dir exists in this repo).\n2. INPUT: The LANDED behaviors from every implementing subtask (P1.M1.T1.S1 through P1.M2.T8.S1): rejected finals recover at the next utterance; the re-said sentence after Backspace-cancel streams live; frozen commits separate words with the trailing space; stale partials never type while toggled off; empty control-socket lines get an error reply; unknown config tables are rejected; stop-after-cancel is immediate; mid-sentence extends match case-insensitively.\n3. LOGIC: Mode B changeset-level sweep (SOW §5): update README.md §Streaming dictation, §Backspace-cancel, and §Configuration ONLY where prose is now wrong or silent about a landed behavior (recovery after a rejected final, live re-say after cancel, config table rejection). Keep edits minimal and user-facing; do not restate engine internals. If a section needs no change, say so explicitly in the subtask result rather than forcing an edit.\n4. OUTPUT: updated README.md sections (or an explicit no-change verdict per section).\n5. DOCS: this IS the changeset-level docs task (Mode B)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T9.S2",
+                  "title": "tests/ACCEPTANCE.md: refresh rows 4/11/12 evidence",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P1.M3.T9.S1", "P1.M1.T1.S2", "P1.M1.T2.S2", "P1.M1.T3.S1", "P1.M1.T4.S1", "P1.M2.T5.S1", "P1.M2.T6.S1", "P1.M2.T7.S1", "P1.M2.T8.S1"],
+                  "prd_selectors": ["h1.0", "h2.0", "h2.2/h3.3", "h2.4", "h2.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/config_tests_docs.md — tests/ACCEPTANCE.md row 4 (:35) claims the listening flag 'gates BOTH the partial and commit paths' (made true by P1.M1.T4.S1, whose Mode-A edit already updated its evidence); rows 11-12 (:42-43) carry streaming/cancel criteria evidence.\n2. INPUT: The new regression test names/functions from the implementing subtasks: rejected-final recovery (P1.M1.T1.S2), cancel-to-live-typing (P1.M1.T2.S2), frozen-commit separator (P1.M1.T3.S1), stale-partial-after-disarm (P1.M1.T4.S1), empty-line reply (P1.M2.T5.S1), unknown-table rejection (P1.M2.T6.S1), stop-after-cancel (P1.M2.T7.S1).\n3. LOGIC: Mode B: refresh the evidence text of rows 4, 11 and 12 so every claim cites the new regression tests and is true against the fixed code (PRD h2.4: the current matrix masked the sequencing bugs; do not mark anything PASS that lacks a test citation). Do not invent evidence — cite only tests that exist and pass.\n4. OUTPUT: refreshed acceptance matrix rows.\n5. DOCS: this IS part of the changeset-level docs task (Mode B)."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

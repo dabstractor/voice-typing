@@ -1,0 +1,17 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+  h3.0 Issue 1: One rejected final (blocklist/min_chars) permanently kills all typed output for the rest of the armed session
+ h2.2 Major Issues (Should Fix)
+  h3.1 Issue 1: After Backspace-cancel, the re-said sentence loses live streaming: partials are suppressed until its commit (append-only Rev 1 behavior)
+  h3.2 Issue 2: User-keypress frozen commit omits the trailing space — next utterance's first word glues onto the previous tail
+  h3.3 Issue 3: No listening gate on the partial typing path — stale partials around toggle-off type text while the daemon is toggled off
+ h2.3 Minor Issues (Nice to Fix)
+  h3.4 Issue 1: Control socket: an empty request line gets no response, hanging clients on a socket with no read timeout
+  h3.5 Issue 2: Unknown top-level config TABLE is silently accepted while unknown KEYS are rejected — typo'd section name silently disables a feature
+  h3.6 Issue 3: Stop immediately after a Backspace-cancel blocks ~5s in a pointless drain
+  h3.7 Issue 4: Casing guard makes the guarded tail permanently mismatch capitalized partials — mid-sentence utterances revise by rate-limited full rewinds instead of clean deltas
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:28 list:3
