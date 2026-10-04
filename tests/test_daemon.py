@@ -474,9 +474,14 @@ class _DaemonFakeFeedback(_FakeFeedback):
         super().__init__()
         self.finals: list[str] = []
         self.listening_states: list[bool] = []
+        self.toasts: list[str] = []  # P1.M1.T1.S2: notify() recorder (the cue surface)
 
     def record_final(self, text: str) -> None:
         self.finals.append(text)
+
+    def notify(self, msg: str) -> None:
+        self.toasts.append(msg)
+        super().notify(msg)  # keep the base cold-load recorder (self.notifies) working
 
     def set_listening(self, listening: bool) -> None:
         self.listening_states.append(listening)
@@ -4630,7 +4635,11 @@ def test_on_final_streaming_rejected_final_freezes_tail_and_keeps_bookkeeping():
     d.on_final("hello")  # blocklisted -> clean() -> None
     assert be.typed == ["hello world"]  # frozen as-is: NO rewind, NO retype, NO space
     assert d._stream.frozen is True
-    assert d._stream.committed == ""  # checkpoint NOT advanced
+    # P1.M1.T1.S2 tree-drift note: the checkpoint assertion used to pin committed == ""
+    # ("NOT advanced"). The engine's BUG-001 companion fix (reset_boundary while frozen
+    # ABSORBS the tail into committed — keystroke-free) deliberately supersedes that:
+    # the on-screen tail must not be orphaned from the checkpoint. Keystrokes still NONE.
+    assert d._stream.committed == "hello world"  # tail absorbed, zero keystrokes
     assert d._final_pending is False  # bookkeeping ran despite the rejection
     assert d._utterance_finalized is True
     assert fb.finals == []
@@ -4648,6 +4657,48 @@ def test_on_final_streaming_false_rejected_final_is_plain_early_return():
     assert be.typed == []
     assert d._stream.frozen is False  # the engine is never touched in Rev 1 mode
     assert fb.finals == []
+
+
+def test_rejected_final_recovers_at_next_speech_with_cue(caplog):
+    """BUG-001 / P1.M1.T1.S2 — the PRD h2.1/h3.0 repro at daemon level: a rejected final
+    freezes the tail and cues the user (WARNING log + feedback.notify toast); a stray late
+    partial of the REJECTED utterance stays mirror-only and does NOT lift the freeze; the
+    NEXT utterance's speech event (_touch_speech -> engine resume()) unfreezes so the next
+    partial TYPES and the next final COMMITS (PRD h2.5: never a silent output death)."""
+    cfg = VoiceTypingConfig()
+    cfg.filter.blocklist = ["thank you."]
+    d, fb, rec, be = _make_daemon(cfg=cfg)
+    d.start()
+    d._on_partial("Hello world")
+    d.on_final("Hello world.")  # a normal utterance commits fine (sentence terminal: the
+    # next utterance's leading capital survives the §4.2quater R1a casing guard)
+    d._on_partial("thank you")  # the hallucination's on-screen tail
+    with caplog.at_level(logging.WARNING, logger="voice_typing.daemon"):
+        d.on_final("thank you.")  # blocklisted -> clean() -> None -> rejected branch
+    assert d._stream.frozen is True  # session freeze as-is (byte-identical bookkeeping)
+    assert any(
+        r.levelno == logging.WARNING and "rejected" in r.message
+        for r in caplog.records
+    ), "no WARNING logged on streaming rejection"
+    assert fb.toasts, "no user-visible cue on rejection"
+    assert any("filtered" in t or "hallucin" in t for t in fb.toasts)
+    n0 = len(be.typed)
+    d._on_partial("ank you")  # stray late partial of the REJECTED utterance
+    assert len(be.typed) == n0 and d._stream.frozen is True  # mirror-only, still frozen
+    d._touch_speech()  # the NEXT utterance's ('speech', {}) event
+    assert d._stream.frozen is False  # resume() lifted the non-backend freeze
+    d._on_partial("The next real sentence")
+    # Case-tolerant: the rejected final folds its unclean tail into the committed
+    # context ("Hello world thank you" — no terminal), so §4.2quater R1a lowercases
+    # the next fragment's first letter. The BEHAVIOR under test: typing resumed live.
+    assert any(
+        "the next real sentence" in t.lower() for t in be.typed
+    )  # LIVE typing resumed
+    d.on_final("The next real sentence")  # and the commit path still works
+    assert d._stream.frozen is False
+    assert (
+        "the next real sentence" in d._stream.committed.lower()
+    )  # checkpoint advanced
 
 
 def test_on_partial_routes_through_engine_in_streaming_mode():

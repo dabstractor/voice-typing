@@ -1161,6 +1161,17 @@ class VoiceTypingDaemon:
                     self._utterance_finalized = (
                         True  # validation Issue 2: this text() is done
                     )
+                    # BUG-001 / P1.M1.T1.S2: never a silent rejection (PRD h2.5). The tail
+                    # is frozen as-is and typing resumes at the next genuinely-new speech
+                    # (_touch_speech -> self._stream.resume()). notify() self-gates on
+                    # cfg.hypr_notify — no second gate here.
+                    logger.warning(
+                        "streaming: final rejected by filter (blocklist/min_chars); tail frozen "
+                        "as-is, typing resumes at next speech"
+                    )
+                    self._feedback.notify(
+                        "filtered hallucination — not typed; keep dictating"
+                    )
                 return
             self._final_pending = False  # the in-flight utterance is finalized; a pending drain can finish
             self._utterance_finalized = (
@@ -1369,6 +1380,13 @@ class VoiceTypingDaemon:
         text() for the NEXT one). _utterance_finalized is reset False only when the run loop
         (re-)enters text(), so a stray late partial cannot resurrect a ~5s drain.
         """
+        # BUG-001 / P1.M1.T1.S2: genuinely-new speech lifts a rejected-final freeze (and
+        # any post-cancel suppression, via the engine's resume()) so the NEW utterance
+        # streams live. Idempotent, no keystrokes, engine-internal lock only. Must run
+        # BEFORE the _final_pending guard: after a rejected final _utterance_finalized is
+        # already True, and resuming is needed precisely then. A stray late partial of the
+        # rejected utterance never reaches this hook — it arrives via _on_partial.
+        self._stream.resume()
         self._last_speech_monotonic = time.monotonic()
         if not self._utterance_finalized:
             self._final_pending = True

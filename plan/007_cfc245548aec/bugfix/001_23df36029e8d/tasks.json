@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "BUG-001: Scope the rejected-final freeze to the utterance (recover typed output after a blocklist/min_chars rejection)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "A single rejected final currently freezes StreamingOutput session-class (daemon.py:1154) — every later utterance of the armed session types nothing until re-arm. Introduce an explicit engine resume seam that a session-class rejected-final freeze does not survive, wire it to the daemon's next-speech signal, and add the user-visible rejection cue. Per PRD h2.1/h3.0 and h2.5; the fix must NOT be a naive session=False retag (daemon.py:1150-1153 comment explains why: reset_boundary() fires on the next line and stray late partials must stay inert).",
               "subtasks": [
                 {
@@ -41,7 +41,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Daemon: wire resume at next speech + user-visible rejected-final cue",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -67,7 +67,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Engine: resume() also clears post-cancel suppression",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
