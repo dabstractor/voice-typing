@@ -116,9 +116,10 @@ class StreamingOutput:
             origin freezes only — resume() (BUG-001).
         frozen_session: the class of the current freeze (False when not frozen
             or per-utterance).
-        suppressed: True after reset_after_cancel() -> mirror-only until the
-            next utterance boundary, so a stale late partial from the cancelled
-            utterance cannot re-type text right after a cancel.
+        suppressed: True after reset_after_cancel() -> mirror-only until resume()
+            (the daemon's next-speech seam) or the next reset_boundary(), so a
+            stale late partial from the cancelled utterance cannot re-type text
+            right after a cancel.
     """
 
     def __init__(
@@ -204,9 +205,12 @@ class StreamingOutput:
     def reset_after_cancel(self) -> None:
         """Fresh tail at the current cursor after a Backspace-cancel; committed UNCHANGED.
 
-        Also sets `suppressed`: until the next reset_boundary(), on_partial mirrors
-        only — a stale late partial from the cancelled utterance must not re-type
-        the fragment the user just deleted.
+        Also sets `suppressed`: on_partial mirrors only while suppressed — a stale
+        late partial from the cancelled utterance must not re-type the fragment the
+        user just deleted. Suppression lifts at resume() (the daemon's next-speech
+        seam — P1.M1.T1.S2 wiring) or the next reset_boundary(); in practice it is
+        resume(): the daemon fires NO boundary between a cancel and the next real
+        final (the sentinel final is dropped pre-commit, BUG-002).
         """
         with self._lock:
             self._tail = ""

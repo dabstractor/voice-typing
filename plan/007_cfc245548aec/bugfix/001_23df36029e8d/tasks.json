@@ -60,14 +60,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "BUG-002: Restore live streaming for the re-said sentence after Backspace-cancel",
-              "status": "Planned",
+              "status": "Researching",
               "description": "daemon.cancel() sets engine _suppressed until 'the next utterance boundary', but the cancelled sentinel final is dropped at on_final's suppression branch before any reset_boundary() fires — so every partial of the re-said sentence is mirror-only until its commit (Rev 1 append-only degradation). Lift the suppression at the next utterance START (speech event), per PRD h2.2/h3.1 and h2.5.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Engine: resume() also clears post-cancel suppression",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -84,7 +84,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Daemon: lift post-cancel suppression at next utterance start (daemon-level regression test)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1"

@@ -351,3 +351,40 @@ def test_resume_clears_post_cancel_suppression():
     stream.resume()                           # idempotent: second call is a no-op
     stream.on_partial("hello")
     assert be.calls == [("type", "hello")], "typing must resume after resume()"
+
+
+def test_cancel_then_resume_restores_live_delta_typing():
+    """BUG-002 / P1.M1.T2.S1 (the contract's full repro): post-cancel suppression
+    lifts at resume(), so the RE-SAID sentence streams LIVE again.
+
+    Daemon-flow rationale: a Backspace-cancel fires reset_after_cancel() (tail
+    cleared, _suppressed=True), but the daemon never fires reset_boundary()
+    between the cancel and the next real final — the sentinel final is dropped
+    BEFORE commit()/reset_boundary() can run (daemon.py:1130-1137). So until the
+    daemon calls resume() at the next genuinely-new speech (P1.M1.T1.S2 wiring;
+    T2.S2), on_partial must stay mirror-only; after resume(), the next partial
+    types for real against the committed checkpoint.
+    """
+    stream, be, fb = _make_stream()
+    stream.on_partial("Hello world")
+    stream.commit("Hello world")
+    stream.on_partial("the quick brown")
+    stream.reset_after_cancel()               # tail cleared; committed UNCHANGED
+    stream.on_partial("the quick brown fox")  # the re-said sentence begins
+    # Guard half — suppression HOLDS without resume(): zero NEW keystrokes (the
+    # stale partial of the cancelled utterance must not re-type anything).
+    assert be.calls == [
+        ("type", "Hello world"),
+        ("type", " "),                # commit's inter-final space
+        ("type", "the quick brown"),  # pre-cancel tail (daemon deletes it off-screen)
+    ], "suppression must HOLD until resume() — the stale partial typed NOTHING"
+    assert fb.partials[-1] == "the quick brown fox"  # suppressed: RAW partial mirrored
+    stream.resume()
+    stream.on_partial("the quick brown fox jumps")
+    # Landing half — live typing restored. reset_after_cancel() cleared the tail,
+    # so the landing is a FRESH START (no rewind, no rate-limit consult): exactly
+    # ONE guarded type of the full re-said sentence (observed, CRITICAL #1).
+    assert be.calls[-1] == ("type", "the quick brown fox jumps")
+    assert all(c[0] == "type" for c in be.calls), "no backspaces: nothing to rewind"
+    assert stream.committed == "Hello world " and stream.tail == "the quick brown fox jumps"
+    assert (stream.committed + stream.tail) == "Hello world the quick brown fox jumps"
