@@ -19,6 +19,7 @@ from voice_typing.config import (
     CancelConfig,
     FeedbackConfig,
     FilterConfig,
+    OutputConfig,
     VoiceTypingConfig,
 )
 
@@ -246,6 +247,70 @@ def test_cancel_unknown_key_raises():
     """A typo'd [cancel] key (on_backspce) surfaces as a loud TypeError, not silent ignore."""
     with pytest.raises(TypeError):
         VoiceTypingConfig.from_toml({"cancel": {"on_backspce": True}})
+
+
+# ---------------------------------------------------------------------------
+# BUG-006: unknown top-level TABLES are rejected exactly like unknown keys
+# ---------------------------------------------------------------------------
+
+def test_unknown_top_level_table_raises():
+    """A typo'd section header ([outpt]) must raise TypeError naming the table (BUG-006)."""
+    with pytest.raises(TypeError, match="outpt"):
+        VoiceTypingConfig.from_toml({"outpt": {"backend": "ydotool"}})
+
+
+def test_unknown_table_alongside_known_raises():
+    """Mixed known + unknown tables raise: the real-world typo from BUG-006's repro."""
+    with pytest.raises(TypeError, match="cancell"):
+        VoiceTypingConfig.from_toml(
+            {"asr": {"device": "cuda"}, "cancell": {"on_backspace": True}}
+        )
+
+
+def test_unknown_table_empty_mapping_content_raises():
+    """A bare typo'd section with NO keys still fails — the header itself is the typo."""
+    with pytest.raises(TypeError, match="typo"):
+        VoiceTypingConfig.from_toml({"typo": {}})
+
+
+def test_unknown_table_error_names_known_set():
+    """The message lists the known tables so the fix is actionable from journalctl alone."""
+    with pytest.raises(TypeError, match="known tables.*\\blog\\b"):
+        VoiceTypingConfig.from_toml({"outpt": {}})
+
+
+def test_all_known_tables_load():
+    """All six known tables together load fine and honor one override each."""
+    cfg = VoiceTypingConfig.from_toml(
+        {
+            "asr": {"device": "cuda"},
+            "output": {"backend": "null"},
+            "cancel": {"on_backspace": True},
+            "feedback": {"hypr_notify": False},
+            "filter": {"min_chars": 3},
+            "log": {"level": "DEBUG"},
+        }
+    )
+    assert cfg.asr.device == "cuda"
+    assert cfg.output.backend == "null"
+    assert cfg.cancel.on_backspace is True
+    assert cfg.feedback.hypr_notify is False
+    assert cfg.filter.min_chars == 3
+    assert cfg.log.level == "DEBUG"
+
+
+def test_empty_mapping_still_defaults():
+    """from_toml({}) -> pure defaults (the check must be a difference, not a whitelist)."""
+    cfg = VoiceTypingConfig.from_toml({})
+    assert cfg == VoiceTypingConfig()
+
+
+def test_known_subset_loads():
+    """A single known table loads; every other section keeps its defaults."""
+    cfg = VoiceTypingConfig.from_toml({"log": {"level": "DEBUG"}})
+    assert cfg.log.level == "DEBUG"
+    assert cfg.output.backend == OutputConfig().backend
+    assert cfg.filter.min_chars == FilterConfig().min_chars
 
 
 def test_lite_post_speech_silence_duration_default_and_round_trip_08():

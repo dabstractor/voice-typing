@@ -188,14 +188,14 @@
               "type": "Task",
               "id": "P1.M2.T6",
               "title": "BUG-006: Reject unknown top-level config tables",
-              "status": "Planned",
+              "status": "Complete",
               "description": "from_toml overlays only the six known tables and silently ignores a typo'd table name (e.g. [outpt]), disabling an entire feature section — contradicting config.toml's documented fail-fast contract. PRD h2.3/h3.5 + h2.5.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T6.S1",
                   "title": "Config: unknown top-level table raises TypeError like unknown keys",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/config_tests_docs.md — VoiceTypingConfig.from_toml (voice_typing/config.py:329-354) builds via _overlay(section_cls, table_name) for exactly six tables: asr, output, cancel, feedback, filter, log; data.get(table_name, {}) never inspects the remaining keys of data, so an unknown TABLE is silently dropped, while unknown KEYS raise TypeError via the dataclass __init__ (existing test: tests/test_config.py:135 test_from_toml_unknown_key_raises). config.toml header (:22) promises 'Unknown keys are REJECTED at load time'.\n2. INPUT: from_toml(data: Mapping) classmethod; callers from_toml_file (:356) and load (:361) are unaffected by the change.\n3. LOGIC: PRD h2.3/h3.5 + h2.5: compute the unknown top-level names as set(data) minus the six known table names and raise TypeError naming them (mirror the existing unknown-key message style so '[outpt]' fails as loudly as a typo'd key); run the check even when all known tables are valid. Write the failing test FIRST in tests/test_config.py next to :135: from_toml({'asr': <valid>, 'outpt': {'backend': 'ydotool'}}) raises TypeError (the PRD repro), while a fully-valid document still loads and partial documents keep working. Verify: timeout 600 uv run pytest tests/test_config.py tests/test_config_repo_default.py -q.\n4. OUTPUT: loud from_toml + green tests.\n5. DOCS: [Mode A] Extend the config.toml header comment (:22) and the from_toml docstring to state that unknown [table] names are rejected at load time too.",

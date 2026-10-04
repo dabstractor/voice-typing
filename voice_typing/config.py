@@ -310,6 +310,14 @@ class LogConfig:
     level: str = "INFO"  # "INFO" | "DEBUG" (case-insensitive at apply time)
 
 
+# BUG-006: the ONLY top-level TOML tables from_toml understands. Anything else in the
+# mapping is a typo'd SECTION header (e.g. [outpt]) — worse than a typo'd key, it would
+# silently disable the whole feature. Rejected loudly in from_toml (TypeError), matching
+# the unknown-KEY rejection the dataclass __init__ already performs. ALL-CAPS literal
+# (cf. textproc._TRAILING_PUNCT): one definition, never re-typed at the check site.
+_KNOWN_TABLES = frozenset({"asr", "output", "cancel", "feedback", "filter", "log"})
+
+
 @dataclass
 class VoiceTypingConfig:
     """Top-level config aggregating all PRD §4.5 sub-sections."""
@@ -327,13 +335,24 @@ class VoiceTypingConfig:
     def from_toml(cls, data: Mapping[str, Any]) -> VoiceTypingConfig:
         """Build a config from an already-parsed TOML mapping.
 
-        Each table ([asr]/[output]/[cancel]/[feedback]/[filter]) overlays its dataclass
-        defaults — only present keys override; missing tables/keys keep defaults.
-        Unknown keys raise TypeError (dataclass __init__ rejects them) so a typo'd
-        config key surfaces loudly instead of being silently ignored. Malformed
-        TOML is caught upstream by tomllib (TOMLDecodeError); a scalar where a
-        table is expected raises TypeError via the Mapping check here.
+        Each table ([asr]/[output]/[cancel]/[feedback]/[filter]/[log]) overlays its
+        dataclass defaults — only present keys override; missing tables/keys keep
+        defaults. Unknown keys raise TypeError (dataclass __init__ rejects them) so a
+        typo'd config key surfaces loudly instead of being silently ignored. Unknown
+        top-level TABLES raise TypeError the same way (BUG-006): a typo'd section
+        header like [outpt] would otherwise silently disable an entire feature.
+        Malformed TOML is caught upstream by tomllib (TOMLDecodeError); a scalar where
+        a table is expected raises TypeError via the Mapping check here.
         """
+        # BUG-006 fail-fast gate BEFORE any overlay runs: reject typo'd section names.
+        # Difference (not a whitelist match) so {} and known subsets stay valid; table
+        # CONTENT validation stays with each section's own __init__/__post_init__.
+        unknown = set(data) - _KNOWN_TABLES
+        if unknown:
+            raise TypeError(
+                f"unknown config table(s): {', '.join(f'[{t}]' for t in sorted(unknown))}; "
+                f"known tables: {', '.join(sorted(_KNOWN_TABLES))}"
+            )
 
         def _overlay(section_cls, table_name):
             section = data.get(table_name, {})
