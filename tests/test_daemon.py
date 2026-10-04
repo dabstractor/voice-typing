@@ -4886,11 +4886,13 @@ def test_on_final_user_keypress_frozen_commit_absorbs_then_unfreezes():
     d.note_user_keypress()
     assert d._stream.frozen is True
     d.on_final("hello world")
-    assert be.typed == ["hello wor"]  # frozen-absorb: no further keystrokes
+    # Frozen-absorb: the tail text adds no keystrokes, but the commit still honors append_space
+    # (commit aae7060, BUG-003: otherwise the next utterance's first word glues to the tail).
+    assert be.typed == ["hello wor", " "]
     assert d._stream.committed == "hello wor"
     assert d._stream.frozen is False  # lifted at the boundary, after the commit
     d._on_partial("next")
-    assert be.typed == ["hello wor", "next"]  # the next utterance types normally
+    assert be.typed == ["hello wor", " ", "next"]  # the next utterance types normally
 
 
 def test_drain_timeout_freezes_pending_tail_session_class():

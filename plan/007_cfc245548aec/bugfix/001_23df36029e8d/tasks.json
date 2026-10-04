@@ -164,14 +164,14 @@
               "type": "Task",
               "id": "P1.M2.T5",
               "title": "BUG-005: Control socket — reply to empty request lines",
-              "status": "Planned",
+              "status": "Complete",
               "description": "ControlServer._handle silently skips empty lines (daemon.py:2453-2454), hanging clients forever on a socket with no read timeout. Reply with the malformed-JSON error shape instead. PRD h2.3/h3.4 + h2.5.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T5.S1",
                   "title": "Daemon: empty-line request gets a malformed-JSON error reply",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/daemon_flow.md — ControlServer._handle (daemon.py:2444) strips each line and runs 'if not line: continue' (:2453-2454, comment: 'empty line -> skip (no response)'); malformed JSON is answered {'ok': False, 'error': 'malformed JSON: <exc>'} at :2496-2497; the control socket has NO read timeout (voice_typing/ctl.py send_command + AGENTS.md hazard table) — which is exactly why silence hangs clients.\n2. INPUT: ControlServer._handle/_dispatch as-is; round-trip test fixtures in tests/test_control_socket.py (test_round_trip_status :190 pattern uses an in-process ControlServer over a real socketpair/unix socket).\n3. LOGIC: PRD h2.3/h3.4 + h2.5: replace the silent continue with a reply in the SAME error shape, e.g. {'ok': False, 'error': 'malformed JSON: empty request line'}; keep serving subsequent lines on the same connection (do not close/break). Write the failing test FIRST at ROUND-TRIP level (the continue lives in _handle, not _dispatch): one connection sends an empty line (b'\\n') and a whitespace-only line (b'   \\n'), then a valid status request — each empty line must yield exactly one JSON error reply line and the status must still answer. No live daemon, no voicectl; in-process ControlServer only.\n4. OUTPUT: fixed _handle + green round-trip test.\n5. DOCS: [Mode A] Update the ControlServer class docstring behavior table (daemon.py ~:2338, 'malformed JSON -> ...' row) to document the empty-line reply; check README 'Logs, status, stopping' (:339) and update ONLY if it documents request framing.",

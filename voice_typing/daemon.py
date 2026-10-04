@@ -2360,7 +2360,9 @@ class ControlServer:
       {"cmd":"toggle"|"start"|"stop"|"status"} -> {"ok":true, **daemon.status_snapshot()}
       {"cmd":"cancel"}                         -> {"ok":true, **daemon.status_snapshot()}  (idempotent; T7.S1)
       {"cmd":"quit"}                           -> {"ok":true,"shutting_down":true}  (+ request_shutdown)
-      malformed JSON                           -> {"ok":false,"error":"malformed JSON: ..."}
+      malformed JSON (incl. empty/whitespace-only lines — BUG-005: silence would hang a
+                                   client forever on this timeout-less socket)
+                                   -> {"ok":false,"error":"malformed JSON: ..."}
       non-dict JSON                            -> {"ok":false,"error":"request must be a JSON object"}
       unknown/missing cmd                      -> {"ok":false,"error":"unknown command: ..."}
     """
@@ -2467,7 +2469,12 @@ class ControlServer:
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn: Any) -> None:
-        """Per-connection readline loop: parse JSON, dispatch, write one JSON line per request."""
+        """Per-connection readline loop: parse JSON, dispatch, write one JSON line per request.
+
+        EVERY request line — including empty/whitespace-only ones (BUG-005) — gets exactly one
+        response line: an empty line is just malformed JSON, and silence would hang a client
+        forever on this timeout-less socket (the exact AGENTS.md wedge-hazard class).
+        """
         rfile = wfile = None
         try:
             rfile = conn.makefile("r", encoding="utf-8", newline="\n")
@@ -2475,8 +2482,9 @@ class ControlServer:
             try:
                 for line in rfile:  # one JSON object per line (PRD §4.2(3))
                     line = line.strip()
-                    if not line:
-                        continue  # empty line -> skip (no response)
+                    # No empty-line special case (BUG-005): "" falls through to _dispatch,
+                    # where json.loads("") raises ValueError -> the standard malformed-JSON
+                    # error reply. One response line per request line, no exceptions.
                     response = self._dispatch(line)
                     wfile.write(json.dumps(response) + "\n")
                     wfile.flush()  # CRITICAL: makefile("w") buffers; flush every reply

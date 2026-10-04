@@ -180,6 +180,15 @@ def test_dispatch_malformed_json():
     assert r["ok"] is False and r["error"].startswith("malformed JSON:")
 
 
+def test_dispatch_empty_line():
+    # BUG-005: an empty request line is just malformed JSON — it must get the standard error
+    # reply, never silence (silence hangs a client forever on the timeout-less control socket).
+    for line in ("", "   "):
+        r = _disp(line)
+        assert r["ok"] is False
+        assert r["error"].startswith("malformed JSON:")
+
+
 def test_dispatch_non_dict_json():
     for bad in ('"a string"', "42", "[1,2]"):
         assert _disp(bad) == {"ok": False, "error": "request must be a JSON object"}
@@ -212,6 +221,42 @@ def test_round_trip_multi_line_one_connection(server):
     assert len(lines) == 3
     assert json.loads(lines[0])["listening"] is True
     assert json.loads(lines[1])["listening"] is False
+
+
+def test_round_trip_empty_line_gets_error_reply(server):
+    # BUG-005: the reported hang — a bare newline (and a whitespace-only line) used to get NO
+    # response, wedging the client on the timeout-less socket. Each must now yield exactly one
+    # malformed-JSON error line (the _send helper itself is the hang repro: it blocks until a
+    # reply line arrives).
+    _srv, path = server
+    for raw in (b"\n", b"   \n"):
+        r = json.loads(_send(path, raw))
+        assert r["ok"] is False
+        assert r["error"].startswith("malformed JSON:")
+
+
+def test_round_trip_empty_line_mid_connection(server):
+    # BUG-005: an error reply mid-connection must neither kill the loop nor desync the
+    # one-response-per-request-line lockstep: valid, empty, valid over ONE connection -> 3 replies.
+    _srv, path = server
+    payload = (
+        json.dumps({"cmd": "start"}) + "\n\n" + json.dumps({"cmd": "status"}) + "\n"
+    ).encode()
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.connect(path)
+    c.sendall(payload)
+    data = b""
+    while data.count(b"\n") < 3:
+        chunk = c.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    c.close()
+    lines = [ln for ln in data.decode().splitlines() if ln]
+    assert len(lines) == 3
+    assert json.loads(lines[0])["listening"] is True  # valid request 1 processed
+    assert json.loads(lines[1])["ok"] is False        # empty line -> malformed-JSON reply
+    assert json.loads(lines[2])["ok"] is True          # loop survived; valid request 2 processed
 
 
 def test_round_trip_quit(server):
