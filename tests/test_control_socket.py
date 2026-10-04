@@ -32,7 +32,7 @@ class _StubDaemon:
         self._snapshot = snapshot or {
             "listening": listening, "mode": "lite", "phase": "idle", "models_loaded": True,
             "load_error": "", "partial": "", "last_final": "", "uptime_s": 0.0,
-            "device": "cuda", "compute_type": "float16", "model": "small.en",
+            "device": "cuda", "compute_type": "float32", "model": "small.en",
             "mic_ok": True, "mic_error": "",
         }
     def toggle(self):

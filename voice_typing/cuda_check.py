@@ -1,6 +1,6 @@
 """CUDA smoke check + degraded-mode decision for the voice-typing daemon.
 
-Decides whether the daemon runs on GPU (device="cuda", compute_type="float16",
+Decides whether the daemon runs on GPU (device="cuda", compute_type="float32",
 model="small.en") or falls back to CPU (device="cpu", compute_type="int8",
 model="tiny.en"), per PRD §4.4 and the Rev 2 single-mode collapse
 (§4.2ter/§4.2quater): ONE model (the small model) serves BOTH realtime
@@ -43,9 +43,14 @@ from typing import Mapping
 
 # PRD §4.4/§4.2ter (Rev 2 single-mode) — the config the daemon WANTS when CUDA works.
 # ONE model (the small model) serves BOTH realtime partials and final transcription.
+# compute_type is float32, NOT float16, because this daemon targets a GeForce 940MX
+# (GM108M, compute capability 5.0 / Maxwell): cuBLAS fp16 GEMM requires CC >= 5.3 and
+# the int8 DP4A path requires CC >= 6.1, so float32 is the only compute type every
+# CUDA op supports on that card. A float16 request would fail at WhisperModel
+# construction and silently drag the daemon to the CPU fallback.
 CUDA_DEFAULTS: dict[str, str] = {
     "device": "cuda",
-    "compute_type": "float16",
+    "compute_type": "float32",
     "model": "small.en",
 }
 

@@ -71,7 +71,7 @@ voicectl_status (run 1 post-run):
   partial: 
   last: 
   uptime: 122.888s
-  device: cuda (float16)
+  device: cuda (float32)
   mic: ok
   context-prompt: on
 systemd_unit:

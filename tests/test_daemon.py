@@ -155,7 +155,7 @@ def test_cfg_to_kwargs_single_model_fills_both_slots(cfg):
     cuda_check probe, so this is deterministic with NO CUDA and NO monkeypatch.
     """
     kw = daemon.cfg_to_kwargs(
-        cfg, resolved={"device": "cuda", "compute_type": "float16", "model": "small.en"}
+        cfg, resolved={"device": "cuda", "compute_type": "float32", "model": "small.en"}
     )
     assert kw["model"] == "small.en"
     assert kw["realtime_model_type"] == "small.en"
@@ -165,7 +165,7 @@ def test_cfg_to_kwargs_single_model_fills_both_slots(cfg):
     assert (
         kw["post_speech_silence_duration"] == cfg.asr.lite_post_speech_silence_duration
     )
-    assert kw["device"] == "cuda" and kw["compute_type"] == "float16"
+    assert kw["device"] == "cuda" and kw["compute_type"] == "float32"
     assert kw["language"] == cfg.asr.language
 
 
@@ -173,7 +173,7 @@ def test_cfg_to_kwargs_cuda_path(cfg, monkeypatch):
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     kw = daemon.cfg_to_kwargs(cfg)
     assert kw["device"] == "cuda"
-    assert kw["compute_type"] == "float16"
+    assert kw["compute_type"] == "float32"
     assert kw["model"] == "small.en"
     assert kw["realtime_model_type"] == "small.en"
 
@@ -321,7 +321,7 @@ def test_cfg_to_kwargs_calls_resolve_with_cfg_defaults(cfg, monkeypatch):
     }  # 3-key Rev 2 resolve contract (S1)
     assert d["model"] == cfg.asr.lite_model
     assert d["device"] == cfg.asr.device
-    assert d["compute_type"] == "float16"  # derived from device=='cuda'
+    assert d["compute_type"] == "float32"  # derived from device=='cuda'
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +595,7 @@ class _FakeHost:
         self.spawn_calls = 0
         self.spawn_result = True
         self.stop_calls = 0
-        self.device = {"device": "cuda", "compute_type": "float16", "model": "small.en"}
+        self.device = {"device": "cuda", "compute_type": "float32", "model": "small.en"}
         self._alive = False
         # P1.M2.T7.S1: cancel surface mirroring the real RecorderHost (cancel records the call and
         # rides the abort path; _cancel_mark mirrors the reader-side marked-sentinel flag that
@@ -1994,7 +1994,7 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
     # device/compute_type/model come from the UN-PROBED config (VT-001) until the child reports
     # its actual resolved device on arm. The defaults happen to equal CUDA_DEFAULTS, so this also
     # pins that the config<->cuda_check defaults have not drifted.
-    assert s["device"] == "cuda" and s["compute_type"] == "float16"
+    assert s["device"] == "cuda" and s["compute_type"] == "float32"
     assert s["model"] == "small.en"
     assert (
         s["mic_ok"] is True and s["mic_error"] == ""
@@ -2121,7 +2121,7 @@ def test_resolved_device_unaffected_by_cuda_check_failure(tmp_path, monkeypatch)
     assert (
         s["device"] == "cuda"
     )  # configured value; cuda_check never called, so no 'unknown'
-    assert s["compute_type"] == "float16"
+    assert s["compute_type"] == "float32"
 
 
 def test_status_snapshot_does_not_import_cuda_stack(tmp_path, monkeypatch):
@@ -4229,7 +4229,7 @@ def test_status_device_reseeded_not_stale_after_child_death(tmp_path, monkeypatc
         ), "VT-002 reseed did not land"
         # VT-002: reseeded to the CONFIGURED device (cuda), not stale at the dead child's cpu.
         snap = d.status_snapshot()
-        assert snap["device"] == "cuda" and snap["compute_type"] == "float16"
+        assert snap["device"] == "cuda" and snap["compute_type"] == "float32"
         assert snap["phase"] == "unloaded" and snap["models_loaded"] is False
     finally:
         d.request_shutdown()
@@ -4273,7 +4273,7 @@ def test_status_device_reseeded_not_stale_after_idle_unload(tmp_path, monkeypatc
     )
     # VT-002: reseeded to the CONFIGURED device (cuda), not stale at the unloaded child's cpu.
     snap = d.status_snapshot()
-    assert snap["device"] == "cuda" and snap["compute_type"] == "float16"
+    assert snap["device"] == "cuda" and snap["compute_type"] == "float32"
     assert snap["phase"] == "unloaded" and snap["models_loaded"] is False
 
 

@@ -112,7 +112,7 @@ class _PromptHost:
     ):
         self.device = {
             "device": "cuda",
-            "compute_type": "float16",
+            "compute_type": "float32",
             "model": "small.en",
             "context_prompt": bool(context_prompt),  # S1's additive ready flag
         }

@@ -160,7 +160,7 @@ def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     """
     defaults = {
         "device": cfg.asr.device,
-        "compute_type": "float16" if cfg.asr.device == "cuda" else "int8",
+        "compute_type": "float32" if cfg.asr.device == "cuda" else "int8",
         "model": cfg.asr.lite_model,
     }
     return cuda_check.resolve_device_and_models(defaults)
@@ -2249,7 +2249,7 @@ class VoiceTypingDaemon:
         """
         return {
             "device": self._cfg.asr.device,
-            "compute_type": "float16" if self._cfg.asr.device == "cuda" else "int8",
+            "compute_type": "float32" if self._cfg.asr.device == "cuda" else "int8",
             "model": self._cfg.asr.lite_model,
         }
 

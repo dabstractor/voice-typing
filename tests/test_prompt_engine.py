@@ -38,7 +38,7 @@ from voice_typing.prompt_engine import (
 )
 from voice_typing.recorder_host import _ready_payload, augment_kwargs_with_executor
 
-_RESOLVED_CUDA = {"device": "cuda", "compute_type": "float16", "model": "small.en"}
+_RESOLVED_CUDA = {"device": "cuda", "compute_type": "float32", "model": "small.en"}
 _LOG = logging.getLogger("prompt-engine-tests")
 
 
@@ -323,7 +323,7 @@ def test_executor_kwargs_injection_success():
     )
     assert isinstance(executor, _FakeExecutor)
     assert executor.warmed == 1  # the capability probe ran exactly once
-    assert executor.args == ("small.en", "cuda", "float16")
+    assert executor.args == ("small.en", "cuda", "float32")
     assert kwargs["transcription_executor"] is executor
     assert (
         kwargs["realtime_transcription_executor"] is executor
@@ -382,7 +382,7 @@ def test_executor_kwargs_probe_failure_degrades_with_one_info_line(caplog):
 
 
 def test_ready_payload_flag_true_and_false():
-    base = {"device": "cuda", "compute_type": "float16", "model": "small.en"}
+    base = {"device": "cuda", "compute_type": "float32", "model": "small.en"}
     ready = _ready_payload(base, True)
     assert ready["context_prompt"] is True
     assert ready["model"] == "small.en"

@@ -30,7 +30,7 @@ from voice_typing import ctl, daemon
 _STATUS_ON = {
     "ok": True, "listening": True, "phase": "listening", "models_loaded": True, "load_error": "",
     "partial": "hello wor", "last_final": "previous sentence.",
-    "uptime_s": 12.345, "device": "cuda", "compute_type": "float16",
+    "uptime_s": 12.345, "device": "cuda", "compute_type": "float32",
     "mode": "lite", "model": "small.en",                 # Rev 2 13-key snapshot (P1.M1.T2.S2/S3)
     "mic_ok": True, "mic_error": "",                       # bugfix Issue 2 / P1.M1.T2.S2
 }
@@ -67,7 +67,7 @@ def test_format_status_multiline_has_partial_and_mode():
     assert "phase: listening" in text                # P1.M2.T2.S1: lifecycle phase rendered
     assert "hello wor" in text                      # partial
     assert "models:" not in text                     # models line DROPPED (P1.M1.T2.S3); JSON-only now
-    assert "cuda" in text and "float16" in text      # device + compute_type
+    assert "cuda" in text and "float32" in text      # device + compute_type
     assert "12.345" in text                          # uptime
 
 

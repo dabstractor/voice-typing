@@ -249,8 +249,9 @@ key changes nothing.
 `silero_sensitivity`, `webrtc_sensitivity`, `min_length_of_recording`,
 `min_gap_between_recordings`, and `silero_backend` are **not** config keys. They are
 constants in `voice_typing/daemon.py` (the `_FIXED_KWARGS` dict). `compute_type` is
-also not a config key; it is derived from `device` (`float16` on cuda, `int8` on
-cpu).
+also not a config key; it is derived from `device` (`float32` on cuda, `int8` on
+cpu — float32 because the target GPU is a Maxwell-based 940MX, which has no
+usable fp16/int8 GEMM path).
 
 To change VAD sensitivity, edit `daemon.py` and restart the daemon. Do **not** add
 these names to `config.toml`. The config loader (`config.py`) rejects unknown keys —
@@ -382,7 +383,7 @@ phase: speaking
 partial: this is what i am say
 last: Previous sentence.
 uptime: 42.3s
-device: cuda (float16)
+device: cuda (float32)
 mic: ok
 context-prompt: on
 ```
