@@ -137,8 +137,10 @@ While you speak:
 
 - **Partials are typed live.** Each stabilized partial is diffed against what is on
   screen: an extension types only the delta; a revision deletes and retypes the changed
-  tail. Full rewind-and-retype cycles are rate-limited (≥300 ms apart — a code constant,
-  not a config key) so a wobbling decode cannot flicker.
+  tail. Extensions match case-insensitively, so a casing-corrected fragment still
+  extends by clean deltas instead of full rewinds. Full rewind-and-retype cycles are
+  rate-limited (≥300 ms apart — a code constant, not a config key) so a wobbling decode
+  cannot flicker.
 - **Silence trips the commit/correction pass.** After `asr.lite_post_speech_silence_duration`
   (default `0.8` s) of silence, the model re-decodes the complete utterance; if the
   correction differs from what is on screen, the tail is rewound and retyped, then the
@@ -148,13 +150,19 @@ While you speak:
   context (`asr.context_prompt`, back to the last sentence boundary, ~200-token cap), so
   a mid-paragraph fragment doesn't start capitalized or gain a spurious trailing period.
 - **A pause never ends the session.** Only `voicectl stop` (or toggle off) disarms the
-  mic; the graceful drain lets the in-flight commit land first.
+  mic — and while disarmed, nothing is ever typed: stale partials are gated exactly like
+  finals; the graceful drain lets the in-flight commit land first.
 
 Safety rails:
 
 - **Stranded tails freeze, never auto-delete.** If a commit can never land (a crash, an
   aborted teardown), the typed tail stays on screen exactly as last shown. The only thing
   that ever deletes typed text is an explicit cancel (below).
+- **Rejected finals recover.** A hallucination caught by `filter.blocklist` (or a final
+  below `filter.min_chars`) is not typed: that utterance's fragment freezes on screen as
+  last shown, a journal warning (and, if notifications are on, a brief toast) says
+  `filtered hallucination — not typed; keep dictating`, and live typing resumes with
+  your next words.
 - **Your keystrokes win.** Any non-Backspace keypress while a fragment is pending freezes
   it immediately and stops revising that utterance — the daemon never types over your
   cursor.
@@ -166,10 +174,15 @@ Safety rails:
 While dictating — a tentative fragment on screen — a physical **Backspace** press cancels
 it: the fragment is erased (by subtraction: the rewind compensates `len(tail) − 1`,
 because the keystroke itself already deleted one character), the buffered audio of the
-in-flight utterance is dropped, and the mic stays hot — just say the sentence again.
+in-flight utterance is dropped, and the mic stays hot — just say the sentence again;
+the re-said words type live again from their first words (the post-cancel pause lifts
+as soon as you speak).
 
 - **Idempotent:** Backspace presses with no pending fragment are plain user edits and are
   never compensated; `voicectl cancel` with nothing in flight is a no-op.
+- **Stop after a cancel is instant.** `voicectl stop` right after a cancel disarms
+  immediately — the cancelled utterance's audio is already gone, so the graceful drain
+  has nothing to wait for.
 - The listener is a passive, read-only evdev watcher over keyboard nodes exposing
   KEY_BACKSPACE. `[cancel].devices` overrides the auto-detection (e.g.
   `["/dev/input/event3"]`); virtual uinput/ydotool devices are always excluded, so the
@@ -240,10 +253,10 @@ also not a config key; it is derived from `device` (`float16` on cuda, `int8` on
 cpu).
 
 To change VAD sensitivity, edit `daemon.py` and restart the daemon. Do **not** add
-these names to `config.toml`. The config loader (`config.py`) rejects unknown keys
-with `TypeError`, so a stray key makes the daemon fail to load and systemd's
-`Restart=on-failure` loops it forever. A value of the **wrong type** is rejected the
-same way: `auto_stop_idle_seconds = "thirty"` (a string where a number is expected)
+these names to `config.toml`. The config loader (`config.py`) rejects unknown keys —
+and unknown top-level tables — with `TypeError`, so a stray key *or a mistyped section
+name* makes the daemon fail to load and systemd's `Restart=on-failure` loops it
+forever. A value of the **wrong type** is rejected the same way: `auto_stop_idle_seconds = "thirty"` (a string where a number is expected)
 or `device = 123` (a number where a string is expected) raises `TypeError` at load
 with a message naming the field, rather than loading silently and breaking the
 feature at runtime. Bare integers are accepted for numeric fields; a `true`/`false`
