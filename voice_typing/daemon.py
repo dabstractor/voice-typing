@@ -1406,6 +1406,10 @@ class VoiceTypingDaemon:
         Called from the host reader thread (daemon thread). The engine never raises
         (backend calls are fail-safe wrapped).
         """
+        if (
+            not self._listening.is_set()
+        ):  # GATE: race guard (BUG-004 / P1.M1.T4.S1) — a stray
+            return  #   post-disarm partial must neither type nor count into latency
         self._stream.on_partial(text)
         self._latency.note_partial(text)
 

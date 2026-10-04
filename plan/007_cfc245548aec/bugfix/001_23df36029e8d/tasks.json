@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Critical & major streaming state-machine fixes (BUG-001..BUG-004)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Restore correct engine/daemon sequencing: rejected finals must not kill the session's output, the re-said sentence after Backspace-cancel must stream live, frozen commits must separate words, and stale partials must never type while toggled off. Engine work is sequenced (shared resume seam, then frozen-path space, then case-insensitive extends) to avoid conflicts in streaming.py.",
           "tasks": [
             {
@@ -130,14 +130,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "BUG-004: Add the listening gate to the partial typing path",
-              "status": "Ready",
+              "status": "Complete",
               "description": "_on_partial (daemon.py:1376) lacks the is_listening() race guard on_final has (:1121-1123), so a stale partial computed before a toggle-off types into the focused window while disarmed. PRD h2.2/h3.3 + h2.5; also makes tests/ACCEPTANCE.md row 4's existing claim true.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Daemon: gate _on_partial on is_listening; daemon-level stale-partial regression test",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: plan/007_cfc245548aec/bugfix/001_23df36029e8d/architecture/daemon_flow.md — _on_partial (daemon.py:1376-1389) routes reader-thread partials straight into self._stream.on_partial(text) + self._latency.note_partial(text) with NO gate, while on_final's first statement (:1121-1123) is the listening race guard; recorder_host._dispatch relays 'partial' ungated (recorder_host.py:444-446). tests/ACCEPTANCE.md row 4 (:35) claims the flag 'gates BOTH the partial and commit paths' — false against the code until this lands.\n2. INPUT: VoiceTypingDaemon._listening (threading.Event), _on_partial, _latency.note_partial, engine.on_partial; test doubles _DaemonFakeFeedback/_StubRecorder/_FakeBackend/_ok_probe and the :684 construction pattern from tests/test_daemon.py.\n3. LOGIC: PRD h2.2/h3.3 + h2.5: add the same first-line guard on_final has — 'if not self._listening.is_set(): return' — BEFORE the engine routing and the latency note (a stray post-disarm partial must neither type nor count into latency). Write the failing test FIRST (PRD repro, daemon level, doubles only): d.start(); d._on_partial('hello there') -> backend.typed gains it; d.stop(); assert not d.is_listening(); d._on_partial('stray words') -> backend.typed UNCHANGED. Mock recorder/backend with the existing doubles; no CUDA; never run the daemon foreground (AGENTS.md). Verify: timeout 600 uv run pytest tests/test_daemon.py -k 'partial or listening' -q plus the new test name.\n4. OUTPUT: gated partial path + green daemon test; ACCEPTANCE row 4 becomes truthful.\n5. DOCS: [Mode A] Update tests/ACCEPTANCE.md row 4 evidence text to cite the new regression test (the claim itself is unchanged — now actually true). No README change (Mode B sweep re-verifies).",

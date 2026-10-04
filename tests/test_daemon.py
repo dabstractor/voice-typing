@@ -4962,3 +4962,31 @@ def test_child_death_branch_freezes_pending_tail_before_handle_dead_host():
     assert be.typed == ["hello wor"]  # zero keystrokes for the stranded tail
     d._disarm()  # the next disarm/arm cycle: engine strings reset, still no keystrokes
     assert be.typed == ["hello wor"]
+
+# ===========================================================================
+# P1.M1.T4.S1 — _on_partial listening gate (BUG-004): stale post-disarm partials
+# (on_final gates its first line (the race guard); _on_partial did NOT — a partial
+#  already in the IPC queue when the user toggles off typed AFTER the disarm. The
+#  gate also stops the state.json partial mirror + the latency count while off.)
+# ===========================================================================
+def test_on_partial_gated_on_listening_stale_partial_after_stop_types_nothing():
+    """A stray post-disarm partial neither types nor counts into latency (BUG-004).
+
+    Daemon-level repro (PRD h2.2/h3.3): arm, a partial types through the engine; stop()
+    clears the listening flag; a partial already computed/in the IPC queue arrives AFTER
+    the disarm — it must NOT reach the backend (case-preserved fresh-session text was
+    typed into the focused window before the gate) and must NOT reach the latency log.
+    Mirrors on_final's first-line race guard (daemon.py on_final GATE).
+    Side effect (intended, mirrors on_final): while toggled off the Feedback/state.json
+    partial mirror also stays quiet — the mirror lives inside _stream.on_partial.
+    """
+    d, _fb, _rec, be = _make_daemon()
+    d.start()
+    assert d.is_listening() is True
+    d._on_partial("hello there")            # armed: routed through the engine
+    assert "hello there" in "".join(be.typed)
+    d.stop()
+    assert d.is_listening() is False
+    before = list(be.typed)
+    d._on_partial("stray words")            # stale partial AFTER the disarm
+    assert be.typed == before, f"stale partial typed while toggled off: {be.typed!r}"
