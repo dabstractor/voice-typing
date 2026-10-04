@@ -75,7 +75,7 @@ phase "unit tests (pure-python)" 600 "$PY" -m pytest \
   tests/test_cuda_check.py tests/test_feedback.py tests/test_systemd_unit.py \
   tests/test_daemon.py tests/test_streaming_core.py tests/test_streaming_commit.py \
   tests/test_streaming_freeze.py tests/test_key_listener.py tests/test_prompt_engine.py \
-  tests/test_recorder_host.py -q
+  tests/test_context_prompt_refresh.py tests/test_recorder_host.py -q
 
 # --- Phase 3: offline ASR suite (CUDA, no mic) ----------------------------------
 # Loads real models (~1 min cold). Uses its own recorder (use_microphone=False), so it

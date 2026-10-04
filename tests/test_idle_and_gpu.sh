@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tests/test_idle_and_gpu.sh — idle stability (PRD §6 T4) + GPU residency (T6: 4-part lazy-load
-# lifecycle, PRD §6 T6 a/b/c/d + §4.2bis + §7.9) + offline (criterion 8).
+# lifecycle, PRD §6 T6 a/b/c/d + §4.2bis + §7.9) + offline (criterion 8) + single-model arming
+# (T7: PRD §4.2quater + acceptance #10/#12 — one-model asserts, VRAM window, cancel smoke).
 #
 # Stands up the REAL daemon via the PRODUCTION path (launch_daemon.sh — no pre-set env, so the
 # test exercises the real systemd -> wrapper flow). launch_daemon.sh exports HF_HUB_OFFLINE=1 +
@@ -21,12 +22,23 @@
 #   (a) BOOT with NO arm      → daemon tree ABSENT from nvidia-smi (~0 VRAM) — the lazy-load
 #       guarantee (M2.T1: the recorder is NOT built at boot; built on the first arm). MUST be
 #       measured BEFORE the first start.
-#   (b) after voicectl start  → daemon tree PRESENT, Σ used_memory ∈ [1024, 5120] MiB (models
-#       resident, phase loaded-listening).
+#   (b) after voicectl start  → daemon tree PRESENT, Σ used_memory ∈ [512, 3072] MiB (the ONE
+#       small.en model resident — Rev 2 single-mode; phase loaded-listening).
 #   (c) after voicectl stop   → daemon tree STILL PRESENT (models stay resident for instant
 #       re-arm; stop does NOT unload — only idle-unload does).
 #   (d) after auto_unload_idle_seconds DISARMED → daemon tree GONE (~0 VRAM reclaimed, PRD §7.9
 #       "verified via nvidia-smi"), then a later voicectl start → tree PRESENT again (reload).
+#
+# T7 single-model arming (PRD §4.2quater + acceptance #10/#12, Rev 2): after T6(c) the test
+# re-arms and asserts the COLLAPSED reality — exactly ONE model (the startup
+# 'voice-typing device resolved: device=cuda compute_type=float16 model=small.en' line fires ONCE
+# at startup via the cuda_check driver probe; ZERO 'distil-large-v3' anywhere in daemon.log — no
+# large-model worker), `mode: lite` in status while armed (a Rev 2 CONSTANT — no other mode
+# exists), armed VRAM inside the widened single-model window [512,3072] MiB (one small.en
+# ≈ 0.5-3 GB; the old two-model [1024,5120] window would spuriously FAIL the single-model arm at
+# the low end and ADMIT a two-model regression at the high end), and an armed no-op
+# `voicectl cancel` smoke (no tail in flight -> ok + listening stays on + idempotent —
+# acceptance #12's shell evidence).
 #
 # This needs TWO daemon runs (different configs):
 #   RUN 1 (default auto_unload_idle_seconds=1800): T6(a) → criterion-8 grep → criterion-6 un-armed
@@ -53,17 +65,18 @@
 #
 # Asserts on the daemon DESCENDANT TREE (daemon_tree_pids), NOT an arbitrary nvidia-smi row — the
 # tree matches whichever process (daemon or spawn worker) holds the context. PID presence/absence
-# is the hard signal (used_memory can lag/underreport; the [1024,5120] MiB range is secondary
+# is the hard signal (used_memory can lag/underreport; the [512,3072] MiB range is secondary
 # corroboration). POLLs (never a fixed sleep) for the unload/reload transitions — nvidia-smi is a
 # live uncached driver query but the unload fire + teardown + driver accounting have variance.
 #
-# Also exercises voicectl toggle/start/stop/status/quit (each must return ok) + greps the systemd
+# Also exercises voicectl toggle/start/stop/cancel/status/quit (each must return ok) + greps the systemd
 # unit for ExecStart → launch_daemon.sh + Restart=on-failure, and asserts the daemon BOOTS UN-ARMED
 # (voicectl status → `listening: off` right after ready — PRD §4.9; criterion 6).
 #
 # Prints a fenced `=== ACCEPTANCE EVIDENCE ===` block (real CPU %, real nvidia-smi rows + total for
-# all 4 T6 states, voicectl status, unit grep, per-criterion PASS/FAIL) — paste it verbatim into
-# tests/ACCEPTANCE.md (criteria 5/6/8/9). On FAIL it prints the daemon.log tail.
+# all 4 T6 states, the T7 single-model outputs — one-model grep, armed VRAM window, mode: lite,
+# cancel smoke — voicectl status, unit grep, per-criterion PASS/FAIL) — paste it verbatim into
+# tests/ACCEPTANCE.md (criteria 5/6/8/9/10). On FAIL it prints the daemon.log tail.
 #
 # Real stack: CUDA Whisper. Heavy (~5-8 min: 2 cold inits ~3-4 min each + the fixed 120 s
 # T4 window + idle-unload waits). Run explicitly; NOT collected by the fast pytest suite.
@@ -134,8 +147,8 @@ UNIT="$REPO/systemd/voice-typing.service"
 NVIDIA_SMI=/usr/bin/nvidia-smi
 IDLE_SECS=120                     # PRD §6 T4: 'silence for 120 s' (FIXED — do not shorten)
 CPU_LIMIT_PCT=25                  # < 25% of ONE core (PRD §6 T4; do NOT divide by nproc)
-VRAM_MIN_MIB=1024                 # PRD §6 T6: '~1 GB'
-VRAM_MAX_MIB=5120                 # PRD §6 T6: '~5 GB'
+VRAM_MIN_MIB=512                  # Rev 2 single-model arm: ONE small.en resident ≈ 0.5 GB (§4.2quater)
+VRAM_MAX_MIB=3072                 # ONE small.en ≈ 3 GB ceiling; old two-model 5120 would admit a two-model regression
 # voicectl's socket readline() has NO timeout (makefile is incompatible with settimeout, ctl.py
 # _send_command), so any daemon-side hang (e.g. a regression of the abort()-under-_lock wedge, or
 # the SIGTERM-path teardown stall) would hang voicectl FOREVER. Wrap the control commands in
@@ -440,7 +453,7 @@ cpu0="$(cpu_tree_seconds "$DAEMON_PID")"; wall0="$(date +%s)"
 voicectl start >/dev/null || die "voicectl start failed"
 echo "listening armed (silent mic); holding ${IDLE_SECS}s of silence..."
 
-# --- T6(b): after start → daemon tree PRESENT, Σ ∈ [1024,5120] MiB (models resident). POLL (the
+# --- T6(b): after start → daemon tree PRESENT, Σ ∈ [512,3072] MiB (the ONE model resident). POLL (the
 # cold load is ~1-3s; the start already waited for it, but give nvidia-smi a moment to settle).
 if wait_vram_present "$DAEMON_PID" 15; then
   T6B_OUT="$(vram_tree_state "$DAEMON_PID")"
@@ -532,98 +545,93 @@ fi
 # offline (not just that the daemon CAN run offline).
 echo "[PASS] criterion 8 (no network): daemon.log has ZERO 'HTTP Request: GET https://huggingface.co' lines (offline via launch_daemon.sh, not a test pre-set)"
 
-# ===================== T7 (PRD §4.2ter/§6 + acceptance #10): lite mode-switch roundtrip =====================
-# Drives the REAL daemon's mode-switch via voicectl: toggle-lite (normal->lite reload) -> disarm ->
-# toggle (lite->normal reload) -> status. Complements P1.M1.T2.S2's UNIT mode-switch tests (mocked
-# host) by proving the REAL reload + status mode end-to-end. Optional VRAM: lite-armed <
-# normal-armed (small.en only vs distil-large-v3+small.en). Placed LAST in Run 1 so the
-# normal->lite/lite->normal reloads do NOT corrupt the earlier T6(a/b/c) VRAM assertions
-# (CRITICAL #6 — the reload tears down + respawns the resident host, changing VRAM attribution).
-#   1. snapshot normal-armed VRAM (re-arm normal first if the mic was disarmed by auto-stop/T6(c)).
-#   2. voicectl toggle-lite  -> POLL status until 'mode: lite' (the normal->lite reload; ~1-3s).
-#      (optional) snapshot lite-armed VRAM; assert lite_total < normal_total (≈half; best-effort).
-#   3. voicectl toggle-lite  -> disarm (listening: off; mode stays lite).
-#   4. voicectl toggle       -> POLL status until 'mode: normal' (the lite->normal reload).
-#   5. voicectl status       -> assert 'mode: normal'.
-T7_OK=0   # T7 (lite mode-switch + VRAM) failures
-# --- 1. re-arm NORMAL + snapshot normal-armed VRAM (T6(c) left the mic disarmed+resident; arm it so
-# we measure the normal-armed VRAM on the SAME resident host the reloads will swap). The first arm
-# is ~1-3s on a cold resident set; subsequent resident arms reply in ms.
-voicectl start >/dev/null || die "T7: voicectl start (normal re-arm) failed"
+# ===================== T7 (PRD §4.2quater + acceptance #10): single-model arming =====================
+# Proves the COLLAPSED single-model daemon end-to-end on the REAL host: exactly ONE model
+# resident (small.en — the startup 'voice-typing device resolved:' line + ZERO 'distil-large-v3'
+# anywhere in daemon.log: no large-model worker, loader line, or cuda_check mention), the
+# constant 'mode: lite' status while armed (Rev 2 has NO second mode — the status mode value is
+# always 'lite'), armed VRAM inside the single-model [512,3072] MiB window (acceptance #10's
+# regenerated nvidia-smi evidence), and the armed no-op `voicectl cancel` smoke (acceptance
+# #12's shell evidence — PRD §4.2quater: cancel with no tail in flight is an idempotent no-op
+# that keeps listening on). Complements the mocked unit tests (tests/test_daemon.py single-model
+# suite) with real-process proof. Placed LAST in Run 1 (after T6 a/b/c + T4) so the extra
+# arm/disarm cannot corrupt the earlier VRAM lifecycle assertions.
+#   1. voicectl start (re-arm; the resident host is already single-model) + wait_vram_present.
+#   2. ONE-MODEL (log): grep run-1 daemon.log for the startup
+#      'voice-typing device resolved: device=cuda compute_type=float16 model=small.en' line
+#      (PASS required) AND assert 'distil-large-v3' NEVER matches.
+#   3. ONE-MODEL (status): `voicectl status` -> assert '^mode: lite' while armed.
+#   4. VRAM window: single-model [512,3072] MiB on the armed resident tree.
+#   5. CANCEL SMOKE: armed, no tail in flight -> cancel ok + listening stays on (idempotent).
+#   6. voicectl stop to disarm (clean state before quit).
+T7_OK=0   # T7 (single-model arming + VRAM window + cancel smoke) failures
+# --- 1. re-arm (T6(c) left the daemon disarmed+resident; the resident host is already
+# single-model — the first arm is ~1-3s on a cold resident set, subsequent arms reply in ms).
+voicectl start >/dev/null || die "T7: voicectl start (re-arm) failed"
 if ! wait_vram_present "$DAEMON_PID" 15; then
-  echo "[FAIL] T7: normal-armed tree not PRESENT within 15s (cannot snapshot baseline VRAM)"
-  T7_OK=1
-fi
-T7_NORMAL_VRAM="$(vram_tree_state "$DAEMON_PID")"
-T7_NORMAL_TOTAL="${T7_NORMAL_VRAM%% *}"
-echo "T7 baseline: normal-armed VRAM total=${T7_NORMAL_TOTAL} MiB [$T7_NORMAL_VRAM]"
-
-# --- 2. voicectl toggle-lite -> POLL status until 'mode: lite' (the normal->lite reload; ~1-3s).
-voicectl toggle-lite >/dev/null || die "T7: voicectl toggle-lite (normal->lite) failed"
-T7_LITE_MODE_OK=0
-for _ in $(seq 1 60); do           # 60 x 0.5s = 30s ceiling for the reload + status settle
-  if "$VOICECTL" status 2>/dev/null | grep -q '^mode: lite'; then
-    T7_LITE_MODE_OK=1; break
-  fi
-  kill -0 "$DAEMON_PID" 2>/dev/null || break
-  sleep 0.5
-done
-if [ "$T7_LITE_MODE_OK" = 1 ]; then
-  echo "[PASS] T7 mode-switch: toggle-lite -> mode: lite"
-else
-  echo "[FAIL] T7 mode-switch: toggle-lite did NOT reach 'mode: lite' within 30s"
-  "$VOICECTL" status 2>/dev/null | grep -E '^mode:|^listening:|^models:' | sed 's/^/    /' || true
-  T7_OK=1
-fi
-# (optional) snapshot lite-armed VRAM; assert lite_total < normal_total (≈half; best-effort <).
-T7_LITE_VRAM="$(vram_tree_state "$DAEMON_PID")"
-T7_LITE_TOTAL="${T7_LITE_VRAM%% *}"
-echo "T7 lite-armed VRAM total=${T7_LITE_TOTAL} MiB [$T7_LITE_VRAM]"
-if awk -v l="$T7_LITE_TOTAL" -v n="$T7_NORMAL_TOTAL" 'BEGIN{ exit !(l+0 < n+0) }'; then
-  echo "[PASS] T7 VRAM≈half: lite ${T7_LITE_TOTAL} MiB < normal ${T7_NORMAL_TOTAL} MiB (best-effort <)"
-else
-  echo "[WARN] T7 VRAM≈half: lite ${T7_LITE_TOTAL} MiB NOT < normal ${T7_NORMAL_TOTAL} MiB (best-effort; not fatal)"
-fi
-
-# --- 3. voicectl toggle-lite -> disarm (listening: off; mode stays lite). A second toggle-lite on
-# an already-armed lite daemon disarms it (mirrors the normal toggle's idempotent on/off).
-voicectl toggle-lite >/dev/null || die "T7: voicectl toggle-lite (disarm) failed"
-if "$VOICECTL" status 2>/dev/null | grep -q '^listening: off'; then
-  echo "[PASS] T7 disarm: second toggle-lite -> listening: off (mode still lite)"
-else
-  echo "[FAIL] T7 disarm: second toggle-lite did NOT disarm (expected 'listening: off')"
-  "$VOICECTL" status 2>/dev/null | grep -E '^mode:|^listening:' | sed 's/^/    /' || true
+  echo "[FAIL] T7: armed tree not PRESENT within 15s of start"
   T7_OK=1
 fi
 
-# --- 4. voicectl toggle -> POLL status until 'mode: normal' (the lite->normal reload; ONE reload).
-voicectl toggle >/dev/null || die "T7: voicectl toggle (lite->normal reload) failed"
-T7_NORMAL_MODE_OK=0
-for _ in $(seq 1 60); do           # 60 x 0.5s = 30s ceiling for the reload + status settle
-  if "$VOICECTL" status 2>/dev/null | grep -q '^mode: normal'; then
-    T7_NORMAL_MODE_OK=1; break
-  fi
-  kill -0 "$DAEMON_PID" 2>/dev/null || break
-  sleep 0.5
-done
-if [ "$T7_NORMAL_MODE_OK" = 1 ]; then
-  echo "[PASS] T7 mode-switch: toggle -> mode: normal (one bounded reload)"
+# --- 2. ONE-MODEL (log): the startup line fires ONCE at daemon start (the cuda_check driver
+# probe — independent of the lazy first-arm model load), so it is already in run-1's log. Grep
+# the RESOLVED line rather than hardcoding beyond what the CUDA run guarantees (on the CPU
+# fallback path the model would be tiny.en — but this suite requires nvidia-smi/CUDA).
+T7_RESOLVED_LINE="$(grep -m1 'voice-typing device resolved:' "$RUN1_LOG" || true)"
+echo "T7 resolved line: ${T7_RESOLVED_LINE:-<missing>}"
+if echo "$T7_RESOLVED_LINE" | grep -q 'device=cuda compute_type=float16 model=small.en'; then
+  echo "[PASS] T7 one-model (log): device=cuda compute_type=float16 model=small.en"
 else
-  echo "[FAIL] T7 mode-switch: toggle did NOT reach 'mode: normal' within 30s"
-  "$VOICECTL" status 2>/dev/null | grep -E '^mode:|^listening:' | sed 's/^/    /' || true
+  echo "[FAIL] T7 one-model: startup line missing/wrong (expected device=cuda compute_type=float16 model=small.en)"
+  T7_OK=1
+fi
+if grep -q 'distil-large-v3' "$RUN1_LOG"; then
+  echo "[FAIL] T7 one-model: distil-large-v3 appeared in daemon.log (two-model regression)"
+  grep -n 'distil-large-v3' "$RUN1_LOG" | head -n 5 | sed 's/^/    /' || true
+  T7_OK=1
+else
+  echo "[PASS] T7 one-model: small.en sole model (no distil-large-v3 anywhere in daemon.log)"
+fi
+
+# --- 3. ONE-MODEL (status): `voicectl status` reports the CONSTANT 'mode: lite' while armed
+# (daemon.py status payload — Rev 2 §4.6 schema-stable constant; there is no 'normal' mode).
+T7_MODE_LINE="$("$VOICECTL" status 2>/dev/null | grep -E '^mode:' || true)"
+echo "T7 mode line: ${T7_MODE_LINE:-<missing>}"
+if echo "$T7_MODE_LINE" | grep -q '^mode: lite'; then
+  echo "[PASS] T7 status: mode: lite (constant single-mode)"
+else
+  echo "[FAIL] T7 status: expected 'mode: lite' while armed, got '${T7_MODE_LINE:-<none>}'"
   T7_OK=1
 fi
 
-# --- 5. voicectl status -> assert 'mode: normal' (final confirmation).
-T7_STATUS="$("$VOICECTL" status 2>/dev/null || true)"
-echo "voicectl status (T7 final):"; echo "$T7_STATUS" | grep -E '^mode:|^listening:' | sed 's/^/  /' || true
-if echo "$T7_STATUS" | grep -q '^mode: normal'; then
-  echo "[PASS] T7 status: mode: normal (roundtrip complete)"
+# --- 4. VRAM window: ONE small.en resident ≈ 0.5-3 GB -> [512,3072] MiB (acceptance #10's
+# regenerated evidence; the old two-model [1024,5120] window is gone). T7-local check (the shared
+# assert_vram_present accumulates into T6_OK — a T7 failure must land in T7_OK).
+T7_ARMED_VRAM="$(vram_tree_state "$DAEMON_PID")"
+T7_ARMED_TOTAL="${T7_ARMED_VRAM%% *}"
+if awk -v t="$T7_ARMED_TOTAL" -v lo="$VRAM_MIN_MIB" -v hi="$VRAM_MAX_MIB" 'BEGIN{ exit !(t+0>=lo+0 && t+0<=hi+0) }'; then
+  echo "[PASS] T7 armed VRAM (single-model): ${T7_ARMED_TOTAL} MiB in [${VRAM_MIN_MIB},${VRAM_MAX_MIB}] [$T7_ARMED_VRAM]"
 else
-  echo "[FAIL] T7 status: final mode is NOT 'normal'"
+  echo "[FAIL] T7 armed VRAM (single-model): expected ${VRAM_MIN_MIB}-${VRAM_MAX_MIB} MiB, got ${T7_ARMED_TOTAL} MiB [$T7_ARMED_VRAM]"
   T7_OK=1
 fi
-# Disarm so the subsequent clean quit is a clean listening:off state.
+
+# --- 5. CANCEL SMOKE (acceptance #12 shell evidence): while armed with NO tail in flight,
+# `voicectl cancel` must return ok (exit 0), keep `listening: on`, and be a no-op (idempotent —
+# PRD §4.2quater). Control command through the timeout-wrapping voicectl() helper (G-TIMEOUTS);
+# status via the raw "$VOICECTL" (lock-free, never hangs — the script-wide convention).
+T7_CANCEL_RESULT="FAIL"
+if voicectl cancel >/dev/null 2>&1 \
+   && "$VOICECTL" status 2>/dev/null | grep -q '^listening: on'; then
+  T7_CANCEL_RESULT="ok"
+  echo "[PASS] T7 cancel smoke: voicectl cancel ok (no-op, no tail in flight), listening stays on"
+else
+  echo "[FAIL] T7 cancel smoke: cancel failed or disarmed the mic"
+  "$VOICECTL" status 2>/dev/null | grep -E '^listening:|^mode:' | sed 's/^/    /' || true
+  T7_OK=1
+fi
+
+# --- 6. disarm (clean listening:off state before the run-1 quit).
 voicectl stop >/dev/null 2>&1 || true
 
 # Clean quit of run 1 before run 2 (the default-config daemon; T4 + T6 a/b/c are done).
@@ -677,7 +685,7 @@ else
   echo "  daemon2.log idle-unload fire (empty = watchdog did NOT fire):"
   grep -n 'voice-typing idle-unload:' "$RUN2_LOG" | sed 's/^/    /' || true
   echo "  voicectl status phase (expect phase: unloaded + (not loaded) if the unload fired):"
-  "$VOICECTL" status | grep -E '^phase:|^models:|^listening:' | sed 's/^/    /' || true
+  "$VOICECTL" status | grep -E '^phase:|^listening:|^mode:' | sed 's/^/    /' || true
   echo "  NOTE: a FAIL here means the unload path did NOT release the CUDA context as seen by nvidia-smi"
   echo "  (PRD §7.9). This is a PRODUCTION bug in M1.T1/M3.T1, NOT a test bug. Do NOT weaken the assertion."
   T6_OK=1
@@ -700,7 +708,7 @@ echo "run 2 daemon stopped cleanly"
 
 # --- evidence block for tests/ACCEPTANCE.md (G-EVIDENCE-BLOCK) ---
 echo
-echo "=== ACCEPTANCE EVIDENCE (paste into tests/ACCEPTANCE.md, criteria 5/6/8/9) ==="
+echo "=== ACCEPTANCE EVIDENCE (paste into tests/ACCEPTANCE.md, criteria 5/6/8/9/10) ==="
 echo "run1_daemon_log: $RUN1_LOG"
 echo "run2_daemon_log: $RUN2_LOG"
 echo "idle_seconds: $IDLE_SECS"
@@ -712,8 +720,10 @@ echo "T6 (d) run2 boot (absent):   $T6D_BOOT_OUT"
 echo "T6 (d) active at stop:       $T6D_ACTIVE_BEFORE"
 echo "T6 (d) after idle-unload:    $T6D_GONE_OUT"
 echo "T6 (d) after re-arm reload:  $T6D_RELOAD_OUT"
-echo "T7 normal-armed VRAM (MiB):   $T7_NORMAL_VRAM"
-echo "T7 lite-armed VRAM (MiB):     $T7_LITE_VRAM"
+echo "T7 one-model grep:            ${T7_RESOLVED_LINE:-<missing>} (no distil-large-v3 in daemon.log)"
+echo "T7 armed VRAM (single-model): $T7_ARMED_VRAM"
+echo "T7 mode:                      ${T7_MODE_LINE:-<missing>}"
+echo "T7 cancel smoke:              $T7_CANCEL_RESULT (no-op, listening on)"
 echo "voicectl_status (run 1 post-run):"
 while IFS= read -r _line; do echo "  $_line"; done <<EOF
 $STATUS_RUN
@@ -726,7 +736,7 @@ echo "=== END ACCEPTANCE EVIDENCE ==="
 
 # --- result ---
 if [ "$IDLE_OK" = 0 ] && [ "$T6_OK" = 0 ] && [ "$T7_OK" = 0 ]; then
-  echo "=== IDLE+GPU PASS (criteria 5, 6, 8; T6 a/b/c/d lifecycle; T7 lite mode-switch) ==="
+  echo "=== IDLE+GPU PASS (criteria 5, 6, 8; T6 a/b/c/d lifecycle; T7 single-model arming) ==="
   exit 0
 else
   [ "$IDLE_OK" = 0 ] || echo "=== T4/criterion-5 FAIL ==="

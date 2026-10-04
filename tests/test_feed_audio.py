@@ -6,7 +6,8 @@ tests/out/*.wav fixtures (P1.M7.T1.S1) at REAL-TIME pacing, and asserts the five
   (a) partials start <1.5 s after speech onset + >=1 per 500 ms while speaking;
   (b) utt_pause.wav -> BOTH halves (the WhisperX-flaw regression);
   (c) utt_multi.wav -> 3 non-empty finals;
-  (d) fuzzy >=80% token overlap per utterance;
+  (d) fuzzy >=70% token overlap per utterance (small.en is the final model post-collapse;
+      PRD §6 T7b bar — the old >=80% was the distil-large-v3 bar);
   (e) final callback <=1.5 s after last speech sample fed (CUDA-gated; skipped on CPU).
 Plus a P1.M4.T1.S3 cross-check: the daemon emits the 'voice-typing latency:' log line + nothing is
 typed with a no-op backend.
@@ -248,6 +249,10 @@ def _wait_for(predicate: object, timeout: float = 30.0, interval: float = 0.05) 
     return bool(predicate())  # type: ignore[arg-type]
 
 
+# Single-model reality (Rev 2, §4.2quater): cfg_to_kwargs fills BOTH slots with resolved["model"]
+# (model == realtime_model_type == the lite_model config key — small.en on CUDA, tiny.en on CPU
+# fallback) and sets use_main_model_for_realtime=True, so exactly ONE construction exists; the
+# endpointer silence gate is cfg.asr.lite_post_speech_silence_duration (dataclass default 0.8).
 # --- session-scoped recorder (G-NOLOGFILE / G-SHUTDOWN); built ONCE, reused across tests --------
 @pytest.fixture(scope="session")
 def recorder() -> "Iterator[tuple[AudioToTextRecorder, _Collector]]":
@@ -265,7 +270,9 @@ def recorder() -> "Iterator[tuple[AudioToTextRecorder, _Collector]]":
     VoiceTypingConfig = deps["VoiceTypingConfig"]  # type: ignore[assignment]
     cfg = VoiceTypingConfig()
     col = _Collector()
-    kwargs = daemon.cfg_to_kwargs(cfg)  # cuda_check resolution already applied (G-CPU)
+    kwargs = daemon.cfg_to_kwargs(cfg)  # cuda_check resolution + SINGLE-MODEL collapse (G-CPU):
+    # model == realtime_model_type == resolved["model"], use_main_model_for_realtime=True,
+    # endpointer = cfg.asr.lite_post_speech_silence_duration (0.8 default; §4.2quater)
     kwargs["use_microphone"] = False  # THE override (PRD T1 feed path)
     kwargs.update(
         {
@@ -297,51 +304,6 @@ def recorder() -> "Iterator[tuple[AudioToTextRecorder, _Collector]]":
     # is_shut_down, sets BOTH start/stop_recording_event (waking any blocked wait_audio()/text()),
     # and joins the non-daemon transcript worker (research §3a/§3d). Run it on a helper thread with
     # a join timeout as a belt-and-suspenders against any hang, so the suite never wedges.
-    shutdown_thread = threading.Thread(target=_safe_shutdown, args=(rec,), daemon=True)
-    shutdown_thread.start()
-    shutdown_thread.join(timeout=30.0)
-
-
-# --- T7 (PRD §4.2ter/§6): the LITE recorder — ONE model (lite_model) via cfg_to_kwargs(lite=True) --
-# Mirrors the `recorder` fixture EXACTLY except cfg_to_kwargs(cfg) -> cfg_to_kwargs(cfg, lite=True),
-# which sets model=realtime_model_type=lite_model + use_main_model_for_realtime=True (verified:
-# the separate realtime engine never initializes -> exactly ONE model resident). Session-scoped so
-# normal (recorder) + lite (lite_recorder) coexist for the latency-comparison test (T7(c)).
-@pytest.fixture(scope="session")
-def lite_recorder() -> "Iterator[tuple[AudioToTextRecorder, _Collector]]":
-    global _DEPS
-    try:
-        deps = _load_deps()
-    except Exception as exc:  # pragma: no cover
-        pytest.skip(f"heavy deps unavailable: {exc!r}")
-    _DEPS = deps
-    AudioToTextRecorder = deps["AudioToTextRecorder"]  # type: ignore[assignment]
-    daemon = deps["daemon"]  # type: ignore[assignment]
-    VoiceTypingConfig = deps["VoiceTypingConfig"]  # type: ignore[assignment]
-    cfg = VoiceTypingConfig()
-    col = _Collector()
-    kwargs = daemon.cfg_to_kwargs(
-        cfg, lite=True
-    )  # THE lite swap (model=lite_model, use_main_model_for_realtime=True)
-    kwargs["use_microphone"] = False
-    kwargs.update(
-        {
-            "on_realtime_transcription_stabilized": col.add_partial,
-            "on_vad_start": col.on_vad_start,
-            "on_vad_stop": col.on_vad_stop,
-            "no_log_file": True,  # keep the repo clean (G-NOLOGFILE)
-        }
-    )
-    filtered = daemon._filter_kwargs_to_signature(kwargs, AudioToTextRecorder)
-    # G-SKIP-GUARDS: model/engine load happens in __init__. If construction fails because the
-    # optional transcription engine / models are absent on this box, SKIP cleanly instead of
-    # erroring the whole suite (the fast unit sweep `pytest tests/` must stay green).
-    try:
-        rec = AudioToTextRecorder(**filtered)
-    except Exception as exc:  # pragma: no cover — models/engine absent
-        pytest.skip(f"lite AudioToTextRecorder construction failed: {exc!r}")
-    yield rec, col
-    # G-SHUTDOWN teardown (same rationale as `recorder` — see above).
     shutdown_thread = threading.Thread(target=_safe_shutdown, args=(rec,), daemon=True)
     shutdown_thread.start()
     shutdown_thread.join(timeout=30.0)
@@ -439,7 +401,9 @@ def test_multi_yields_three_finals(
     finals = [f.strip() for f in col.finals if f.strip()]
     assert len(finals) == 3, f"expected 3 finals, got {finals!r}"
     for hyp, ref in zip(finals, MULTI_TEXTS):  # (d) per-utterance fuzzy
-        assert _token_overlap(hyp, ref) >= 0.80, (hyp, ref)
+        # small.en is the final model post-collapse -> PRD §6 T7b bar is >=0.70 (the old 0.80 was
+        # the distil-large-v3 bar from PRD §6 T1d, written when a second model existed).
+        assert _token_overlap(hyp, ref) >= 0.70, (hyp, ref)
 
 
 # ===================== CRITERION (d): fuzzy accuracy (simple + punct) =====================
@@ -452,7 +416,9 @@ def test_fuzzy_accuracy(
     finals = [f.strip() for f in col.finals if f.strip()]
     assert finals, f"no finals for {key}"
     joined = " ".join(finals)
-    assert _token_overlap(joined, ref) >= 0.80, (joined, ref)
+    # small.en is the final model post-collapse -> PRD §6 T7b bar is >=0.70 (the old 0.80 was
+    # the distil-large-v3 bar from PRD §6 T1d, written when a second model existed).
+    assert _token_overlap(joined, ref) >= 0.70, (joined, ref)
 
 
 # ===================== CRITERION (e): final latency (CUDA-gated; G-CPU) =====================
@@ -464,7 +430,7 @@ def test_final_latency(
     sf = _DEPS["sf"]
     if not daemon.cuda_check.is_cuda_available():
         pytest.skip(
-            "criterion (e) <=1.5 s is a GPU budget; CPU distil-large-v3 can exceed it (G-CPU)"
+            "criterion (e) <=1.5 s is a GPU budget; the CPU fallback model can exceed it (G-CPU)"
         )
     rec, col = recorder
     samples, _ = sf.read(str(_WAVS["simple"]), dtype="int16")
@@ -649,131 +615,130 @@ def test_daemon_path_emits_latency_line_and_types_nothing(
         abort_thread.join(timeout=5.0)
 
 
-# ===================== T7 (PRD §4.2ter/§6): LITE mode — one model + ≥70% accuracy + lower latency =====================
-def test_lite_feed_audio_utt_simple(
-    lite_recorder: "tuple[AudioToTextRecorder, _Collector]",
+# ====== T7 (PRD §4.2quater/§6): SINGLE-MODEL arming — one construction + ≥70% finals + ≤1500 ms latency ======
+def test_single_model_construction(
+    recorder: "tuple[AudioToTextRecorder, _Collector]",
 ) -> None:
-    """T7(a,b): lite loads ONE model (use_main_model_for_realtime=True on the REAL recorder) + finals ≥70% fuzzy."""
+    """T7(a,b): ONE model (model == realtime_model_type, use_main_model_for_realtime=True) + finals ≥70% fuzzy."""
     assert _DEPS is not None
     daemon = _DEPS["daemon"]  # type: ignore[assignment]
     if not daemon.cuda_check.is_cuda_available():
         pytest.skip(
-            "T7 is a GPU integration test (G-CPU); the lite contract is real-model"
+            "T7 is a GPU integration test (G-CPU); the single-model contract is real-model"
         )
-    rec, col = lite_recorder
-    # (a) ONE model: the real constructed recorder carries the one-model flag (the integration-grade
-    #     invariant; P1.M1.T1.S2 already unit-tests the kwargs dict). A future RealtimeSTT regression
-    #     of the early-return would leave this False -> fail loudly.
-    assert rec.use_main_model_for_realtime is True, (
-        "lite recorder did not get use_main_model_for_realtime=True"
+    # (a) ONE model — assert on the FILTERED kwargs the fixture actually constructs with: the
+    #     collapsed cfg_to_kwargs fills BOTH slots with resolved["model"] (small.en on CUDA,
+    #     tiny.en on CPU fallback) and sets use_main_model_for_realtime=True, so the separate
+    #     realtime engine never initializes (exactly ONE construction). P1.M1.T2.S1 already
+    #     unit-tests the raw kwargs dict; here we re-derive + filter them exactly like the
+    #     `recorder` fixture does, then check the REAL constructed recorder carries the flag
+    #     (integration-grade invariant — a future RealtimeSTT regression of the early-return
+    #     would leave it False -> fail loudly).
+    AudioToTextRecorder = _DEPS["AudioToTextRecorder"]  # type: ignore[assignment]
+    VoiceTypingConfig = _DEPS["VoiceTypingConfig"]  # type: ignore[assignment]
+    kwargs = daemon.cfg_to_kwargs(VoiceTypingConfig())
+    assert kwargs["model"] == kwargs["realtime_model_type"], (
+        "cfg_to_kwargs did not collapse both model slots to ONE model"
     )
-    # (b) finals over the normal clean path + fuzzy-accuracy ≥0.70 (lower bar than normal's 0.80 —
-    #     small.en is the final model in lite mode).
+    assert kwargs["use_main_model_for_realtime"] is True, (
+        "cfg_to_kwargs did not set use_main_model_for_realtime=True"
+    )
+    filtered = daemon._filter_kwargs_to_signature(kwargs, AudioToTextRecorder)
+    assert (
+        filtered["model"] == filtered["realtime_model_type"]
+        and filtered["use_main_model_for_realtime"] is True
+    ), "filtered kwargs lost the single-model invariant"
+    rec, col = recorder
+    assert rec.use_main_model_for_realtime is True, (
+        "recorder did not get use_main_model_for_realtime=True (two-model regression)"
+    )
+    # (b) finals over the real path + fuzzy-accuracy ≥0.70 — small.en is the final model
+    #     post-collapse (PRD §6 T7b bar; the old ≥0.80 was the distil-large-v3 bar).
     _run_utterance(rec, col, _WAVS["simple"], want_finals=1)
     finals = [f.strip() for f in col.finals if f.strip()]
-    assert finals, "no lite finals for utt_simple"
+    assert finals, "no finals for utt_simple"
     joined = " ".join(finals)
     assert _token_overlap(joined, SIMPLE_TEXT) >= 0.70, (joined, SIMPLE_TEXT)
 
 
-def test_lite_latency_lower_than_normal(
-    recorder: "tuple[AudioToTextRecorder, _Collector]",
-    lite_recorder: "tuple[AudioToTextRecorder, _Collector]",
-) -> None:
-    """T7(c): lite final-typed latency is NOT materially higher than normal on utt_simple.
+def _final_latency_ms(rec: "AudioToTextRecorder", col: _Collector, wav: Path) -> float:
+    """last-speech-fed -> final-received (ms) for one utterance (mirrors test_final_latency)."""
+    assert _DEPS is not None  # populated by the `recorder` fixture before any test runs
+    sf = _DEPS["sf"]
+    samples, _ = sf.read(str(wav), dtype="int16")
+    col.reset()
+    stop = threading.Event()
+    # Stamp the moment the LAST speech slice is fed (before the trailing-silence pad),
+    # mirroring test_final_latency's t_last_speech hook.
+    t_last_speech: list[float | None] = [None]
+    t_final: list[float | None] = [None]
 
-    Measures last-speech-fed -> final-received for BOTH the normal (recorder) and lite
-    (lite_recorder) real recorders on the SAME utterance, mirroring test_final_latency's timing
-    wrap, and asserts lite is not more than 25% slower (best-of-3 min per recorder to cut GPU
-    scheduling/warm-up noise). The one-model invariant (test_lite_feed_audio_utt_simple) is the
-    PRIMARY proof lite loads one model; this is secondary corroboration that catches a two-model
-    regression (which is ~1.5-2x slower). CUDA-gated (both models must be on GPU). NOTE:
-    test_feed_audio builds the recorder DIRECTLY (no daemon) so the daemon's 'voice-typing
-    latency:' log line never fires here — latency is measured directly (t_last_speech->t_final).
+    def _on_last_speech() -> None:
+        if t_last_speech[0] is None:
+            t_last_speech[0] = time.monotonic()
+
+    # Wrap col.add_final BEFORE the consume thread starts so the callback the consume thread
+    # hands to rec.text() is the wrapped one (rec.text(cb) captures cb at call time; swapping
+    # add_final after the thread is already blocked in text() would race and leave t_final unset).
+    orig_add_final = col.add_final
+
+    def stamp(t: str) -> None:
+        if t_final[0] is None:
+            t_final[0] = time.monotonic()
+        orig_add_final(t)
+
+    col.add_final = stamp  # type: ignore[method-assign]
+    feed = threading.Thread(
+        target=_feed_paced,
+        args=(rec, samples),
+        kwargs={"stop": stop, "on_last_speech": _on_last_speech},
+        daemon=True,
+    )
+    cons = threading.Thread(target=_consume, args=(rec, col, stop, 1), daemon=True)
+    cons.start()  # G-ORDER: consume arms listening BEFORE feed
+    feed.start()
+    try:
+        assert _wait_for(lambda: t_final[0] is not None, timeout=90.0), (
+            f"no final received: finals={col.finals!r}"
+        )
+    finally:
+        stop.set()
+        # abort() from a HELPER thread (G-ABORT — see _run_utterance / test_final_latency).
+        abort_thread = threading.Thread(target=_safe_abort, args=(rec,), daemon=True)
+        abort_thread.start()
+        abort_thread.join(timeout=10.0)
+        cons.join(timeout=5.0)
+        feed.join(timeout=5.0)
+        col.add_final = orig_add_final  # type: ignore[method-assign]
+    assert t_last_speech[0] is not None and t_final[0] is not None, (
+        f"timestamps missing: t_last_speech={t_last_speech[0]!r} t_final={t_final[0]!r}"
+    )
+    return (t_final[0] - t_last_speech[0]) * 1000.0
+
+
+def test_single_model_final_latency_within_budget(
+    recorder: "tuple[AudioToTextRecorder, _Collector]",
+) -> None:
+    """T7(c): single-model final-typed latency stays within the PRD §6 T1e budget (≤1500 ms).
+
+    Measures last-speech-fed -> final-received on the REAL single-model recorder (small.en on
+    CUDA — it is BOTH the final and the realtime model post-collapse), best-of-3 (min = least
+    contended = true model speed; cuts GPU scheduling/warm-up noise). small.en is faster than
+    the old final model, so the budget holds on GPU. CUDA-gated (G-CPU). NOTE: test_feed_audio
+    builds the recorder DIRECTLY (no daemon) so the daemon's 'voice-typing latency:' log line
+    never fires here — latency is measured directly (t_last_speech->t_final).
     """
     assert _DEPS is not None
     daemon = _DEPS["daemon"]  # type: ignore[assignment]
-    sf = _DEPS["sf"]
     if not daemon.cuda_check.is_cuda_available():
-        pytest.skip("T7(c) latency comparison is a GPU budget (G-CPU)")
-
-    def _final_latency_ms(
-        rec: "AudioToTextRecorder", col: _Collector, wav: Path
-    ) -> float:
-        """last-speech-fed -> final-received (ms) for one utterance (mirrors test_final_latency)."""
-        samples, _ = sf.read(str(wav), dtype="int16")
-        col.reset()
-        stop = threading.Event()
-        # Stamp the moment the LAST speech slice is fed (before the trailing-silence pad),
-        # mirroring test_final_latency's t_last_speech hook.
-        t_last_speech: list[float | None] = [None]
-        t_final: list[float | None] = [None]
-
-        def _on_last_speech() -> None:
-            if t_last_speech[0] is None:
-                t_last_speech[0] = time.monotonic()
-
-        # Wrap col.add_final BEFORE the consume thread starts so the callback the consume thread
-        # hands to rec.text() is the wrapped one (rec.text(cb) captures cb at call time; swapping
-        # add_final after the thread is already blocked in text() would race and leave t_final unset).
-        orig_add_final = col.add_final
-
-        def stamp(t: str) -> None:
-            if t_final[0] is None:
-                t_final[0] = time.monotonic()
-            orig_add_final(t)
-
-        col.add_final = stamp  # type: ignore[method-assign]
-        feed = threading.Thread(
-            target=_feed_paced,
-            args=(rec, samples),
-            kwargs={"stop": stop, "on_last_speech": _on_last_speech},
-            daemon=True,
-        )
-        cons = threading.Thread(target=_consume, args=(rec, col, stop, 1), daemon=True)
-        cons.start()  # G-ORDER: consume arms listening BEFORE feed
-        feed.start()
-        try:
-            assert _wait_for(lambda: t_final[0] is not None, timeout=90.0), (
-                f"no final received: finals={col.finals!r}"
-            )
-        finally:
-            stop.set()
-            # abort() from a HELPER thread (G-ABORT — see _run_utterance / test_final_latency).
-            abort_thread = threading.Thread(target=_safe_abort, args=(rec,), daemon=True)
-            abort_thread.start()
-            abort_thread.join(timeout=10.0)
-            cons.join(timeout=5.0)
-            feed.join(timeout=5.0)
-            col.add_final = orig_add_final  # type: ignore[method-assign]
-        assert t_last_speech[0] is not None and t_final[0] is not None, (
-            f"timestamps missing: t_last_speech={t_last_speech[0]!r} t_final={t_final[0]!r}"
-        )
-        return (t_final[0] - t_last_speech[0]) * 1000.0
-
-    # Materially lower latency: the small model is genuinely faster than distil-large-v3. The two
-    # session-scoped recorders share the GPU, and a single dual measurement is noisy (warm-up, CUDA
-    # scheduling, model-load variance). To reduce that noise we take the MINIMUM over a few trials
-    # per recorder (standard latency-benchmarking: min = least-contended = true model speed). The
-    # PRP's primary contract is `lite_ms < normal_ms`; it explicitly authorizes `<=` if a noisy GPU
-    # makes strict `<` flaky. On a fast GPU a SHORT utterance (9 words) shows the model-size
-    # advantage swamped by VAD/realtime-stabilization/GPU-scheduling noise, so we assert a TOLERANCE
-    # BAND: lite must not be more than 25% slower than normal. A true regression — a future
-    # RealtimeSTT upgrade silently loading TWO models (final + realtime) — would make lite ~1.5-2x
-    # SLOWER (it would run both distil-large-v3 AND small.en), which this band catches loudly.
-    normal_trials: list[float] = []
-    lite_trials: list[float] = []
-    for _trial in range(3):  # best-of-3 min per recorder
-        normal_trials.append(_final_latency_ms(recorder[0], recorder[1], _WAVS["simple"]))
-        lite_trials.append(_final_latency_ms(lite_recorder[0], lite_recorder[1], _WAVS["simple"]))
-    normal_best = min(normal_trials)
-    lite_best = min(lite_trials)
-    # The one-model invariant (test_lite_feed_audio_utt_simple) is the PRIMARY proof lite loads one
-    # model; this latency test is the secondary corroboration. 1.25x band = generous on a noisy GPU,
-    # tight enough to catch a two-model regression (which is ~1.5-2x slower).
-    assert lite_best <= normal_best * 1.25, (
-        f"lite materially slower than normal (best-of-3): lite={lite_best:.0f}ms "
-        f"(trials={[f'{x:.0f}' for x in lite_trials]}) normal={normal_best:.0f}ms "
-        f"(trials={[f'{x:.0f}' for x in normal_trials]}) — lite should be ~as-fast or faster "
-        f"(small.en vs distil-large-v3); >1.25x slower suggests a two-model regression"
+        pytest.skip("T7(c) latency budget is a GPU budget (G-CPU)")
+    rec, col = recorder
+    trials = [_final_latency_ms(rec, col, _WAVS["simple"]) for _trial in range(3)]
+    best = min(trials)
+    # PRD §6 T1e: final callback ≤1.5 s after last speech. A large overshoot on GPU suggests the
+    # separate realtime engine loaded again (two-model regression).
+    assert best <= 1500.0, (
+        f"single-model final latency over budget: best={best:.0f}ms > 1500ms "
+        f"(trials={[f'{x:.0f}' for x in trials]}) — small.en final+realtime on GPU must meet "
+        f"the PRD §6 T1e ≤1500 ms budget"
     )
