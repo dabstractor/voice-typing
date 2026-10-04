@@ -2023,7 +2023,18 @@ class VoiceTypingDaemon:
         if timer is not None:
             timer.cancel()
         if self._host is None:
-            return  # nothing loaded (never armed, or already torn down) -> _shutdown is enough
+            # Nothing loaded (never armed, or already torn down) -> _shutdown is enough — but
+            # CLAIM the teardown + signal _teardown_done anyway (validation Issue 2): with no
+            # host there is no teardown to run, so a concurrent shutdown() (main()'s finally,
+            # racing this on the quit path) must see the claim AND an already-set
+            # _teardown_done. The old bare return let main()'s shutdown() claim instead and
+            # then early-return WITHOUT signalling, leaving the quit worker blocked on a
+            # never-set event while process exit killed it before the client reply was
+            # written ("voicectl: daemon closed the connection without replying", exit 1).
+            with self._lock:
+                self._shutdown_done = True
+            self._teardown_done.set()
+            return
         # P1.M1.T2.S1 / bugfix Issue 1: CLAIM the teardown so a concurrent shutdown() (main-thread
         # finally, on the SIGTERM path) WAITS on _teardown_done instead of starting a SECOND
         # _bounded_shutdown() (the double-teardown that blew TimeoutStopSec). Under _lock (short
@@ -2277,7 +2288,13 @@ class VoiceTypingDaemon:
             # fall through: do our own teardown as the fallback (safe via _stop_lock)
         if self._host is None:
             # M2 lazy-load prep: the recorder-host child is spawned on first arm, so it may never
-            # exist (e.g. a session that never armed). Nothing to tear down.
+            # exist (e.g. a session that never armed). Nothing to tear down — but we may have
+            # CLAIMED the teardown just above, so signal _teardown_done before returning
+            # (validation Issue 2): a concurrent waiter (e.g. the quit worker's shutdown()
+            # seeing already_claimed=True) must be released immediately, not left to burn the
+            # full _TEARDOWN_WAIT_TIMEOUT on an event that would never fire while process exit
+            # kills it mid-wait (the lost `voicectl quit` reply on an unloaded daemon).
+            self._teardown_done.set()
             return
         try:
             self._bounded_shutdown()
@@ -2481,7 +2498,11 @@ class ControlServer:
         if not isinstance(msg, dict):
             return {"ok": False, "error": "request must be a JSON object"}
         cmd = msg.get("cmd")
-        if cmd == "toggle":
+        if cmd in ("toggle", "toggle-lite"):
+            # 'toggle-lite' is the Rev 1 two-mode name, kept ONLY as a deprecated migration
+            # alias for `toggle` (validation Issue 2: pre-Rev-2 Hyprland keybind wrappers
+            # still call it). It behaves EXACTLY like toggle — the same single arm/disarm
+            # path, same response. 'start-lite' stays unknown-command (below).
             was_listening = self._daemon.is_listening()
             self._daemon.toggle()
             # A toggle arms (from idle) or disarms (when armed) — Rev 2 single path, no cross-mode

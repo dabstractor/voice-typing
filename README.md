@@ -111,6 +111,21 @@ Hyprland uses the last matching bind for a given MODS+key. Source this file LAST
 already bind that MODS+key elsewhere. Check `~/.config/hypr/custom/keybinds.conf`,
 or rebind to a free combo in `hypr-binds.conf`.
 
+## Upgrading from Rev 1 (two-mode builds)
+
+Rev 2 collapsed the two ASR modes into one streaming model, and the CLI shrank to six
+commands: `toggle`, `start`, `stop`, `status`, `cancel`, `quit`. If you are upgrading a
+machine whose Hyprland config (e.g. `~/.config/hypr/custom/keybinds.lua` or
+`keybinds.conf`) predates the change:
+
+- A bind ending in `voicectl toggle-lite` still works — `toggle-lite` is accepted as a
+  deprecated migration alias for `toggle`. Rebind it to plain `voicectl toggle` when
+  convenient; the alias is undocumented and may be removed in a future release.
+- A bind ending in `voicectl start-lite` now fails with exit 64 (usage error) and must be
+  changed to `voicectl start` (or `toggle`).
+- `state.json` and `voicectl status` always report `mode: lite`; there is no normal mode
+  any more.
+
 ## Streaming dictation
 
 Rev 2 has exactly one dictation mode: a single resident model (`asr.lite_model`, default

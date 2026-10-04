@@ -96,7 +96,9 @@ class Feedback:
             "listening": False,
             "phase": "unloaded",      # P1.M2.T2.S1: boot phase (models not yet loaded, §4.2bis)
             "models_loaded": False,   # P1.M2.T2.S1: True once _load_recorder succeeds (driven by the daemon)
-            "mode": "normal",        # PRD §4.2ter: "normal" | "lite" (which model set is resident/armed)
+            "mode": "lite",          # Rev 2 constant (§4.2quater): ALWAYS "lite" — seeded "lite" at
+                                     # boot too, so state.json never carries the retired "normal"
+                                     # name in the boot→first-arm window (validation Issue 4)
             "partial": "",
             "last_final": "",
             "ts": 0.0,

@@ -72,11 +72,23 @@ def test_format_status_multiline_has_partial_and_mode():
 
 
 def test_lite_commands_are_rejected_as_usage_errors():
-    """Rev 2 single-mode (P1.M1.T2.S3): toggle-lite/start-lite are gone from the surface;
-    main() rejects them with exit 64 (EX_USAGE) BEFORE any socket connect."""
+    """Rev 2 single-mode (P1.M1.T2.S3): start-lite is gone from the surface and rejected with
+    exit 64 (EX_USAGE) BEFORE any socket connect. toggle-lite is ALSO absent from _COMMANDS —
+    it survives only as a deprecated migration alias (validation Issue 2), remapped to
+    `toggle` by main() before this check (see test_toggle_lite_alias_maps_to_toggle)."""
     assert "toggle-lite" not in ctl._COMMANDS and "start-lite" not in ctl._COMMANDS
-    assert ctl.main(["toggle-lite"]) == 64      # usage path returns before socket resolution
-    assert ctl.main(["start-lite"]) == 64
+    assert ctl.main(["start-lite"]) == 64      # usage path returns before socket resolution
+
+
+def test_toggle_lite_alias_maps_to_toggle(monkeypatch):
+    """validation Issue 2: pre-Rev-2 keybind wrappers (this machine's own Hyprland bind among
+    them) still call `voicectl toggle-lite`. main() remaps it to `toggle` BEFORE the usage
+    gate, so the stale command arms dictation instead of dying with exit 64. With the socket
+    deliberately unresolvable, the remapped command proceeds to the daemon-not-running path
+    (exit 2) — proving it passed the usage gate (which alone returns 64)."""
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    assert ctl._ALIASES == {"toggle-lite": "toggle"}  # the shim is exactly this one mapping
+    assert ctl.main(["toggle-lite"]) == 2  # NOT 64: remapped to `toggle`, socket attempted
 
 
 def test_format_status_shows_unloaded_state_and_load_error():
@@ -400,7 +412,9 @@ def test_help_surfaces_list_all_commands():
     for cmd in commands:
         assert cmd in help_text, f"{cmd!r} missing from --help:\n{help_text}"
         assert cmd in ctl.__doc__, f"{cmd!r} missing from the ctl module docstring"
-    # (2) negative sweep: the dropped lite commands must be ABSENT from every help surface:
+    # (2) negative sweep: the lite commands must be ABSENT from every help surface. (toggle-lite
+    # remains a FUNCTIONAL migration alias in main() — validation Issue 2 — but is deliberately
+    # undocumented: the Rev 2 surface stays the six commands above.)
     for stale in ("toggle-lite", "start-lite"):
         assert stale not in help_text, f"{stale!r} still in --help:\n{help_text}"
         assert stale not in ctl.__doc__, f"{stale!r} still in the module docstring"

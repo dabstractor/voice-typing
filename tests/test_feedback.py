@@ -138,7 +138,7 @@ def test_set_phase_round_trip(feedback, tmp_path):
 def test_set_mode_writes_mode_field(feedback, tmp_path):
     """set_mode publishes the armed mode to state.json (PRD §4.2ter)."""
     fb, _rec, _clock = feedback
-    assert fb.snapshot()["mode"] == "normal"          # default at construction (in-memory)
+    assert fb.snapshot()["mode"] == "lite"           # Rev 2 constant from construction (validation Issue 4)
     fb.set_mode("lite")
     assert _read_state(tmp_path)["mode"] == "lite"     # written to disk
 

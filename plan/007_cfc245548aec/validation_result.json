@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 6,
+  "summary": "All automated suites pass (623 unit, 7/7 streaming CUDA E2E, 9/9 offline ASR, virtual-mic E2E, idle/GPU lifecycle, install journey), but voicectl quit loses its reply whenever the daemon is unloaded (acceptance #6), the user's live Super+Alt+D keybind still calls the removed toggle-lite command, plus ruff F821, state.json mode:\"normal\" at boot, a stale launch_daemon.sh comment, and a stale PRD task snapshot."
+}

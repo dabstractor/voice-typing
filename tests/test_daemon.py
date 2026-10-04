@@ -1211,6 +1211,98 @@ def test_request_shutdown_skips_abort_but_tears_down_when_no_text_in_flight():
     )  # BUG-1: child teardown runs regardless (idempotent vs quit path)
 
 
+# --- validation Issue 2: `voicectl quit` on an UNLOADED daemon lost its reply -----------------
+# The quit worker (a ControlServer connection thread) runs request_shutdown() -> on_quit=
+# shutdown(). With _host is None, request_shutdown() returned WITHOUT claiming _shutdown_done
+# or signalling _teardown_done; main()'s racing shutdown() (run() had exited on _shutdown)
+# claimed instead, then hit its own `host is None` early return — which bypassed the
+# try/finally that signals _teardown_done. The worker resumed, saw already_claimed=True, and
+# blocked in _teardown_done.wait(_TEARDOWN_WAIT_TIMEOUT) on an event that would never fire;
+# process exit then killed the daemon-thread worker before it wrote the reply -> the client
+# saw EOF ("daemon closed the connection without replying") and exited 1.
+
+
+class _SlowStopKeyListener:
+    """KeyListener double whose FIRST stop() is slow (the real evdev listener closes N keyboard
+    fds + joins N reader threads — hundreds of ms); later calls are instant (the idempotent
+    second call main()'s finally makes)."""
+
+    def __init__(self, first_stop_s: float = 0.3) -> None:
+        self._first_stop_s = first_stop_s
+        self.stops = 0
+
+    def stop(self) -> None:
+        self.stops += 1
+        if self.stops == 1:
+            _time.sleep(self._first_stop_s)
+
+
+def test_quit_unloaded_request_shutdown_claims_and_signals_teardown():
+    """request_shutdown() with no host must CLAIM _shutdown_done and SET _teardown_done.
+
+    The old bare `if self._host is None: return` left both untouched, so the concurrent
+    main-thread shutdown() claimed and early-returned without signalling — the lost-reply
+    deadlock's root (validation Issue 2)."""
+    d, _fb = _make_lazy_daemon()
+    assert d._host is None
+    d.request_shutdown()
+    assert d._shutdown.is_set() is True
+    assert getattr(d, "_shutdown_done", False) is True
+    assert d._teardown_done.is_set()  # the signal whose absence lost the quit reply
+    d.shutdown()  # must return immediately (no _TEARDOWN_WAIT_TIMEOUT burn on a set event)
+
+
+def test_quit_unloaded_shutdown_signals_teardown_on_early_return():
+    """shutdown() with no host must SET _teardown_done even on its early-return path.
+
+    The early return sat BEFORE the try/finally that signals the event, so a shutdown() that
+    claimed the teardown and then found no host left waiters stranded (validation Issue 2)."""
+    d, _fb = _make_lazy_daemon()
+    assert d._host is None
+    d.shutdown()
+    assert getattr(d, "_shutdown_done", False) is True  # claimed
+    assert d._teardown_done.is_set()  # and signalled
+
+
+def test_quit_unloaded_reply_race_worker_not_stranded(monkeypatch):
+    """The exact reported interleaving, deterministically.
+
+    Worker: request_shutdown() then on_quit shutdown() whose key_listener.stop() is slow (the
+    real evdev cost). Main: shutdown() from the run()-exited finally, which claims and
+    early-returns on host None. Post-fix, the worker's request_shutdown() claims + signals
+    FIRST, so main's shutdown() and the worker's own shutdown() both see the set event and
+    return at once — the reply window survives process exit. (Pre-fix the worker burned the
+    full _TEARDOWN_WAIT_TIMEOUT and this assert fires at the 2s deadline.)"""
+    monkeypatch.setattr(daemon, "_TEARDOWN_WAIT_TIMEOUT", 5.0)  # pre-fix this blocks 5s
+    cfg = VoiceTypingConfig()
+    fb = _DaemonFakeFeedback()
+    d = daemon.VoiceTypingDaemon(
+        cfg,
+        fb,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
+        key_listener=_SlowStopKeyListener(first_stop_s=0.3),
+    )
+    assert d._host is None
+
+    done = threading.Event()
+
+    def _quit_worker() -> None:
+        d.request_shutdown()  # what ControlServer._dispatch("quit") does first
+        d.shutdown()  # on_quit — slow first stop() mirrors the real evdev listener
+        done.set()
+
+    t = threading.Thread(target=_quit_worker, name="quit-worker", daemon=True)
+    t.start()
+    _time.sleep(0.05)  # let the worker enter its slow key_listener.stop()
+    d.shutdown()  # main()'s finally — claims / early-returns on host None (the old bug)
+    assert done.wait(timeout=2.0), (
+        "quit worker still blocked 2s after main's shutdown(): _teardown_done was not "
+        "signalled (validation Issue 2 regression — the voicectl reply would be lost)"
+    )
+    assert d._teardown_done.is_set()
+
+
 # --- validation Issue 1: abort()-deadlock regression (run-loop integration) ---
 # RealtimeSTT's abort() blocks on was_interrupted.wait(), set ONLY inside text(). When the run()
 # loop is disarmed/idle (in time.sleep(0.05)) nothing sets that event, so an unconditional abort()
@@ -4287,15 +4379,18 @@ def test_toggle_while_armed_disarms():
 
 
 def test_dispatch_lite_commands_are_now_unknown():
-    """Rev 2: the socket lite commands are GONE — dispatch replies unknown-command.
+    """Rev 2: the socket start-lite command is GONE — dispatch replies unknown-command.
 
-    The daemon-side start-lite/toggle-lite arms were deleted with the two-mode machinery; the
-    generic unknown-command reply covers them (ctl.py's dead command entries are S3's cleanup).
+    The daemon-side start-lite arm was deleted with the two-mode machinery; the generic
+    unknown-command reply covers it. toggle-lite was likewise deleted, but survives as a
+    deprecated migration alias for `toggle` (validation Issue 2): dispatch routes it down
+    the exact same single arm/disarm path, so a stale wrapper arm actually arms.
     """
     d, _fb = _make_lazy_daemon(host_factory=_fake_host_factory(spawn_result=True))
     srv = daemon.ControlServer(d)
     resp = srv._dispatch(json.dumps({"cmd": "toggle-lite"}))
-    assert resp == {"ok": False, "error": "unknown command: 'toggle-lite'"}
+    assert resp["ok"] is True and resp["listening"] is True  # aliased -> armed like toggle
+    assert d.is_listening() is True
     resp = srv._dispatch(json.dumps({"cmd": "start-lite"}))
     assert resp == {"ok": False, "error": "unknown command: 'start-lite'"}
 

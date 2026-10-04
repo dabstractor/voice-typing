@@ -44,6 +44,12 @@ _COMMANDS: tuple[str, ...] = (
     "quit",
     "cancel",
 )  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' = Backspace-cancel fallback (P1.M2.T7.S1)
+# Migration shim (validation Issue 2): Rev 1's two-mode CLI survives in the wild — e.g. this
+# machine's own pre-Rev-2 Hyprland keybind wrapper still ends in `voicectl toggle-lite`.
+# main() remaps it to the canonical command BEFORE the _COMMANDS validation so stale callers
+# keep working. Deliberately NOT a member of _COMMANDS and NOT listed in any help surface
+# (--help / module docstring): the documented Rev 2 surface stays the six commands above.
+_ALIASES: dict[str, str] = {"toggle-lite": "toggle"}
 # BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
 # so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
 _EX_USAGE: int = 64
@@ -198,9 +204,17 @@ def main(argv: list[str] | None = None) -> int:
     every path returns an int (the [project.scripts] wrapper does sys.exit(main())). The command
     is validated HERE (not by argparse choices) so usage errors map to 64 while 2 stays exclusive
     to daemon-not-running (PRD §4.8, bugfix Issue 7). --help still exits 0 via argparse as usual.
+
+    Migration (validation Issue 2): a command found in _ALIASES ('toggle-lite') is remapped to
+    its canonical name BEFORE validation, so a Rev 1 caller arms dictation instead of dying
+    with exit 64. Unknown names are untouched by the remap and still exit 64.
     """
     args = _build_parser().parse_args(argv)
     cmd: str | None = args.cmd  # None when no command given (positional is nargs='?')
+    if cmd is not None:
+        cmd = _ALIASES.get(
+            cmd, cmd
+        )  # deprecated Rev 1 names -> canonical (validation Issue 2); unknown names pass through
     if cmd not in _COMMANDS:  # missing (None) or unknown string -> usage error
         if cmd is None:
             print(

@@ -133,10 +133,13 @@ def test_dispatch_start_stop_set_listening():
     assert _disp({"cmd": "stop"})["listening"] is False
 
 
-def test_dispatch_lite_commands_are_unknown():
-    """Rev 2 (P1.M1.T2.S2): the lite socket commands are gone — unknown-command reply."""
+def test_dispatch_lite_commands_are_unknown_except_toggle_lite_alias():
+    """Rev 2 (P1.M1.T2.S2): start-lite is gone — unknown-command reply. toggle-lite survives
+    ONLY as a deprecated migration alias for `toggle` (validation Issue 2: pre-Rev-2 keybind
+    wrappers still call it), so over the socket it dispatches exactly like toggle."""
     assert _disp({"cmd": "start-lite"}) == {"ok": False, "error": "unknown command: 'start-lite'"}
-    assert _disp({"cmd": "toggle-lite"}) == {"ok": False, "error": "unknown command: 'toggle-lite'"}
+    assert _disp({"cmd": "toggle-lite"}) == _disp({"cmd": "toggle"})   # identical payload
+    assert _disp({"cmd": "toggle-lite"})["listening"] is True           # ...and it arms
 
 
 def test_dispatch_status_response_carries_mode():
