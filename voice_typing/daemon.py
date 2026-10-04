@@ -1386,6 +1386,9 @@ class VoiceTypingDaemon:
         # BEFORE the _final_pending guard: after a rejected final _utterance_finalized is
         # already True, and resuming is needed precisely then. A stray late partial of the
         # rejected utterance never reaches this hook — it arrives via _on_partial.
+        # BUG-002 / P1.M1.T2.S2: this is the ONE post-cancel lift point — the on_final
+        # sentinel branch deliberately does NOT resume (a stray late final of the cancelled
+        # utterance must not lift suppression; only genuinely-new speech may).
         self._stream.resume()
         self._last_speech_monotonic = time.monotonic()
         if not self._utterance_finalized:

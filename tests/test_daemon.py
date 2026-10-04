@@ -4568,6 +4568,74 @@ def test_arm_clears_stale_cancel_suppression():
 
 
 # ===========================================================================
+# P1.M1.T2.S2 — BUG-002 daemon level: post-cancel suppression lifts at next
+# speech (_touch_speech -> stream.resume()); the re-said sentence streams live.
+# (Replaces test_streaming_core.py:291's MANUAL reset_boundary() masking — the
+#  daemon fires no boundary post-cancel; the sentinel final is dropped in
+#  on_final BEFORE commit()/reset_boundary() ever runs.)
+# ===========================================================================
+
+
+def test_cancel_then_next_utterance_streams_live_daemon_level():
+    """BUG-002 / P1.M1.T2.S2: after a Backspace-cancel, the NEXT utterance's partials type live
+    again (a delta lands BEFORE any commit) — suppression lifts at the daemon's next-speech
+    signal (_touch_speech -> stream.resume()), not at a boundary the daemon never fires
+    post-cancel (the sentinel final is dropped in on_final BEFORE commit()).
+
+    Mirrors the live flow: partials type live -> cancel (in flight) -> [stale window: late
+    partials of the CANCELLED utterance type nothing] -> next speech (the host reader fires
+    _touch_speech on the child's 'speech' event, BEFORE the re-said partials — faithful event
+    order) -> the re-said sentence streams live. Drives the daemon's own seams
+    (_on_partial/cancel/_touch_speech) with the REAL StreamingOutput so deltas flow to
+    _FakeBackend — replacing test_streaming_core.py:291's manual reset_boundary() masking, an
+    event no daemon code path fires post-cancel. Doubles only; no CUDA; no threads (as the
+    T7.S1 section notes, tests call cancel()/on_final() directly). P1.M2.T7.S1 will extend the
+    same suppression branch (stop-after-cancel) — it must keep this test green.
+    """
+    d, fb = _make_cancel_daemon()  # armed + resident _FakeHost + _text_in_flight set
+    be = d._backend
+    host = d._host
+
+    # Live typing before the cancel: a fresh fragment streams as ONE additive delta (never
+    # rate-limited — streaming.py: 'additive and flicker-free by construction').
+    d._on_partial("the quick brown")
+    assert be.typed == ["the quick brown"]
+    n_before_cancel = len(be.typed)
+
+    # Backspace-cancel: the 15-char tail is compensated by 14 backspaces, host.cancel() drops
+    # the in-flight utterance, the sentinel suppression window arms, and the stream resets
+    # (fresh tail + engine _suppressed — the stale-window guard under test).
+    resp = d.cancel()
+    assert resp["ok"] is True and resp["listening"] is True
+    assert be.typed[n_before_cancel:] == [("bs", 14)]
+    assert d._cancel_suppress_final is True  # the sentinel window is armed (CRITICAL #2 leg)
+    assert host.cancel_calls == 1
+    n_after_cancel = len(be.typed)
+
+    # STALE WINDOW: a late partial of the CANCELLED utterance must type NOTHING (the engine's
+    # _suppressed holds — the new lift wiring does NOT weaken this guard).
+    d._on_partial("late partial")
+    assert len(be.typed) == n_after_cancel, (
+        f"a stale post-cancel partial typed: {be.typed[n_after_cancel:]!r}"
+    )
+
+    # The daemon's next-utterance-start signal -> the ONE lift point (_touch_speech calls
+    # stream.resume() FIRST, before the _final_pending guard).
+    d._touch_speech()
+
+    # The RE-SAID sentence streams live: ONE fresh-fragment delta, and NO commit is involved
+    # anywhere after the cancel — this test sends NO on_final at all, so any type call here is
+    # live-streaming by construction (committed stays '').
+    d._on_partial("the quick brown fox")
+    landing = be.typed[n_after_cancel:]
+    assert landing == ["the quick brown fox"], (
+        f"expected one live delta after resume; got {landing!r}"
+    )
+    assert d._stream.committed == ""  # no commit() ever ran: partials only
+    assert fb.partials[-1] == "the quick brown fox"  # the state.json mirror shows the live text
+
+
+# ===========================================================================
 # P1.M2.T6.S2 — streaming commit path + Rev 1 rollback hatch (daemon wiring)
 # ===========================================================================
 
