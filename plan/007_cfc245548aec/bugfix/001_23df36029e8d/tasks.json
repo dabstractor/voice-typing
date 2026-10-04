@@ -212,14 +212,14 @@
               "type": "Task",
               "id": "P1.M2.T7",
               "title": "BUG-007: Stop immediately after a Backspace-cancel",
-              "status": "Planned",
+              "status": "Complete",
               "description": "The cancelled sentinel's early return in on_final skips _final_pending=False, so stop-after-cancel takes a pointless ~5s graceful-drain abort for a final that can never come. PRD h2.3/h3.6 + h2.5.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T7.S1",
                   "title": "Daemon: clear _final_pending when the cancelled sentinel is consumed",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2"

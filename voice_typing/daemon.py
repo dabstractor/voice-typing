@@ -670,9 +670,11 @@ class VoiceTypingDaemon:
         # build_recorder→_build_callbacks) + on_final. Injectable for tests; a real one otherwise.
         self._latency = latency if latency is not None else LatencyLog()
         # Graceful-stop drain (let the FINAL model finish before disarming). _final_pending is True
-        # from the first speech of an utterance (_touch_speech) until its final is typed (on_final),
-        # so _request_stop can tell "an utterance is in flight — let it finish" from "idle — stop
-        # now". _drain is set by _request_stop when a final is pending; the run loop completes the
+        # from the first speech of an utterance (_touch_speech) until that utterance is bookended:
+        # its final is typed (on_final), its final is rejected (on_final), or the CANCELLED sentinel
+        # of a Backspace-cancel is consumed (BUG-007 / P1.M2.T7.S1 — the real final can never come,
+        # so the in-flight signal must drop there). This lets _request_stop tell "an utterance is in
+        # flight — let it finish" from "idle — stop now". _drain is set by _request_stop when a final is pending; the run loop completes the
         # drain (disarms) once text() returns the final. _drain_timer is the hang safety net: if no
         # final fires within _DRAIN_TIMEOUT_S it aborts the blocked text() so the drain still ends.
         # All bool/Timer-ref stores here are atomic in CPython (written by reader/control threads,
@@ -1135,6 +1137,17 @@ class VoiceTypingDaemon:
                     self._cancel_suppress_final = (
                         False  # sentinel seen; pipeline re-armed
                     )
+                    # BUG-007 / P1.M2.T7.S1: the cancelled utterance is bookended HERE — its
+                    # audio was discarded, so no further final can ever come for it. Clear
+                    # _final_pending so _request_stop takes the immediate path (a drain would
+                    # wait _DRAIN_TIMEOUT_S for a final that cannot arrive), and set
+                    # _utterance_finalized so a stray late partial/'speech' of the cancelled
+                    # utterance cannot re-arm the flag before the run loop re-enters text()
+                    # (same validation-Issue-2 semantics as the two exits below). The run
+                    # loop's re-entry into text() resets _utterance_finalized, so genuinely-
+                    # new speech (the re-said sentence) re-arms the drain correctly.
+                    self._final_pending = False
+                    self._utterance_finalized = True
                 return  # dropped: no clean, no type_text, no record_final
             cleaned = textproc.clean(text, self._cfg.filter)
             if not cleaned:  # rejected: blocklist hallucination / below min_chars

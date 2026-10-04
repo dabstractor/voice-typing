@@ -4636,6 +4636,75 @@ def test_cancel_then_next_utterance_streams_live_daemon_level():
 
 
 # ===========================================================================
+# P1.M2.T7.S1 — BUG-007 daemon level: stop right after a Backspace-cancel
+# disarms immediately (the cancelled sentinel clears _final_pending).
+# ===========================================================================
+
+
+def test_stop_after_cancel_disarms_immediately():
+    """BUG-007 / PRD Minor Issue 3: 'scratch that, done' must NOT pay the ~5s drain.
+
+    Cancel-then-stop: after the cancelled sentinel is consumed, the cancelled utterance's
+    real final can NEVER come (the child discarded its audio), so _final_pending must drop
+    AT THE SENTINEL — _request_stop then takes the immediate idle path (disarm + one
+    _safe_abort) instead of _begin_drain() (which would block the stop for _DRAIN_TIMEOUT_S
+    waiting for a final that cannot arrive). Fails before the fix: on_final's suppression
+    branch returned early WITHOUT clearing _final_pending, so stop() entered the drain.
+    """
+    d, fb = _make_cancel_daemon()  # armed + resident _FakeHost + _text_in_flight set
+    host = d._host
+    d._touch_speech()  # speech happened -> an utterance is pending (the pre-fix poisoned state)
+    assert d._final_pending is True
+    d.cancel()  # suppression window armed; host.cancel() rides the abort path (aborts: 0 -> 1)
+    assert d._cancel_suppress_final is True
+    assert host.cancel_calls == 1 and host.recorder.aborts == 1
+    host.mark_cancel_sentinel()  # the reader thread marked the relayed sentinel
+    d.on_final("")  # the sentinel itself -> dropped, window closes AND the bookkeeping finalizes
+    assert d._cancel_suppress_final is False
+    assert d._final_pending is False, (
+        "the cancelled utterance can never produce a final; leaving _final_pending set "
+        "poisons the stop heuristic (BUG-007)"
+    )
+    assert d._utterance_finalized is True
+    d.stop()  # _text_in_flight is still set (the child's text() has not returned)
+    assert d._drain is False, "stop after cancel must disarm immediately, not drain ~5s"
+    assert d.is_listening() is False
+    # exactly ONE more abort beyond cancel's: the immediate-stop _safe_abort() unblocking text()
+    assert host.recorder.aborts == 2
+
+
+def test_sentinel_consumption_blocks_stray_partial_rearm():
+    """Validation-Issue-2 parity on the cancel path: after the sentinel is consumed, a stray
+    late 'speech' of the CANCELLED utterance must NOT re-arm _final_pending (the
+    _utterance_finalized guard) — otherwise the stale drain is recreated before the run loop
+    even re-enters text()."""
+    d, fb = _make_cancel_daemon()
+    d._touch_speech()
+    d.cancel()
+    d._host.mark_cancel_sentinel()
+    d.on_final("")  # sentinel consumed: window closed + _utterance_finalized True
+    d._touch_speech()  # a stray late 'speech'/partial of the cancelled utterance
+    assert d._final_pending is False, (
+        "a post-sentinel stray speech must not resurrect the drain (_utterance_finalized)"
+    )
+
+
+def test_next_utterance_after_cancel_rearms_final_pending():
+    """No over-fix: once the run loop re-enters text() for the next utterance (it resets
+    _utterance_finalized), genuinely-new speech (the re-said sentence) re-arms
+    _final_pending — a stop MID-re-said-utterance must still drain as always."""
+    d, fb = _make_cancel_daemon()
+    d._touch_speech()
+    d.cancel()
+    d._host.mark_cancel_sentinel()
+    d.on_final("")  # sentinel consumed
+    assert d._utterance_finalized is True
+    d._utterance_finalized = False  # the run loop re-entered text() for the next utterance
+    d._touch_speech()  # genuinely-new speech: the re-said sentence
+    assert d._final_pending is True  # in flight again -> a stop now drains (unchanged semantics)
+
+
+# ===========================================================================
 # P1.M2.T6.S2 — streaming commit path + Rev 1 rollback hatch (daemon wiring)
 # ===========================================================================
 
