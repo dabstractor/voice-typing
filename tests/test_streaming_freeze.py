@@ -260,3 +260,94 @@ def test_session_frozen_disarm_sends_no_keystrokes_and_next_session_types():
     assert be.calls == [("type", "hello wor")], "reset_session must never press backspace"
     stream.on_partial("fresh session")
     assert be.calls == [("type", "hello wor"), ("type", "fresh session")]
+
+
+# ---------------------------------------------------------------------------
+# BUG-001 (PRD h3.0): a single rejected final (blocklist/min_chars) freezes with
+# session=True and used to silence typed output until the next re-arm. The NEW
+# engine contract: an explicit resume() lifts a non-backend freeze (and clears
+# post-cancel suppression); reset_boundary() under freeze ABSORBS the tail into
+# the checkpoint; backend-failure freezes stay un-liftable (fail-safe).
+# ---------------------------------------------------------------------------
+
+
+def test_rejected_final_freeze_lives_until_resume_then_next_utterance_types():
+    """BUG-001 engine contract (the PRD h3.0 repro): a rejected-final SESSION freeze
+    survives the boundary AND stray late partials (the never-retag pin), lifts ONLY
+    at resume(), and the next utterance then streams for real (on_partial types;
+    commit corrects+joins)."""
+    stream, be, _fb = _make_stream()
+    stream.on_partial("Hello world.")         # baseline utterance types
+    stream.commit("Hello world.")
+    stream.reset_boundary()
+    n0 = len(be.calls)
+    assert n0 > 0, "baseline typing must have happened"
+    stream.on_partial("Thank you")            # the to-be-rejected utterance typed live
+    n1 = len(be.calls)
+    assert n1 > n0
+    stream.freeze("rejected final (blocklist/min_chars)", session=True)
+    stream.reset_boundary()
+    assert stream.frozen is True and stream.frozen_session is True
+    stream.on_partial("ank you.")             # stray late partial of the REJECTED utterance
+    assert stream.frozen is True, "must stay frozen across strays (never retag per-utterance)"
+    assert len(be.calls) == n1, "frozen strays must be mirror-only (zero keystrokes)"
+    stream.resume()
+    assert stream.frozen is False and stream.frozen_session is False
+    stream.on_partial("The next real sentence")
+    # (casing guard lowercases the mid-sentence leading 'T' — match the stable suffix.)
+    assert any("next real sentence" in t for _, t in be.calls), "real typing must resume"
+    n2 = len(be.calls)
+    stream.commit("The next real sentence")
+    assert len(be.calls) > n2, "the next commit must produce real backend calls"
+
+
+def test_resume_cannot_lift_backend_failure_freeze():
+    """Fail-safe: a freeze raised by a backend exception (engine-internal origin) is
+    NOT liftable by resume() — the on-screen state is untrusted; only reset_session()
+    (fresh arm) recovers. Covers BOTH failure doubles."""
+    be_type = RecordingBackend(fail_type=True)
+    stream, _b1, _f1 = _make_stream(be_type)
+    stream.on_partial("hello")                # fresh start -> type_text raises -> freeze
+    assert stream.frozen is True and stream.frozen_session is True
+    stream.resume()
+    assert stream.frozen is True, "backend-failure freeze must survive resume()"
+    stream.on_partial("hello again")
+    assert be_type.calls == [], "a backend-failure freeze must stay mirror-only"
+
+    be_bs = RecordingBackend(fail_backspace=True)
+    stream2, _b2, _f2 = _make_stream(be_bs)
+    stream2.on_partial("hello wor")           # types fine
+    stream2.on_partial("goodbye")             # revise -> press_backspace raises -> freeze
+    assert stream2.frozen is True
+    stream2.resume()
+    assert stream2.frozen is True, "backspace-failure freeze must also survive resume()"
+
+
+def test_reset_boundary_under_freeze_absorbs_tail_into_committed():
+    """BUG-001 companion: the rejected final's boundary drops the tail — it must be
+    ABSORBED into the checkpoint first (commit()'s frozen-path join discipline), so
+    the casing guard / context prompt / mirror stay truthful. Keystroke-free."""
+    stream, be, _fb = _make_stream()
+    stream.on_partial("Hello world")          # empty committed -> verbatim
+    assert stream.tail == "Hello world"
+    stream.freeze("rejected final (blocklist/min_chars)", session=True)
+    stream.reset_boundary()
+    assert stream.committed == "Hello world", "the frozen tail must be absorbed"
+    assert stream.tail == ""
+    assert be.calls == [("type", "Hello world")], "the absorb must send no keystrokes"
+    assert stream.frozen is True, "the freeze itself survives (resume() owns the lift)"
+
+
+def test_resume_clears_post_cancel_suppression():
+    """resume() ALWAYS clears _suppressed (the P1.M1.T2.S1 / BUG-002 reuse seam):
+    after reset_after_cancel() the suppressed mirror-only state is lifted and the
+    next partial types again. Idempotent."""
+    stream, be, fb = _make_stream()
+    stream.reset_after_cancel()
+    stream.on_partial("stale partial")        # suppressed: raw mirror only
+    assert be.calls == []
+    assert fb.partials[-1] == "stale partial"
+    stream.resume()
+    stream.resume()                           # idempotent: second call is a no-op
+    stream.on_partial("hello")
+    assert be.calls == [("type", "hello")], "typing must resume after resume()"

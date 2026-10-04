@@ -112,7 +112,8 @@ class StreamingOutput:
             freeze() or a backend failure). Comes in two classes (P1.M2.T6.S3):
             per-utterance (_frozen_session False) is lifted by the next
             reset_boundary(); session (_frozen_session True) survives every
-            reset_boundary() and is cleared ONLY by reset_session().
+            reset_boundary() and is cleared by reset_session() or — for NON-backend
+            origin freezes only — resume() (BUG-001).
         frozen_session: the class of the current freeze (False when not frozen
             or per-utterance).
         suppressed: True after reset_after_cancel() -> mirror-only until the
@@ -155,6 +156,12 @@ class StreamingOutput:
         self._frozen_session: bool = (
             False  # True = survives reset_boundary() (P1.M2.T6.S3)
         )
+        # Freeze ORIGIN tag: True only while the CURRENT freeze was raised by a
+        # backend failure inside _safe_type/_safe_backspace (engine-internal), so
+        # resume() can refuse to lift it (after a backend failure the on-screen
+        # state cannot be trusted). A fresh freeze()/reset_session() clears it;
+        # the promote-only path never touches it.
+        self._frozen_backend_failure: bool = False
         self._suppressed: bool = False
         # None = no full rewind has happened yet (first revise is always allowed).
         # A plain 0.0 sentinel would break a fake clock starting at 0.0 (and read
@@ -209,14 +216,29 @@ class StreamingOutput:
         """New utterance boundary: clear the tail, lift post-cancel suppression, and
         lift a PER-UTTERANCE freeze.
 
+        While FROZEN, the tail is first ABSORBED into `committed` — commit()'s
+        frozen-path join, verbatim (BUG-001 companion fix): a rejected final (the
+        daemon's freeze(session=True) + reset_boundary() pair) leaves a real typed
+        fragment on screen, and dropping it without absorbing would orphan it from
+        the checkpoint, staling the casing guard, the rolling context prompt and
+        the mirror. Keystroke-free — the absorb only moves the engine string.
+
         The daemon calls this once per utterance, right after commit() (or a rejected
         final), so a user-keypress freeze (P1.M2.T6.S3, PRD rule 5) is lifted exactly
         here: the frozen commit has already absorbed the tail without keystrokes and
         the next utterance streams normally. SESSION-class freezes (backend failure,
-        stranded tail — PRD rule 4) deliberately SURVIVE this boundary: only
-        reset_session() may clear them.
+        stranded tail, rejected final — PRD rule 4) deliberately SURVIVE this
+        boundary: only reset_session() or resume() (non-backend origin) may clear
+        them.
         """
         with self._lock:
+            if self._frozen:
+                # Same join commit()'s frozen path uses: rstrip the base so the
+                # previous commit's inter-final space (already on screen) is not
+                # doubled, and drop empty parts.
+                self._committed = " ".join(
+                    p for p in (self._committed.rstrip(), self._tail) if p
+                )
             self._tail = ""
             self._suppressed = False
             if self._frozen and not self._frozen_session:
@@ -243,7 +265,44 @@ class StreamingOutput:
             self._suppressed = False
             self._frozen = False
             self._frozen_session = False
+            # A fresh arm trusts the screen again: clear the backend-failure origin
+            # tag too, so a later non-backend freeze in the new session is liftable
+            # by resume() (the tag must imply frozen; this unfreeze clears it).
+            self._frozen_backend_failure = False
             self._last_full_rewind = None
+
+    def resume(self) -> None:
+        """Lift a rejected-final (non-backend) freeze + clear suppression (BUG-001).
+
+        The engine seam the daemon calls at the NEXT utterance's genuinely-new speech
+        (P1.M1.T1.S2 wires the call): a blocklist/min_chars-rejected final freezes
+        with session=True — so stray late partials of the dead utterance cannot
+        revise the frozen tail — and resume() is the only way that freeze lifts
+        mid-session. Semantics, all under self._lock:
+          - `_suppressed` = False ALWAYS (also the post-cancel seam; P1.M1.T2.S1 /
+            BUG-002 reuses exactly this).
+          - frozen AND NOT backend-failure-origin: lift (_frozen/_frozen_session
+            False).
+          - frozen WITH backend-failure origin (tagged internally by _safe_type/
+            _safe_backspace): leave frozen, log at INFO — after a backend failure
+            the on-screen state cannot be trusted, so only reset_session() (fresh
+            arm) may recover. A public freeze() landing ON TOP of a backend failure
+            takes the promote-only path, which never clears the origin tag, so the
+            refusal holds there too.
+        Idempotent; sends NO keystrokes; does not touch _committed/_tail/
+        _last_full_rewind.
+        """
+        with self._lock:
+            self._suppressed = False
+            if self._frozen:
+                if self._frozen_backend_failure:
+                    logger.info(
+                        "streaming resume(): refusing to lift backend-failure freeze "
+                        "(on-screen state untrusted; re-arm to recover)"
+                    )
+                else:
+                    self._frozen = False
+                    self._frozen_session = False
 
     def freeze(self, reason: str = "", *, session: bool = False) -> None:
         """Stop typing (mirror-only); log why. `session=True` freezes survive reset_boundary().
@@ -253,12 +312,18 @@ class StreamingOutput:
             keypress over a pending tail must stop revising THIS utterance only.
           - session: on-screen state can no longer be trusted for the rest of the
             armed session (backend failure; stranded tail from a drain-timeout abort
-            or a recorder-host child death) — only reset_session() (fresh arm) lifts
-            it, and the tail simply stays on screen across disarm (NO rewind).
+            or a recorder-host child death; a rejected final — BUG-001). It survives
+            every reset_boundary() and is lifted by reset_session() (fresh arm) or,
+            for NON-backend-origin freezes, by resume() at the next utterance's
+            speech (P1.M1.T1.S2); resume() deliberately REFUSES a backend-failure
+            freeze.
 
         Idempotent and PROMOTE-ONLY: freezing while already frozen is a no-op, except
         that a session freeze upgrades a per-utterance one (a later per-utterance
-        reason must never weaken a session freeze).
+        reason must never weaken a session freeze). The backend-failure origin tag is
+        never cleared on that promote path (a rejected-final freeze on top of a
+        backend failure stays un-liftable); a FRESH freeze clears it (it describes
+        the current freeze only).
         """
         with self._lock:
             if self._frozen:
@@ -270,6 +335,7 @@ class StreamingOutput:
                 return
             self._frozen = True
             self._frozen_session = bool(session)
+            self._frozen_backend_failure = False  # fresh freeze: no backend origin yet
         logger.warning(
             "streaming output frozen (%s): %s",
             "session" if session else "per-utterance",
@@ -477,9 +543,11 @@ class StreamingOutput:
         except Exception as exc:  # noqa: BLE001 — the reader thread must survive
             logger.warning("streaming type_text(%r) failed (%s); freezing tail", s, exc)
             # SESSION-class freeze (P1.M2.T6.S3): on-screen state unknown — survives
-            # reset_boundary(); only reset_session() (fresh arm) lifts it.
+            # reset_boundary(); only reset_session() (fresh arm) lifts it. Tag the
+            # ORIGIN so resume() refuses to lift it (BUG-001 fail-safe).
             self._frozen = True
             self._frozen_session = True
+            self._frozen_backend_failure = True
             return False
 
     def _safe_backspace(self, n: int) -> bool:
@@ -494,6 +562,8 @@ class StreamingOutput:
                 "streaming press_backspace(%d) failed (%s); freezing", n, exc
             )
             # SESSION-class freeze (P1.M2.T6.S3): on-screen state unknown — see _safe_type.
+            # Origin tagged so resume() refuses to lift it (BUG-001 fail-safe).
             self._frozen = True
             self._frozen_session = True
+            self._frozen_backend_failure = True
             return False
