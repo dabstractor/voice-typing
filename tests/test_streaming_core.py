@@ -6,8 +6,9 @@ no-real-subprocess guard and test_daemon.py's _FakeBackend shape). Run:
     cd /home/dustin/projects/voice-typing
     timeout 120 .venv/bin/python -m pytest tests/test_streaming_core.py -q
 
-Covers: delta-only extends (guarded), exact-length rewind + guarded retype on
-revise, the >=300 ms full-rewind rate limit, no-trailing-space-while-tentative,
+Covers: delta-only extends (guarded), minimal-diff (longest-common-prefix)
+revision — backspace exactly the diverging suffix, guarded suffix retype — the
+>=300 ms rewind rate limit, no-trailing-space-while-tentative,
 freeze/suppress mirror-only paths, the pending_tail_len()/reset_after_cancel()
 seam names daemon.cancel() already calls, and the fail-safe (freeze, never
 propagate) backend-failure policy.
@@ -183,24 +184,51 @@ def test_capitalized_partial_equal_length_case_only_diff_is_noop():
 
 
 # ---------------------------------------------------------------------------
-# Revise path: exact-length rewind + guarded retype
+# Revise path: minimal-diff rewind — backspace EXACTLY the diverging suffix
+# (len(tail) - k for k = the CI longest common prefix; PRD §4.2quater rule 1,
+# as amended — a whole-tail rewind for a tail-only edit is a FAILURE)
 # ---------------------------------------------------------------------------
 
-def test_revise_rewinds_exact_tail_len_then_retypes():
+def test_revise_backspaces_exactly_the_diverging_suffix():
     stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.5, 1.0))
     stream.on_partial("hello wrld")    # fresh: types "hello wrld" (10 chars)
-    stream.on_partial("hello world")   # revise: backspace(10) + retype
+    stream.on_partial("hello world")   # revise: k=7 ("hello w") -> bs 3, type "orld"
     assert be.calls == [
         ("type", "hello wrld"),
-        ("bs", 10),
-        ("type", "hello world"),
+        ("bs", 3),
+        ("type", "orld"),
     ]
     assert stream.tail == "hello world"
 
 
+def test_revise_multi_word_tail_retracts_only_the_changed_word():
+    # A last-word revision rewinds ONLY that word's chars — never the whole tail.
+    stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.5))
+    stream.on_partial("the quick brown fox")
+    stream.on_partial("the quick brown dog")   # k=16 -> bs 3, type "dog"
+    assert be.calls == [
+        ("type", "the quick brown fox"),
+        ("bs", 3),
+        ("type", "dog"),
+    ]
+    assert stream.tail == "the quick brown dog"
+
+
+def test_whole_tail_rewind_only_for_a_genuinely_prefix_free_rewrite():
+    # k=0 is the ONLY case that may backspace the whole tail (fresh start /
+    # total rewrite — T8a: "a whole-tail rewind for a tail-only edit is a test
+    # FAILURE").
+    stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.5))
+    stream.on_partial("hello world")
+    stream.on_partial("goodbye")   # shares nothing with the tail -> k=0
+    assert be.calls == [("type", "hello world"), ("bs", 11), ("type", "goodbye")]
+    assert stream.tail == "goodbye"
+
+
 def test_revise_guard_context_is_committed_alone():
-    # A revise replaces the whole tail, so the casing context is `committed` —
-    # NOT committed+tail (the tail is going away).
+    # A revise whose partial shares NO prefix with the tail (k=0) replaces the
+    # whole tail, so the casing context is `committed` — NOT committed+tail (the
+    # tail is going away).
     stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.5, 1.0))
     stream._committed = "Done."
     stream.on_partial("new")
@@ -209,6 +237,40 @@ def test_revise_guard_context_is_committed_alone():
     stream.on_partial("Fine wording")
     # after "Done." a new sentence keeps its capital on revise
     assert _typed(be) == ["new", "Fine wording"]
+
+
+def test_revise_guard_context_is_the_kept_on_screen_prefix():
+    # The corrected suffix goes through the guards with the ON-SCREEN prefix
+    # (committed + the surviving tail[:k]) as casing context: mid-sentence it
+    # lowercases the suffix's first cased char; a kept prefix that itself ends a
+    # sentence preserves the capital.
+    stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.5, 1.0))
+    stream.on_partial("the quick brown")
+    stream.on_partial("the quick Red")    # k=10 -> bs 5, suffix "Red" mid-sentence
+    assert be.calls == [
+        ("type", "the quick brown"),
+        ("bs", 5),
+        ("type", "red"),
+    ]
+    assert stream.tail == "the quick red"
+
+    # The KEPT prefix ends a sentence -> the suffix keeps its capital.
+    stream2, be2, _fb2 = _make_stream(clock=FakeClock(0.0, 0.5))
+    stream2.on_partial("stop. then")      # typed tail spans a sentence boundary
+    stream2.on_partial("stop. Now")       # k=6 -> bs 4, suffix "Now" after '.'
+    assert be2.calls == [("type", "stop. then"), ("bs", 4), ("type", "Now")]
+
+
+def test_revise_indices_counted_on_original_characters():
+    # A length-changing casefold ('ß'.casefold() == 'ss') must never desync the
+    # indices: k counts ORIGINAL characters, so the backspace deletes exactly
+    # the 2 diverging chars ("ße") and the suffix is sliced from the original
+    # partial — never from folded text (PRD §4.2quater rule 1, as amended).
+    stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.5))
+    stream.on_partial("die straße")     # 'ß' is ONE typed char
+    stream.on_partial("die strasse")    # k=8 -> bs 2, type "sse"
+    assert be.calls == [("type", "die straße"), ("bs", 2), ("type", "sse")]
+    assert stream.tail == "die strasse"
 
 
 def test_revise_to_empty_deletes_everything():
@@ -230,8 +292,8 @@ def test_rate_limit_suppresses_second_rewind_within_300ms():
     stream.on_partial("hello three")   # revise at t=0.1 -> 0.1 < 0.3 -> SUPPRESSED
     assert be.calls == [
         ("type", "hello one"),
-        ("bs", 9),
-        ("type", "hello twelve"),
+        ("bs", 3),
+        ("type", "twelve"),
     ]
     assert stream.tail == "hello twelve"          # screen keeps the FIRST revise
     assert fb.partials[-1] == "hello twelve"      # mirror keeps the tail too
@@ -245,10 +307,10 @@ def test_rate_limit_releases_after_300ms():
     stream.on_partial("hello four")    # t=0.4 -> 0.4 - 0.0 >= 0.3 -> allowed
     assert be.calls == [
         ("type", "hello one"),
-        ("bs", 9),
-        ("type", "hello twelve"),
-        ("bs", 12),
-        ("type", "hello four"),
+        ("bs", 3),
+        ("type", "twelve"),
+        ("bs", 6),
+        ("type", "four"),
     ]
     assert stream.tail == "hello four"
 
@@ -262,8 +324,8 @@ def test_fresh_start_is_not_rate_limited():
     stream.on_partial("")              # t=0.4 revise-to-empty -> allowed; empty retype
     assert be.calls == [
         ("type", "hello one"),
-        ("bs", 9),
-        ("type", "hello twelve"),
+        ("bs", 3),
+        ("type", "twelve"),
         ("bs", 12),
     ]                    # no ("type", ""): an empty guarded retype is skipped
     assert stream.tail == ""

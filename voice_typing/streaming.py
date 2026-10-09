@@ -10,9 +10,13 @@ tail:
     textproc.apply_streaming_guards() applied (mid-sentence casing + one spurious
     '.' stripped). Additive and flicker-free by construction — never rate-limited.
   - REVISE (anything else — RealtimeSTT may re-capitalize, retract or rewrite
-    earlier words): press_backspace(len(tail)) then type the guarded corrected
-    tail. FULL REWINDS ARE RATE-LIMITED: at most one per
-    _FULL_REWIND_RATE_LIMIT_S (a code constant, NOT config — PRD §4.2quater ">=300
+    words): MINIMAL-DIFF REWIND (PRD §4.2quater rule 1): backspace ONLY the suffix
+    past the longest common prefix of tail and partial — never the whole tail —
+    then type the guarded corrected suffix (the guards see the KEPT on-screen
+    prefix as their casing context). A full-tail rewind happens only when the
+    partial shares no prefix with the tail (fresh start / total rewrite).
+    Rewind cycles (any backspace > 0) ARE RATE-LIMITED: at most one per
+    _REWIND_RATE_LIMIT_S (a code constant, NOT config — PRD §4.2quater ">=300
     ms so a wobbling decode cannot flicker"). A suppressed cycle mirrors the
     current tail and touches nothing.
   - Every event — extend, revise, suppressed, frozen, disabled — mirrors the
@@ -71,10 +75,12 @@ import voice_typing.textproc as textproc
 
 logger = logging.getLogger(__name__)
 
-# Minimum spacing between FULL rewind-and-retype cycles (PRD §4.2quater rule 1:
-# ">=300 ms" — a code constant by design, deliberately NOT a config key, so a
-# wobbling decoder can never be tuned into flicker).
-_FULL_REWIND_RATE_LIMIT_S = 0.3
+# Minimum spacing between revision cycles that include at least one backspace
+# (PRD §4.2quater rule 1, as amended: ">=300 ms apart — code constant, not
+# config"). Additive (zero-backspace) cycles are never limited; a suppressed
+# cycle types nothing and leaves the current tail on screen. Deliberately NOT a
+# config key, so a wobbling decoder can never be tuned into flicker.
+_REWIND_RATE_LIMIT_S = 0.3
 
 # Sentence terminators that end the rolling context sentence (PRD §4.2quater rule 2:
 # the child's context prompt carries the text since the last sentence boundary). Same
@@ -110,6 +116,23 @@ def _ci_startswith(text: str, prefix: str) -> bool:
     return len(text) >= len(prefix) and all(
         a.casefold() == b.casefold() for a, b in zip(text, prefix)
     )
+
+
+def _ci_common_prefix_len(a: str, b: str) -> int:
+    """Length of the longest common prefix of `a` and `b`, case-insensitively.
+
+    The minimal-diff rewind count (PRD §4.2quater rule 1): k matched chars ->
+    press_backspace(len(typed) - k) + type the corrected suffix from offset k —
+    never a whole-tail rewind for a tail-only edit. Per-character casefold
+    comparison over the ORIGINAL strings, so k counts original characters and a
+    length-changing casefold ('ß'.casefold() == 'ss') can never desync callers'
+    slicing (same discipline as _ci_startswith). PURE: no I/O, no state.
+    """
+    n = min(len(a), len(b))
+    k = 0
+    while k < n and a[k].casefold() == b[k].casefold():
+        k += 1
+    return k
 
 
 def _echo_norm(text: str) -> str:
@@ -173,7 +196,7 @@ class StreamingOutput:
         streaming: bool,
         *,
         append_space: bool = True,
-        rate_limit_s: float = _FULL_REWIND_RATE_LIMIT_S,
+        rate_limit_s: float = _REWIND_RATE_LIMIT_S,
         clock=time.monotonic,
     ) -> None:
         """Args:
@@ -185,7 +208,8 @@ class StreamingOutput:
         append_space: the cfg.output.append_space flag; commit() appends the
             inter-final trailing space IFF true (the ONLY code that ever types a
             space while the engine is live — P1.M2.T6.S2).
-        rate_limit_s: minimum spacing between full rewinds (override only in tests).
+        rate_limit_s: minimum spacing between backspace-bearing revision cycles
+            (override only in tests).
         clock: monotonic time source (injectable for deterministic rate-limit tests).
         """
         self._backend = backend
@@ -217,10 +241,11 @@ class StreamingOutput:
         # reset_session(); a later reject overwrites it.
         self._echo_guard: str | None = None
         self._suppressed: bool = False
-        # None = no full rewind has happened yet (first revise is always allowed).
+        # None = no backspace-bearing revision has happened yet (the first is
+        # always allowed).
         # A plain 0.0 sentinel would break a fake clock starting at 0.0 (and read
         # as "rewound 50 years ago" on the real clock) — None says it cleanly.
-        self._last_full_rewind: float | None = None
+        self._last_rewind: float | None = None
 
     # --- read-only accessors (T5.S2 + T6.S2 consume; tests may poke _committed) ---
 
@@ -307,7 +332,7 @@ class StreamingOutput:
 
         Session-lifecycle counterpart of reset_boundary(): a fresh arm legitimately
         unfreezes — whatever stranded the previous session's tail (a backend failure,
-        a rejected final) must not carry into the next one, and the full-rewind
+        a rejected final) must not carry into the next one, and the rewind-rate
         budget starts fresh. reset_boundary() lifts only PER-UTTERANCE freezes;
         session-class freezes (backend failure, stranded tail) survive every boundary
         and are cleared ONLY here. On disarm the pending tail simply stays typed on
@@ -327,7 +352,7 @@ class StreamingOutput:
             # tag too, so a later non-backend freeze in the new session is liftable
             # by resume() (the tag must imply frozen; this unfreeze clears it).
             self._frozen_backend_failure = False
-            self._last_full_rewind = None
+            self._last_rewind = None
 
     def resume(self) -> None:
         """Class-aware lift: clears suppression ALWAYS; lifts ONLY a stranded
@@ -356,7 +381,7 @@ class StreamingOutput:
             at INFO. The keypress freeze must hold until reset_boundary() absorbs
             the tail (PRD §4.2quater rule 5: never type over the user's cursor).
         Idempotent; sends NO keystrokes; does not touch _committed/_tail/
-        _last_full_rewind.
+        _last_rewind.
         """
         with self._lock:
             self._suppressed = False
@@ -527,7 +552,7 @@ class StreamingOutput:
                 self._feedback.update_partial(self._tail)
                 return
 
-            # REVISE (includes the fresh start when tail == ""): rewind + retype.
+            # REVISE (includes the fresh start when tail == ""): minimal-diff rewind.
             # Clock is consulted ONLY for an actual rewind attempt (tail non-empty):
             # a fresh start is not a rewind, consumes no time sample, and stamps
             # nothing — so the rate limiter measures rewind-to-rewind spacing only.
@@ -535,25 +560,35 @@ class StreamingOutput:
             now = self._clock() if had_tail else None
             if (
                 had_tail
-                and self._last_full_rewind is not None
-                and now - self._last_full_rewind < self._rate_limit_s
+                and self._last_rewind is not None
+                and now - self._last_rewind < self._rate_limit_s
             ):
-                # Too soon after the last full rewind: keep the current tail on
+                # Too soon after the last rewind: keep the current tail on
                 # screen, type nothing this cycle — a wobbling decode cannot flicker.
                 self._feedback.update_partial(self._tail)
                 return
-            guarded = textproc.apply_streaming_guards(self._committed, text)
+            # MINIMAL-DIFF rewind (PRD §4.2quater rule 1): backspace ONLY the suffix
+            # past the longest common prefix of tail and partial — never the whole
+            # tail. A last-word wobble rewinds just that word; a retract rewinds only
+            # the retracted chars; only a genuinely prefix-free rewrite rewinds all.
+            k = _ci_common_prefix_len(self._tail, text)
+            guarded = textproc.apply_streaming_guards(
+                self._guard_context(self._tail[:k]), text[k:]
+            )
             # press_backspace(0) is a backend no-op; _safe_backspace also guards it.
-            if not self._safe_backspace(len(self._tail)):
+            if not self._safe_backspace(len(self._tail) - k):
                 self._feedback.update_partial(self._tail)
                 return  # freeze already recorded by _safe_backspace
             if guarded and not self._safe_type(guarded):
+                # Rewind landed, retype did not: the screen now ends at tail[:k] —
+                # keep the engine string on screen truth (frozen either way).
+                self._tail = self._tail[:k]
                 self._feedback.update_partial(self._tail)
-                return  # tail unchanged: the retype never landed
-            self._tail = guarded
+                return
+            self._tail = self._tail[:k] + guarded
             if had_tail:
                 # Stamp only ACTUAL rewinds — never fresh starts.
-                self._last_full_rewind = now
+                self._last_rewind = now
             self._feedback.update_partial(self._tail)
 
     # --- the commit (correction pass; PRD §4.2quater rule 2, P1.M2.T6.S2) ---
@@ -579,9 +614,10 @@ class StreamingOutput:
           - final EXTENDS the tail: type ONLY the guarded delta (same context shape
             as _guard_context_delta). NOT rate-limited: commits are authoritative,
             never wobble (the >=300 ms limiter exists only for partial cycles).
-          - final DIFFERS (revise/rewrite/shorter/fresh): press_backspace(len(tail))
-            then type the guarded final. NOT rate-limited: a commit is once per
-            utterance.
+          - final DIFFERS (revise/rewrite/shorter/fresh): MINIMAL-DIFF rewind (the
+            same common-prefix rule as partial typing): press_backspace(len(tail) −
+            k), type only the guarded corrected suffix. NOT rate-limited: a commit
+            is once per utterance.
         Then append the trailing space iff append_space, advance the checkpoint
         (`committed` gains the text ACTUALLY TYPED + the space, so future guards and
         the context prompt diff against screen truth), clear the tail, lift
@@ -629,15 +665,21 @@ class StreamingOutput:
                     self._tail += guarded
                 typed = self._tail
             else:
-                # REVISE / fresh start: exact-length rewind + guarded retype. A commit
-                # is authoritative — no rate-limit consult, no _last_full_rewind stamp.
-                guarded = textproc.apply_streaming_guards(self._committed, text)
-                if not self._safe_backspace(len(self._tail)):
+                # REVISE / fresh start: minimal-diff rewind + guarded suffix retype
+                # (PRD §4.2quater rule 2 — the same common-prefix rule as partial
+                # typing). A commit is authoritative — no rate-limit consult, no
+                # _last_rewind stamp.
+                k = _ci_common_prefix_len(self._tail, text)
+                guarded = textproc.apply_streaming_guards(
+                    self._guard_context(self._tail[:k]), text[k:]
+                )
+                if not self._safe_backspace(len(self._tail) - k):
                     return  # frozen; on-screen state unknown — touch nothing further
                 if guarded and not self._safe_type(guarded):
+                    self._tail = self._tail[:k]  # screen truth after the landed rewind
                     return  # frozen mid-retype: the rewind landed, the retype did not
-                self._tail = guarded
-                typed = guarded
+                self._tail = self._tail[:k] + guarded
+                typed = self._tail
             space = " " if self._append_space else ""
             if space and not self._safe_type(space):
                 return  # frozen: checkpoint stays at the pre-commit boundary
@@ -652,14 +694,20 @@ class StreamingOutput:
 
     # --- internals ---
 
-    def _guard_context_delta(self) -> str:
-        """Casing context for an extend delta: committed + " " + tail.
+    def _guard_context(self, tail: str) -> str:
+        """Casing context for a fragment continuing `tail`: committed + " " + tail.
 
-        The delta continues what is already on screen, so the text preceding it —
-        not `committed` alone — decides mid-sentence vs sentence-start.
+        The fragment continues what is already on screen — the full tail for an
+        extend delta, or the KEPT tail prefix for a minimal-diff revise suffix —
+        so the text preceding it, not `committed` alone, decides mid-sentence vs
+        sentence-start.
         """
-        parts = [p for p in (self._committed.strip(), self._tail) if p]
+        parts = [p for p in (self._committed.strip(), tail) if p]
         return " ".join(parts)
+
+    def _guard_context_delta(self) -> str:
+        """Casing context for an extend delta: committed + " " + tail."""
+        return self._guard_context(self._tail)
 
     def _safe_type(self, s: str) -> bool:
         """type_text that fails SAFE: log WARNING + freeze instead of killing the reader."""

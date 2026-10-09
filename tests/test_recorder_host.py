@@ -678,3 +678,69 @@ def test_run_text_plain_abort_emits_unmarked_sentinel_and_keeps_audio():
     assert events == [("final", {"text": ""})], (
         f"plain abort sentinel must stay UNMARKED ({{'text': ''}} — no 'cancelled' key); got {events!r}"
     )
+
+
+# ===========================================================================
+# LOST-SIGNAL FIX (Backspace stuck-suppression bug): a cancel/abort landing in
+# the gap BETWEEN the child's text() cycles used to be silently wiped by the
+# 'text' command's fresh-marker clears — the marked sentinel was never emitted,
+# the daemon's _cancel_suppress_final latched forever, every later final was
+# dropped (no commit, no reset_boundary), and the streaming tail accumulated
+# across utterances so everything dictated after the Backspace kept rewinding
+# to the edit point. These tests pin the child-side halves of the fix.
+# ===========================================================================
+
+
+def test_drain_stale_abort_signals_cancel_wins_and_clears_both():
+    """_drain_stale_abort_signals consumes a between-cycles cancel/abort, cancel FIRST
+    (RecorderHost.cancel() sets both events; cancel's sentinel must be MARKED), and always
+    clears both so the next text() cycle starts on the fresh-marker slate."""
+    cancel_event = threading.Event()
+    abort_event = threading.Event()
+    assert recorder_host._drain_stale_abort_signals(cancel_event, abort_event) is None
+
+    abort_event.set()
+    assert recorder_host._drain_stale_abort_signals(cancel_event, abort_event) == "abort"
+    assert not abort_event.is_set() and not cancel_event.is_set()
+
+    cancel_event.set()
+    abort_event.set()
+    assert recorder_host._drain_stale_abort_signals(cancel_event, abort_event) == "cancel"
+    assert not cancel_event.is_set() and not abort_event.is_set()
+
+
+def test_run_text_holds_text_running_for_whole_text_call():
+    """_run_text_and_emit_final holds the text_running lock for the WHOLE recorder.text() call
+    (the abort handler's try-acquire liveness check: acquired == text() NOT in flight)."""
+    import queue as _queue
+
+    evt_q: Any = _queue.Queue()
+    lock = threading.Lock()
+    seen: dict[str, bool] = {}
+
+    class _Rec:
+        def text(self, on_final):
+            seen["locked_during_text"] = lock.locked()
+            return None
+
+    recorder_host._run_text_and_emit_final(_Rec(), evt_q, lambda _t: None, None, None, lock)
+    assert seen["locked_during_text"] is True, "text_running must be held inside recorder.text()"
+    assert not lock.locked(), "text_running must be released once text() returns"
+
+
+def test_bounded_recorder_abort_returns_on_wedged_abort():
+    """_bounded_recorder_abort can never wedge the caller: an abort() that blocks forever
+    (abort_recording's was_interrupted.wait() when text() is not in flight and the recorder
+    state is not 'inactive') is abandoned after the bound — the handler thread stays alive."""
+    entered = threading.Event()
+
+    class _WedgingRec:
+        def abort(self):
+            entered.set()
+            time.sleep(3600.0)  # the wedge (never returns this test's lifetime)
+
+    t0 = time.monotonic()
+    recorder_host._bounded_recorder_abort(_WedgingRec(), timeout_s=0.2)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, f"bounded abort must return promptly, took {elapsed:.2f}s"
+    assert entered.is_set(), "the abort call must still have been attempted"

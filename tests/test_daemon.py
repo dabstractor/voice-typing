@@ -4732,14 +4732,15 @@ def test_on_final_streaming_commit_types_via_engine():
     assert fb.finals == ["hello world"]
 
 
-def test_on_final_streaming_revise_rewinds_and_retypes():
-    """A final that differs from the tail: the engine rewinds exactly len(tail) and
-    retypes the guarded final + space (NOT rate-limited — commit is authoritative)."""
+def test_on_final_streaming_revise_minimal_diff():
+    """A final that differs from the tail: the engine backspaces EXACTLY the
+    diverging suffix (len(tail) - k, k = the CI common prefix) and retypes only
+    the corrected suffix + space (NOT rate-limited — commit is authoritative)."""
     d, fb, rec, be = _make_daemon()
     d.start()
     d._on_partial("hello world")
-    d.on_final("hello there")
-    assert be.typed == ["hello world", ("bs", 11), "hello there", " "]
+    d.on_final("hello there")               # k=6 -> bs 5, type "there"
+    assert be.typed == ["hello world", ("bs", 5), "there", " "]
     assert d._stream.committed == "hello there "
     assert fb.finals == ["hello there"]
 
@@ -5113,3 +5114,68 @@ def test_on_partial_gated_on_listening_stale_partial_after_stop_types_nothing():
     before = list(be.typed)
     d._on_partial("stray words")            # stale partial AFTER the disarm
     assert be.typed == before, f"stale partial typed while toggled off: {be.typed!r}"
+
+
+# ===========================================================================
+# LOST-SENTINEL SELF-HEAL (Backspace stuck-suppression bug): a cancel whose
+# marked sentinel never arrived (it landed while the recorder-host child sat
+# BETWEEN text() cycles and was wiped by the fresh-marker clears — now fixed
+# at the source in recorder_host) used to latch _cancel_suppress_final
+# FOREVER: every later final was silently dropped (no commit, no
+# reset_boundary), the streaming tail accumulated across utterances, and
+# everything dictated after the Backspace kept rewinding to the edit point.
+# The timeout bound is the daemon-side backstop.
+# ===========================================================================
+
+
+def test_lost_sentinel_self_heals_after_timeout():
+    """Past _CANCEL_SUPPRESS_TIMEOUT_S with no marked sentinel, on_final force-closes the
+    suppression window and PROCESSES the final (it cannot belong to the cancelled utterance —
+    its audio was discarded at cancel time). Inside the bound the drop behavior is unchanged.
+    """
+    import time as _time
+
+    d, fb = _make_cancel_daemon()
+    be = d._backend
+    d.cancel()  # latches the window + stamps _cancel_suppress_since
+    assert d._cancel_suppress_final is True
+    assert d._cancel_suppress_since is not None
+    d.on_final("racing tail")  # immediate: inside the window -> DROPPED (unchanged)
+    assert be.typed == [] and fb.finals == []
+    # Age the stamp past the bound (poked directly — the same style
+    # test_arm_clears_stale_cancel_suppression uses for the flag itself).
+    d._cancel_suppress_since = _time.monotonic() - (
+        daemon._CANCEL_SUPPRESS_TIMEOUT_S + 1.0
+    )
+    d.on_final("fresh sentence")  # self-heal: processed like a normal final
+    assert d._cancel_suppress_final is False and d._cancel_suppress_since is None
+    assert be.typed == ["fresh sentence", " "]
+    assert fb.finals == ["fresh sentence"]
+
+
+def test_sentinel_consume_clears_suppress_since():
+    """The healthy path: the marked sentinel closes the window AND clears the self-heal stamp,
+    so no later final can be mistaken for a lost-sentinel recovery."""
+    d, fb = _make_cancel_daemon()
+    host = d._host
+    d.cancel()
+    host.mark_cancel_sentinel()
+    d.on_final("")  # sentinel consumed -> window closed, stamp cleared
+    assert d._cancel_suppress_final is False
+    assert d._cancel_suppress_since is None
+    d.on_final("next sentence")  # normal processing resumes immediately
+    assert d._backend.typed == ["next sentence", " "]
+    assert fb.finals == ["next sentence"]
+
+
+def test_fresh_arm_clears_suppress_since():
+    """_arm() resets the self-heal stamp with the flag (a stale stamp from a pre-toggle cancel
+    must not age an UNLATCHED window into a bogus self-heal log line)."""
+    import time as _time
+
+    d, _fb = _make_cancel_daemon()
+    d._cancel_suppress_final = True  # simulate the lost-sentinel residue
+    d._cancel_suppress_since = _time.monotonic() - 100.0
+    d.start()  # _arm() under the lock
+    assert d._cancel_suppress_final is False
+    assert d._cancel_suppress_since is None

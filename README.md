@@ -135,17 +135,21 @@ place, and the mic never pauses for decoding.**
 
 While you speak:
 
-- **Partials are typed live.** Each stabilized partial is diffed against what is on
-  screen: an extension types only the delta; a revision deletes and retypes the changed
-  tail. Extensions match case-insensitively, so a casing-corrected fragment still
-  extends by clean deltas instead of full rewinds. Full rewind-and-retype cycles are
-  rate-limited (≥300 ms apart — a code constant, not a config key) so a wobbling decode
-  cannot flicker.
+- **Partials are typed live, revised with minimal diffs.** Each stabilized partial
+  is diffed against what is on screen: an extension types only the delta; a
+  revision backspaces only the diverging suffix — the text after the longest
+  common prefix, matched case-insensitively (so a casing-corrected fragment
+  still extends by clean deltas) and counted on the original characters — then
+  retypes just the corrected remainder. Only a genuinely prefix-free rewrite
+  ever rewinds the whole tail. Revision cycles that include a backspace are
+  rate-limited (≥300 ms apart — a code constant, not a config key) so a wobbling
+  decode cannot flicker.
 - **Silence trips the commit/correction pass.** After `asr.lite_post_speech_silence_duration`
   (default `0.8` s) of silence, the model re-decodes the complete utterance; if the
-  correction differs from what is on screen, the tail is rewound and retyped, then the
-  trailing space is appended (`output.append_space`). Under streaming, the silence gate
-  only delays this commit — the words are already visible.
+  correction differs from what is on screen, the tail is revised with the same
+  minimal-diff rule (only the diverging suffix is rewound and retyped), then the
+  trailing space is appended (`output.append_space`). Under streaming, the silence
+  gate only delays this commit — the words are already visible.
 - **Continuations read coherently.** Every decode is conditioned on the rolling committed
   context (`asr.context_prompt`, back to the last sentence boundary, ~200-token cap), so
   a mid-paragraph fragment doesn't start capitalized or gain a spurious trailing period.

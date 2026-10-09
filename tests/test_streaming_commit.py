@@ -145,15 +145,36 @@ def test_commit_extend_matches_case_insensitively():
 
 
 # ---------------------------------------------------------------------------
-# Commit: revise / fresh path (exact rewind + retype)
+# Commit: revise / fresh path (minimal-diff rewind + guarded suffix retype —
+# the SAME common-prefix rule as partial typing; PRD §4.2quater rule 2, amended)
 # ---------------------------------------------------------------------------
 
-def test_commit_revise_rewinds_exact_tail_len_and_retypes():
+def test_commit_revise_backspaces_exactly_the_diverging_suffix():
     stream, be, _fb = _make_stream()
     stream.on_partial("hello world")        # tail = "hello world" (11 chars)
-    stream.commit("hello there")            # differs -> full rewind, NOT rate-limited
-    assert be.calls == [("type", "hello world"), ("bs", 11), ("type", "hello there"), ("type", " ")]
+    stream.commit("hello there")            # k=6 -> bs 5, type "there"; NOT rate-limited
+    assert be.calls == [
+        ("type", "hello world"),
+        ("bs", 5),
+        ("type", "there"),
+        ("type", " "),
+    ]
     assert stream.committed == "hello there "
+
+
+def test_commit_confirming_prefix_rewinds_only_the_diverging_suffix():
+    # T8b: a commit that confirms most of the typed tail rewinds ONLY the
+    # diverging suffix — a whole-tail rewind for a tail-only edit is a FAILURE.
+    stream, be, _fb = _make_stream()
+    stream.on_partial("hello world foo")
+    stream.commit("hello world bar")        # k=12 -> bs 3, type "bar"
+    assert be.calls == [
+        ("type", "hello world foo"),
+        ("bs", 3),
+        ("type", "bar"),
+        ("type", " "),
+    ]
+    assert stream.committed == "hello world bar "
 
 
 def test_commit_fresh_start_no_backspace_recorded():
@@ -184,13 +205,14 @@ def test_commit_not_rate_limited_back_to_back():
     assert stream.committed == "goodbye farewell "
 
 
-def test_commit_shorter_final_rewinds_and_retypes():
+def test_commit_shorter_final_backspaces_only_the_extra():
     stream, be, _fb = _make_stream()
     stream.on_partial("hello world how are")
-    stream.commit("hello world")            # final SHORTER than the tail
+    stream.commit("hello world")            # final SHORTER: k=11 -> bs 8, no retype
     assert be.calls == [
         ("type", "hello world how are"),
-        ("bs", 19), ("type", "hello world"), ("type", " "),
+        ("bs", 8),
+        ("type", " "),
     ]
     assert stream.committed == "hello world "
 
@@ -251,8 +273,8 @@ def test_commit_append_space_false_types_no_space():
 def test_commit_append_space_false_revise_path():
     stream, be, _fb = _make_stream(append_space=False)
     stream.on_partial("hello world")
-    stream.commit("hello there")
-    assert be.calls == [("type", "hello world"), ("bs", 11), ("type", "hello there")]
+    stream.commit("hello there")            # k=6 -> bs 5, type "there"
+    assert be.calls == [("type", "hello world"), ("bs", 5), ("type", "there")]
     assert stream.committed == "hello there"
 
 
@@ -298,7 +320,10 @@ def test_commit_type_failure_freezes_and_never_raises():
     assert be.calls == [("type", "hello"), ("bs", 5)]  # rewind landed, retype did not
     stream.on_partial("next")               # frozen: mirror-only, no backend calls
     assert be.calls == [("type", "hello"), ("bs", 5)]   # no NEW calls after the freeze
-    assert fb.partials[-1] == "hello"       # frozen mirror = the typed tail
+    # frozen mirror = SCREEN TRUTH after the landed rewind: the diverging suffix
+    # was deleted, the retype never landed, so only the kept prefix remains
+    # (tail[:k] — here k=0, an empty screen).
+    assert fb.partials[-1] == ""
 
 
 def test_commit_backspace_failure_freezes_tail_intact():

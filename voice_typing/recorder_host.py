@@ -650,6 +650,14 @@ def _worker_main(
     # CANCEL (RecorderHost.cancel()), not a plain stop/drain abort. _run_text_and_emit_final keys
     # the audio discard + the MARKED sentinel on it; cleared at the top of each 'text' command.
     cancelled = threading.Event()
+    # LOST-SIGNAL FIX (Backspace stuck-suppression bug): held for the WHOLE recorder.text()
+    # call inside _run_text_and_emit_final, so the abort handler's try-acquire below can tell
+    # "text() is blocked inside (safe to recorder.abort())" from "between text() cycles
+    # (defer: leave the events set for the next 'text' command's stale-signal check)".
+    # recorder.abort() waits on was_interrupted — an event ONLY text() sets — so aborting
+    # with text() not running would wedge the handler thread forever (and every later
+    # abort/cancel with it: stops/drains would degrade to their timeouts).
+    text_running = threading.Lock()
 
     def _abort_handler() -> None:
         """Watch cancel_event/abort_event; call recorder.abort() to unblock a sleeping text().
@@ -658,25 +666,34 @@ def _worker_main(
         abort, but ALSO sets `cancelled` so the sentinel is emitted MARKED and the buffered audio
         is discarded. RecorderHost.cancel() sets BOTH events — the cancel branch consumes
         abort_event too, so the plain-abort branch below does not run recorder.abort() twice.
+
+        LOST-SIGNAL FIX: recorder.abort() runs ONLY while text() is in flight (the text_running
+        try-acquire). When it is NOT, the events are LEFT SET — never consumed here — and the
+        next 'text' command's stale-signal check consumes them and emits the sentinel directly,
+        so the daemon's cancel-suppression window still closes and a stop's abort still
+        unblocks text(). Consuming them here instead (the old behavior) silently discarded the
+        signal: no marked sentinel was ever emitted and every later final was dropped daemon-side.
         """
         while not stop_abort_thread.is_set():
             if cancel_event.wait(timeout=0.2):
+                if text_running.acquire(blocking=False):
+                    text_running.release()  # text() not in flight: the next 'text' command's
+                    time.sleep(0.05)  # stale-signal check owns these events — leave them set
+                    continue
                 cancel_event.clear()
                 abort_event.clear()  # cancel() set both; consume both (ONE recorder.abort())
                 aborted.set()        # VT-007: the sentinel must fire (same as a plain abort) ...
                 cancelled.set()      # ... but MARKED, with the buffered audio discarded
-                try:
-                    recorder.abort()
-                except Exception:
-                    logger.exception("child: recorder.abort() raised (best-effort; ignored)")
+                _bounded_recorder_abort(recorder)
                 continue
             if abort_event.wait(timeout=0.2):
+                if text_running.acquire(blocking=False):
+                    text_running.release()  # same deferral as the cancel branch above
+                    time.sleep(0.05)
+                    continue
                 abort_event.clear()
                 aborted.set()  # VT-007: mark so _run_text_and_emit_final emits the sentinel
-                try:
-                    recorder.abort()
-                except Exception:
-                    logger.exception("child: recorder.abort() raised (best-effort; ignored)")
+                _bounded_recorder_abort(recorder)
 
     abort_thread = threading.Thread(target=_abort_handler, name="vt-child-abort", daemon=True)
     abort_thread.start()
@@ -690,18 +707,44 @@ def _worker_main(
                 break  # daemon gone -> exit
             try:
                 if kind == "text":
-                    # Clear any stale abort before entering text() so a leftover set from a previous
-                    # session does not immediately abort this utterance.
-                    abort_event.clear()
+                    # LOST-SIGNAL FIX (Backspace stuck-suppression bug): a cancel/abort that
+                    # landed while we were BETWEEN text() cycles was silently discarded by
+                    # these fresh-marker clears (and RealtimeSTT's text() entry clears
+                    # interrupt_stop_event too) — the marked sentinel was never emitted, the
+                    # daemon's cancel-suppression window never closed, and every later final
+                    # was dropped (no commit, no reset_boundary: the streaming tail
+                    # accumulated across utterances, so everything dictated after the
+                    # Backspace kept rewinding to the edit point). Consume a stale signal
+                    # HERE and emit its sentinel DIRECTLY — one ('final', ...) event per
+                    # text command, the same invariant _run_text_and_emit_final guarantees —
+                    # and do NOT enter recorder.text(); the daemon run loop re-sends 'text'.
+                    stale = _drain_stale_abort_signals(cancel_event, abort_event)
+                    abort_event.clear()  # fresh per-utterance markers (the original intent)
                     aborted.clear()  # VT-007: fresh per-utterance abort marker
                     cancelled.clear()  # P1.M2.T7.S1: fresh per-utterance cancel marker
+                    if stale == "cancel":
+                        _clear_recorder_audio(recorder)
+                        _safe_put(evt_q, ("final", {"text": "", "cancelled": True}))
+                        continue
+                    if stale == "abort":
+                        _safe_put(evt_q, ("final", {"text": ""}))
+                        continue
                     # blocks until a final (or an abort). _run_text_and_emit_final GUARANTEES a
                     # ('final', ...) event on BOTH paths (real final via on_final, OR abort via the
                     # sentinel) so the daemon's host.text() always unblocks — without it an abort
                     # (stop/toggle-off/auto-stop) leaves host.text() blocked forever (the child is
                     # still alive), wedging the run() loop so no further utterance transcribes.
-                    _run_text_and_emit_final(recorder, evt_q, _child_on_final, aborted, cancelled)
+                    _run_text_and_emit_final(
+                        recorder, evt_q, _child_on_final, aborted, cancelled, text_running
+                    )
                 elif kind == "arm":
+                    # LOST-SIGNAL FIX companion: drop any cancel/abort that raced a
+                    # disarm->arm toggle (e.g. a stop's abort landing after this child had
+                    # already returned from text()). A fresh session starts with a clean
+                    # abort slate; otherwise the next 'text' command would emit a STALE
+                    # sentinel — a spurious rejected-final freeze + "filtered hallucination"
+                    # toast at the session's first utterance.
+                    _drain_stale_abort_signals(cancel_event, abort_event)
                     recorder.set_microphone(True)
                 elif kind == "disarm":
                     recorder.set_microphone(False)
@@ -863,12 +906,61 @@ def _clear_recorder_audio(recorder: Any) -> None:
         logger.debug("child: clearing recorder.audio raised (ignored)", exc_info=True)
 
 
+def _drain_stale_abort_signals(cancel_event: Any, abort_event: Any) -> str | None:
+    """Consume a cancel/abort signal that landed BETWEEN text() cycles. PURE event plumbing.
+
+    LOST-SIGNAL FIX (Backspace stuck-suppression bug): the child's command loop sits at
+    cmd_q.get() between utterance cycles. A cancel/abort arriving there used to be wiped by
+    the 'text' command's fresh-marker clears without ever being observed, so the daemon's
+    cancel-suppression window never closed. This drains the events instead, cancel FIRST
+    (RecorderHost.cancel() sets both; cancel takes precedence so its sentinel is MARKED).
+
+    Returns "cancel", "abort", or None (no stale signal). ALWAYS clears both events so the
+    caller enters its next text() cycle with the fresh-marker slate the clears intend. PURE:
+    no recorder calls, no queue puts — the caller decides what to emit.
+    """
+    stale = "cancel" if cancel_event.is_set() else ("abort" if abort_event.is_set() else None)
+    cancel_event.clear()
+    abort_event.clear()
+    return stale
+
+
+def _bounded_recorder_abort(recorder: Any, timeout_s: float = 2.0) -> None:
+    """recorder.abort() that can never wedge the caller (the child's abort-handler thread).
+
+    abort_recording() waits on was_interrupted — an event ONLY recorder.text() sets — so an
+    abort with text() not in flight and recorder state != "inactive" blocks FOREVER. The
+    handler calls this only after the text_running try-acquire says text() IS in flight, but
+    the check-then-abort window is microscopic, not zero: if text() returns in between, a bare
+    abort would wedge the handler thread permanently (killing every later abort/cancel —
+    stops and drains degrade to their timeouts). The join bound turns that residual into a
+    WARNING + one abandoned daemon thread (it holds no locks); the handler loop stays alive.
+    Never raises.
+    """
+    def _call() -> None:
+        try:
+            recorder.abort()
+        except Exception:
+            logger.exception("child: recorder.abort() raised (best-effort; ignored)")
+
+    t = threading.Thread(target=_call, name="vt-child-abort-call", daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if t.is_alive():
+        logger.warning(
+            "child: recorder.abort() did not return within %.1fs (text() likely not in "
+            "flight); the abort signal is left to the next text cycle's stale-signal check",
+            timeout_s,
+        )
+
+
 def _run_text_and_emit_final(
     recorder: Any,
     evt_q: Any,
     on_final: "Callable[[str], None]",
     aborted: "threading.Event | None" = None,
     cancelled: "threading.Event | None" = None,
+    text_running: "threading.Lock | None" = None,
 ) -> None:
     """Child: run ONE recorder.text(on_final) call AND guarantee a ('final', ...) event when it ends.
 
@@ -905,8 +997,19 @@ def _run_text_and_emit_final(
           v1.0.2 return semantics exactly).
     Either signal fires the sentinel. The recorder-host integration test (tests/test_idle_and_gpu.sh)
     + the abort-path unit tests (incl. a fake text() returning None on abort) guard this contract.
+
+    text_running (LOST-SIGNAL FIX): when given, held for the WHOLE recorder.text() call so the
+    child's abort handler can tell "text() in flight (safe to recorder.abort())" from "between
+    cycles (defer: leave the events for the next 'text' command's stale-signal check)". Default
+    None keeps the existing unit-test call sites (4-arg) unchanged.
     """
-    result = recorder.text(on_final)
+    if text_running is not None:
+        text_running.acquire()
+    try:
+        result = recorder.text(on_final)
+    finally:
+        if text_running is not None:
+            text_running.release()
     if (aborted is not None and aborted.is_set()) or result is not None:
         # Abort/shutdown path: emit the ('final', {text:''}) sentinel so the daemon's host.text()
         # unblocks instead of wedging the run() loop forever. See the VT-007 note above for why we

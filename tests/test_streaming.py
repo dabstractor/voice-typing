@@ -14,15 +14,19 @@ reusable, nothing loosened):
   (a) test_a_delta_cadence     — while speech streams, typed deltas arrive >=1 per 500 ms
                                  (suppress-aware: a gap is legitimate iff a feedback-mirror
                                  partial arrived in it — a rate-limited/suppressed revise
-                                 cycle types nothing but the decoder is alive), and at least
+                                 cycle types nothing but the decoder is alive); at least
                                  one extend cycle types ONLY the delta (no backspace since
-                                 the previous keystroke).
+                                 the previous keystroke); and — via _assert_commit_invariants
+                                 check 3 — every revising backspace deletes EXACTLY the
+                                 diverging suffix (len(tail) - k, k = the CI common prefix).
   (b) test_b_commit_rewind_exact — every commit leaves the simulated screen exactly equal to
                                  the committed-so-far reconstruction (guarded final + trailing
                                  space, reconstructed from the harness's own commit log — an
                                  EXACT check, not fuzzy); every rewind deletes EXACTLY the
-                                 pending tail; >=1 revising commit occurs (bounded retry with
-                                 utt_punct.wav before failing).
+                                 diverging suffix (len(tail) - k for k = the CI common prefix
+                                 with the rewind's owning partial/commit — a whole-tail rewind
+                                 for a tail-only edit is a FAILURE); >=1 revising commit
+                                 occurs (bounded retry with utt_punct.wav before failing).
   (c) test_c_pause_join       — PAUSE_A + 3.0 s silence + PAUSE_B joins into coherent
                                  committed text: per-commit deterministic-guard
                                  postconditions (textproc.apply_streaming_guards) checked
@@ -240,6 +244,21 @@ class BackendEvent:
     screen_after: str = ""  # simulated on-screen text after this event
 
 
+@dataclasses.dataclass
+class EngineCall:
+    """One StreamingOutput.on_partial()/commit() invocation, timestamped at its
+    seams (t0 before the engine call, t1 after it returns) — the minimal-diff
+    oracle's target attribution: a backspace whose t falls inside [t0, t1]
+    belongs to the call with the LATEST t0 among the windows open at t (the
+    engine lock serializes the calls; windows can nest only while a caller
+    waits on that lock)."""
+
+    t0: float
+    t1: float
+    kind: str  # "partial" | "commit"
+    text: str  # the RAW incoming text (pre-normalization)
+
+
 class RecordingTypingBackend(TypingBackend):
     """Records (t, kind, payload) per call + maintains a simulated screen buffer.
 
@@ -379,6 +398,22 @@ class StreamingHarness:
             self.cfg.output.streaming,
             append_space=self.cfg.output.append_space,
         )
+        # Minimal-diff oracle seam (T8a/T8b): timestamp every engine call so each
+        # backspace event can be attributed to the partial/commit that issued it
+        # (see _assert_commit_invariants check 3). Behavior-neutral wrapping.
+        self.engine_calls: list[EngineCall] = []
+        for name, kind in (("on_partial", "partial"), ("commit", "commit")):
+            inner = getattr(self.stream, name)
+
+            def _wrapped(text: str, _inner=inner, _kind=kind) -> object:
+                call = EngineCall(time.monotonic(), 0.0, _kind, text)
+                self.engine_calls.append(call)
+                try:
+                    return _inner(text)
+                finally:
+                    call.t1 = time.monotonic()
+
+            setattr(self.stream, name, _wrapped)
 
     def attach_executor(self, executor: RecordingPromptedExecutor) -> None:
         self.executor = executor
@@ -895,6 +930,17 @@ def _dump_events(harness: StreamingHarness, limit: int = 300) -> str:
 # ================================================================================================
 
 
+def _ci_lcp(a: str, b: str) -> int:
+    """Case-insensitive longest common prefix length, counted on the ORIGINAL
+    characters — mirrors voice_typing.streaming._ci_common_prefix_len so the
+    minimal-diff oracle computes k exactly as the engine does."""
+    n = min(len(a), len(b))
+    k = 0
+    while k < n and a[k].casefold() == b[k].casefold():
+        k += 1
+    return k
+
+
 def _assert_commit_invariants(harness: StreamingHarness, refs: list[str]) -> None:
     """Exact screen/rewind invariants over the WHOLE run (PRD T8b), + per-piece fuzzy (G-FUZZY).
 
@@ -904,8 +950,12 @@ def _assert_commit_invariants(harness: StreamingHarness, refs: list[str]) -> Non
 
     1. The capture is live: the engine's CURRENT committed == the last captured truth.
     2. Every commit window contains its trailing type_text(" ").
-    3. EVERY backspace deletes exactly the pending tail:
-       n == len(screen_before) - len(engine_committed_at_event_time).
+    3. MINIMAL-DIFF REVISION (PRD T8a/T8b, as amended): every backspace issued inside
+       an engine call deletes EXACTLY the diverging suffix — n == len(pending_tail) - k
+       for k = the case-insensitive longest common prefix of the pending tail and the
+       owning call's (normalized) target text. A whole-tail rewind for a tail-only edit
+       fails here. Backspaces OUTSIDE any engine call (the daemon's direct cancel
+       compensation) are bounded: they never exceed the pending tail.
     4. Replaying the recorded keystrokes up to each commit stamp lands EXACTLY on that
        commit's engine committed — the on-screen truth the engine believes (stale partials
        that slip in after a commit are typed on top and would break this; by engine design
@@ -936,8 +986,10 @@ def _assert_commit_invariants(harness: StreamingHarness, refs: list[str]) -> Non
             + _dump_events(harness)
         )
 
-    # 3. EVERY backspace rewinds exactly the pending tail (commit-time AND mid-utterance
-    #    revises — the engine only ever deletes typed-since-checkpoint text).
+    # 3. MINIMAL-DIFF REVISION (PRD T8a/T8b, as amended): every backspace deletes
+    #    EXACTLY the diverging suffix — never the whole tail for a tail-only edit.
+    #    tail_before is reconstructed from the screen replay (screen == committed +
+    #    tail at every event boundary); the owning engine call supplies the target.
     screen = ""
     ci = 0
     for e in events:
@@ -945,11 +997,30 @@ def _assert_commit_invariants(harness: StreamingHarness, refs: list[str]) -> Non
             ci += 1
         committed_prefix = engine_truths[ci - 1] if ci else ""
         if e.kind == "bs":
-            n_expected = max(0, len(screen) - len(committed_prefix))
-            assert e.n == n_expected, (
-                f"backspace n={e.n} != pending tail {n_expected} "
-                f"(screen {screen!r} vs committed {committed_prefix!r})\n" + _dump_events(harness)
+            assert screen.startswith(committed_prefix), (
+                f"screen {screen!r} lost the committed prefix {committed_prefix!r}\n"
+                + _dump_events(harness)
             )
+            tail_before = screen[len(committed_prefix):]
+            owner = None
+            for c in harness.engine_calls:
+                if c.t0 <= e.t <= c.t1 and (owner is None or c.t0 > owner.t0):
+                    owner = c
+            if owner is not None:
+                target = " ".join(owner.text.split())  # the engine's own normalization
+                k = _ci_lcp(tail_before, target)
+                n_expected = len(tail_before) - k
+                assert e.n == n_expected, (
+                    f"{owner.kind} backspace n={e.n} != diverging suffix {n_expected} "
+                    f"(tail {tail_before!r}, target {target!r}, k={k}) — whole-tail "
+                    f"rewind for a tail-only edit?\n" + _dump_events(harness)
+                )
+            else:
+                # Direct (cancel-compensation) rewind: bounded by the pending tail.
+                assert 0 <= e.n <= len(tail_before), (
+                    f"direct backspace n={e.n} exceeds pending tail {tail_before!r}\n"
+                    + _dump_events(harness)
+                )
         screen = e.screen_after
 
     # 4. at each commit stamp the replayed keystrokes land exactly on the engine's committed
@@ -982,11 +1053,12 @@ def _assert_commit_invariants(harness: StreamingHarness, refs: list[str]) -> Non
 
 
 def _has_revising_commit(harness: StreamingHarness) -> bool:
-    """True iff some commit REVISED (rewound a non-empty tail, then retyped the full final).
+    """True iff some commit REVISED (rewound a non-empty diverging suffix).
 
-    Event signature within one commit window: [bs(n>0)] [type(guarded final)] [type(" ")] —
-    i.e. a bs immediately followed by exactly those two type events. An extending/fresh
-    commit has NO bs right before the retype.
+    Event signature within one commit window: [bs(n>0)] then EXACTLY the retype
+    tail — either [type(guarded corrected suffix)] [type(" ")], or just
+    [type(" ")] alone (a SHORTER final: the commit deletes only the extra chars
+    and types the separator). An extending/fresh commit has NO bs at all.
     """
     events = harness.backend.events
     for k, (ct, _piece, _ec) in enumerate(harness.commit_log):
@@ -997,11 +1069,10 @@ def _has_revising_commit(harness: StreamingHarness) -> bool:
                 continue
             rest = win[i + 1 :]
             if (
-                len(rest) == 2
-                and rest[0].kind == "type"
-                and rest[0].text.strip()
-                and rest[1].kind == "type"
-                and rest[1].text == " "
+                rest
+                and all(x.kind == "type" for x in rest)
+                and rest[-1].text == " "
+                and (len(rest) == 1 or (len(rest) == 2 and rest[0].text.strip()))
             ):
                 return True
     return False
@@ -1129,7 +1200,7 @@ def test_a_delta_cadence(
             ):
                 extends.append(e)
     assert extends, (
-        "no delta-only extend cycle observed (every cycle was a full rewind?)\n"
+        "no delta-only extend cycle observed (every cycle rewound?)\n"
         + _dump_events(harness)
     )
 
@@ -1149,8 +1220,9 @@ def test_b_commit_rewind_exact(
     stream_recorder: "tuple[AudioToTextRecorder, StreamingHarness]",
 ) -> None:
     """T8(b): every commit leaves the simulated screen EXACTLY at the committed-so-far
-    reconstruction (guarded final + trailing space); every rewind deletes EXACTLY the pending
-    tail; >=1 revising commit occurs (bounded utt_punct retry before failing)."""
+    reconstruction (guarded final + trailing space); every rewind deletes EXACTLY the
+    diverging suffix (minimal-diff, len(tail) - k); >=1 revising commit occurs (bounded
+    utt_punct retry before failing)."""
     rec, harness = stream_recorder
     harness.reset()
     refs: list[str] = list(MULTI_TEXTS)

@@ -148,6 +148,21 @@ _COLD_LOAD_NOTIFY_LOADING = "Loading…"
 # transcription time (~0.5–1.5s); raise if you load a much larger model.
 _DRAIN_TIMEOUT_S: float = 5.0
 
+# Cancel-suppression window bound (the Backspace stuck-suppression bug). cancel() latches
+# _cancel_suppress_final, and ONLY the child's MARKED sentinel final (or a fresh _arm()) was
+# allowed to clear it — if the sentinel was LOST (a cancel landing while the child sat BETWEEN
+# text() cycles was wiped by the fresh-marker clears; see recorder_host's stale-signal check,
+# which now closes that at the source), the window stayed latched FOREVER: every later final
+# was silently dropped (no commit, no reset_boundary), the streaming tail accumulated across
+# utterances, and everything dictated after the Backspace kept rewinding to the edit point.
+# This constant is the daemon-side backstop: the sentinel is emitted within ~0.5 s (0.2 s
+# handler poll + the abort), and a racing REAL final of the cancelled utterance lands within
+# ~2 s (the large model finishing) — both far inside this bound, which matches
+# _DRAIN_TIMEOUT_S, the repo's existing "no final is coming" budget. A final arriving past
+# it cannot belong to the cancelled utterance (its audio was discarded at cancel time), so
+# on_final closes the window and PROCESSES it.
+_CANCEL_SUPPRESS_TIMEOUT_S: float = 5.0
+
 
 def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     """Build cuda_check defaults from cfg, then resolve (applies PRD §4.4 CPU fallback).
@@ -648,12 +663,18 @@ class VoiceTypingDaemon:
         )  # cleared → no thread in text() at boot
         # P1.M2.T7.S1 (PRD §4.2quater Backspace-cancel): set by cancel() while it aborts the
         # in-flight utterance; while set, on_final DROPS every final (the real final that raced
-        # the cancel AND the marked sentinel). Cleared ONLY by the cancelled sentinel
-        # (consume_cancel_mark() True) so a racing final can never land, and re-armed defensively
-        # on the next _arm() so a lost sentinel (child died mid-cancel) cannot eat a later
-        # utterance. Plain bool: written by cancel() under _lock, read/cleared by on_final under
-        # _on_final_lock — no read-modify-write race (each writer owns the full transition).
+        # the cancel AND the marked sentinel). Cleared by the cancelled sentinel
+        # (consume_cancel_mark() True), re-armed defensively on the next _arm(), and — the
+        # LOST-SENTINEL SELF-HEAL — force-closed by on_final after _CANCEL_SUPPRESS_TIMEOUT_S
+        # (a lost sentinel must not eat every later final). Plain bool: written by cancel() under
+        # _lock, read/cleared by on_final under _on_final_lock — no read-modify-write race (each
+        # writer owns the full transition).
         self._cancel_suppress_final = False
+        # LOST-SENTINEL SELF-HEAL (see _CANCEL_SUPPRESS_TIMEOUT_S): time.monotonic() of the
+        # cancel() that latched _cancel_suppress_final (refreshed by a re-press); None when
+        # the window is closed. Read here by on_final (under _on_final_lock) to bound the
+        # suppression window — same atomic-store discipline as the flag itself.
+        self._cancel_suppress_since: float | None = None
         self._start_monotonic: float | None = None
         # Idle auto-stop: timestamp of the last recognized speech; the _idle_watchdog thread disarms
         # when now - this exceeds cfg.asr.auto_stop_idle_seconds. None while NOT listening. Set on
@@ -743,8 +764,8 @@ class VoiceTypingDaemon:
         self._backend = (
             backend if backend is not None else typing_backends.make_backend(cfg.output)
         )
-        # P1.M2.T6.S1 (PRD §4.2quater): the streaming-output engine (extend/revise with
-        # guards + rate-limited full rewinds). Constructed UNCONDITIONALLY so the landed
+        # P1.M2.T6.S1 (PRD §4.2quater): the streaming-output engine (minimal-diff
+        # extend/revise with guards + rate-limited rewinds). Constructed UNCONDITIONALLY so the landed
         # cancel() seam (_pending_tail_len/_reset_stream_after_cancel -> self._stream via
         # getattr) now resolves to the real API instead of the defensive no-op. Pure-python
         # object: no models, no threads, no subprocesses at construction. Nothing ROUTES
@@ -1132,23 +1153,46 @@ class VoiceTypingDaemon:
             # the pipeline. RACE-SAFE by construction: textproc.clean('') rejection alone cannot
             # tell a racing real final from the sentinel.
             if self._cancel_suppress_final:
-                consume = getattr(self._host, "consume_cancel_mark", None)
-                if callable(consume) and consume():
-                    self._cancel_suppress_final = (
-                        False  # sentinel seen; pipeline re-armed
+                # LOST-SENTINEL SELF-HEAL (see _CANCEL_SUPPRESS_TIMEOUT_S): if the marked
+                # sentinel never arrived, this window would stay latched forever and drop
+                # EVERY later final — no commit, no reset_boundary — so the streaming tail
+                # would accumulate across utterances and each new one would rewind everything
+                # back to the edit point (the reported Backspace bug). A final arriving this
+                # late cannot belong to the cancelled utterance (its audio was discarded at
+                # cancel time): close the window and fall through to normal processing.
+                if (
+                    self._cancel_suppress_since is not None
+                    and time.monotonic() - self._cancel_suppress_since
+                    > _CANCEL_SUPPRESS_TIMEOUT_S
+                ):
+                    logger.warning(
+                        "cancel: suppression window open >%.1fs with no marked sentinel — "
+                        "the sentinel was lost (cancel raced a text() boundary); closing "
+                        "the window and processing this final",
+                        _CANCEL_SUPPRESS_TIMEOUT_S,
                     )
-                    # BUG-007 / P1.M2.T7.S1: the cancelled utterance is bookended HERE — its
-                    # audio was discarded, so no further final can ever come for it. Clear
-                    # _final_pending so _request_stop takes the immediate path (a drain would
-                    # wait _DRAIN_TIMEOUT_S for a final that cannot arrive), and set
-                    # _utterance_finalized so a stray late partial/'speech' of the cancelled
-                    # utterance cannot re-arm the flag before the run loop re-enters text()
-                    # (same validation-Issue-2 semantics as the two exits below). The run
-                    # loop's re-entry into text() resets _utterance_finalized, so genuinely-
-                    # new speech (the re-said sentence) re-arms the drain correctly.
-                    self._final_pending = False
-                    self._utterance_finalized = True
-                return  # dropped: no clean, no type_text, no record_final
+                    self._cancel_suppress_final = False
+                    self._cancel_suppress_since = None
+                    # fall through: clean/commit this (new-utterance) final below
+                else:
+                    consume = getattr(self._host, "consume_cancel_mark", None)
+                    if callable(consume) and consume():
+                        self._cancel_suppress_final = (
+                            False  # sentinel seen; pipeline re-armed
+                        )
+                        self._cancel_suppress_since = None
+                        # BUG-007 / P1.M2.T7.S1: the cancelled utterance is bookended HERE — its
+                        # audio was discarded, so no further final can ever come for it. Clear
+                        # _final_pending so _request_stop takes the immediate path (a drain would
+                        # wait _DRAIN_TIMEOUT_S for a final that cannot arrive), and set
+                        # _utterance_finalized so a stray late partial/'speech' of the cancelled
+                        # utterance cannot re-arm the flag before the run loop re-enters text()
+                        # (same validation-Issue-2 semantics as the two exits below). The run
+                        # loop's re-entry into text() resets _utterance_finalized, so genuinely-
+                        # new speech (the re-said sentence) re-arms the drain correctly.
+                        self._final_pending = False
+                        self._utterance_finalized = True
+                    return  # dropped: no clean, no type_text, no record_final
             cleaned = textproc.clean(text, self._cfg.filter)
             if not cleaned:  # rejected: blocklist hallucination / below min_chars
                 # P1.M2.T6.S2: under streaming a rejected final FREEZES the tail as-is
@@ -1304,6 +1348,7 @@ class VoiceTypingDaemon:
         self._cancel_suppress_final = (
             False  # P1.M2.T7.S1: a fresh arm re-arms the final pipeline
         )
+        self._cancel_suppress_since = None  # LOST-SENTINEL SELF-HEAL: fresh arm, fresh window
         stream_reset = getattr(
             self._stream, "reset_session", None
         )  # P1.M2.T6.S2: NEW session
@@ -1667,7 +1712,11 @@ class VoiceTypingDaemon:
         audio so NO late final from the cancelled utterance can land) and resets the streaming
         tail to a fresh one at the current cursor (committed text unchanged — the fragment is
         GONE, not committed). The cancellation sentinel is emitted MARKED and dropped (see
-        _cancel_suppress_final): nothing typed, nothing recorded, mic stays hot.
+        _cancel_suppress_final): nothing typed, nothing recorded, mic stays hot. The suppression
+        window is BOUNDED (_CANCEL_SUPPRESS_TIMEOUT_S): if the marked sentinel is lost (a cancel
+        racing the child's text() boundary — see recorder_host's stale-signal check, which closes
+        that at the source), on_final self-heals after the bound instead of dropping every later
+        final (the stuck "everything after the Backspace keeps rewinding to the edit point" bug).
 
         Idempotent (PRD §4.2quater freeze-rule): when NOT armed, or armed with NO pending tail,
         this issues no backspace and still replies ok — further Backspaces are plain user edits,
@@ -1688,6 +1737,9 @@ class VoiceTypingDaemon:
                 if callable(host_cancel):
                     # Drop the racing real final AND the marked sentinel (on_final suppression).
                     self._cancel_suppress_final = True
+                    # Bound the window (LOST-SENTINEL SELF-HEAL): refreshed per press so it
+                    # measures from the LATEST cancel.
+                    self._cancel_suppress_since = time.monotonic()
                     host_cancel()
             self._reset_stream_after_cancel()  # fresh tail at the cursor; committed unchanged
         return {"ok": True, "listening": True, **self.status_snapshot()}
