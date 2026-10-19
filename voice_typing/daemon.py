@@ -765,7 +765,9 @@ class VoiceTypingDaemon:
             backend if backend is not None else typing_backends.make_backend(cfg.output)
         )
         # P1.M2.T6.S1 (PRD §4.2quater): the streaming-output engine (minimal-diff
-        # extend/revise with guards + rate-limited rewinds). Constructed UNCONDITIONALLY so the landed
+        # extend/revise with guards + persistence-debounced revisions: extend-only
+        # while divergence is fresh, ONE rewind after it persists, the commit is
+        # the authoritative end-of-utterance correction). Constructed UNCONDITIONALLY so the landed
         # cancel() seam (_pending_tail_len/_reset_stream_after_cancel -> self._stream via
         # getattr) now resolves to the real API instead of the defensive no-op. Pure-python
         # object: no models, no threads, no subprocesses at construction. Nothing ROUTES

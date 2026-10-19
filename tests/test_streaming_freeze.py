@@ -64,10 +64,13 @@ def _make_stream(
     backend: RecordingBackend | None = None,
     *,
     streaming: bool = True,
+    revision_debounce_s: float = 0.0,
 ) -> tuple[StreamingOutput, RecordingBackend, FakeFeedback]:
     backend = backend if backend is not None else RecordingBackend()
     fb = FakeFeedback()
-    return StreamingOutput(backend, fb, streaming), backend, fb
+    return StreamingOutput(
+        backend, fb, streaming, revision_debounce_s=revision_debounce_s
+    ), backend, fb
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +141,7 @@ def test_backend_type_failure_freezes_session_class():
 
 def test_backend_backspace_failure_freezes_session_class():
     be = RecordingBackend(fail_backspace=True)
-    stream, _backend, _fb = _make_stream(be)
+    stream, _backend, _fb = _make_stream(be)  # debounce 0.0: the revise fires now
     stream.on_partial("hello wor")            # extends fine
     stream.on_partial("goodbye")              # revise -> press_backspace raises -> freeze
     assert stream.frozen is True and stream.frozen_session is True

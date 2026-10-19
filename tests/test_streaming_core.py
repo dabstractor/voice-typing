@@ -79,10 +79,13 @@ def _make_stream(
     *,
     streaming: bool = True,
     clock: FakeClock | None = None,
+    revision_debounce_s: float = 0.0,
 ) -> tuple[StreamingOutput, RecordingBackend, FakeFeedback]:
     backend = backend if backend is not None else RecordingBackend()
     fb = FakeFeedback()
-    kwargs = {} if clock is None else {"clock": clock}
+    kwargs = {"revision_debounce_s": revision_debounce_s}
+    if clock is not None:
+        kwargs["clock"] = clock
     return StreamingOutput(backend, fb, streaming, **kwargs), backend, fb
 
 
@@ -282,52 +285,78 @@ def test_revise_to_empty_deletes_everything():
 
 
 # ---------------------------------------------------------------------------
-# Full-rewind rate limit (>=300 ms, code constant)
+# Revision debounce (smoothness: extend-only while divergence is fresh; ONE
+# rewind after it PERSISTS — the commit stays the authoritative correction)
 # ---------------------------------------------------------------------------
 
-def test_rate_limit_suppresses_second_rewind_within_300ms():
-    stream, be, fb = _make_stream(clock=FakeClock(0.0, 0.1, 0.2))
-    stream.on_partial("hello one")     # fresh start at t~n/a (no clock use)
-    stream.on_partial("hello twelve")  # revise at t=0.0 -> allowed (first rewind)
-    stream.on_partial("hello three")   # revise at t=0.1 -> 0.1 < 0.3 -> SUPPRESSED
+def test_transient_wobble_reconverges_with_zero_backspaces():
+    # The smoothness core: a mid-word retract that grows back past the tail is a
+    # pure EXTEND — the divergence window opens and closes with ZERO backspaces.
+    stream, be, fb = _make_stream(
+        clock=FakeClock(0.0, 0.1, 0.2), revision_debounce_s=2.0
+    )
+    stream.on_partial("hello twel")     # fresh start
+    stream.on_partial("hello")          # retract -> divergent: window opens, NO rewind
+    stream.on_partial("hello twelve")   # re-converged -> EXTEND: type only the delta
+    assert be.calls == [("type", "hello twel"), ("type", "ve")]
+    assert stream.tail == "hello twelve"
+    assert fb.partials[-1] == "hello twelve"
+
+
+def test_persistent_divergence_revises_once_with_the_latest_text():
+    stream, be, _fb = _make_stream(
+        clock=FakeClock(0.0, 0.5, 2.6), revision_debounce_s=2.0
+    )
+    stream.on_partial("hello one")        # fresh start (no clock sample)
+    stream.on_partial("hello two")        # t=0.0: divergent -> window opens, nothing typed
+    stream.on_partial("hello three")      # t=0.5: still inside the window -> nothing
+    assert be.calls == [("type", "hello one")]
+    stream.on_partial("hello wonderful")  # t=2.6: persisted -> ONE minimal-diff revision
     assert be.calls == [
         ("type", "hello one"),
-        ("bs", 3),
-        ("type", "twelve"),
+        ("bs", 3),               # only the diverging suffix ("one"), never the tail
+        ("type", "wonderful"),   # the LATEST partial, not the first divergent one
     ]
-    assert stream.tail == "hello twelve"          # screen keeps the FIRST revise
-    assert fb.partials[-1] == "hello twelve"      # mirror keeps the tail too
+    assert stream.tail == "hello wonderful"
 
 
-def test_rate_limit_releases_after_300ms():
-    stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.1, 0.4))
-    stream.on_partial("hello one")
-    stream.on_partial("hello twelve")  # t=0.0 -> allowed, stamped 0.0
-    stream.on_partial("hello three")   # t=0.1 -> suppressed (0.1 < 0.3)
-    stream.on_partial("hello four")    # t=0.4 -> 0.4 - 0.0 >= 0.3 -> allowed
+def test_revision_rearms_the_window():
+    # After a debounced revision, a FRESH divergence must persist a full window
+    # again — no revision storm even under sustained decoder churn.
+    stream, be, _fb = _make_stream(
+        clock=FakeClock(0.0, 2.1, 2.2, 4.3), revision_debounce_s=2.0
+    )
+    stream.on_partial("hello one")       # fresh start
+    stream.on_partial("hello two")       # t=0.0: divergent
+    stream.on_partial("hello three")     # t=2.1: persisted -> revision lands, re-arms
+    stream.on_partial("hello four")      # t=2.2: divergent again 0.1s in -> SUPPRESSED
     assert be.calls == [
         ("type", "hello one"),
         ("bs", 3),
-        ("type", "twelve"),
-        ("bs", 6),
-        ("type", "four"),
+        ("type", "three"),
     ]
-    assert stream.tail == "hello four"
-
-
-def test_fresh_start_is_not_rate_limited():
-    # A fresh start deletes nothing -> not a "full rewind" -> never rate-limited.
-    # (Revise-to-empty IS a rewind, so it still respects the >=300 ms spacing: t=0.4.)
-    stream, be, _fb = _make_stream(clock=FakeClock(0.0, 0.4))
-    stream.on_partial("hello one")
-    stream.on_partial("hello twelve")  # t=0.0 revise -> allowed (first rewind)
-    stream.on_partial("")              # t=0.4 revise-to-empty -> allowed; empty retype
+    stream.on_partial("hello five")      # t=4.3: 4.3 - 2.2 >= 2.0 -> second revision
     assert be.calls == [
         ("type", "hello one"),
         ("bs", 3),
-        ("type", "twelve"),
-        ("bs", 12),
-    ]                    # no ("type", ""): an empty guarded retype is skipped
+        ("type", "three"),
+        ("bs", 5),
+        ("type", "five"),
+    ]
+    assert stream.tail == "hello five"
+
+
+def test_fresh_start_is_never_debounced_and_revise_to_empty_waits():
+    # An empty tail has nothing to rewind: the first partial types immediately at
+    # any debounce. Revise-to-EMPTY is a real revision and waits for the window.
+    stream, be, _fb = _make_stream(clock=FakeClock(0.0, 2.1), revision_debounce_s=2.0)
+    stream.on_partial("hello one")   # fresh start: types immediately
+    assert be.calls == [("type", "hello one")]
+    stream.on_partial("")            # t=0.0: revise-to-empty opens the window
+    assert be.calls == [("type", "hello one")]     # nothing yet
+    stream.on_partial("")            # t=2.1: persisted -> rewind lands, empty retype skipped
+    assert be.calls == [("type", "hello one"), ("bs", 9)]
+    assert stream.tail == ""
     assert stream.tail == ""
 
 
@@ -463,12 +492,13 @@ def test_type_failure_on_extend_freezes_and_does_not_propagate(caplog):
 # ---------------------------------------------------------------------------
 
 def test_mirror_updates_on_every_event_including_suppressed_cycles():
-    stream, _be, fb = _make_stream(clock=FakeClock(0.0, 0.1))
-    stream.on_partial("alpha one")      # fresh
-    stream.on_partial("alpha two")      # revise at t=0.0 (allowed; not a prefix)
+    stream, _be, fb = _make_stream(clock=FakeClock(0.0, 0.1), revision_debounce_s=2.0)
+    stream.on_partial("alpha one")      # fresh start: types + mirrors
     n_before = len(fb.partials)
-    stream.on_partial("alpha three")    # revise at t=0.1 -> rate-limited
-    stream.on_partial("alpha two x")    # extend (prefix of tail "alpha two")
-    assert len(fb.partials) == n_before + 2   # suppressed cycle ALSO mirrors
-    assert fb.partials[-2] == "alpha two"     # suppressed cycle keeps the tail
-    assert fb.partials[-1] == "alpha two x"
+    stream.on_partial("alpha two")      # t=0.0: divergent -> window opens, SUPPRESSED
+    stream.on_partial("alpha three")    # t=0.1: still inside the window -> SUPPRESSED
+    stream.on_partial("alpha one two")  # extend (tail "alpha one" is a prefix)
+    assert len(fb.partials) == n_before + 3   # every cycle mirrors, suppressed included
+    assert fb.partials[-3] == "alpha one"     # suppressed cycles keep the tail
+    assert fb.partials[-2] == "alpha one"
+    assert fb.partials[-1] == "alpha one two"

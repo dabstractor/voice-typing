@@ -8,17 +8,21 @@ tail:
     — the casing guard lowercases a fresh mid-sentence fragment while decoder
     partials stay capitalized; BUG-008): type ONLY the delta, with
     textproc.apply_streaming_guards() applied (mid-sentence casing + one spurious
-    '.' stripped). Additive and flicker-free by construction — never rate-limited.
+    '.' stripped). Additive and flicker-free by construction — never debounced.
   - REVISE (anything else — RealtimeSTT may re-capitalize, retract or rewrite
-    words): MINIMAL-DIFF REWIND (PRD §4.2quater rule 1): backspace ONLY the suffix
-    past the longest common prefix of tail and partial — never the whole tail —
-    then type the guarded corrected suffix (the guards see the KEPT on-screen
-    prefix as their casing context). A full-tail rewind happens only when the
-    partial shares no prefix with the tail (fresh start / total rewrite).
-    Rewind cycles (any backspace > 0) ARE RATE-LIMITED: at most one per
-    _REWIND_RATE_LIMIT_S (a code constant, NOT config — PRD §4.2quater ">=300
-    ms so a wobbling decode cannot flicker"). A suppressed cycle mirrors the
-    current tail and touches nothing.
+    words): DEBOUNCED MINIMAL-DIFF REWIND (PRD §4.2quater rule 1, as amended for
+    smoothness): partial typing is EXTEND-ONLY while the divergence is fresh —
+    a mid-word retract that grows back past the tail re-converges as an EXTEND
+    and types only its delta with ZERO backspaces. A rewind fires only after
+    the divergence has PERSISTED for _REVISION_DEBOUNCE_S (a code constant,
+    NOT config), and it is then ONE minimal-diff rewind: backspace ONLY the
+    suffix past the longest common prefix of tail and the LATEST divergent
+    partial — never the whole tail — then type the guarded corrected suffix
+    (the guards see the KEPT on-screen prefix as their casing context). While
+    the window is open the current tail stays on screen (mirror-only). The
+    upshot: most utterances see ZERO mid-utterance revisions and exactly ONE
+    authoritative correction — the commit's; a persistent mid-utterance
+    rewrite is corrected at most once per debounce window.
   - Every event — extend, revise, suppressed, frozen, disabled — mirrors the
     appropriate string into feedback.update_partial() so voicectl status / the
     state file always show what the user sees.
@@ -75,12 +79,21 @@ import voice_typing.textproc as textproc
 
 logger = logging.getLogger(__name__)
 
-# Minimum spacing between revision cycles that include at least one backspace
-# (PRD §4.2quater rule 1, as amended: ">=300 ms apart — code constant, not
-# config"). Additive (zero-backspace) cycles are never limited; a suppressed
-# cycle types nothing and leaves the current tail on screen. Deliberately NOT a
-# config key, so a wobbling decoder can never be tuned into flicker.
-_REWIND_RATE_LIMIT_S = 0.3
+# How long a partial must PERSISTently diverge from the typed tail before a
+# mid-utterance revision (a rewind+retype) is allowed (PRD §4.2quater rule 1,
+# as amended for smoothness: "one or two revisions per statement, ideally one
+# authoritative one at the commit"). While the window is open, partial typing
+# is EXTEND-ONLY — momentary decoder wobble (a mid-word retract that grows
+# back past the tail) re-converges as an extend and types only its delta with
+# ZERO backspaces; the divergent partials are mirrored (screen truth) and the
+# latest is remembered. Once divergence has persisted this long, ONE
+# minimal-diff rewind+retype lands with the LATEST partial, and the window
+# re-arms (a further divergence opens a fresh one). The commit's correction is
+# NEVER debounced — it is the authoritative end-of-utterance pass. Deliberately
+# a code constant, NOT config: the >=300 ms rate limit this replaces still
+# churned up to ~3 rewinds/sec on sustained divergence, and a wobbly decoder
+# must never be tuned back into that flicker.
+_REVISION_DEBOUNCE_S = 2.0
 
 # Sentence terminators that end the rolling context sentence (PRD §4.2quater rule 2:
 # the child's context prompt carries the text since the last sentence boundary). Same
@@ -196,7 +209,7 @@ class StreamingOutput:
         streaming: bool,
         *,
         append_space: bool = True,
-        rate_limit_s: float = _REWIND_RATE_LIMIT_S,
+        revision_debounce_s: float = _REVISION_DEBOUNCE_S,
         clock=time.monotonic,
     ) -> None:
         """Args:
@@ -208,15 +221,16 @@ class StreamingOutput:
         append_space: the cfg.output.append_space flag; commit() appends the
             inter-final trailing space IFF true (the ONLY code that ever types a
             space while the engine is live — P1.M2.T6.S2).
-        rate_limit_s: minimum spacing between backspace-bearing revision cycles
-            (override only in tests).
-        clock: monotonic time source (injectable for deterministic rate-limit tests).
+        revision_debounce_s: how long divergence must persist before a
+            mid-utterance revision is allowed (override only in tests; 0.0 =
+            revise on the first divergent partial, the pre-debounce behavior).
+        clock: monotonic time source (injectable for deterministic debounce tests).
         """
         self._backend = backend
         self._feedback = feedback
         self._streaming = bool(streaming)
         self._append_space = bool(append_space)
-        self._rate_limit_s = float(rate_limit_s)
+        self._revision_debounce_s = float(revision_debounce_s)
         self._clock = clock
         self._lock = threading.Lock()
         self._committed: str = ""
@@ -241,11 +255,15 @@ class StreamingOutput:
         # reset_session(); a later reject overwrites it.
         self._echo_guard: str | None = None
         self._suppressed: bool = False
-        # None = no backspace-bearing revision has happened yet (the first is
-        # always allowed).
-        # A plain 0.0 sentinel would break a fake clock starting at 0.0 (and read
-        # as "rewound 50 years ago" on the real clock) — None says it cleanly.
-        self._last_rewind: float | None = None
+        # Divergence debounce (the smoothness fix): _diverged_since is the clock
+        # stamp of the FIRST partial that diverged from the current tail (None =
+        # no open window); _diverged_text is the LATEST divergent partial. Closed
+        # when a partial re-converges (an EXTEND — the divergence was momentary
+        # wobble), when the debounced revision lands, and at every
+        # boundary/session/cancel reset. None (not a 0.0 sentinel) so a fake
+        # clock starting at 0.0 cannot alias "window open since t=0".
+        self._diverged_since: float | None = None
+        self._diverged_text: str = ""
 
     # --- read-only accessors (T5.S2 + T6.S2 consume; tests may poke _committed) ---
 
@@ -293,6 +311,8 @@ class StreamingOutput:
         with self._lock:
             self._tail = ""
             self._suppressed = True
+            self._diverged_since = None  # the cancelled fragment's divergence dies with it
+            self._diverged_text = ""
 
     def reset_boundary(self) -> None:
         """New utterance boundary: clear the tail, lift post-cancel suppression, and
@@ -323,6 +343,8 @@ class StreamingOutput:
                 )
             self._tail = ""
             self._suppressed = False
+            self._diverged_since = None  # a new utterance starts with a closed window
+            self._diverged_text = ""
             if self._frozen and not self._frozen_session:
                 self._frozen = False
                 self._frozen_session = False
@@ -332,7 +354,7 @@ class StreamingOutput:
 
         Session-lifecycle counterpart of reset_boundary(): a fresh arm legitimately
         unfreezes — whatever stranded the previous session's tail (a backend failure,
-        a rejected final) must not carry into the next one, and the rewind-rate
+        a rejected final) must not carry into the next one, and the revision-debounce
         budget starts fresh. reset_boundary() lifts only PER-UTTERANCE freezes;
         session-class freezes (backend failure, stranded tail) survive every boundary
         and are cleared ONLY here. On disarm the pending tail simply stays typed on
@@ -352,7 +374,8 @@ class StreamingOutput:
             # tag too, so a later non-backend freeze in the new session is liftable
             # by resume() (the tag must imply frozen; this unfreeze clears it).
             self._frozen_backend_failure = False
-            self._last_rewind = None
+            self._diverged_since = None  # fresh session: revision window closed
+            self._diverged_text = ""
 
     def resume(self) -> None:
         """Class-aware lift: clears suppression ALWAYS; lifts ONLY a stranded
@@ -381,7 +404,7 @@ class StreamingOutput:
             at INFO. The keypress freeze must hold until reset_boundary() absorbs
             the tail (PRD §4.2quater rule 5: never type over the user's cursor).
         Idempotent; sends NO keystrokes; does not touch _committed/_tail/
-        _last_rewind.
+        the divergence-debounce state.
         """
         with self._lock:
             self._suppressed = False
@@ -536,6 +559,11 @@ class StreamingOutput:
             if self._tail and _ci_startswith(text, self._tail):
                 # EXTEND: tail is a case-insensitive prefix -> type only the
                 # guarded delta (sliced from the ORIGINALS, not folded text).
+                # Re-convergence also CLOSES any open divergence window: the
+                # divergence was momentary wobble (typing stays smooth), and a
+                # LATER divergence opens a fresh window of its own.
+                self._diverged_since = None
+                self._diverged_text = ""
                 delta = text[len(self._tail) :]
                 if not delta:
                     self._feedback.update_partial(self._tail)
@@ -544,7 +572,7 @@ class StreamingOutput:
                     self._guard_context_delta(), delta
                 )
                 if guarded:
-                    # Never rate-limited: additive, flicker-free by construction.
+                    # Never debounced: additive, flicker-free by construction.
                     if not self._safe_type(guarded):
                         self._feedback.update_partial(self._tail)
                         return
@@ -552,25 +580,46 @@ class StreamingOutput:
                 self._feedback.update_partial(self._tail)
                 return
 
-            # REVISE (includes the fresh start when tail == ""): minimal-diff rewind.
-            # Clock is consulted ONLY for an actual rewind attempt (tail non-empty):
-            # a fresh start is not a rewind, consumes no time sample, and stamps
-            # nothing — so the rate limiter measures rewind-to-rewind spacing only.
-            had_tail = bool(self._tail)
-            now = self._clock() if had_tail else None
-            if (
-                had_tail
-                and self._last_rewind is not None
-                and now - self._last_rewind < self._rate_limit_s
-            ):
-                # Too soon after the last rewind: keep the current tail on
-                # screen, type nothing this cycle — a wobbling decode cannot flicker.
+            # REVISE (the partial diverges from the typed tail — retraction,
+            # rewrite or re-capitalization; the fresh start when tail == "" is
+            # split out below). SMOOTHNESS (revision debounce): a mid-utterance
+            # rewind is the jarring part of live dictation, so it fires ONLY
+            # after the divergence has PERSISTED for _REVISION_DEBOUNCE_S —
+            # momentary wobble re-converges as an EXTEND above (zero backspaces),
+            # and while the window is open the tail stays on screen (mirror-only)
+            # while the latest divergent partial is remembered. The commit's
+            # authoritative correction still lands exactly once, at the end: the
+            # common case is ZERO mid-utterance revisions.
+            if not self._tail:
+                # Fresh start: not a revision — type the guarded partial now. No
+                # clock sample (nothing on screen to rewind, no window to open).
+                guarded = textproc.apply_streaming_guards(
+                    self._guard_context(""), text
+                )
+                if guarded:
+                    # Never debounced: additive, flicker-free by construction.
+                    if not self._safe_type(guarded):
+                        self._feedback.update_partial(self._tail)
+                        return
+                    self._tail += guarded
                 self._feedback.update_partial(self._tail)
                 return
-            # MINIMAL-DIFF rewind (PRD §4.2quater rule 1): backspace ONLY the suffix
-            # past the longest common prefix of tail and partial — never the whole
-            # tail. A last-word wobble rewinds just that word; a retract rewinds only
-            # the retracted chars; only a genuinely prefix-free rewrite rewinds all.
+            now = self._clock()
+            self._diverged_text = text  # the LATEST divergent partial (never stale)
+            if self._diverged_since is None:
+                self._diverged_since = now  # first divergent partial opens the window
+            if now - self._diverged_since < self._revision_debounce_s:
+                # Transient (so far) divergence: keep the current tail on screen,
+                # type nothing this cycle — if the decoder grows back past the
+                # tail the next cycle is a pure EXTEND (zero backspaces).
+                self._feedback.update_partial(self._tail)
+                return
+            # PERSISTENT divergence (>= debounce): ONE minimal-diff rewind +
+            # retype with the LATEST partial (PRD §4.2quater rule 1): backspace
+            # ONLY the suffix past the longest common prefix of tail and partial
+            # — never the whole tail. A last-word wobble rewinds just that word;
+            # a retract rewinds only the retracted chars; only a genuinely
+            # prefix-free rewrite rewinds all.
             k = _ci_common_prefix_len(self._tail, text)
             guarded = textproc.apply_streaming_guards(
                 self._guard_context(self._tail[:k]), text[k:]
@@ -586,10 +635,12 @@ class StreamingOutput:
                 self._feedback.update_partial(self._tail)
                 return
             self._tail = self._tail[:k] + guarded
-            if had_tail:
-                # Stamp only ACTUAL rewinds — never fresh starts.
-                self._last_rewind = now
+            # Re-arm the window: a further divergence must persist a FRESH full
+            # debounce before another revision (bounded revisions per utterance).
+            self._diverged_since = None
+            self._diverged_text = ""
             self._feedback.update_partial(self._tail)
+            return
 
     # --- the commit (correction pass; PRD §4.2quater rule 2, P1.M2.T6.S2) ---
 
@@ -612,12 +663,13 @@ class StreamingOutput:
             absorbs and STAYS frozen, and a user-keypress-frozen tail absorbs before
             the daemon's post-commit reset_boundary() lifts the per-utterance freeze.
           - final EXTENDS the tail: type ONLY the guarded delta (same context shape
-            as _guard_context_delta). NOT rate-limited: commits are authoritative,
-            never wobble (the >=300 ms limiter exists only for partial cycles).
+            as _guard_context_delta). NOT debounced: commits are authoritative,
+            never wobble (the revision debounce exists only for partial cycles).
           - final DIFFERS (revise/rewrite/shorter/fresh): MINIMAL-DIFF rewind (the
             same common-prefix rule as partial typing): press_backspace(len(tail) −
-            k), type only the guarded corrected suffix. NOT rate-limited: a commit
-            is once per utterance.
+            k), type only the guarded corrected suffix. NOT debounced: a commit
+            is once per utterance — the ONE authoritative end-of-utterance
+            correction the debounced partial path defers to.
         Then append the trailing space iff append_space, advance the checkpoint
         (`committed` gains the text ACTUALLY TYPED + the space, so future guards and
         the context prompt diff against screen truth), clear the tail, lift
@@ -667,8 +719,7 @@ class StreamingOutput:
             else:
                 # REVISE / fresh start: minimal-diff rewind + guarded suffix retype
                 # (PRD §4.2quater rule 2 — the same common-prefix rule as partial
-                # typing). A commit is authoritative — no rate-limit consult, no
-                # _last_rewind stamp.
+                # typing). A commit is authoritative — never debounced.
                 k = _ci_common_prefix_len(self._tail, text)
                 guarded = textproc.apply_streaming_guards(
                     self._guard_context(self._tail[:k]), text[k:]

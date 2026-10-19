@@ -44,7 +44,7 @@ auto_unload_idle_seconds     = 1800.0              # after this many seconds DIS
 
 backend     = "wtype"   # "wtype" (Wayland virtual keyboard, default) | "ydotool" (kernel uinput, TTY/X fallback) | "null" (types nothing; used by the headless E2E tests). The daemon auto-falls-back from wtype to ydotool on failure.
 append_space = true     # append one trailing space after each final so consecutive utterations flow as words. false = type text verbatim.
-streaming   = true      # PRD §4.2quater: type stabilized partials live + revise in place as the utterance grows. false = append-only finals (rollback hatch to the pre-Rev-2 typing behavior).
+streaming   = true      # PRD §4.2quater: type stabilized partials live as the utterance grows. Revisions are debounced for smoothness: live typing is extend-only while the decoder wobbles, one mid-utterance correction only after ~2 s of sustained divergence, and one authoritative correction at the end of each utterance. false = append-only finals (rollback hatch to the pre-Rev-2 typing behavior).
 
 
 [cancel]   # Rev 2: erase the last committed utterance (PRD §4.2quater)

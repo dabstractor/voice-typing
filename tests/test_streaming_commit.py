@@ -78,10 +78,11 @@ def _make_stream(
     streaming: bool = True,
     append_space: bool = True,
     clock: FakeClock | None = None,
+    revision_debounce_s: float = 0.0,
 ) -> tuple[StreamingOutput, RecordingBackend, FakeFeedback]:
     backend = backend if backend is not None else RecordingBackend()
     fb = FakeFeedback()
-    kwargs: dict = {"append_space": append_space}
+    kwargs: dict = {"append_space": append_space, "revision_debounce_s": revision_debounce_s}
     if clock is not None:
         kwargs["clock"] = clock
     return StreamingOutput(backend, fb, streaming, **kwargs), backend, fb
