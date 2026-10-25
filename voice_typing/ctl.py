@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import sys
 import threading
@@ -58,6 +59,23 @@ _EX_USAGE: int = 64
 # so this fires ONLY on a real load (no flicker on instant arms). Tuned well below the ~1 s minimum load and
 # well above local socket round-trip latency. (P1.M2.T1.S2.)
 _LOADING_HINT_DELAY: float = 0.3
+# VT-009 (2026-10): how long ANY voicectl command may block on the control socket before
+# giving up (connect + read). The old makefile("r") read IGNORED the socket timeout, so a
+# wedged daemon hung the keybind's `voicectl toggle` forever — the "stops responding to my
+# shortcut" report. Overridable: VOICECTL_TIMEOUT=<seconds> (tests use it).
+_SOCKET_TIMEOUT_S: float = 10.0
+
+
+def _socket_timeout_s() -> float:
+    """Resolve the socket timeout: $VOICECTL_TIMEOUT (seconds, parsed defensively) or the default."""
+    raw = os.environ.get("VOICECTL_TIMEOUT")
+    if not raw:
+        return _SOCKET_TIMEOUT_S
+    try:
+        val = float(raw)
+    except ValueError:
+        return _SOCKET_TIMEOUT_S
+    return val if val > 0 else _SOCKET_TIMEOUT_S
 
 
 def format_result(cmd: str, response: dict) -> tuple[str, int]:
@@ -135,17 +153,32 @@ def send_command(socket_path: str, cmd: str) -> dict:
 
     Raises OSError (FileNotFoundError / ConnectionRefusedError / PermissionError) if the daemon is
     unreachable at connect time — caller maps to exit 2. Raises ValueError if the daemon replies with
-    an empty or non-JSON line (a protocol error) — caller maps to exit 1. Uses makefile("r") (NOT
-    settimeout — makefile raises if the socket has a timeout, P1.M4.T2.S1 §3). Reads exactly ONE line
-    then closes (voicectl is one-shot).
+    an empty or non-JSON line (a protocol error) — caller maps to exit 1 — or if the daemon accepts
+    the connection but never replies within the socket timeout (WEDGED — previously this hung
+    FOREVER: makefile("r") silently ignores settimeout). Reads exactly ONE line then closes
+    (voicectl is one-shot).
     """
+    timeout = _socket_timeout_s()
+    line = ""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)  # bounds connect AND every recv (the wedge guard)
         sock.connect(
             socket_path
         )  # raises FileNotFoundError/ConnectionRefusedError/PermissionError
         sock.sendall((json.dumps({"cmd": cmd}) + "\n").encode("utf-8"))
-        with sock.makefile("r", encoding="utf-8", newline="\n") as rfile:
-            line = rfile.readline()
+        buf = bytearray()
+        try:
+            while b"\n" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+        except socket.timeout:
+            raise ValueError(
+                f"daemon wedged: no reply within {timeout:.0f}s "
+                "(systemctl --user restart voice-typing to recover)"
+            ) from None
+        line = bytes(buf).split(b"\n", 1)[0].decode("utf-8", errors="replace")
     if not line:
         raise ValueError("daemon closed the connection without replying")
     return json.loads(line)  # json.JSONDecodeError is a ValueError subclass

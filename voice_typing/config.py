@@ -70,6 +70,10 @@ class AsrConfig:
                                                # models loaded, tear down the recorder to free VRAM
                                                # (~0); the clock starts on disarm and resets on arm.
                                                # 0 disables (models stay resident until quit)
+    graceful_stop: bool = False       # stop = IMMEDIATE disarm (mic off now; the racing final
+                                       # is dropped, the tail stays typed as-is). The old drain
+                                       # (wait up to ~5 s for the in-flight final) is opt-in
+                                       # (2026-10: "all the way, no exceptions")
 
     def __post_init__(self) -> None:
         """Validate field types at construction (bugfix Issue 4 / PRD §4.5 robustness).
@@ -168,6 +172,10 @@ class CancelConfig:
     """
 
     on_backspace: bool = True  # Alt+Super+Backspace erases the last committed utterance
+    keypress_action: str = "disarm"  # user keypress while armed (2026-10 user decision):
+                                     # "disarm" = halt dictation ENTIRELY (mic off, no late
+                                     # keystrokes, re-arm with the hotkey) | "freeze" = legacy
+                                     # per-utterance freeze (typing resumes at the boundary)
     # default_factory: each CancelConfig gets its OWN list (mutable-default guard,
     # mirroring FilterConfig.blocklist). Empty list = auto-detect the keyboard device(s).
     devices: list[str] = field(default_factory=list)
@@ -185,6 +193,11 @@ class CancelConfig:
             raise TypeError(
                 f"[cancel] on_backspace expects bool, got "
                 f"{type(self.on_backspace).__name__}: {self.on_backspace!r}"
+            )
+        if self.keypress_action not in ("disarm", "freeze"):
+            raise TypeError(
+                f"[cancel] keypress_action expects 'disarm' or 'freeze', got "
+                f"{self.keypress_action!r}"
             )
         if not isinstance(self.devices, list) or not all(
             isinstance(_d, str) for _d in self.devices

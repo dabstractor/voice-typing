@@ -44,6 +44,25 @@ logger = logging.getLogger(__name__)
 # be watched — see module docstring. Matched case-insensitively against the device NAME.
 _EXCLUDE_NAME_RE = re.compile(r"(?i)(uinput|ydotool)")
 
+# Bare modifier presses are NOT user typing: they insert no text and they are the ARM
+# HOTKEY's own chord (Ctrl+Super/Alt+D) — counting them would make every arm instantly
+# self-disarm/halt. Caps/Num/Scroll lock likewise insert nothing. VT-010 (2026-10).
+_MODIFIER_KEYCODES = frozenset(
+    {
+        ecodes.KEY_LEFTCTRL,
+        ecodes.KEY_RIGHTCTRL,
+        ecodes.KEY_LEFTALT,
+        ecodes.KEY_RIGHTALT,
+        ecodes.KEY_LEFTSHIFT,
+        ecodes.KEY_RIGHTSHIFT,
+        ecodes.KEY_LEFTMETA,
+        ecodes.KEY_RIGHTMETA,
+        ecodes.KEY_CAPSLOCK,
+        ecodes.KEY_NUMLOCK,
+        ecodes.KEY_SCROLLLOCK,
+    }
+)
+
 
 class KeyEvent(Enum):
     """The only event classes the listener cares about (presses; everything else is None)."""
@@ -61,6 +80,8 @@ def parse_key_event(ev_type: int, code: int, value: int) -> KeyEvent | None:
     """
     if ev_type != ecodes.EV_KEY or value != 1:
         return None
+    if code in _MODIFIER_KEYCODES:
+        return None  # modifier-only press (hotkey chord) — not user typing
     if code == ecodes.KEY_BACKSPACE:
         return KeyEvent.BACKSPACE_PRESS
     return KeyEvent.OTHER_PRESS
@@ -299,7 +320,65 @@ class KeyListener:
             watched.append(path)
         self._watched = watched
         logger.debug("key-listener: watching %d device(s): %s", len(watched), watched)
+        # SUPERVISOR (VT-011, 2026-10): a reader thread used to die silently (DEBUG) on device
+        # replug / KVM switch / suspend re-enumeration, and keypress protection was LOST until
+        # the next daemon restart. The supervisor re-enumerates every _RESUPERVISE_S and
+        # reopens anything dead or new.
+        supervisor = threading.Thread(
+            target=self._supervise,
+            name="voice-typing-key-supervisor",
+            daemon=True,
+        )
+        supervisor.start()
         return list(watched)
+
+    def _supervise(self) -> None:
+        """Keep watch alive: periodically re-enumerate + reopen dead/new keyboards. Never raises."""
+        while not self._stop_event.wait(10.0):
+            try:
+                self._refresh_devices()
+            except Exception:  # pylint: disable=broad-except — supervision must survive
+                logger.warning("key-listener: supervision cycle failed", exc_info=True)
+
+    def _refresh_devices(self) -> None:
+        """Prune dead readers (their devices) and open paths not currently watched by a live thread."""
+        with self._lifecycle:
+            if self._stop_event.is_set() or not self._started:
+                return
+            live: list[tuple["evdev.InputDevice", threading.Thread, str]] = []
+            for dev, thr, path in zip(self._opened, self._threads, self._watched):
+                if thr.is_alive():
+                    live.append((dev, thr, path))
+                else:
+                    logger.warning("key-listener: reader for %s died — reopening", path)
+                    try:
+                        dev.close()
+                    except Exception:  # pylint: disable=broad-except — hygiene
+                        pass
+            self._opened = [d for d, _, _ in live]
+            self._threads = [t for _, t, _ in live]
+            self._watched = [p for _, _, p in live]
+            for path in self._enumerate_fn(self._devices):
+                if path in self._watched:
+                    continue
+                try:
+                    dev = evdev.InputDevice(path)  # READ-ONLY; grab() never called
+                except Exception:  # pylint: disable=broad-except — unreadable: skip
+                    logger.debug(
+                        "key-listener: cannot open %s (supervisor)", path, exc_info=True
+                    )
+                    continue
+                thread = threading.Thread(
+                    target=self._run_device,
+                    args=(dev,),
+                    name=f"voice-typing-key-listener-{path}",
+                    daemon=True,
+                )
+                self._opened.append(dev)
+                self._threads.append(thread)
+                self._watched.append(path)
+                thread.start()
+                logger.info("key-listener: supervisor now watching %s", path)
 
     def stop(self) -> None:
         """Close device fds + join reader threads briefly. Idempotent, NEVER raises, safe
@@ -343,5 +422,10 @@ class KeyListener:
                 other_key_cb=self._other_key_cb,
                 is_active=_gate,
             )
-        except Exception:  # pylint: disable=broad-except — a dying device exits its thread quietly
-            logger.debug("key-listener: device reader exited: %s", path, exc_info=True)
+        except Exception:  # pylint: disable=broad-except — a dying device exits its thread
+            logger.warning(
+                "key-listener: device reader exited — keypress protection LOST for this "
+                "keyboard until the supervisor reopens it: %s",
+                path,
+                exc_info=True,
+            )

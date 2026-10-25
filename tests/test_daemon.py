@@ -765,6 +765,7 @@ def test_on_final_typing_raises_is_caught_and_record_still_happens():
 def test_stop_drains_when_utterance_in_flight():
     """stop() mid-utterance does NOT abort — it drains: lets the final finish, THEN disarms."""
     d, fb, rec, be = _make_daemon()
+    d._cfg.asr.graceful_stop = True  # drain is opt-in since 2026-10
     d.start()
     d._touch_speech()  # speech happened -> _final_pending=True
     d._text_in_flight.set()  # simulate the run loop blocked inside text()
@@ -784,6 +785,7 @@ def test_stop_drains_when_utterance_in_flight():
 def test_toggle_off_drains_when_utterance_in_flight():
     """toggle-off (the hotkey) mid-utterance drains, exactly like stop()."""
     d, fb, rec, be = _make_daemon()
+    d._cfg.asr.graceful_stop = True  # drain is opt-in since 2026-10
     d.start()
     d._touch_speech()
     d._text_in_flight.set()
@@ -932,6 +934,7 @@ def test_stop_within_session_new_speech_after_final_drains():
     NEW utterance's partial fires → stop must still drain so the second final isn't dropped.
     """
     d, fb, rec, be = _make_daemon()
+    d._cfg.asr.graceful_stop = True  # drain is opt-in since 2026-10
     d.start()
     d._touch_speech()
     d._text_in_flight.set()
@@ -4543,6 +4546,7 @@ def test_cancel_suppression_drops_racing_final_and_clears_on_sentinel():
         "the marked sentinel must clear the suppression"
     )
     assert be.typed == [] and fb.finals == []  # sentinel typed/recorded nothing
+    d._touch_speech()  # live flow: a partial precedes the final, lifting the drop-freeze
     d.on_final("fresh sentence")  # a NORMAL final afterwards flows through
     assert be.typed == ["fresh sentence", " "]  # commit: final + space (P1.M2.T6.S2)
     assert fb.finals == ["fresh sentence"]
@@ -4851,6 +4855,7 @@ def test_user_keypress_freeze_survives_paired_speech_events():
     must survive partial+speech cycles until this utterance's commit+boundary —
     never typing over the user's cursor."""
     d, fb, rec, be = _make_daemon()
+    d._cfg.cancel.keypress_action = "freeze"  # legacy freeze path
     d.start()
     d._on_partial("hello wor")
     assert be.typed == ["hello wor"]
@@ -4975,6 +4980,7 @@ class _FakeKeypressStream(_FakeStream):
 def test_note_user_keypress_forwards_to_stream_while_listening():
     """Armed: the seam forwards to the engine's note_user_keypress (T7.S2's future call)."""
     d, fb = _make_cancel_daemon()
+    d._cfg.cancel.keypress_action = "freeze"  # legacy freeze path (default: disarm, 2026-10)
     d._stream = _FakeKeypressStream(tail_len=8)
     d.note_user_keypress()
     assert d._stream.keypress_notes == 1
@@ -4993,6 +4999,7 @@ def test_note_user_keypress_disarmed_is_noop():
 def test_note_user_keypress_without_stream_is_noop():
     """Defensive getattr seam style (_pending_tail_len): a missing stream must not raise."""
     d, fb = _make_cancel_daemon()
+    d._cfg.cancel.keypress_action = "freeze"  # legacy freeze path
     del d._stream
     d.note_user_keypress()  # must not raise
 
@@ -5003,6 +5010,7 @@ def test_on_final_user_keypress_frozen_commit_absorbs_then_unfreezes():
     the daemon's post-commit reset_boundary() lifts the freeze; the NEXT utterance
     streams normally."""
     d, fb, rec, be = _make_daemon()
+    d._cfg.cancel.keypress_action = "freeze"  # legacy freeze path
     d.start()
     d._on_partial("hello wor")
     d.note_user_keypress()
@@ -5147,6 +5155,7 @@ def test_lost_sentinel_self_heals_after_timeout():
     d._cancel_suppress_since = _time.monotonic() - (
         daemon._CANCEL_SUPPRESS_TIMEOUT_S + 1.0
     )
+    d._touch_speech()  # live flow: a partial precedes the final, lifting the drop-freeze
     d.on_final("fresh sentence")  # self-heal: processed like a normal final
     assert d._cancel_suppress_final is False and d._cancel_suppress_since is None
     assert be.typed == ["fresh sentence", " "]
@@ -5163,6 +5172,7 @@ def test_sentinel_consume_clears_suppress_since():
     d.on_final("")  # sentinel consumed -> window closed, stamp cleared
     assert d._cancel_suppress_final is False
     assert d._cancel_suppress_since is None
+    d._touch_speech()  # live flow: a partial precedes the final, lifting the drop-freeze
     d.on_final("next sentence")  # normal processing resumes immediately
     assert d._backend.typed == ["next sentence", " "]
     assert fb.finals == ["next sentence"]

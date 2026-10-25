@@ -75,6 +75,9 @@ import os
 import signal
 import sys
 import threading
+import time  # VT-008: _abort_handler's defer branch sleeps — the missing import killed the
+# thread with NameError on EVERY deferred cancel/abort, wedging all later stops into drain
+# timeouts and latching the cancel-suppression window (the mass-rewind regressions of Oct 2026)
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -695,7 +698,19 @@ def _worker_main(
                 aborted.set()  # VT-007: mark so _run_text_and_emit_final emits the sentinel
                 _bounded_recorder_abort(recorder)
 
-    abort_thread = threading.Thread(target=_abort_handler, name="vt-child-abort", daemon=True)
+    def _abort_supervisor() -> None:
+        """Restart _abort_handler if it EVER dies (belt & braces: a dead handler wedges every
+        later abort/cancel into their timeouts — stops stop working, cancels latch windows)."""
+        while not stop_abort_thread.is_set():
+            try:
+                _abort_handler()
+            except Exception:  # pylint: disable=broad-except — the supervisor must survive
+                logger.warning("vt-child-abort handler died; restarting", exc_info=True)
+                time.sleep(0.5)
+
+    abort_thread = threading.Thread(
+        target=_abort_supervisor, name="vt-child-abort", daemon=True
+    )
     abort_thread.start()
 
     running = True

@@ -776,7 +776,22 @@ class StreamingOutput:
             return False
 
     def _safe_backspace(self, n: int) -> bool:
-        """press_backspace that fails SAFE. n <= 0 is a no-op success (backend contract)."""
+        """press_backspace that fails SAFE. n <= 0 is a no-op success (backend contract).
+
+        ACCOUNTING CLAMP (the "backspaces WAY farther than it ever typed" bug): a rewind may
+        NEVER delete more characters than THIS engine typed since the checkpoint — clamped
+        to len(tail) with a WARNING when a caller's arithmetic exceeds it. Every rewind is
+        logged at INFO (n + tail length) so the journal is an audit trail for accounting
+        regressions."""
+        if n > len(self._tail):
+            logger.warning(
+                "streaming rewind CLAMPED: asked %d, tail is only %d — deleting only ours",
+                n,
+                len(self._tail),
+            )
+            n = len(self._tail)
+        if n > 0:
+            logger.info("streaming rewind: %d char(s) (tail was %d)", n, len(self._tail))
         if n <= 0:
             return True
         try:

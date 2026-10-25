@@ -1175,6 +1175,17 @@ class VoiceTypingDaemon:
                     )
                     self._cancel_suppress_final = False
                     self._cancel_suppress_since = None
+                    # TAIL-ACCUMULATION FIX: while the window was latched, dropped finals
+                    # never reset the boundary — partials kept typing and the tail grew
+                    # across utterances, so THIS commit rewound "way farther than it ever
+                    # typed". Absorb whatever tail accumulated (no keystrokes) and process
+                    # this final as a fresh utterance.
+                    if self._cfg.output.streaming and self._pending_tail_len() > 0:
+                        self._stream.freeze(
+                            "cancel-suppression window closed (tail absorbed)",
+                            session=True,
+                        )
+                        self._stream.reset_boundary()
                     # fall through: clean/commit this (new-utterance) final below
                 else:
                     consume = getattr(self._host, "consume_cancel_mark", None)
@@ -1194,6 +1205,15 @@ class VoiceTypingDaemon:
                         # new speech (the re-said sentence) re-arms the drain correctly.
                         self._final_pending = False
                         self._utterance_finalized = True
+                    # TAIL-ACCUMULATION FIX (latched window): each dropped final is still an
+                    # utterance boundary — absorb the tail into the checkpoint (no keystrokes)
+                    # so it can never grow across dropped finals into a mass rewind.
+                    if self._cfg.output.streaming:
+                        self._stream.freeze(
+                            "final dropped (cancel suppression window latched)",
+                            session=True,
+                        )
+                        self._stream.reset_boundary()
                     return  # dropped: no clean, no type_text, no record_final
             cleaned = textproc.clean(text, self._cfg.filter)
             if not cleaned:  # rejected: blocklist hallucination / below min_chars
@@ -1377,6 +1397,9 @@ class VoiceTypingDaemon:
                 logger.debug(
                     "context-prompt clear skipped: host has no set_prompt seam"
                 )
+        self._armed_monotonic = (
+            time.monotonic()
+        )  # keypress-disarm grace window anchor (note_user_keypress)
         self._last_speech_monotonic = (
             time.monotonic()
         )  # start the idle auto-stop clock fresh
@@ -1511,12 +1534,17 @@ class VoiceTypingDaemon:
         ~5s drain the way it could when _final_pending was set on every partial.
         """
         if (
-            self._host is not None
+            self._cfg.asr.graceful_stop
+            and self._host is not None
             and self._text_in_flight.is_set()
             and self._final_pending
         ):
             self._begin_drain()
         else:
+            # IMMEDIATE stop (default since 2026-10; graceful_stop=false): disarm NOW — mic
+            # off, engine reset, toast — never wait on the child's decode. The racing final
+            # is dropped by the _listening gate in on_final; the tail stays typed as-is
+            # (session reset, no keystrokes). "All the way. No exceptions."
             with self._lock:
                 self._disarm()
             if self._host is not None:
@@ -1563,6 +1591,24 @@ class VoiceTypingDaemon:
         internal lock serializes with on_partial/commit; never raises.
         """
         if not self._listening.is_set():
+            return
+        if self._cfg.cancel.keypress_action == "disarm":
+            # HALT semantics (user decision 2026-10): any real keypress while armed stops
+            # dictation ENTIRELY — mic off, engine reset, no drain, no late keystrokes.
+            # GRACE: the arm hotkey's own chord (Ctrl/Super/Alt/D) arrives as EV_KEY presses
+            # right after arming — without this window every arm would instantly self-disarm.
+            # (Modifier-only presses are already filtered in key_listener.parse_key_event.)
+            armed_at = getattr(self, "_armed_monotonic", None)
+            if armed_at is not None and time.monotonic() - armed_at < 1.5:
+                return
+            logger.warning(
+                "voice-typing: user keypress while armed — halting dictation (disarm)"
+            )
+            with self._lock:
+                if self._listening.is_set():  # re-check under the lock (racing stop/toggle)
+                    self._disarm()
+            if self._host is not None:
+                self._safe_abort()
             return
         stream = getattr(self, "_stream", None)
         note = getattr(stream, "note_user_keypress", None)
