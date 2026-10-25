@@ -744,3 +744,32 @@ def test_bounded_recorder_abort_returns_on_wedged_abort():
     elapsed = time.monotonic() - t0
     assert elapsed < 2.0, f"bounded abort must return promptly, took {elapsed:.2f}s"
     assert entered.is_set(), "the abort call must still have been attempted"
+
+
+# ---------------------------------------------------------------------------
+# Rev 3 hardening — 'arm' purges post-abort re-stashed audio (stale-replay fix)
+# ---------------------------------------------------------------------------
+
+
+def test_arm_purges_stale_audio_before_mic_on():
+    """'arm' must clear the recorder's audio buffers BEFORE set_microphone(True).
+
+    The stop's abort unblocks text() AFTER the 'disarm' clear ran, and the aborted decode
+    re-stashes its audio into frames/last_frames — which the NEXT text() would otherwise
+    fall back to and transcribe, replaying the previous session's last utterance into the
+    new one (the stale-replay word-vomit). Order contract: purge, drain raced abort
+    signals, then mic on."""
+    import threading as _th
+
+    rec = _CancelFakeRecorder()
+    mic_calls: list[bool] = []
+    rec.set_microphone = mic_calls.append  # record order + arg
+    cancel_ev, abort_ev = _th.Event(), _th.Event()
+    abort_ev.set()  # raced the disarm->arm toggle: must be drained, not leaked
+    recorder_host._handle_arm(rec, cancel_ev, abort_ev)
+    assert mic_calls == [True]  # mic on LAST
+    assert rec.clear_audio_queue_calls == 1
+    assert rec.recorded_audio_queue.empty()  # stale completed recording gone
+    assert rec.frames == [] and rec.last_frames == []
+    assert rec.audio is None
+    assert not abort_ev.is_set() and not cancel_ev.is_set()  # raced signal drained

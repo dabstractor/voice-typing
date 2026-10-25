@@ -753,14 +753,7 @@ def _worker_main(
                         recorder, evt_q, _child_on_final, aborted, cancelled, text_running
                     )
                 elif kind == "arm":
-                    # LOST-SIGNAL FIX companion: drop any cancel/abort that raced a
-                    # disarm->arm toggle (e.g. a stop's abort landing after this child had
-                    # already returned from text()). A fresh session starts with a clean
-                    # abort slate; otherwise the next 'text' command would emit a STALE
-                    # sentinel — a spurious rejected-final freeze + "filtered hallucination"
-                    # toast at the session's first utterance.
-                    _drain_stale_abort_signals(cancel_event, abort_event)
-                    recorder.set_microphone(True)
+                    _handle_arm(recorder, cancel_event, abort_event)
                 elif kind == "disarm":
                     recorder.set_microphone(False)
                     # Drop ALL buffered/queued audio so the next arm transcribes fresh speech, not the
@@ -875,6 +868,25 @@ def _ready_payload(resolved_device: dict[str, str], context_prompt_active: bool)
     payload = dict(resolved_device)
     payload["context_prompt"] = bool(context_prompt_active)
     return payload
+
+
+def _handle_arm(recorder: Any, cancel_event: Any, abort_event: Any) -> None:
+    """The child's 'arm' command: purge stale audio, drain raced abort signals, mic on.
+
+    POST-ABORT RE-STASH PURGE (Rev 3 hardening): the 'disarm' clear runs BEFORE the stop's
+    abort unblocks text(), so whatever the aborted decode re-stashes (recorder.frames /
+    last_frames / audio) lands AFTER that clear — and survived until the next 'disarm',
+    which never comes before the next 'arm'. The next text() then falls back to those
+    buffers and transcribes the PREVIOUS session's last utterance into the new one (the
+    "pringles can" word-vomit: stop right after speaking → re-arm → the cut-off sentence
+    types itself, chars AND backspaces). Clearing HERE too makes every arm start provably
+    fresh. Then: drain any cancel/abort that raced a disarm->arm toggle (LOST-SIGNAL FIX
+    companion — a stale sentinel would freeze the session's first utterance), and only
+    then un-mute the mic.
+    """
+    _clear_recorder_audio(recorder)
+    _drain_stale_abort_signals(cancel_event, abort_event)
+    recorder.set_microphone(True)
 
 
 def _clear_recorder_audio(recorder: Any) -> None:
