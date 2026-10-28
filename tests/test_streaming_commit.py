@@ -101,7 +101,7 @@ def test_commit_extend_types_only_delta_and_space():
     stream, be, fb = _make_stream()
     stream.on_partial("hello wor")          # fresh start: types the whole partial
     stream.commit("hello world")            # final extends the tail -> delta + space
-    assert be.calls == [("type", "hello wor"), ("type", "ld"), ("type", " ")]
+    assert be.calls == [("type", "hello wor"), ("type", "ld ")]
     assert stream.tail == ""                # checkpoint advanced: nothing pending
     assert stream.committed == "hello world "
     assert fb.partials[-1] == "hello world "
@@ -113,7 +113,7 @@ def test_commit_extend_applies_casing_guard_to_the_delta():
     stream, be, _fb = _make_stream()
     stream.on_partial("then he said")
     stream.commit("then he said Stop.")     # mid-sentence final waffle
-    assert _typed(be) == ["then he said", " stop", " "]
+    assert _typed(be) == ["then he said", " stop" ]
     assert stream.committed == "then he said stop "
 
 
@@ -122,7 +122,7 @@ def test_commit_empty_delta_types_only_the_space():
     stream, be, _fb = _make_stream()
     stream.on_partial("hello world")
     stream.commit("hello world")
-    assert be.calls == [("type", "hello world"), ("type", " ")]
+    assert be.calls == [("type", "hello world ")]
     assert stream.committed == "hello world "
 
 
@@ -136,11 +136,9 @@ def test_commit_extend_matches_case_insensitively():
     stream.commit("The quick brown fox")     # capital final over guarded tail: EXTEND
     assert not [c for c in be.calls if c[0] == "bs"]
     assert be.calls == [
-        ("type", "and then he said"),
-        ("type", " "),
+        ("type", "and then he said "),
         ("type", "the quick"),
-        ("type", " brown fox"),
-        ("type", " "),
+        ("type", " brown fox "),
     ]
     assert stream.committed == "and then he said the quick brown fox "
 
@@ -157,8 +155,7 @@ def test_commit_revise_backspaces_exactly_the_diverging_suffix():
     assert be.calls == [
         ("type", "hello world"),
         ("bs", 5),
-        ("type", "there"),
-        ("type", " "),
+        ("type", "there "),
     ]
     assert stream.committed == "hello there "
 
@@ -172,8 +169,7 @@ def test_commit_confirming_prefix_rewinds_only_the_diverging_suffix():
     assert be.calls == [
         ("type", "hello world foo"),
         ("bs", 3),
-        ("type", "bar"),
-        ("type", " "),
+        ("type", "bar "),
     ]
     assert stream.committed == "hello world bar "
 
@@ -183,7 +179,7 @@ def test_commit_fresh_start_no_backspace_recorded():
     # must not be recorded), just the guarded final + space.
     stream, be, _fb = _make_stream()
     stream.commit("Hello world")
-    assert be.calls == [("type", "Hello world"), ("type", " ")]
+    assert be.calls == [("type", "Hello world ")]
     assert stream.committed == "Hello world "
 
 
@@ -197,9 +193,9 @@ def test_commit_not_rate_limited_back_to_back():
     stream.commit("farewell")               # rewind #2 (bs 11) — still allowed
     assert be.calls == [
         ("type", "hello"),
-        ("bs", 5), ("type", "goodbye"), ("type", " "),
+        ("bs", 5), ("type", "goodbye "),
         ("type", "goodbye now"),
-        ("bs", 11), ("type", "farewell"), ("type", " "),
+        ("bs", 11), ("type", "farewell "),
     ]
     # committed ACCUMULATES across commits; the previous commit's trailing space is
     # not doubled by the second join (screen truth: one space between utterances).
@@ -289,7 +285,7 @@ def test_commit_frozen_absorbs_tail_and_types_separator():
     stream.on_partial("hello wor")          # typed tail
     stream.freeze("test freeze")
     stream.commit("hello world")
-    assert be.calls == [("type", "hello wor"), ("type", " ")]  # separator only
+    assert be.calls == [("type", "hello wor ")]  # separator only
     assert stream.committed == "hello wor "           # tail + separator (screen truth)
     assert stream.tail == ""
     assert fb.partials[-1] == "hello wor "
@@ -387,7 +383,7 @@ def test_reset_session_clears_post_cancel_suppression():
     assert be.calls == [("type", "hello")]
     stream.reset_session()
     stream.on_partial("fresh")
-    assert _typed(be) == ["hello", "fresh"]
+    assert _typed(be) == ["hello", " fresh"]  # Rev 3: continuation separator
 
 
 def test_reset_boundary_still_does_not_clear_frozen():

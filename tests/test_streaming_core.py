@@ -414,8 +414,8 @@ def test_suppressed_after_cancel_mirrors_only_until_boundary():
     assert stream.tail == ""
     stream.reset_boundary()             # next utterance begins
     stream.on_partial("fresh words")
-    assert _typed(be) == ["hello", "fresh words"]
-    assert stream.tail == "fresh words"
+    assert _typed(be) == ["hello", " fresh words"]  # Rev 3: separator after cancel
+    assert stream.tail == " fresh words"  # includes the separator
 
 
 def test_streaming_disabled_is_mirror_only():
@@ -502,3 +502,75 @@ def test_mirror_updates_on_every_event_including_suppressed_cycles():
     assert fb.partials[-3] == "alpha one"     # suppressed cycles keep the tail
     assert fb.partials[-2] == "alpha one"
     assert fb.partials[-1] == "alpha one two"
+
+
+# ---------------------------------------------------------------------------
+# Rev 3 — continuation separator (no fusion after an interrupted session)
+# ---------------------------------------------------------------------------
+
+def _engine(**kw):
+    fb = FakeFeedback()
+    be = RecordingBackend()
+    return StreamingOutput(be, fb, kw.pop("streaming", True), **kw), be, fb
+
+
+def test_continuation_separator_after_interrupted_session():
+    """Interrupted session (stranded tail, no commit) -> the NEXT fragment leads with
+    exactly one space instead of fusing onto the stranded words."""
+    so, be, fb = _engine()
+    so.on_partial("I have a long")
+    assert be.calls == [("type", "I have a long")]
+    so.reset_session()  # disarm (tail stranded)
+    so.reset_session()  # re-arm
+    so.on_partial("Rug in my hallway")
+    assert be.calls[-1] == ("type", " rug in my hallway")  # separator + lowercased
+
+
+def test_no_separator_after_clean_commit():
+    """Clean session (commit typed its trailing space) -> next fragment gets NO extra
+    leading space (no double-space)."""
+    so, be, fb = _engine()
+    so.on_partial("Hello world")
+    so.commit("Hello world")
+    so.reset_session()
+    so.reset_session()
+    so.on_partial("Next sentence")
+    assert be.calls[-1] == ("type", "Next sentence")
+
+
+def test_separator_via_commit_as_first_event():
+    """A COMMIT can be the session's first typed event — it carries the separator too."""
+    so, be, fb = _engine()
+    so.on_partial("I have a long")
+    so.reset_session()
+    so.commit("Rug in my hallway")
+    typed = "".join(t for k, t in be.calls if k == "type")
+    assert " rug in my hallway" in typed  # single separator space
+
+
+def test_separator_after_cancel():
+    """Backspace-cancel leaves the cursor 1 char into the erased fragment; the next
+    fragment must not fuse onto it."""
+    so, be, fb = _engine()
+    so.on_partial("hello wor")
+    so.reset_after_cancel()
+    so.resume()  # the paired speech event lifts post-cancel suppression
+    so.on_partial("let me say that again")
+    assert be.calls[-1][1].startswith(" ")
+
+
+def test_separator_consumed_once_and_append_space_off_disables():
+    """The flag is consumed by the first typed piece; append_space=False never sets it."""
+    so, be, fb = _engine()
+    so.on_partial("alpha")
+    so.reset_session(); so.reset_session()
+    so.on_partial("beta")
+    so.on_partial("beta gamma")
+    assert [c for c in be.calls if c[0] == "type"] == [
+        ("type", "alpha"), ("type", " beta"), ("type", " gamma"),
+    ]
+    so2, be2, fb2 = _engine(append_space=False)
+    so2.on_partial("alpha")
+    so2.reset_session(); so2.reset_session()
+    so2.on_partial("beta")
+    assert be2.calls == [("type", "alpha"), ("type", "beta")]

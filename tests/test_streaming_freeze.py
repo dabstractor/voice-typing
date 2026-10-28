@@ -207,7 +207,7 @@ def test_note_user_keypress_frozen_commit_absorbs_then_boundary_lifts_and_next_t
     stream.on_partial("hello wor")
     stream.note_user_keypress()
     stream.commit("hello world")
-    assert be.calls == [("type", "hello wor"), ("type", " ")], (
+    assert be.calls == [("type", "hello wor ")], (
         "a frozen commit must absorb (no revision keystrokes) but still type the separator"
     )
     assert stream.committed == "hello wor "
@@ -216,7 +216,7 @@ def test_note_user_keypress_frozen_commit_absorbs_then_boundary_lifts_and_next_t
     stream.reset_boundary()                   # the daemon's post-commit boundary call
     assert stream.frozen is False
     stream.on_partial("next")
-    assert be.calls == [("type", "hello wor"), ("type", " "), ("type", "next")]
+    assert be.calls == [("type", "hello wor "), ("type", "next")]
 
 
 def test_note_user_keypress_logs_warning(caplog):
@@ -240,7 +240,7 @@ def test_session_frozen_tail_late_commit_absorbs_plus_separator_and_stays_frozen
     stream.on_partial("hello wor")
     stream.freeze("drain timeout: stranded tail", session=True)
     stream.commit("hello world")
-    assert be.calls == [("type", "hello wor"), ("type", " ")]
+    assert be.calls == [("type", "hello wor ")]
     assert stream.committed == "hello wor "
     stream.reset_boundary()
     assert stream.frozen is True and stream.frozen_session is True
@@ -263,10 +263,12 @@ def test_session_frozen_disarm_sends_no_keystrokes_and_next_session_types():
     stream.on_partial("hello wor")
     stream.freeze("stranded", session=True)
     stream.reset_session()
-    assert stream.frozen is False and stream.committed == "" and stream.tail == ""
+    # Rev 3: a stranded tail is ABSORBED into committed (casing/context source for the
+    # continuation) and the continuation separator is armed — but still ZERO keystrokes.
+    assert stream.frozen is False and stream.committed == "hello wor" and stream.tail == ""
     assert be.calls == [("type", "hello wor")], "reset_session must never press backspace"
     stream.on_partial("fresh session")
-    assert be.calls == [("type", "hello wor"), ("type", "fresh session")]
+    assert be.calls == [("type", "hello wor"), ("type", " fresh session")]
 
 
 # ---------------------------------------------------------------------------
@@ -385,8 +387,7 @@ def test_cancel_then_resume_restores_live_delta_typing():
     # Guard half — suppression HOLDS without resume(): zero NEW keystrokes (the
     # stale partial of the cancelled utterance must not re-type anything).
     assert be.calls == [
-        ("type", "Hello world"),
-        ("type", " "),                # commit's inter-final space
+        ("type", "Hello world "),                # commit's inter-final space
         ("type", "the quick brown"),  # pre-cancel tail (daemon deletes it off-screen)
     ], "suppression must HOLD until resume() — the stale partial typed NOTHING"
     assert fb.partials[-1] == "the quick brown fox"  # suppressed: RAW partial mirrored
@@ -395,10 +396,11 @@ def test_cancel_then_resume_restores_live_delta_typing():
     # Landing half — live typing restored. reset_after_cancel() cleared the tail,
     # so the landing is a FRESH START (no rewind, no rate-limit consult): exactly
     # ONE guarded type of the full re-said sentence (observed, CRITICAL #1).
-    assert be.calls[-1] == ("type", "the quick brown fox jumps")
+    assert be.calls[-1] == ("type", " the quick brown fox jumps")  # Rev 3: separator after cancel
     assert all(c[0] == "type" for c in be.calls), "no backspaces: nothing to rewind"
-    assert stream.committed == "Hello world " and stream.tail == "the quick brown fox jumps"
-    assert (stream.committed + stream.tail) == "Hello world the quick brown fox jumps"
+    assert stream.committed == "Hello world " and stream.tail == " the quick brown fox jumps"
+    # engine strings: committed kept its trailing space; tail leads with the synthesized separator
+    assert (stream.committed + stream.tail) == "Hello world  the quick brown fox jumps"
 
 
 # ---------------------------------------------------------------------------

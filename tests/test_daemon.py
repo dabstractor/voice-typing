@@ -4632,11 +4632,14 @@ def test_cancel_then_next_utterance_streams_live_daemon_level():
     # live-streaming by construction (committed stays '').
     d._on_partial("the quick brown fox")
     landing = be.typed[n_after_cancel:]
-    assert landing == ["the quick brown fox"], (
+    assert landing == [" the quick brown fox"], (  # Rev 3: separator after cancel
         f"expected one live delta after resume; got {landing!r}"
     )
-    assert d._stream.committed == ""  # no commit() ever ran: partials only
-    assert fb.partials[-1] == "the quick brown fox"  # the state.json mirror shows the live text
+    # No commit() ever ran; cancel() cleared the tail BEFORE any reset_session, so
+    # there was nothing to absorb — committed stays "". The separator lives only in
+    # the typed stream (typed by reset_after_cancel's continuation flag).
+    assert d._stream.committed == ""
+    assert fb.partials[-1] == " the quick brown fox"  # mirror = screen truth (separator included)
 
 
 # ===========================================================================

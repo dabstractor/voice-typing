@@ -264,6 +264,22 @@ class StreamingOutput:
         # clock starting at 0.0 cannot alias "window open since t=0".
         self._diverged_since: float | None = None
         self._diverged_text: str = ""
+        # CONTINUATION SEPARATOR (Rev 3): set when a session ends with a stranded tail
+        # (immediate stop / keypress-disarm — the commit that would have typed the
+        # inter-utterance space never ran). The screen continues mid-text with NO
+        # trailing space, so the NEXT typed fragment must lead with exactly one space
+        # or it fuses onto the stranded words (the "skipped spaces" bug). Typed
+        # LAZILY — at the first fragment that actually lands — so a session that just
+        # ends never leaves a dangling trailing space. Survives reset_session()
+        # (it is a fact about the SCREEN, not the engine session); consumed only by
+        # typing. append_space=false disables it entirely.
+        self._pending_leading_space = False
+        # True while tail[0] is a SYNTHESIZED separator (typed by us, never produced by
+        # the decoder): prefix-diffing must use tail[1:] so decoder partials (which never
+        # contain the space) still EXTEND cleanly instead of perpetually "diverging".
+        # Accounting (backspace counts, len(tail)) always uses the REAL tail — the space
+        # is on screen and a rewind must delete it. Only meaningful while tail non-empty.
+        self._lead_sep = False
 
     # --- read-only accessors (T5.S2 + T6.S2 consume; tests may poke _committed) ---
 
@@ -309,8 +325,16 @@ class StreamingOutput:
         final (the sentinel final is dropped pre-commit, BUG-002).
         """
         with self._lock:
+            had_tail = bool(self._tail)
             self._tail = ""
+            self._lead_sep = False
             self._suppressed = True
+            # The cursor now sits one char into the erased fragment (the physical
+            # backspace's compensation) — the next fragment must not fuse onto it.
+            # (Only when a REAL fragment was erased: a tail-less cancel is plain
+            # user editing — the screen state is the user's business, not ours.)
+            if self._append_space and had_tail:
+                self._pending_leading_space = True
             self._diverged_since = None  # the cancelled fragment's divergence dies with it
             self._diverged_text = ""
 
@@ -338,10 +362,21 @@ class StreamingOutput:
                 # Same join commit()'s frozen path uses: rstrip the base so the
                 # previous commit's inter-final space (already on screen) is not
                 # doubled, and drop empty parts.
+                had_tail = bool(self._tail)
                 self._committed = " ".join(
                     p for p in (self._committed.rstrip(), self._tail) if p
                 )
+                if had_tail and self._append_space:
+                    # CONTINUATION SEPARATOR (Rev 3c): the join above put a separator
+                    # into the ENGINE string, but NOTHING typed one on screen — the
+                    # next fragment (first non-echo partial / next utterance) must
+                    # lead with the synthesized space or it fuses onto the absorbed
+                    # tail (the remaining "skipped spaces" hole — the rejected-final
+                    # path fires the freeze+boundary pair on every filtered
+                    # hallucination, so this hole was hit constantly).
+                    self._pending_leading_space = True
             self._tail = ""
+            self._lead_sep = False
             self._suppressed = False
             self._diverged_since = None  # a new utterance starts with a closed window
             self._diverged_text = ""
@@ -364,18 +399,31 @@ class StreamingOutput:
         getattr seam, matching daemon.cancel()'s style).
         """
         with self._lock:
-            self._committed = ""
+            if self._tail:
+                # INTERRUPTED SESSION (Rev 3): a tail is stranded on screen with no
+                # separator after it ("no trailing space while tentative"; the commit
+                # that would have appended it never ran). Flag the continuation instead
+                # of wiping: the next typed fragment leads with one space, and the
+                # absorbed text stays as the casing/context source ("…long" lowercases
+                # the continuation's first word).
+                self._committed = " ".join(
+                    p for p in (self._committed.rstrip(), self._tail) if p
+                )
+                self._pending_leading_space = True
             self._tail = ""
+            self._lead_sep = False
             self._suppressed = False
             self._frozen = False
             self._frozen_session = False
             self._echo_guard = None  # a fresh arm clears the rejected-final guard too
-            # A fresh arm trusts the screen again: clear the backend-failure origin
-            # tag too, so a later non-backend freeze in the new session is liftable
-            # by resume() (the tag must imply frozen; this unfreeze clears it).
-            self._frozen_backend_failure = False
+            self._frozen_backend_failure = False  # we just unfroze; the origin tag must not outlive it
             self._diverged_since = None  # fresh session: revision window closed
             self._diverged_text = ""
+            if not self._pending_leading_space:
+                # GENUINELY fresh session (clean stop or first arm): full wipe — the
+                # original reset_session contract. With a continuation pending, the
+                # absorbed committed text above is deliberately KEPT.
+                self._committed = ""
 
     def resume(self) -> None:
         """Class-aware lift: clears suppression ALWAYS; lifts ONLY a stranded
@@ -556,15 +604,19 @@ class StreamingOutput:
             # diffing is stable and a trailing-space waffle is a no-op.
             text = " ".join(text.split())
 
-            if self._tail and _ci_startswith(text, self._tail):
-                # EXTEND: tail is a case-insensitive prefix -> type only the
+            # DIFF BASE (lead-sep): when tail[0] is our synthesized separator, decoder
+            # partials never contain it — diff against tail[1:] so extends stay extends.
+            vtail = self._tail[1:] if self._lead_sep else self._tail
+
+            if vtail and _ci_startswith(text, vtail):
+                # EXTEND: diff-base is a case-insensitive prefix -> type only the
                 # guarded delta (sliced from the ORIGINALS, not folded text).
                 # Re-convergence also CLOSES any open divergence window: the
                 # divergence was momentary wobble (typing stays smooth), and a
                 # LATER divergence opens a fresh window of its own.
                 self._diverged_since = None
                 self._diverged_text = ""
-                delta = text[len(self._tail) :]
+                delta = text[len(vtail) :]
                 if not delta:
                     self._feedback.update_partial(self._tail)
                     return
@@ -596,12 +648,20 @@ class StreamingOutput:
                 guarded = textproc.apply_streaming_guards(
                     self._guard_context(""), text
                 )
-                if guarded:
+                piece = guarded
+                if piece and self._pending_leading_space and self._append_space:
+                    # CONTINUATION SEPARATOR: the screen ends with stranded text and
+                    # no trailing space — lead with exactly one (typed lazily).
+                    piece = " " + piece
+                    self._pending_leading_space = False
+                if piece:
                     # Never debounced: additive, flicker-free by construction.
-                    if not self._safe_type(guarded):
+                    if not self._safe_type(piece):
                         self._feedback.update_partial(self._tail)
                         return
-                    self._tail += guarded
+                    self._tail += piece
+                    if piece.startswith(" ") and not self._lead_sep:
+                        self._lead_sep = True  # synthesized separator now at tail[0]
                 self._feedback.update_partial(self._tail)
                 return
             now = self._clock()
@@ -616,25 +676,29 @@ class StreamingOutput:
                 return
             # PERSISTENT divergence (>= debounce): ONE minimal-diff rewind +
             # retype with the LATEST partial (PRD §4.2quater rule 1): backspace
-            # ONLY the suffix past the longest common prefix of tail and partial
-            # — never the whole tail. A last-word wobble rewinds just that word;
-            # a retract rewinds only the retracted chars; only a genuinely
-            # prefix-free rewrite rewinds all.
-            k = _ci_common_prefix_len(self._tail, text)
+            # ONLY the suffix past the longest common prefix of the diff base and
+            # partial — never the whole tail. A last-word wobble rewinds just that
+            # word; a retract rewinds only the retracted chars; only a genuinely
+            # prefix-free rewrite rewinds all. (k is measured against the diff base;
+            # a synthesized leading separator is KEPT by keep_n below — it is on
+            # screen before the fragment and must survive the rewind.)
+            vtail = self._tail[1:] if self._lead_sep else self._tail
+            k = _ci_common_prefix_len(vtail, text)
+            keep_n = k + (1 if self._lead_sep else 0)
             guarded = textproc.apply_streaming_guards(
-                self._guard_context(self._tail[:k]), text[k:]
+                self._guard_context(self._tail[:keep_n]), text[k:]
             )
             # press_backspace(0) is a backend no-op; _safe_backspace also guards it.
             if not self._safe_backspace(len(self._tail) - k):
                 self._feedback.update_partial(self._tail)
                 return  # freeze already recorded by _safe_backspace
             if guarded and not self._safe_type(guarded):
-                # Rewind landed, retype did not: the screen now ends at tail[:k] —
+                # Rewind landed, retype did not: the screen now ends at tail[:keep_n] —
                 # keep the engine string on screen truth (frozen either way).
-                self._tail = self._tail[:k]
+                self._tail = self._tail[:keep_n]
                 self._feedback.update_partial(self._tail)
                 return
-            self._tail = self._tail[:k] + guarded
+            self._tail = self._tail[:keep_n] + guarded
             # Re-arm the window: a further divergence must persist a FRESH full
             # debounce before another revision (bounded revisions per utterance).
             self._diverged_since = None
@@ -684,62 +748,86 @@ class StreamingOutput:
             if not self._streaming:
                 return  # Rev 1 rollback hatch: engine is a mirror-only pass-through
             text = " ".join(final_text.split())
+            if (
+                not self._tail
+                and self._pending_leading_space
+                and self._append_space
+                and text
+            ):
+                # CONTINUATION SEPARATOR (fresh-tail commit): same lazy-space rule as
+                # on_partial — the stranded screen text needs one space before this
+                # final. Applied to `text` BEFORE the extend/revise split so both
+                # commit paths (an empty tail always takes the extend path) carry it.
+                text = " " + text
+                self._pending_leading_space = False
+            space = " " if self._append_space else ""
             if self._frozen:
-                # BUG-003 (P1.M1.T3.S1): absorb WITHOUT revision keystrokes, but still
-                # honor append_space — type the separator so the next utterance's first
-                # word does not glue onto the absorbed tail once reset_boundary() lifts
-                # a per-utterance freeze (PRD §4.2quater rule 2). Space exactly once
-                # (rstrip base + " + space"), the non-frozen path's discipline.
-                # Fail-safe: a space-type failure freezes SESSION-class (promote-only)
-                # — acceptable (the tail is stranded anyway); absorb nothing then.
-                space = " " if self._append_space else ""
-                if space and not self._safe_type(space):
-                    return  # frozen (session); checkpoint stays at the pre-commit boundary
-                self._committed = (
-                    " ".join(p for p in (self._committed.rstrip(), self._tail) if p)
-                    + space
-                )
+                # BUG-003 successor (Rev 3c): absorb WITHOUT revision keystrokes and
+                # WITHOUT typing the separator either — a lone-space type_text is its
+                # own tiny wtype spawn, and browsers drop those short bursts (the
+                # app-dependent half of the missing-spaces report). The space is
+                # carried lazily (flag) and lands glued to the next fragment's payload.
+                _base = self._committed.rstrip()
+                _glue = "" if (not _base or self._tail.startswith(" ")) else " "
+                self._committed = _base + _glue + self._tail + space
+                if space:
+                    self._pending_leading_space = True
                 self._tail = ""
+                self._lead_sep = False
                 self._suppressed = False
                 self._feedback.update_partial(self._committed)
                 return
-            if self._tail and _ci_startswith(text, self._tail):
-                # EXTEND: the final confirms the tail (case-insensitively) — type
-                # only the guarded delta (sliced from the ORIGINALS).
-                delta = text[len(self._tail) :]
+            if self._tail and _ci_startswith(text, self._tail[1:] if self._lead_sep else self._tail):
+                # EXTEND: the final confirms the tail (case-insensitively, against the
+                # diff base — a synthesized leading separator is not decoder text) —
+                # type only the guarded delta (sliced from the ORIGINALS), with the
+                # inter-final space GLUED into the same payload (never a lone spawn).
+                delta = text[(len(self._tail) - (1 if self._lead_sep else 0)) :]
                 guarded = ""
                 if delta:
                     guarded = textproc.apply_streaming_guards(
                         self._guard_context_delta(), delta
                     )
-                    if guarded and not self._safe_type(guarded):
-                        return  # frozen by the fail-safe; tail frozen on screen
-                    self._tail += guarded
+                    if guarded:
+                        if not self._safe_type(guarded + space):
+                            return  # frozen by the fail-safe; tail frozen on screen
+                        self._tail += guarded
+                if not guarded and space:
+                    # Final confirmed the tail exactly — carry the separator lazily
+                    # instead of a lone-space spawn (browser-safe).
+                    self._pending_leading_space = True
                 typed = self._tail
             else:
                 # REVISE / fresh start: minimal-diff rewind + guarded suffix retype
                 # (PRD §4.2quater rule 2 — the same common-prefix rule as partial
-                # typing). A commit is authoritative — never debounced.
-                k = _ci_common_prefix_len(self._tail, text)
+                # typing, against the diff base; a synthesized separator is kept by
+                # keep_n). A commit is authoritative — never debounced.
+                _vt = self._tail[1:] if self._lead_sep else self._tail
+                k = _ci_common_prefix_len(_vt, text)
+                keep_n = k + (1 if self._lead_sep else 0)
                 guarded = textproc.apply_streaming_guards(
-                    self._guard_context(self._tail[:k]), text[k:]
+                    self._guard_context(self._tail[:keep_n]), text[k:]
                 )
                 if not self._safe_backspace(len(self._tail) - k):
                     return  # frozen; on-screen state unknown — touch nothing further
-                if guarded and not self._safe_type(guarded):
-                    self._tail = self._tail[:k]  # screen truth after the landed rewind
-                    return  # frozen mid-retype: the rewind landed, the retype did not
-                self._tail = self._tail[:k] + guarded
+                if guarded:
+                    # Space GLUED into the retype payload (never a lone spawn).
+                    if not self._safe_type(guarded + space):
+                        self._tail = self._tail[:keep_n]  # screen truth after the landed rewind
+                        return  # frozen mid-retype: the rewind landed, the retype did not
+                elif space:
+                    # Nothing to retype after the rewind — carry the separator lazily.
+                    self._pending_leading_space = True
+                self._tail = self._tail[:keep_n] + guarded
+                self._lead_sep = self._tail.startswith(
+                    " "
+                )  # a synthesized separator is the only way tail[0] is a space
                 typed = self._tail
-            space = " " if self._append_space else ""
-            if space and not self._safe_type(space):
-                return  # frozen: checkpoint stays at the pre-commit boundary
-            # rstrip the base so the join never doubles the previous commit's
-            # trailing space (it is already on screen exactly once).
-            self._committed = (
-                " ".join(p for p in (self._committed.rstrip(), typed) if p) + space
-            )
+            _base = self._committed.rstrip()
+            _glue = "" if (not _base or typed.startswith(" ")) else " "
+            self._committed = _base + _glue + typed + space
             self._tail = ""
+            self._lead_sep = False
             self._suppressed = False
             self._feedback.update_partial(self._committed)
 
