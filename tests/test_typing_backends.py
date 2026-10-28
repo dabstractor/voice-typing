@@ -88,7 +88,7 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
 
 def test_wtype_invokes_exact_argv(recorder):
     WtypeBackend().type_text("hello world")
-    assert recorder.argvs == [("wtype", "--", "hello world")]
+    assert recorder.argvs == [("wtype", "-d", "12", "--", "hello world")]
 
 
 def test_wtype_passes_check_true(recorder):
@@ -100,7 +100,7 @@ def test_wtype_passes_check_true(recorder):
 def test_wtype_text_starting_with_dash_stays_literal(recorder):
     # `--` keeps "-5 degrees" positional (not parsed as an option) — PRD §4.3.
     WtypeBackend().type_text("-5 degrees")
-    assert recorder.argvs == [("wtype", "--", "-5 degrees")]
+    assert recorder.argvs == [("wtype", "-d", "12", "--", "-5 degrees")]
 
 
 def test_wtype_never_appends_newline_or_space(recorder):
@@ -110,13 +110,13 @@ def test_wtype_never_appends_newline_or_space(recorder):
 
 
 # ---------------------------------------------------------------------------
-# YdotoolBackend — argv includes ["type","--key-delay","2","--",text] (PRD §4.3)
+# YdotoolBackend — argv includes ["type","--key-delay", "12","--",text] (PRD §4.3)
 # ---------------------------------------------------------------------------
 
 
 def test_ydotool_uses_key_delay_2(recorder):
     YdotoolBackend().type_text("hi")
-    assert recorder.argvs[0][:4] == ("ydotool", "type", "--key-delay", "2")
+    assert recorder.argvs[0][:4] == ("ydotool", "type", "--key-delay", "12")
 
 
 def test_ydotool_invokes_exact_argv(recorder):
@@ -124,8 +124,7 @@ def test_ydotool_invokes_exact_argv(recorder):
     assert recorder.argvs[0] == (
         "ydotool",
         "type",
-        "--key-delay",
-        "2",
+        "--key-delay", "12",
         "--",
         "hello",
     )
@@ -209,12 +208,11 @@ def test_wtype_nonzero_exit_falls_back_to_ydotool(recorder):
     # check=True converts a nonzero returncode into CalledProcessError -> caught -> fallback.
     recorder.raise_on("wtype", subprocess.CalledProcessError(1, ["wtype"]))
     make_backend(OutputConfig(backend="wtype")).type_text("hi")
-    assert recorder.argvs[0] == ("wtype", "--", "hi")
+    assert recorder.argvs[0] == ("wtype", "-d", "12", "--", "hi")
     assert recorder.argvs[1] == (
         "ydotool",
         "type",
-        "--key-delay",
-        "2",
+        "--key-delay", "12",
         "--",
         "hi",
     )
@@ -278,9 +276,9 @@ def test_no_real_subprocess_run_during_tests(monkeypatch):
     # fixture; this one asserts the mechanism directly.
     rec = _Recorder()
     rec.install(monkeypatch)
-    result = subprocess.run(["wtype", "--", "x"], check=True)
+    result = subprocess.run(["wtype", "-d", "12", "--", "x"], check=True)
     assert result.returncode == 0
-    assert rec.argvs == [("wtype", "--", "x")]
+    assert rec.argvs == [("wtype", "-d", "12", "--", "x")]
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +318,7 @@ def test_wtype_press_backspace_exact_argv(recorder):
 def test_ydotool_press_backspace_exact_argv(recorder):
     YdotoolBackend().press_backspace(2)
     assert recorder.argvs == [
-        ("ydotool", "key", "-d", "1", "14:1", "14:0", "14:1", "14:0")
+        ("ydotool", "key", "-d", "2", "14:1", "14:0", "14:1", "14:0")
     ]
     assert recorder.calls[0][1].get("check") is True
 
@@ -345,7 +343,7 @@ def test_press_backspace_n80_is_one_invocation(recorder):
     assert recorder.argvs[0].count("Backspace") == 80
     YdotoolBackend().press_backspace(80)
     assert len(recorder.argvs) == 2  # one MORE call (total), still 1 each
-    assert len(recorder.argvs[1]) == 4 + 2 * 80  # + "-d","1" pair
+    assert len(recorder.argvs[1]) == 4 + 2 * 80  # + "-d", "2" pair
     assert recorder.argvs[1].count("14:1") == 80 and recorder.argvs[1].count("14:0") == 80
 
 
@@ -354,7 +352,7 @@ def test_press_backspace_fallback_ordering(recorder):
     make_backend(OutputConfig(backend="wtype")).press_backspace(2)
     assert recorder.argvs == [
         ("wtype", "-k", "Backspace", "-k", "Backspace"),
-        ("ydotool", "key", "-d", "1", "14:1", "14:0", "14:1", "14:0"),
+        ("ydotool", "key", "-d", "2", "14:1", "14:0", "14:1", "14:0"),
     ]  # retry exactly ONCE, correct argv each
 
 

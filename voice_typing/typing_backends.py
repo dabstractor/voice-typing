@@ -45,6 +45,27 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
+import time
+
+# EVENT PACING (Rev 3d): synthesized key events sent at 0-2 ms intervals get
+# COALESCED/dropped by the compositor's input path when bursts bunch up (sustained
+# dictation — the "missing characters, worse the longer I use it" report; the
+# injector always exits 0, so the loss is silent). Every spawn is serialized with
+# a minimum inter-spawn floor so one batch's events drain before the next begins.
+_SPAWN_LOCK = threading.Lock()
+_LAST_SPAWN = [0.0]
+_MIN_SPAWN_GAP_S = 0.025
+
+
+def _paced_run(cmd: list[str]) -> None:
+    """subprocess.run serialized + floored: one injector at a time, >=25 ms apart."""
+    with _SPAWN_LOCK:
+        gap = _MIN_SPAWN_GAP_S - (time.monotonic() - _LAST_SPAWN[0])
+        if gap > 0:
+            time.sleep(gap)
+        _LAST_SPAWN[0] = time.monotonic()
+        subprocess.run(cmd, check=True)
 from abc import ABC, abstractmethod
 
 from voice_typing.config import OutputConfig
@@ -83,7 +104,7 @@ class WtypeBackend(TypingBackend):
         # check=True -> nonzero exit raises CalledProcessError, caught by the
         # auto-fallback wrapper. A missing wtype binary raises FileNotFoundError
         # (an OSError), also caught by the fallback.
-        subprocess.run(["wtype", "--", text], check=True)
+        _paced_run(["wtype", "-d", "12", "--", text])
 
     def press_backspace(self, n: int) -> None:
         # ONE batched invocation: repeated "-k Backspace" pairs are verified to repeat
@@ -91,17 +112,18 @@ class WtypeBackend(TypingBackend):
         # all args are options (there is no positional text to separate).
         if n <= 0:
             return
-        subprocess.run(["wtype"] + ["-k", "Backspace"] * n, check=True)
+        _paced_run(["wtype"] + ["-k", "Backspace"] * n)
 
 
 class YdotoolBackend(TypingBackend):
     """ydotool type: uinput-level. Fallback; non-ASCII/layout quirks (PRD §4.3)."""
 
     def type_text(self, text: str) -> None:
-        # --key-delay 2: 2ms between key events (PRD §4.3 verbatim; man ydotool
-        # documents the space form `--key-delay <ms>`; GNU argp accepts it).
-        subprocess.run(
-            ["ydotool", "type", "--key-delay", "2", "--", text], check=True
+        # --key-delay 12: 12ms between key events (was 2 — too tight: compositor
+        # input coalescing silently DROPPED characters under sustained bursts; 12ms
+        # still types ~80 chars/s, faster than any fragment needs).
+        _paced_run(
+            ["ydotool", "type", "--key-delay", "12", "--", text]
         )
 
     def press_backspace(self, n: int) -> None:
@@ -110,8 +132,8 @@ class YdotoolBackend(TypingBackend):
         # an 80-press batch.
         if n <= 0:
             return
-        subprocess.run(
-            ["ydotool", "key", "-d", "1"] + ["14:1", "14:0"] * n, check=True
+        _paced_run(
+            ["ydotool", "key", "-d", "2"] + ["14:1", "14:0"] * n
         )
 
 
