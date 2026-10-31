@@ -310,7 +310,7 @@ def test_module_docstring_names_on_final_serialization_lock():
 def test_wtype_press_backspace_exact_argv(recorder):
     WtypeBackend().press_backspace(3)
     assert recorder.argvs == [
-        ("wtype", "-k", "Backspace", "-k", "Backspace", "-k", "Backspace")
+        ("wtype", "-d", "12", "-k", "Backspace", "-k", "Backspace", "-k", "Backspace")
     ]
     assert recorder.calls[0][1].get("check") is True
 
@@ -318,7 +318,7 @@ def test_wtype_press_backspace_exact_argv(recorder):
 def test_ydotool_press_backspace_exact_argv(recorder):
     YdotoolBackend().press_backspace(2)
     assert recorder.argvs == [
-        ("ydotool", "key", "-d", "2", "14:1", "14:0", "14:1", "14:0")
+        ("ydotool", "key", "-d", "6", "14:1", "14:0", "14:1", "14:0")
     ]
     assert recorder.calls[0][1].get("check") is True
 
@@ -339,11 +339,11 @@ def test_press_backspace_n80_is_one_invocation(recorder):
     # The budget contract (PRD §4.2quater): ~80 chars must rewind via ONE subprocess call.
     WtypeBackend().press_backspace(80)
     assert len(recorder.argvs) == 1
-    assert len(recorder.argvs[0]) == 1 + 2 * 80  # "wtype" + 80 × ("-k","Backspace")
+    assert len(recorder.argvs[0]) == 3 + 2 * 80  # "wtype" + "-d","12" + 80 × ("-k","Backspace") (Rev 3d pacing)
     assert recorder.argvs[0].count("Backspace") == 80
     YdotoolBackend().press_backspace(80)
     assert len(recorder.argvs) == 2  # one MORE call (total), still 1 each
-    assert len(recorder.argvs[1]) == 4 + 2 * 80  # + "-d", "2" pair
+    assert len(recorder.argvs[1]) == 4 + 2 * 80  # + "-d", "6" pair
     assert recorder.argvs[1].count("14:1") == 80 and recorder.argvs[1].count("14:0") == 80
 
 
@@ -351,8 +351,8 @@ def test_press_backspace_fallback_ordering(recorder):
     recorder.raise_on("wtype", subprocess.CalledProcessError(1, ["wtype"]))
     make_backend(OutputConfig(backend="wtype")).press_backspace(2)
     assert recorder.argvs == [
-        ("wtype", "-k", "Backspace", "-k", "Backspace"),
-        ("ydotool", "key", "-d", "2", "14:1", "14:0", "14:1", "14:0"),
+        ("wtype", "-d", "12", "-k", "Backspace", "-k", "Backspace"),
+        ("ydotool", "key", "-d", "6", "14:1", "14:0", "14:1", "14:0"),
     ]  # retry exactly ONCE, correct argv each
 
 

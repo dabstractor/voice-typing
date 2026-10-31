@@ -112,11 +112,16 @@ class WtypeBackend(TypingBackend):
         # all args are options (there is no positional text to separate).
         if n <= 0:
             return
-        _paced_run(["wtype"] + ["-k", "Backspace"] * n)
+        _paced_run(["wtype", "-d", "12"] + ["-k", "Backspace"] * n)
 
 
 class YdotoolBackend(TypingBackend):
-    """ydotool type: uinput-level. Fallback; non-ASCII/layout quirks (PRD §4.3)."""
+    """ydotool type: uinput-level. press_backspace prefers a PERSISTENT ydotoold
+    socket client (PRD Rev 3e — zero spawn per revision, 3d pacing) when injected;
+    direct construction (unit tests) keeps the CLI path. Client failure -> CLI."""
+
+    def __init__(self, client: "object | None" = None) -> None:
+        self._client = client
 
     def type_text(self, text: str) -> None:
         # --key-delay 12: 12ms between key events (was 2 — too tight: compositor
@@ -128,12 +133,19 @@ class YdotoolBackend(TypingBackend):
 
     def press_backspace(self, n: int) -> None:
         # ONE batched invocation: "14:1 14:0" = Backspace press+release (keycode 14);
-        # explicit "-d 1" (1 ms between events) — never rely on the default delay for
-        # an 80-press batch.
         if n <= 0:
             return
+        if self._client is not None:
+            try:
+                self._client.press_backspace(n)  # persistent socket, 12 ms/char (3e)
+                return
+            except Exception:  # noqa: BLE001 — transport hiccup: fall back to CLI
+                logger.warning(
+                    "ydotoold client failed; falling back to ydotool CLI", exc_info=True
+                )
         _paced_run(
-            ["ydotool", "key", "-d", "2"] + ["14:1", "14:0"] * n
+            # -d 6 = 6ms/event, 2 events/char = 12ms/char — same pace as type (Rev 3d)
+            ["ydotool", "key", "-d", "6"] + ["14:1", "14:0"] * n
         )
 
 
@@ -212,7 +224,9 @@ def make_backend(cfg: OutputConfig) -> TypingBackend:
     if backend == "wtype":
         return _WtypeWithFallback()
     if backend == "ydotool":
-        return YdotoolBackend()
+        from voice_typing.ydotoold_client import YdotoolClient
+
+        return YdotoolBackend(client=YdotoolClient())
     if backend == "null":
         return NullBackend()
     raise ValueError(f"unknown output.backend: {backend!r}")
