@@ -1,14 +1,24 @@
 """Persistent ydotoold socket client (PRD Rev 3e — zero-spawn key events).
 
-Wire protocol (captured empirically via strace from ydotool 1.x on this machine):
-every event is TWO 24-byte little-endian messages on a persistent AF_UNIX socket
-($XDG_RUNTIME_DIR/.ydotool_socket, fallback /run/ydotoold.socket):
+Socket type: AF_UNIX **SOCK_DGRAM** — this matches ydotoold's socket
+($XDG_RUNTIME_DIR/.ydotool_socket, fallback /run/ydotoold.socket), whose type is
+verified from kernel socket tables (/proc/net/unix / `ss -x`), NOT assumed: the
+original SOCK_STREAM implementation could never connect (connect() raised
+Errno 91, "Protocol wrong type for socket"), so every backspace burst silently
+degraded to per-batch CLI `ydotool key` spawns.
+
+Wire format (basis: source analysis of ydotoold's protocol by the protocol-
+verification agent — PENDING independent verification against ydotoold source;
+NOT captured empirically on this machine): every event is TWO 24-byte
+little-endian datagrams on the persistent socket — one message per datagram
+(each sendall() on a connected DGRAM socket emits exactly one datagram, which
+is the per-message framing ydotoold's recv loop expects):
   event: 16 zero bytes + u16 ev_type(1=EV_KEY) + u16 keycode + i32 value(1=press/0=release)
   sync:  24 zero bytes (EV_SYN report)
-This is exactly what `ydotool key -d 6 14:1 14:0` writes per event — minus the
-process spawn, connect, and exit per batch (the last per-event spawn overhead;
-PRD Rev 3d). A dropped connection self-heals on the next call; ANY failure
-raises and the backend falls back to the paced CLI path.
+This is the message shape `ydotool key -d 6 14:1 14:0` writes per event — minus
+the process spawn, connect, and exit per batch. A dropped connection self-heals
+on the next call; ANY failure raises and the backend falls back to the paced
+CLI path.
 """
 from __future__ import annotations
 
@@ -38,7 +48,11 @@ class YdotoolClient:
 
     def _connect(self) -> socket.socket:
         if self._sock is None:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            # SOCK_DGRAM: ydotoold's socket is a datagram socket (verified from
+            # kernel socket tables); SOCK_STREAM connect() always fails with
+            # Errno 91. Each sendall() on the connected DGRAM socket is one
+            # datagram — the per-message framing ydotoold's recv loop expects.
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
             s.connect(self._path)
             self._sock = s
         return self._sock
