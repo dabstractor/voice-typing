@@ -26,3 +26,8 @@ venv/
 *.tmp
 *.bak
 *.swp
+
+# ASR lab (experimentation only, not shipped)
+tools/asr-lab/.venv/
+tools/asr-lab/models/
+tools/asr-lab/results/

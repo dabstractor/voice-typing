@@ -1,0 +1,1 @@
+Their deployment pipeline keeps failing even though the tests all pass. I want to produce a summary of every change we made this quarter, and reduce the number of steps it takes to ship. They're going to ask why there's a delay, and I'd rather not explain it twice.

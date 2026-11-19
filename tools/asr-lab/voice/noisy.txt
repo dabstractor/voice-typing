@@ -1,0 +1,1 @@
+The system should duck the volume when the microphone is armed, and restore it exactly as it found it when I stop talking. If I change the volume while dictating, my change wins.

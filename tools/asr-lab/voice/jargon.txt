@@ -1,0 +1,1 @@
+Voice typing runs as a systemd user service under Hyprland, typing through ydotool with a PipeWire capture path. The daemon loads faster-whisper with ctranslate2 at float16 on the CUDA device, and voicectl talks to it over a local socket. I keep notes in tracker-admin and build tools with pi-bolt.

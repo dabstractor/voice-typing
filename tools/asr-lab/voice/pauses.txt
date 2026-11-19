@@ -1,0 +1,1 @@
+The streaming layer types partials as I speak, and revises them in place with a minimal diff. The backspace churn comes from decoder wobble, not the typing backend. That is the part I want to fix first.
