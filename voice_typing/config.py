@@ -54,6 +54,12 @@ class AsrConfig:
                                           # pair is gone; PRD §4.2quater collapse)
     language: str = "en"
     device: str = "cuda"  # "cuda" | "cpu" (daemon may override via cuda_check at startup)
+    compute_type: str = "float16"  # ctranslate2 compute type on the CUDA path. "float16" =
+                                   # Ampere+ native (~2x faster decode than float32 — the
+                                   # measured difference between usable and laggy live partials
+                                   # on large models). "float32" = legacy cards without usable
+                                   # fp16 (e.g. Maxwell 940MX). IGNORED when device="cpu" or on
+                                   # the no-CUDA fallback (always int8 there).
     post_speech_silence_duration: float = 0.6  # VAD: finalize after this much silence (seconds)
     lite_post_speech_silence_duration: float = 0.8  # PRD §4.2quater: the endpointer only delays
                                                # COMMIT under streaming (words are already typed
@@ -102,7 +108,7 @@ class AsrConfig:
                     f"got {type(_v).__name__}: {_v!r}"
                 )
         # String fields: must be str.
-        for _name in ("lite_model", "language", "device"):
+        for _name in ("lite_model", "language", "device", "compute_type"):
             _v = getattr(self, _name)
             if not isinstance(_v, str):
                 raise TypeError(

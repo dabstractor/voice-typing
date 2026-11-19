@@ -1072,7 +1072,9 @@ def _child_resolved_device(cfg: "VoiceTypingConfig", force_cpu: bool) -> dict[st
         return cuda_check.resolve_device_and_models(
             {
                 "device": cfg.asr.device,
-                "compute_type": "float32" if cfg.asr.device == "cuda" else "int8",
+                "compute_type": cfg.asr.compute_type
+                if cfg.asr.device == "cuda"
+                else "int8",
                 "model": cfg.asr.lite_model,
             }
         )

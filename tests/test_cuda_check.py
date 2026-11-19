@@ -20,7 +20,7 @@ def test_cuda_defaults_is_three_key_single_model():
     assert set(cuda_check.CUDA_DEFAULTS) == {"device", "compute_type", "model"}
     assert cuda_check.CUDA_DEFAULTS == {
         "device": "cuda",
-        "compute_type": "float32",
+        "compute_type": "float16",
         "model": "small.en",
     }
 
@@ -67,7 +67,7 @@ def test_main_cuda_prints_verdict_and_single_model_line(monkeypatch, capsys):
     assert rc == 0
     assert "ctranslate2_version=4.x-test" in out and "cuda_device_count=1" in out
     assert "VERDICT=cuda-ok" in out
-    assert "resolved: device=cuda compute_type=float32 model=small.en" in out
+    assert "resolved: device=cuda compute_type=float16 model=small.en" in out
     assert "final_model" not in out and "realtime_model" not in out  # the collapse
 
 

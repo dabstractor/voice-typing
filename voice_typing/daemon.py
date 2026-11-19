@@ -167,15 +167,16 @@ _CANCEL_SUPPRESS_TIMEOUT_S: float = 5.0
 def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     """Build cuda_check defaults from cfg, then resolve (applies PRD §4.4 CPU fallback).
 
-    Returns {device, compute_type, model}. compute_type is DERIVED from cfg.asr.device (config.py
-    has no compute_type field — it is a cuda_check concern) before being handed to cuda_check.
-    cuda_check.resolve_device_and_models() then either keeps these defaults (cuda available) or
-    overrides wholesale with CPU_FALLBACK — device cpu, compute_type int8, and the CPU substitute
-    model tiny.en (no CUDA, ONE place maps the model; Rev 2 §4.2quater).
+    Returns {device, compute_type, model}. compute_type comes from cfg.asr.compute_type
+    (config.py field — "float16" default for the Ampere daily driver) on the CUDA path;
+    "int8" whenever device="cpu". cuda_check.resolve_device_and_models() then either
+    keeps these defaults (cuda available) or overrides wholesale with CPU_FALLBACK —
+    device cpu, compute_type int8, and the CPU substitute model tiny.en
+    (no CUDA, ONE place maps the model; Rev 2 §4.2quater).
     """
     defaults = {
         "device": cfg.asr.device,
-        "compute_type": "float32" if cfg.asr.device == "cuda" else "int8",
+        "compute_type": cfg.asr.compute_type if cfg.asr.device == "cuda" else "int8",
         "model": cfg.asr.lite_model,
     }
     return cuda_check.resolve_device_and_models(defaults)
@@ -2349,7 +2350,9 @@ class VoiceTypingDaemon:
         """
         return {
             "device": self._cfg.asr.device,
-            "compute_type": "float32" if self._cfg.asr.device == "cuda" else "int8",
+            "compute_type": self._cfg.asr.compute_type
+            if self._cfg.asr.device == "cuda"
+            else "int8",
             "model": self._cfg.asr.lite_model,
         }
 

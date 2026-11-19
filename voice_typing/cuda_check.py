@@ -1,6 +1,6 @@
 """CUDA smoke check + degraded-mode decision for the voice-typing daemon.
 
-Decides whether the daemon runs on GPU (device="cuda", compute_type="float32",
+Decides whether the daemon runs on GPU (device="cuda", compute_type="float16",
 model="small.en") or falls back to CPU (device="cpu", compute_type="int8",
 model="tiny.en"), per PRD §4.4 and the Rev 2 single-mode collapse
 (§4.2ter/§4.2quater): ONE model (the small model) serves BOTH realtime
@@ -43,14 +43,14 @@ from typing import Mapping
 
 # PRD §4.4/§4.2ter (Rev 2 single-mode) — the config the daemon WANTS when CUDA works.
 # ONE model (the small model) serves BOTH realtime partials and final transcription.
-# compute_type is float32, NOT float16, because this daemon targets a GeForce 940MX
-# (GM108M, compute capability 5.0 / Maxwell): cuBLAS fp16 GEMM requires CC >= 5.3 and
-# the int8 DP4A path requires CC >= 6.1, so float32 is the only compute type every
-# CUDA op supports on that card. A float16 request would fail at WhisperModel
-# construction and silently drag the daemon to the CPU fallback.
+# compute_type is float16: the daily-driver target is an RTX 3080 Ti (Ampere, CC 8.6)
+# with native fp16 tensor cores — measured ~2x faster Whisper decode than float32,
+# which on large models (large-v3-turbo) is the difference between ~0.4s and ~2.7s
+# live-partial re-decode lag. Cards without usable fp16 (e.g. Maxwell 940MX, CC 5.0)
+# should set compute_type="float32" in config.toml; every CUDA op supports it.
 CUDA_DEFAULTS: dict[str, str] = {
     "device": "cuda",
-    "compute_type": "float32",
+    "compute_type": "float16",
     "model": "small.en",
 }
 

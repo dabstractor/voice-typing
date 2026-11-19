@@ -25,7 +25,7 @@ def test_repo_config_toml_equals_defaults():
 
 
 def test_repo_config_toml_has_no_extra_keys():
-    """The repo default must carry only the 21 schema keys (no compute_type etc.)."""
+    """The repo default must carry only the 24 schema keys."""
     import tomllib
 
     with open(_repo_config_path(), "rb") as fh:
@@ -35,15 +35,17 @@ def test_repo_config_toml_has_no_extra_keys():
             "lite_model",                 # Rev 2 single-mode: THE model (partials + finals)
             "language",
             "device",
+            "compute_type",              # "float16" default (Ampere daily driver); float32 for legacy cards
             "post_speech_silence_duration",
             "lite_post_speech_silence_duration",   # PRD §4.2quater: commit silence under streaming
             "context_prompt",             # PRD §4.2quater: rolling committed-context conditioning
             "realtime_processing_pause",
             "auto_stop_idle_seconds",
             "auto_unload_idle_seconds",   # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)
+            "graceful_stop",              # 2026-10: instant-stop default (drain is opt-in)
         },
         "output": {"backend", "append_space", "streaming"},  # streaming: PRD §4.2quater
-        "cancel": {"on_backspace", "devices"},  # PRD §4.2quater: Backspace-cancel section
+        "cancel": {"on_backspace", "devices", "keypress_action"},  # §4.2quater + 2026-10 halt rule
         "feedback": {"state_file", "hypr_notify", "notify_ms", "notify_on_final"},
         "filter": {"min_chars", "blocklist"},
         "log": {"level"},
