@@ -221,6 +221,29 @@ Rev 1 `clean()` rules (blocklist, min_chars, whitespace) are unchanged.
 
 **Unchanged:** VAD segmentation (it now only triggers commits); feedback/state file/toasts (the `partial` field mirrors the live tail; `record_final` records the committed text); lazy load, idle unload, idle auto-stop, and the lite recorder construction (§4.2ter) including single-model `use_main_model_for_realtime=True`; `output.streaming=false` restores Rev 1 append-only behavior as a rollback hatch (§4.5).
 
+### 4.2quinquies Media ducking while listening — pause/duck speakers at arm (spec'd 2026-11-18; implement next round)
+
+**Problem.** The mic has no acoustic echo cancellation: anything the speakers play during dictation is transcribed as speech (music, video, notification dings). Every second of media bleed is pure WER — it is a leading source of "wrong words that change meaning" when dictating on a machine that is also playing audio. The tool should get media out of the way for exactly as long as the mic is hot, and put it back EXACTLY as it found it.
+
+**Mechanism — two tiers, strictly best-effort (verified on this machine 2026-11-18: PipeWire 1.6.9 with PulseAudio compatibility, `playerctl`/`wpctl`/`pactl` installed, 4 live MPRIS endpoints):**
+
+1. **MPRIS pause (primary, default).** At arm: enumerate MPRIS players; for each whose `PlaybackStatus` is `Playing`, record its bus name and pause it (`playerctl --all-players pause` or direct D-Bus; subprocess under a hard timeout). At disarm: resume ONLY players (a) that WE paused, (b) that were `Playing` before we paused them, and (c) that are still `Paused` now. Rule (c) is the user-sovereignty guard: if the user resumed a player themselves mid-dictation, or paused a different one, we never fight them — restore is additive, never destructive.
+2. **Sink-volume duck (fallback / non-MPRIS audio).** At arm: read and store the default sink's current volume (`wpctl get-volume @DEFAULT_AUDIO_SINK@`), then set `duck_volume_pct`. At disarm: restore the stored value ONLY if the current volume still equals what we last set — if the user touched the volume mid-dictation, THEIR value wins and we do nothing. This comparison-before-restore is the whole point: a restore that clobbers a user's manual change is worse than not ducking.
+
+NOT chosen: PipeWire `module-role-ducking` (module availability varies across PipeWire versions and it requires a live duck-role stream we do not otherwise need — the classic Linux crapshoot; revisit if WirePlumber grows first-class ducking).
+
+**Lifecycle wiring.** Engage where the arm toast fires; release on EVERY disarm path: manual stop/toggle-off, idle auto-stop, Rev 3 HALT keypress disarm, daemon quit — but NOT on Backspace-cancel (the mic stays hot). Crash-safety: a `ducked` field in the feedback state file lets a post-crash restart self-heal (best-effort release at startup when set), and the systemd unit gets an `ExecStopPost` best-effort restore.
+
+**Failure discipline (non-negotiable, mirrors the PRD §8 philosophy).** Ducking is an enhancement, NEVER a gate: every audio call is subprocess/bounded (`timeout` ≤1 s), failures journal ONE line and are otherwise invisible, and arm latency must not measurably change (engage runs concurrently with recorder arming; the arm does not wait for it). Engage/release are idempotent — repeated arms must not stack pauses or volume writes, and release without a prior engage is a no-op.
+
+**Config (`[audio]` section — add to config.py + config.toml in lockstep with the key-set test, 24 → 26 keys).**
+- `duck_mode = "off"` — `"mpris"` | `"volume"` | `"off"`. Ships `"off"` until implemented; default flips to `"mpris"` the round this lands.
+- `duck_volume_pct = 15` — target volume for the `"volume"` tier.
+
+**Tests (unit, no real audio — an `AudioDucker` protocol with engage()/release() and a mocked backend):** (a) resume-only-what-we-paused (a player the user paused mid-dictation stays paused); (b) volume restore skipped when the user changed volume mid-dictation; (c) release fires on every disarm path incl. HALT and auto-stop; (d) a hung backend call (mocked 5 s sleep) does not delay arm beyond bound; (e) engage/release idempotence; (f) crash-recovery: `ducked` flag in state → release at next daemon start.
+
+**Acceptance.** Music playing → arm → music pauses within ~1 s and resumes at stop; video in a non-MPRIS app with `duck_mode="volume"` → volume ducks to 15% and restores exactly; the user changing volume or player state mid-dictation is never overridden; `journalctl` shows the engage/release lines; with `duck_mode="off"` behavior is byte-identical to today.
+
 ### 4.3 Typing backends (`typing_backends.py`)
 
 Interface: `type_text(text: str) -> None` (append committed text) plus `press_backspace(n: int) -> None` (Rev 2, §4.2quater — delete exactly n characters for in-place revision). Selected by config `output.backend`, default **`wtype`**.
@@ -280,6 +303,7 @@ realtime_model = "small.en"
 lite_model = "small.en"             # the SINGLE model loaded in lite mode (used for both partials + finals); §4.2ter
 language = "en"
 device = "cuda"                       # "cuda" | "cpu"
+compute_type = "float16"              # ctranslate2 compute type on the CUDA path (2026-11-18: now a config key, config.py + config.toml in lockstep). "float16" = Ampere+ native — measured ~2x faster decode (the ASR-lab bake-off: turbo polled at float16 = 382 ms median word lag vs 2667 ms at float32); "float32" = legacy cards without usable fp16. Ignored on the CPU paths (always int8).
 post_speech_silence_duration = 0.6
 lite_post_speech_silence_duration = 0.8  # Rev 2 §4.2quater: the endpointer only delays COMMIT under streaming (words are already typed live) — 0.8 halves mid-thought cuts for +0.3 s commit latency. 0.5 = razor-snappy; 1.0 = near-zero cuts.
 context_prompt = true                  # Rev 2 §4.2quater: condition every decode on the rolling committed context (back to the last sentence boundary, ~200-token cap)
@@ -484,8 +508,15 @@ Assert: (a) while speech streams, typing deltas arrive at least every 500 ms; a 
 | Revision flicker (rewind/retype storms) | minimal-diff (longest-common-prefix) revision: backspace only the diverging suffix, never the whole tail (§4.2quater rule 1); rewinds persistence-debounced (≥2 s of sustained divergence; otherwise extend-only); no trailing space while tentative |
 | evdev listener misses keyboards / permission loss | fail-safe: log once at arm, keybind (`voicectl cancel`) keeps working; `[cancel].devices` override for odd setups |
 
+**Known defects (2026-11-18 triage — bugs, no spec change needed; pipeline bugfix candidates):**
+- `ydotoold_client` opened SOCK_STREAM against ydotoold's SOCK_DGRAM socket → EVERY connection since f0d8d0a (2026-10-31) failed with Errno 91 and degraded to per-burst CLI spawns (56 journal warnings/week). Fix exists: branch `fix/ydotoold-datagram` (commit 33321c6, 11 tests; packing proven byte-identical to the real CLI by two independent captures). MERGE + add the 6 ms press→release contact gap (protocol finding: CLI gaps every event; socket path currently does not).
+- Cancel compensation assumes one physical Backspace = one character (auto-repeat violates it) → under-compensation manufactures belief-desync.
+- Cancel-suppression window latched and dropped finals 4× in the week of 2026-11-12..18 ("missing/repeated sections") — window latch timing needs investigation.
+
 ## 9. Future work (explicitly out of scope now)
 
 - Moonshine Streaming (medium, 107 ms, beats large-v3 WER) or Voxtral-Mini-4B-Realtime as a single-model true-streaming engine once tooling matures — engine layer is isolated in `daemon.py` to keep this swap cheap.
+- Hybrid engine behind the `recorder_host` event protocol: a true-streaming transducer (near-zero wobble live words) + a big batch model (large-v3 at float16) for authoritative finals — the two-tier design done right on the desktop GPU (3080 Ti). Offline bake-off harness + findings: `tools/asr-lab/` (2026-01: turbo@float16 dominates polled whisper arms; streaming transducers wobble ~10× less but trail on WER — pending real-voice clips in `tools/asr-lab/voice/`).
+- Personal vocabulary biasing (hotwords / prompt seeding from a user word list) — targeted at wrong-but-plausible-word errors; pending real-voice error taxonomy from the lab clips.
 - Waybar/eww overlay UI; per-app profiles; voice commands ("new line", "scratch that"); punctuation-command mode.
 - Better microphone (hardware) — webcam mic is the current accuracy ceiling.
