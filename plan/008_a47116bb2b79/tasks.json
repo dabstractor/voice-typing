@@ -229,7 +229,7 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Implement the AudioDucker module (protocol + two tiers + failure discipline)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "New voice_typing/audio_ducking.py: AudioDucker over an injectable backend; MPRIS tracked-pause-set tier and wpctl volume tier; every call a ≤1 s subprocess; engage/release idempotent; never blocks arm.",
               "subtasks": [
                 {
@@ -266,7 +266,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S3",
                   "title": "Volume tier: wpctl snapshot + conditional restore",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1"
@@ -281,7 +281,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S4",
                   "title": "Failure discipline: non-blocking, bounded, idempotent",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S2",
@@ -306,7 +306,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Engage/release at the arm/disarm seams (spawned, never under _lock)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S4"
