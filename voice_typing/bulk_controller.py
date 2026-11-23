@@ -15,6 +15,14 @@ THE ORDERING LAWS THIS MODULE IMPLEMENTS (PRD §4.2sexies R.5, verbatim):
 
   "NEVER retry an operation that may already have landed."
 
+  "Any unknown/refused/stalled operation (250 ms engineering deadline)
+   disarms bulk delivery AND recording, retains recoverable recognition,
+   and reports one concise reason via status and the configured fault
+   surface."
+
+  "Validate deadlines in the RECEIVER so a late operation cannot mutate
+   after the daemon has given up."
+
 Plus R.1's event-count law, generalized: "two strings that render identically
 ⇒ zero events". The controller-side zero-diff skip makes that structural: a
 partial whose span renders equal to the last shown span NEVER reaches the
@@ -38,14 +46,47 @@ landed = no advance). ShowResult.REFUSED / UNKNOWN stop delivery — no retry;
 ANY enqueue onto a full queue stops delivery with reason "queue-overflow" —
 nothing is ever dropped-and-continued.
 
+FAILURE HANDLING (P1.M3.T2.S2, R.5): the writer's single target call per
+item runs through a single-worker op runner (concurrent.futures,
+ThreadPoolExecutor(max_workers=1)) under the 250 ms ENGINEERING DEADLINE
+(op_deadline — a code constant, NOT config; the config surface is
+P1.M3.T3.S1's). The controller is the RECEIVER and owns the deadline — the
+adapter is never trusted to self-timeout. A deadline miss means the outcome
+is UNKNOWN (the op may STILL land in the field — timeout-after-apply): give
+up (stop reason "op-deadline"), NEVER resubmit, and leave the abandoned
+future to drain into the late-result discard path. A target exception
+(child death / adapter crash) is unknown-class too: stop "target-error",
+exception NAME parked in stats(), one concise reason everywhere else;
+nothing ever propagates out of the dispatch path. Every stop transition
+bumps _dispatch_epoch; an op result whose captured epoch is stale (or whose
+delivery went inactive) is LATE — it is DISCARDED and counted
+(late_results_discarded) and can never advance expected_revision, touch
+_shown_span, or confirm visible text after give-up (the receiver-side
+validation law). THE THREE-VALUE LAW (R.5): latest_recognized() — newest
+span RECEIVED (partial or final), updated at ENQUEUE; accepted_final() —
+the last filter-accepted final (on_final IS it: the daemon applies the
+textproc gates BEFORE entry); confirmed_visible() — the last span an
+in-time APPLIED show/finalize CONFIRMED. All three stay distinct, are never
+conflated, and are RETAINED across a failure stop (recovery surfacing is
+P1.M6.T2.S2) until the next acquire()/arm(). STOP REASONS — one concise
+word, fired ONCE via on_stopped: "queue-overflow" | "op-deadline" |
+"refused" | "unknown" | "target-error" (plus "stopped"/acquire-failure for
+non-fault transitions). The DAEMON disarm (bulk delivery AND recording)
+consumes the on_stopped seam — that wiring is P1.M6.T2.S1; this module only
+reports the reason and keeps the recognition.
+
+NOTE ON IMPORTS: `concurrent.futures` and `time` are stdlib and are imported
+inside the functions that use them, keeping the module's TOP-LEVEL import
+surface exactly the set pinned by the guard test in
+tests/test_bulk_controller.py (stdlib + voice_typing.bulk_delivery only).
+
 CONSUMES: voice_typing.bulk_delivery (DeliveryTarget / ShowResult /
 AcquireResult / rendered_equal — the P1.M3.T1.S1 contract surface).
-CONSUMED BY: P1.M3.T2.S2 (the 250 ms deadline + disarm-on-unknown extend
-this class; the on_stopped seam and the single target-call site in
-_process_next are its hook points), P1.M3.T3 (config gate + the
-delivery_state surface, fed by stats()), and P1.M6.T2.S1 (daemon wiring:
-reader thread → on_partial/on_final/on_final_dropped; control thread →
-arm/stop/acquire).
+CONSUMED BY: P1.M3.T2.S3 (the G2 gate — runs the full fake-target matrix
+incl. the failure traces), P1.M3.T3 (config gate + the delivery_state
+surface, fed by stats()), and P1.M6.T2.S1 (daemon wiring: reader thread →
+on_partial/on_final/on_final_dropped; control thread → arm/stop/acquire;
+on_stopped(reason) → the bulk-delivery AND recording disarm).
 
 SCOPE (d2 §3): NO textproc guards (the daemon wiring applies them BEFORE
 these entries), NO typing fallback, NO feedback/_stream/backend access.
@@ -69,6 +110,13 @@ from voice_typing.bulk_delivery import (
 __all__ = ["BulkController"]
 
 logger = logging.getLogger(__name__)
+
+
+def _now_ms() -> int:
+    """Wall-clock epoch milliseconds (R.1: counts AND times)."""
+    import time  # stdlib, function-scope import (top-level surface is guard-pinned)
+
+    return int(time.time() * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -138,15 +186,34 @@ class BulkController:
             are rejected, never queued).
         _running / _writer: the single writer thread's lifecycle.
         _left: target.leave() happened (exactly once per controller).
-        _stopped_reason: why delivery stopped ("queue-overflow", the
-            ShowResult taxonomy word on REFUSED/UNKNOWN, "stopped", or the
-            acquire-failure reason).
+        _stopped_reason: why delivery stopped — ONE concise word from the
+            fixed vocabulary ("queue-overflow" | "op-deadline" | "refused" |
+            "unknown" | "target-error", or "stopped"/acquire-failure).
+        _stopped_at_ms: wall-clock epoch ms of the stop transition (None
+            while active) — R.1 counts-and-times.
+        _last_target_error: exception NAME of the last target error (the
+            details live here; the reason string stays one word).
+        _dispatch_epoch: the give-up guard — incremented on EVERY stop
+            transition; an op result whose captured epoch is stale (or whose
+            delivery went inactive) is late and is DISCARDED, never applied.
+        _runner / _futures: the single-worker op runner (created lazily by
+            _ensure_runner so the deterministic _process_next()/drain() seam
+            exercises the SAME deadline path as the writer thread) and its
+            module handle (for futures.TimeoutError).
+        _op_deadline: the 250 ms engineering deadline in seconds (code
+            constant default 0.25; tests inject smaller values).
+        _latest_recognized / _accepted_final / _confirmed_visible: the
+            three-value law (R.5) — newest received span, last
+            filter-accepted final, last APPLIED-confirmed visible text;
+            distinct, queryable, retained across a failure stop.
         _stats: counts and reasons only — never recognition text (R.5).
 
-    The writer is the only thread that performs target I/O and the only
-    mutator of _expected_revision/_shown_span, so one operation is in flight
-    by construction. Tests drive the very same dispatch handler via
-    _process_next()/drain() instead of starting the thread.
+    The writer is the only thread that DISPATCHES target I/O — every op
+    executes on the single-worker op runner it submits to — and the epoch
+    guard makes the writer the only effective mutator of
+    _expected_revision/_shown_span/_confirmed_visible, so one operation is
+    in flight by construction. Tests drive the very same dispatch handler
+    via _process_next()/drain() instead of starting the thread.
     """
 
     def __init__(
@@ -155,16 +222,24 @@ class BulkController:
         *,
         queue_size: int = 32,
         on_stopped=None,
+        op_deadline: float = 0.25,
     ) -> None:
         """Args:
         target: a DeliveryTarget (bulk_delivery contract; the R.3 adapter).
         queue_size: bounded-queue capacity (R.5: default 32). ANY enqueue at
             capacity stops delivery — it never blocks and never drops.
         on_stopped: optional callback fired EXACTLY ONCE with the stop reason
-            when delivery stops from a fault (REFUSED/UNKNOWN/overflow) — the
-            P1.M3.T2.S2 disarm seam. Must be quick and non-blocking; it runs
-            on whichever thread triggered the stop (reader or writer), never
-            under the condition lock.
+            when delivery stops from a fault — the disarm seam the daemon
+            consumes (P1.M6.T2.S1 wires it to the bulk AND recording
+            disarm). Must be quick and non-blocking; it runs on whichever
+            thread triggered the stop (reader or writer), never under the
+            condition lock.
+        op_deadline: the 250 ms ENGINEERING DEADLINE per target operation,
+            in seconds (R.5: "250 ms engineering deadline") — a code
+            constant here, NOT config (the config surface is P1.M3.T3.S1's).
+            The controller is the RECEIVER: it awaits future.result(timeout)
+            on the single-worker runner, so a stalled adapter can never wedge
+            the writer.
         """
         self._target = target
         self._queue_size = max(1, int(queue_size))
@@ -183,6 +258,18 @@ class BulkController:
         self._stopped_reason: str | None = None
         self._stopped_cb_fired: bool = False
         self._writer: threading.Thread | None = None
+        # -- P1.M3.T2.S2: the failure layer (R.5) ---------------------------
+        self._op_deadline = float(op_deadline)
+        if self._op_deadline <= 0:
+            raise ValueError("op_deadline must be > 0 (seconds)")
+        self._runner = None
+        self._futures = None
+        self._dispatch_epoch = 0
+        self._stopped_at_ms: int | None = None
+        self._last_target_error: str | None = None
+        self._latest_recognized: str = ""
+        self._accepted_final: str | None = None
+        self._confirmed_visible: str = ""
         self._stats: dict[str, int] = {
             "applied": 0,
             "unchanged": 0,
@@ -191,6 +278,9 @@ class BulkController:
             "discarded_dup": 0,
             "coalesced": 0,
             "overflow": 0,
+            "deadline_exceeded": 0,
+            "target_errors": 0,
+            "late_results_discarded": 0,
         }
 
     # -- lifecycle (daemon-thread calls, not reader-thread calls) ------------
@@ -208,6 +298,14 @@ class BulkController:
                 self._active = True
                 self._stopped_reason = None
                 self._stopped_cb_fired = False
+                self._stopped_at_ms = None
+                self._last_target_error = None
+                # Three-value law: a fresh delivery lifetime starts empty.
+                # _dispatch_epoch is deliberately NOT reset — a straggler op
+                # from the previous lifetime must stay discard-on-arrival.
+                self._latest_recognized = ""
+                self._accepted_final = None
+                self._confirmed_visible = ""
                 return True
             self._stopped_reason = result.reason or "acquire-failed"
             return False
@@ -216,11 +314,14 @@ class BulkController:
         """Launch THE writer thread (one per controller; R.5 one-writer law).
 
         No-op if already started or not active (acquire() first). The writer
-        exits by itself when delivery stops; stop() joins it.
+        exits by itself when delivery stops; stop() joins it. Also ensures
+        the single-worker op runner exists — fresh per delivery lifetime
+        (stop() shut the previous one down and cleared it).
         """
         with self._cond:
             if self._writer is not None or not self._active:
                 return
+            self._ensure_runner()
             self._running = True
             self._writer = threading.Thread(
                 target=self._writer_loop, name="bulk-controller-writer", daemon=True
@@ -230,25 +331,39 @@ class BulkController:
     def stop(self, *, leave: bool = True) -> None:
         """Halt delivery; the writer exits; target.leave() exactly once (R.3).
 
-        Post-stop events are rejected at every entry. Idempotent.
+        Post-stop events are rejected at every entry. Idempotent. The op
+        runner is shut down without waiting (wait=False) and cleared, so a
+        re-acquire + start() gets a FRESH runner — an abandoned op from this
+        lifetime can only ever drain into the late-result discard path.
+        leave() is best-effort: a dead target raising here must not mask the
+        recorded stop reason (the one-concise-reason law, R.5).
         """
         writer = None
+        runner = None
         with self._cond:
-            if self._active:
-                self._active = False
-                if self._stopped_reason is None:
-                    self._stopped_reason = "stopped"
+            self._stop_locked("stopped")  # no-op when already inactive
             self._running = False
             self._cond.notify_all()
             writer = self._writer
+            runner = self._runner
         if writer is not None and writer is not threading.current_thread():
             writer.join(timeout=5.0)
+        if runner is not None:
+            runner.shutdown(wait=False)  # abandoned op finishes into the discard path
+        with self._cond:
+            self._runner = None  # fresh runner for the next delivery lifetime
         if leave:
             with self._cond:
                 first = not self._left
                 self._left = True
             if first:
-                self._target.leave()
+                try:
+                    self._target.leave()
+                except Exception:  # noqa: BLE001 — never mask the stop reason
+                    logger.warning(
+                        "bulk_controller: target.leave() raised during stop",
+                        exc_info=True,
+                    )
 
     # -- event entries (reader/control threads: enqueue-and-return ONLY) -----
 
@@ -302,6 +417,7 @@ class BulkController:
                 self._stats["discarded_stale"] += 1  # late seq
                 return
             self._high_seq[key] = seq
+            self._latest_recognized = span  # three-value law: newest RECEIVED, at ENQUEUE
             if len(self._dq) >= self._queue_size:
                 # Overflow STOPS delivery — never drop-and-continue, never wait.
                 stopped = self._stop_locked("queue-overflow")
@@ -339,6 +455,8 @@ class BulkController:
                 return
             self._closed.add(key)
             self._high_seq[key] = seq
+            self._latest_recognized = span  # a final is recognition text too (R.5)
+            self._accepted_final = span  # on_final IS the filter-accepted final
             if len(self._dq) >= self._queue_size:
                 stopped = self._stop_locked("queue-overflow")
                 if stopped:
@@ -382,6 +500,28 @@ class BulkController:
         with self._cond:
             return self._active
 
+    def latest_recognized(self) -> str:
+        """Three-value law (R.5): the newest recognition span RECEIVED —
+        partial or final, updated at ENQUEUE, before any dispatch or
+        confirmation. Retained across a failure stop."""
+        with self._cond:
+            return self._latest_recognized
+
+    def accepted_final(self) -> str | None:
+        """Three-value law (R.5): the last FILTER-ACCEPTED final (on_final IS
+        the accepted final — the daemon applies the textproc gates BEFORE
+        entry, the controller applies none). Retained across a failure stop."""
+        with self._cond:
+            return self._accepted_final
+
+    def confirmed_visible(self) -> str:
+        """Three-value law (R.5): the last span the target CONFIRMED via an
+        in-time APPLIED show/finalize — updated ONLY on APPLIED (never on
+        UNCHANGED, never on a late result), epoch-checked at dispatch.
+        Retained across a failure stop."""
+        with self._cond:
+            return self._confirmed_visible
+
     def stats(self) -> dict:
         """Counters and state — counts and reasons, NEVER recognition text."""
         with self._cond:
@@ -392,6 +532,8 @@ class BulkController:
                 session_gen=self._session_gen,
                 expected_revision=self._expected_revision,
                 stopped_reason=self._stopped_reason,
+                stopped_at_ms=self._stopped_at_ms,
+                last_target_error=self._last_target_error,
             )
             return out
 
@@ -403,7 +545,10 @@ class BulkController:
         consumed (dispatched, skipped, or discarded).
 
         The writer thread loops this with blocking=True; tests call it with
-        blocking=False / drain() for fully deterministic dispatch.
+        blocking=False / drain() for fully deterministic dispatch. The ONE
+        target call is submitted to the single-worker op runner and awaited
+        under the 250 ms engineering deadline (op_deadline); a deadline miss
+        or a target exception stops delivery here and never propagates.
         """
         with self._cond:
             while not self._dq:
@@ -442,18 +587,56 @@ class BulkController:
                 return True
 
         # ---- OUTSIDE _cond: AT MOST ONE target call (one op in flight) ----
-        if isinstance(item, _Partial):
-            result = self._target.show(item.gen, item.utterance, item.seq, revision, item.span)
-        else:  # _Final — always ONE finalize (the adapter decides unchanged)
-            result = self._target.finalize(
-                item.gen, item.utterance, item.seq, revision, item.span
-            )
-
+        # R.5 failure law: the ONE call runs through the single-worker op
+        # runner under the 250 ms engineering deadline. The controller is the
+        # RECEIVER and owns the deadline — the adapter is never trusted to
+        # self-timeout, and a stalled op is a give-up, never a retry.
+        op = self._target.show if isinstance(item, _Partial) else self._target.finalize
+        runner = self._ensure_runner()
         stopped = False
         with self._cond:
+            if not self._active:
+                # A stop landed between the mutation-time re-checks and the
+                # submit: the op is dead on arrival — ZERO target calls.
+                self._stats["discarded_stale"] += 1
+                return True
+            epoch = self._dispatch_epoch  # give-up guard: captured BEFORE submit
+        future = runner.submit(op, item.gen, item.utterance, item.seq, revision, item.span)
+        future.add_done_callback(lambda f: self._note_late(f, epoch))
+        try:
+            result = future.result(timeout=self._op_deadline)
+        except self._futures.TimeoutError:
+            # Stalled past the deadline: the outcome is UNKNOWN — the op may
+            # STILL land in the field (timeout-after-apply). Give up and
+            # NEVER resubmit; the abandoned future drains into _note_late's
+            # discard path and can never mutate state after the give-up.
+            with self._cond:
+                self._stats["deadline_exceeded"] += 1
+                stopped = self._stop_locked("op-deadline")
+            if stopped:
+                self._fire_on_stopped()
+            return True
+        except Exception as exc:  # noqa: BLE001 — child death / adapter crash
+            # A raising target is unknown-class (outcome unverifiable — the
+            # edit may or may not have landed): stop "target-error", keep ONE
+            # concise reason, park the exception NAME in stats. Never re-raised.
+            with self._cond:
+                self._stats["target_errors"] += 1
+                self._last_target_error = type(exc).__name__
+                stopped = self._stop_locked("target-error")
+            if stopped:
+                self._fire_on_stopped()
+            logger.warning("bulk_controller: target op raised %s", type(exc).__name__)
+            return True
+
+        with self._cond:
+            if epoch != self._dispatch_epoch or not self._active:
+                return True  # LATE: a stop raced (or beat) this result — NEVER
+                             # mutate after give-up; _note_late owns the count
             if result is ShowResult.APPLIED:
                 self._expected_revision = revision + 1  # +1 ONLY on applied
                 self._shown_span[key] = item.span
+                self._confirmed_visible = item.span  # three-value law: ONLY on APPLIED
                 self._stats["applied"] += 1
             elif result is ShowResult.UNCHANGED:
                 self._shown_span[key] = item.span  # no edit landed: no advance
@@ -498,6 +681,12 @@ class BulkController:
         self._closed.clear()
         self._closed_dispatched.clear()
         self._shown_span.clear()
+        # Three-value law (R.5): a fresh session starts with fresh values.
+        # They were still retained across any failure stop BEFORE this arm
+        # (recovery reads them between the stop and the re-arm).
+        self._latest_recognized = ""
+        self._accepted_final = None
+        self._confirmed_visible = ""
 
     def _drop_stale_generations_locked(self, current_gen: int) -> None:
         """_SessionBegin dispatch: drop keys of OTHER generations only (call
@@ -522,14 +711,54 @@ class BulkController:
         """Transition to stopped; True iff THIS call caused the transition.
 
         Fires nothing here — callers invoke _fire_on_stopped() OUTSIDE the
-        lock (a user callback must never run under _cond).
+        lock (a user callback must never run under _cond). Every transition
+        records the wall-clock stop time (R.1) and bumps the dispatch epoch,
+        which instantly invalidates any op in flight: its result can only
+        drain into the late-result discard path (the receiver-side give-up
+        guard, R.5). The three recognition values are deliberately NOT
+        touched — "retains recoverable recognition".
         """
         if not self._active:
             return False
         self._active = False
         self._stopped_reason = reason
+        self._stopped_at_ms = _now_ms()
+        self._dispatch_epoch += 1
         self._cond.notify_all()
         return True
+
+    def _ensure_runner(self):
+        """The single-worker op runner (one operation in flight, by the
+        executor's own max_workers=1). Created lazily — NOT just in start() —
+        so the deterministic _process_next()/drain() seam that tests drive
+        (without a writer thread) exercises the SAME deadline path as the
+        writer. stop() shuts the runner down (wait=False) and clears it, so
+        the next delivery lifetime gets a FRESH runner and can never inherit
+        a poisoned worker from an abandoned op."""
+        runner = self._runner
+        if runner is not None:
+            return runner
+        with self._cond:
+            if self._runner is None:
+                from concurrent import futures  # stdlib, function-scope import
+                self._futures = futures
+                self._runner = futures.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="bulk-op-runner"
+                )
+            return self._runner
+
+    def _note_late(self, future, epoch: int) -> None:
+        """Receiver-side give-up guard (R.5: "Validate deadlines in the
+        RECEIVER so a late operation cannot mutate after the daemon has
+        given up"). Runs on the op-runner thread the moment an op settles:
+        if its dispatch epoch is stale — a give-up/stop raced or beat it —
+        the result is DISCARDED and counted. Nothing else: it never advances
+        expected_revision, never touches _shown_span/_confirmed_visible, and
+        never calls the target again."""
+        with self._cond:
+            if not future.done() or (epoch == self._dispatch_epoch and self._active):
+                return  # settled in time for a live delivery — nothing to discard
+            self._stats["late_results_discarded"] += 1
 
     def _fire_on_stopped(self) -> None:
         """Fire the on_stopped seam exactly once per delivery lifetime."""

@@ -422,7 +422,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Failure handling: 250 ms deadline, disarm-on-unknown, no retries",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S1"
