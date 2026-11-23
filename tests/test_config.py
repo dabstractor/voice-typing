@@ -55,6 +55,7 @@ def test_defaults_match_prd_4_5():
     assert cfg.output.backend == "wtype"
     assert cfg.output.append_space is True
     assert cfg.output.streaming is True  # PRD §4.2quater: live partial typing + revise in place
+    assert cfg.output.delivery == "stream-edit"  # P1.M3.T3.S1 §4.2sexies: opt-in until G6 graduation
     # [cancel]
     assert cfg.cancel.on_backspace is True  # PRD §4.2quater: Alt+Super+Backspace cancel gesture
     assert cfg.cancel.devices == []
@@ -393,6 +394,104 @@ def test_valid_backend_values_load():
     for good in ("wtype", "ydotool", "null"):
         cfg = VoiceTypingConfig.from_toml({"output": {"backend": good}})
         assert cfg.output.backend == good
+
+
+# ---------------------------------------------------------------------------
+# [output] delivery key (P1.M3.T3.S1, PRD §4.5 + §4.2sexies): "stream-edit" |
+# "bulk-text", plus the LOAD-TIME precondition triple — bulk-text requires
+# output.streaming=true, asr.graceful_stop=false, cancel.keypress_action="disarm"
+# (R.3: no typing fallback; R.5: HALT keypress semantics). The triple spans THREE
+# sections (graceful_stop lives in [asr], keypress_action in [cancel]), so it is
+# enforced by a NEW top-level VoiceTypingConfig.__post_init__ (VT-005/Issue 3
+# fail-fast posture; ALL violated keys collected into ONE ValueError).
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_delivery_value_raises():
+    """P1.M3.T3.S1: a delivery value outside {stream-edit, bulk-text} is rejected at load with a ValueError naming it."""
+    for bad in ("Bulk-Text", "stream", "bulk", "paste", "", "STREAM-EDIT"):
+        with pytest.raises(ValueError, match="delivery"):
+            VoiceTypingConfig.from_toml({"output": {"delivery": bad}})
+
+
+def test_delivery_rejects_non_str():
+    """P1.M3.T3.S1: a non-str delivery is a TYPE error (string-field precedent — bool fields reject int)."""
+    for bad in (True, 1, 2.0, None, ["bulk-text"]):
+        with pytest.raises(TypeError, match="delivery"):
+            VoiceTypingConfig.from_toml({"output": {"delivery": bad}})
+
+
+def test_valid_delivery_values_load():
+    """P1.M3.T3.S1: both delivery values round-trip through TOML."""
+    for good in ("stream-edit", "bulk-text"):
+        cfg = VoiceTypingConfig.from_toml({"output": {"delivery": good}})
+        assert cfg.output.delivery == good
+
+
+def test_default_delivery_is_stream_edit():
+    """P1.M3.T3.S1: default delivery is "stream-edit" (opt-in until G6 graduation) — default is a no-op."""
+    assert VoiceTypingConfig().output.delivery == "stream-edit"
+
+
+def test_bulk_text_with_all_default_companions_loads():
+    """P1.M3.T3.S1: bulk-text + all-default asr/cancel satisfies the triple (streaming=True, graceful_stop=False, keypress_action="disarm") → loads."""
+    cfg = VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
+    assert cfg.output.delivery == "bulk-text"
+    assert cfg.output.streaming is True
+    assert cfg.asr.graceful_stop is False
+    assert cfg.cancel.keypress_action == "disarm"
+
+
+def test_bulk_text_requires_streaming_true():
+    """P1.M3.T3.S1: bulk-text + streaming=false → ValueError naming output.streaming."""
+    with pytest.raises(ValueError, match=r"output\.streaming"):
+        VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text", "streaming": False}})
+
+
+def test_bulk_text_requires_graceful_stop_false():
+    """P1.M3.T3.S1: bulk-text + graceful_stop=true → ValueError naming asr.graceful_stop.
+
+    Gotcha pinned: graceful_stop is an [asr] field (NOT [output] despite PRD §4.5's listing) —
+    the clause must carry the section-qualified asr.graceful_stop key.
+    """
+    with pytest.raises(ValueError, match=r"asr\.graceful_stop"):
+        VoiceTypingConfig.from_toml({"asr": {"graceful_stop": True}, "output": {"delivery": "bulk-text"}})
+
+
+def test_bulk_text_requires_keypress_action_disarm():
+    """P1.M3.T3.S1: bulk-text + keypress_action="freeze" → ValueError naming cancel.keypress_action."""
+    with pytest.raises(ValueError, match=r"cancel\.keypress_action"):
+        VoiceTypingConfig.from_toml({"cancel": {"keypress_action": "freeze"}, "output": {"delivery": "bulk-text"}})
+
+
+def test_bulk_text_two_violations_named_together():
+    """P1.M3.T3.S1: ALL violations collected into ONE error — two violated keys BOTH appear, the unviolated one does not."""
+    with pytest.raises(ValueError) as excinfo:
+        VoiceTypingConfig.from_toml(
+            {
+                "output": {"delivery": "bulk-text", "streaming": False},
+                "asr": {"graceful_stop": True},
+            }
+        )
+    msg = str(excinfo.value)
+    assert "output.streaming" in msg
+    assert "asr.graceful_stop" in msg
+    assert "keypress_action" not in msg
+
+
+def test_stream_edit_ignores_all_violations():
+    """P1.M3.T3.S1: the triple is enforced ONLY for bulk-text — stream-edit loads with every precondition violated."""
+    cfg = VoiceTypingConfig.from_toml(
+        {
+            "output": {"delivery": "stream-edit", "streaming": False},
+            "asr": {"graceful_stop": True},
+            "cancel": {"keypress_action": "freeze"},
+        }
+    )
+    assert cfg.output.delivery == "stream-edit"
+    assert cfg.output.streaming is False
+    assert cfg.asr.graceful_stop is True
+    assert cfg.cancel.keypress_action == "freeze"
 
 
 # ---------------------------------------------------------------------------

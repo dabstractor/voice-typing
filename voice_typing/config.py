@@ -144,6 +144,13 @@ class OutputConfig:
     append_space: bool = True  # daemon appends one trailing space to each final
     streaming: bool = True     # PRD §4.2quater: type stabilized partials live + revise in place;
                                # false = append-only finals (rollback hatch)
+    delivery: str = "stream-edit"  # Rev 4 §4.2sexies: "bulk-text" = paste-as-policy output path
+                               # (one-edit corrections, NO typing/backspace fallback; opt-in
+                               # until G6 graduation); "stream-edit" = today's behavior.
+                               # bulk-text additionally requires (enforced at the TOP level,
+                               # because the other two members live in other sections):
+                               # output.streaming=true, asr.graceful_stop=false,
+                               # cancel.keypress_action="disarm" — see VoiceTypingConfig.
 
     def __post_init__(self) -> None:
         # backend VALUE validation (bugfix Issue 3 / VT-005 precedent): only "wtype" | "ydotool" |
@@ -163,6 +170,19 @@ class OutputConfig:
             raise TypeError(
                 f"[output] streaming expects bool, got "
                 f"{type(self.streaming).__name__}: {self.streaming!r}"
+            )
+        # delivery VALUE validation (backend / VT-005 precedent): only "stream-edit" | "bulk-text"
+        # are valid. A typo such as delivery="Bulk-Text" is a valid str, but it would otherwise be
+        # silently treated as the default by the future daemon wiring (P1.M6.T2.S1) — reject it at
+        # load time with a clear ValueError (the TYPE is correct, the VALUE is not).
+        if not isinstance(self.delivery, str):
+            raise TypeError(
+                f"[output] delivery expects str, got "
+                f"{type(self.delivery).__name__}: {self.delivery!r}"
+            )
+        if self.delivery not in ("stream-edit", "bulk-text"):
+            raise ValueError(
+                f'[output] delivery must be "stream-edit" or "bulk-text", got {self.delivery!r}'
             )
 
 
@@ -375,6 +395,40 @@ class VoiceTypingConfig:
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
     filter: FilterConfig = field(default_factory=FilterConfig)
     log: LogConfig = field(default_factory=LogConfig)
+
+    def __post_init__(self) -> None:
+        """Cross-section gate (P1.M3.T3.S1): bulk-text's precondition triple.
+
+        bulk-text (§4.2sexies R.3/R.5) forbids typing fallbacks, drains, and the freeze
+        keypress action — a config combining bulk-text with any of those would produce
+        incoherent runtime behavior far from the config mistake (the exact failure mode
+        VT-005/Issue 3 established as worth rejecting at load). The triple spans THREE
+        sections (output.streaming, asr.graceful_stop, cancel.keypress_action), so it
+        cannot live in OutputConfig.__post_init__ — this is the config's FIRST cross-section
+        validation, hence a top-level __post_init__. It runs for BOTH construction paths
+        (defaults + from_toml overlay) since __post_init__ fires after all field
+        construction; the default delivery="stream-edit" short-circuits, so every existing
+        config loads identically (zero behavior change at default).
+
+        ALL violated preconditions are collected into ONE ValueError (not first-fail) so
+        the operator sees the full extent of the incoherence in a single edit round.
+        """
+        if self.output.delivery != "bulk-text":
+            return
+        violated = []  # (dot-qualified key, required value, got value) clauses
+        if self.output.streaming is not True:
+            violated.append(("output.streaming", "true", self.output.streaming))
+        if self.asr.graceful_stop is not False:
+            violated.append(("asr.graceful_stop", "false", self.asr.graceful_stop))
+        if self.cancel.keypress_action != "disarm":
+            violated.append(
+                ("cancel.keypress_action", '"disarm"', self.cancel.keypress_action)
+            )
+        if violated:
+            clauses = ", ".join(f"{key}={want} (got {got!r})" for key, want, got in violated)
+            raise ValueError(
+                'output.delivery="bulk-text" requires ' + clauses
+            )
 
     # --- construction from parsed TOML / files ---
 
