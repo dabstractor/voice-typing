@@ -657,3 +657,287 @@ def test_show_correction_refusal_then_retry_recomputes_vs_last_applied_span():
     assert proc.calls[-1][2]["before"] == 5   # vs the last APPLIED span — state NOT advanced
     assert proc.calls[-1][2]["text"] == "jello"
     assert target._inserted_bytes == 5 and target._last_applied_span == "jello"
+
+
+# ============================================================== P1.M4.T3.S3 ===
+# finalize / leave / cancel — the R.3 lifecycle: ownership ends (finalize), stop
+# preserves (leave), one-op cancel with NO legacy len(tail)−1 compensation.
+
+import logging  # noqa: E402 — appended with the S3 block (S1/S2 bodies untouched)
+
+
+def _cancelreply(result="applied", t_ms=17.0, **over):
+    r = {"id": 9, "reply": "cancel", "result": result, "t_ms": t_ms}
+    r.update(over)
+    return r
+
+
+class _RaisingProc:
+    """A dead/wedged child: every request raises (leave must tolerate this)."""
+
+    def request(self, cmd, timeout=None, **fields):
+        raise RuntimeError("child died")
+
+
+# --- finalize: matching final settles with ZERO requests (ownership ends) ---
+
+def test_finalize_matching_span_is_unchanged_zero_requests_and_settles():
+    target, proc, _ = _bound(
+        _verify("héllo hello world", 7, 7), _showreply(),   # insert "hello world" (11 B)
+    )
+    assert target.show(1, "u1", 1, 3, "hello world") is ShowResult.APPLIED
+    n = len(proc.calls)
+    assert target.finalize(1, "u1", 2, 4, "hello world") is ShowResult.UNCHANGED
+    assert len(proc.calls) == n                          # ZERO new requests — commit side
+    # effects cannot visibly change or duplicate already-visible text (R.3)
+    assert target._last_applied_span == ""               # ownership ENDS
+    assert target._owned_utterance is None
+    assert "u1" in target._closed_utterances
+    assert target._inserted_bytes == 11                  # bytes REMAIN (caret math survives)
+
+
+def test_finalize_differing_span_is_one_replacement_then_settles():
+    target, proc, _ = _bound(
+        _verify("héllo helllo w", 7, 7), _showreply(),   # insert "helllo w" (8 B)
+        _verify("héllo helllo w", 15, 15),               # finalize's show: recheck
+        _verify("héllo helllo w", 15, 15),               # owned-region pull
+        _showreply(),                                    # the ONE replacement
+    )
+    assert target.show(1, "u1", 1, 3, "helllo w") is ShowResult.APPLIED
+    assert target.finalize(1, "u1", 2, 4, "hello world") is ShowResult.APPLIED
+    shows = [c for c in proc.calls if c[0] == "show"]
+    assert len(shows) == 2                               # insert + exactly ONE replacement
+    cmd, timeout, fields = proc.calls[-1]
+    assert (cmd, timeout) == ("show", 0.25)
+    assert fields["before"] == 8 and fields["text"] == "hello world"  # delegated branches
+    assert target._last_applied_span == ""
+    assert target._owned_utterance is None and "u1" in target._closed_utterances
+    assert target._inserted_bytes == 11                  # bytes remain; only ownership ends
+
+
+def test_finalize_multi_utterance_bytes_advance_suffix_aware():
+    # u1 settled at 5 B → u2 partial applied → u2 correction finalize: the advance is
+    # _inserted − owned + span (= B1 + span_bytes), NOT bare span_bytes; the verified
+    # delete anchors at caret − owned_bytes (the suffix rule), not the binding caret.
+    target, proc, _ = _bound(
+        _verify("héllo hello", 7, 7), _showreply(),      # u1 "hello" (5 B) applied
+                                                          # u1 finalize: render-equal ⇒ free
+        _verify("héllo hello", 12, 12), _showreply(),   # u2 "ok" (2 B) insert → caret 14
+        _verify("héllo hellook", 14, 14),                # u2 correction recheck (cumulative)
+        _verify("héllo hellook", 14, 14),                # owned-region pull: [14−2, 14)
+        _showreply(),                                    # "jello" (5 B) replacement
+    )
+    assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    assert target.finalize(1, "u1", 2, 4, "hello") is ShowResult.UNCHANGED
+    assert target._inserted_bytes == 5                   # B1 — finalize never resets bytes
+    assert target.show(1, "u2", 1, 4, "ok") is ShowResult.APPLIED
+    assert target.finalize(1, "u2", 2, 5, "jello") is ShowResult.APPLIED
+    fields = proc.calls[-1][2]
+    assert fields["before"] == 2 and fields["text"] == "jello"
+    assert target._inserted_bytes == 10                  # B1(5) + span_bytes(5) — the pin
+    assert target._last_applied_span == ""               # settled
+
+
+def test_finalize_with_no_partial_inserts_once_and_logs_live_false(caplog):
+    # The missed-live-update hook: a final with no preceding partial inserts once and
+    # logs live=false (counts/flags only — counting it in latency evidence is M6.T4/G5).
+    target, proc, _ = _bound(
+        _verify("héllo ", 7, 7), _showreply(),   # the ONE insert (recheck + commit)
+    )
+    with caplog.at_level(logging.INFO, logger="voice_typing.ime.target"):
+        assert target.finalize(1, "u1", 1, 3, "ok") is ShowResult.APPLIED
+    cmd, timeout, fields = proc.calls[-1]
+    assert (cmd, timeout) == ("show", 0.25)
+    assert fields["before"] == 0 and fields["text"] == "ok"   # ONE insert
+    assert "live=False" in caplog.text
+    assert "ok" not in caplog.text                       # text-free logs (R.5)
+
+
+def test_post_finalize_new_utterance_inserts_at_cumulative_caret():
+    target, proc, _ = _bound(
+        _verify("héllo hello world", 7, 7), _showreply(),       # u1 insert (11 B)
+        _verify("héllo hello world", 18, 18), _showreply(),     # u2 insert at caret 18
+    )
+    assert target.show(1, "u1", 1, 3, "hello world") is ShowResult.APPLIED
+    assert target.finalize(1, "u1", 2, 4, "hello world") is ShowResult.UNCHANGED
+    assert target.show(1, "u2", 1, 4, "yes") is ShowResult.APPLIED
+    fields = proc.calls[-1][2]
+    assert fields["before"] == 0 and fields["text"] == "yes"  # INSERT, anchored at bytes
+    assert target._inserted_bytes == 14                       # 11 + 3 — accounting intact
+
+
+def test_rejected_final_next_utterance_inserts_never_deletes():
+    # The controller's on_final_dropped makes NO finalize call: u1's words STAY and u2
+    # INSERTS — the adapter self-heals via the utterance switch, never a delete.
+    target, proc, _ = _bound(
+        _verify("héllo abc", 7, 7), _showreply(),        # u1 "abc" (3 B) applied
+        _verify("héllo abc", 10, 10), _showreply(),      # u2 "x" INSERTS at caret 10→11
+    )
+    assert target.show(1, "u1", 1, 3, "abc") is ShowResult.APPLIED
+    assert target.show(1, "u2", 1, 4, "x") is ShowResult.APPLIED  # NO finalize between
+    fields = proc.calls[-1][2]
+    assert fields["before"] == 0 and fields["text"] == "x"        # INSERT — never erase u1
+    assert target._inserted_bytes == 4                            # switch KEPT the bytes
+
+
+def test_closed_utterance_show_and_finalize_refuse_with_no_requests():
+    target, proc, _ = _bound(
+        _verify("héllo hi", 7, 7), _showreply(),
+    )
+    assert target.show(1, "u1", 1, 3, "hi") is ShowResult.APPLIED
+    assert target.finalize(1, "u1", 2, 4, "hi") is ShowResult.UNCHANGED
+    n = len(proc.calls)
+    assert target.show(1, "u1", 3, 4, "hi again") is ShowResult.REFUSED
+    assert target.last_reason == "utterance closed"
+    assert target.finalize(1, "u1", 4, 4, "hi") is ShowResult.REFUSED
+    assert target.last_reason == "utterance closed"
+    assert len(proc.calls) == n                          # a settled utterance: never a 2nd op
+
+
+def test_finalize_not_acquired_refuses_without_request():
+    proc = _FakeProc([])
+    target = ImeTarget(proc)
+    assert target.finalize(1, "u1", 1, 0, "x") is ShowResult.REFUSED
+    assert target.last_reason == "not acquired"
+    assert proc.calls == []
+
+
+# --- leave: stop preserves; binding cleared FIRST; never raises; idempotent ---
+
+def test_leave_clears_binding_and_stops_all_writes():
+    target, proc, _ = _bound(
+        _verify("héllo hi", 7, 7), _showreply(),
+    )
+    assert target.show(1, "u1", 1, 3, "hi") is ShowResult.APPLIED
+    assert target.leave() is None
+    assert proc.calls[-1] == ("leave", 0.25, {})         # ONE bounded best-effort request
+    assert target._binding is None                       # cleared BEFORE the request
+    n = len(proc.calls)
+    assert target.show(1, "u2", 1, 4, "x") is ShowResult.REFUSED
+    assert target.finalize(1, "u2", 1, 4, "x") is ShowResult.REFUSED
+    assert target.cancel() is ShowResult.REFUSED
+    assert target.last_reason == "not acquired"
+    assert len(proc.calls) == n                          # NOTHING mutates after stop
+    assert target.leave() is None                        # idempotent
+    assert len(proc.calls) == n                          # second leave: pure no-op
+
+
+def test_leave_tolerates_raising_proc_and_stays_idempotent():
+    target, _proc, _ = _bound()
+    target._proc = _RaisingProc()
+    assert target.leave() is None                        # dead child must not propagate
+    assert target._binding is None
+    assert target._last_applied_span == ""
+
+
+# --- cancel: ONE op, before == owned_bytes EXACTLY (no −1), uncertain ⇒ refuse ---
+
+def test_cancel_nothing_pending_is_unchanged_no_request():
+    # Load-bearing (G2 trace_07): the controller cancels when a partial was QUEUED — it
+    # may not be DISPATCHED yet, so the owned span can be "" ⇒ UNCHANGED keeps delivery.
+    target, proc, _ = _bound()
+    assert target.cancel() is ShowResult.UNCHANGED
+    assert target.last_reason == "nothing pending"
+    assert [c[0] for c in proc.calls] == ["acquire"]     # NO cancel request
+
+
+def test_cancel_owned_is_one_exact_byte_operation_then_roundtrip():
+    target, proc, _ = _bound(
+        _verify("héllo wait no", 7, 7), _showreply(),    # "wait no" (7 B) applied
+        _verify("héllo wait no", 14, 14),                # cancel recheck: caret ends owned
+        _verify("héllo wait no", 14, 14),                # owned-region pull
+        _cancelreply(),                                  # the ONE atomic op
+        _verify("héllo again", 7, 7),                    # post-cancel insert recheck
+        _showreply(),                                    # insert applied
+    )
+    assert target.show(1, "u1", 1, 3, "wait no") is ShowResult.APPLIED
+    assert target.cancel() is ShowResult.APPLIED
+    cmd, timeout, fields = proc.calls[5]                 # acquire, verify, show, verify, verify, cancel
+    assert (cmd, timeout) == ("cancel", 0.25)
+    assert fields == {"before": 7}                       # EXACTLY 7 — NO len(tail)−1
+    assert target._last_applied_span == ""
+    assert target._owned_utterance is None and "u1" in target._closed_utterances
+    assert target._inserted_bytes == 0                   # caret moved BACK by 7
+    assert target.show(1, "u2", 1, 4, "again") is ShowResult.APPLIED  # recheck passes
+    fields = proc.calls[-1][2]
+    assert fields["before"] == 0 and fields["text"] == "again"  # accounting round-trip
+
+
+def test_cancel_utf8_bytes_astral_is_four_no_compensation():
+    owned = "héllo 😀"
+    assert len(owned.encode("utf-8")) == 11              # é = 2 B, 😀 = 4 B
+    target, proc, _ = _bound(
+        _verify("héllo " + owned, 7, 7), _showreply(),
+        _verify("héllo " + owned, 18, 18),
+        _verify("héllo " + owned, 18, 18), _cancelreply(),
+    )
+    assert target.show(1, "u1", 1, 3, owned) is ShowResult.APPLIED
+    assert target.cancel() is ShowResult.APPLIED
+    assert proc.calls[5][2]["before"] == 11              # UTF-8 bytes; NO −1 anywhere
+
+
+def test_cancel_owned_region_diverged_refuses_state_untouched():
+    target, proc, _ = _bound(
+        _verify("héllo wait no", 7, 7), _showreply(),
+        _verify("héllo wait no", 14, 14),                # recheck ok
+        _verify("héllo USER edited", 14, 14),            # owned-region pull: diverged!
+    )
+    assert target.show(1, "u1", 1, 3, "wait no") is ShowResult.APPLIED
+    assert target.cancel() is ShowResult.REFUSED
+    assert target.last_reason == "owned region diverged"  # uncertain ⇒ stop, never repair
+    assert all(c[0] != "cancel" for c in proc.calls)      # zero cancel requests
+    assert target._last_applied_span == "wait no"         # state untouched
+    assert target._inserted_bytes == 7
+
+
+def test_cancel_recheck_caret_moved_refuses_no_request():
+    target, proc, _ = _bound(
+        _verify("héllo wait no", 7, 7), _showreply(),
+        _verify("héllo wait no", 13, 13),                # caret no longer ends the range
+    )
+    assert target.show(1, "u1", 1, 3, "wait no") is ShowResult.APPLIED
+    assert target.cancel() is ShowResult.REFUSED
+    assert target.last_reason == "recheck: caret moved"
+    assert all(c[0] != "cancel" for c in proc.calls)
+
+
+def test_cancel_no_reply_unknown_then_retry_recomputes_same_before():
+    target, proc, _ = _bound(
+        _verify("héllo wait no", 7, 7), _showreply(),
+        _verify("héllo wait no", 14, 14),
+        _verify("héllo wait no", 14, 14), None,          # cancel: no reply
+        _verify("héllo wait no", 14, 14),                # retry recheck
+        _verify("héllo wait no", 14, 14),                # retry owned-region pull
+        _cancelreply(),                                  # retry applied
+    )
+    assert target.show(1, "u1", 1, 3, "wait no") is ShowResult.APPLIED
+    assert target.cancel() is ShowResult.UNKNOWN
+    assert target.last_reason == "ime no reply"
+    assert target._last_applied_span == "wait no"         # state advances ONLY on applied
+    assert target.cancel() is ShowResult.APPLIED
+    assert proc.calls[-1][2]["before"] == 7              # same before recomputed
+    assert target._inserted_bytes == 0
+
+
+def test_cancel_host_refused_maps_refused_state_untouched():
+    target, proc, _ = _bound(
+        _verify("héllo wait no", 7, 7), _showreply(),
+        _verify("héllo wait no", 14, 14),
+        _verify("héllo wait no", 14, 14), _cancelreply(result="refused"),
+    )
+    assert target.show(1, "u1", 1, 3, "wait no") is ShowResult.APPLIED
+    assert target.cancel() is ShowResult.REFUSED
+    assert target.last_reason == "host refused"
+    assert target._inserted_bytes == 7 and target._last_applied_span == "wait no"
+
+
+def test_cancel_odd_result_maps_unknown_taxonomy():
+    target, proc, _ = _bound(
+        _verify("héllo wait no", 7, 7), _showreply(),
+        _verify("héllo wait no", 14, 14),
+        _verify("héllo wait no", 14, 14), _cancelreply(result="weird"),
+    )
+    assert target.show(1, "u1", 1, 3, "wait no") is ShowResult.APPLIED
+    assert target.cancel() is ShowResult.UNKNOWN
+    assert target.last_reason == "host result 'weird'"
+    assert target._last_applied_span == "wait no"         # unknown never advances

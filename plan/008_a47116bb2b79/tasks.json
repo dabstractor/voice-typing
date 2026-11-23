@@ -572,7 +572,7 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "show()/finalize: atomic insert, atomic correction, finalize semantics",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Insert = commit_string+commit; correction = delete_surrounding_text(before,0)+commit_string+commit in ONE atomic commit; >4000-byte chunk-or-refuse; finalize = zero-diff ⇒ zero edits, differing ⇒ one replacement.",
               "subtasks": [
                 {
@@ -609,7 +609,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T3.S3",
                   "title": "finalize/leave/cancel semantics",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T3.S2"
@@ -626,14 +626,14 @@
               "type": "Task",
               "id": "P1.M4.T4",
               "title": "Takeover revocation at the target",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Any ordinary physical key, caret move, selection change, click, focus change, tab/pane switch, or target death revokes the handle AT THE TARGET; queued ops re-check at mutation time.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T4.S1",
                   "title": "Takeover detection + revocation + mutation-time re-checks",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T3.S3"
@@ -657,7 +657,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T5.S1",
                   "title": "G3 harness + GTK field rows (insert AND correct, visible)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T4.S1"

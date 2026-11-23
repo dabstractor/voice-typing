@@ -15,8 +15,11 @@ Requests (every request carries a caller-supplied `id`; the reply echoes it):
   {"id": N, "cmd": "verify"}   → reply {text_head, cursor, anchor, bytes}
   {"id": N, "cmd": "leave"}    → reply {ok: true} (keeps serving; S2 owns exit)
   {"id": N, "cmd": "ping"}     → reply {activated, dones} (health/heartbeat)
-  "cancel" is RESERVED in the vocabulary (P1.M4.T3.S3 owns its semantics);
-  until then it gets an error reply.
+  {"id": N, "cmd": "cancel", "before": K}
+      → reply {result, t_ms}, result ∈ SHOW_RESULTS (like show): deletes K UTF-8
+        bytes backward from the caret in ONE commit cycle
+        (delete_surrounding_text(before, 0) + commit_string("") + commit).
+        K ≥ 0 and an int — validate_request refuses anything else.
 
 Replies carry `reply` = the cmd; events are ASYNC and id-less:
   {"ev": name, "t_ms": ..., ...}
@@ -34,7 +37,7 @@ import json
 import time
 from pathlib import Path
 
-REQUEST_CMDS = ("acquire", "show", "verify", "leave", "ping")   # 'cancel' RESERVED (P1.M4.T3.S3)
+REQUEST_CMDS = ("acquire", "show", "verify", "leave", "ping", "cancel")  # cancel live (T3.S3)
 SHOW_RESULTS = ("applied", "unchanged", "refused", "unknown")   # == ShowResult values, verbatim
 LOG_CAP_BYTES = 64 * 1024                                       # im_probe lineage
 SHOW_FIELDS = ("session", "utterance", "seq", "expected_revision", "text")
@@ -77,20 +80,22 @@ def make_event(name: str, **fields) -> dict:
 
 
 def validate_request(obj: dict) -> tuple[str | None, str | None]:
-    """(cmd, error): missing id, unknown/reserved cmd, or show missing SHOW_FIELDS → error."""
+    """(cmd, error): missing id, unknown cmd, or show/cancel missing required fields → error."""
     if "id" not in obj:
         return None, "missing id"
     cmd = obj.get("cmd")
     if not isinstance(cmd, str):
         return None, f"unknown request {cmd!r}"
-    if cmd == "cancel":
-        return None, "cancel reserved (P1.M4.T3.S3)"
     if cmd not in REQUEST_CMDS:
         return None, f"unknown request {cmd!r}"
     if cmd == "show":
         missing = [f for f in SHOW_FIELDS if f not in obj]
         if missing:
             return None, f"show missing required fields: {', '.join(missing)}"
+    if cmd == "cancel":
+        before = obj.get("before")
+        if not isinstance(before, int) or isinstance(before, bool) or before < 0:
+            return None, "cancel requires 'before' as a non-negative int"
     return cmd, None
 
 

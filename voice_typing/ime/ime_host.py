@@ -10,7 +10,7 @@ Usage (from the S2 subprocess host):
 
 Becomes the seat's input method (get_registry → roundtrip → bind manager+seat
 → get_input_method → two roundtrips, proven in the lab), then serves JSONL:
-requests acquire/show/verify/leave/ping (+ reserved cancel), replies echoing
+requests acquire/show/verify/leave/ping/cancel, replies echoing
 the caller id, async id-less {"ev":...} event lines interleaved on stdout,
 and a 64 KiB-capped event log at argv[1] (default under $XDG_RUNTIME_DIR).
 `unavailable` → event line + log + clean exit(0) (one-IM-per-seat; S2 marks
@@ -141,6 +141,8 @@ class ImeHost:
             return self._acquire(rid)
         if cmd == "show":
             return self._show(rid, obj)
+        if cmd == "cancel":
+            return self._cancel(rid, obj)
         if cmd == "verify":
             return self._verify(rid)
         if cmd == "leave":
@@ -193,6 +195,35 @@ class ImeHost:
                                            t_ms=round((time.monotonic() - t0) * 1000, 3))
             if self.stopped or time.monotonic() >= deadline:
                 return protocol.make_reply(rid, "show", result="unknown",
+                                           t_ms=round((time.monotonic() - t0) * 1000, 3))
+            time.sleep(0.01)
+
+    def _cancel(self, rid, obj: dict) -> dict:
+        """(P1.M4.T3.S3) ONE atomic removal: delete_surrounding_text(before, 0) +
+        commit_string("") + commit — mirrors _show's posture (not-activated ⇒ refused;
+        wire send failure ⇒ unknown, never retried) minus the text payload. The empty
+        commit_string keeps the delete+commit_string+commit triple the lab proved; the
+        optional GTK lab row (tests/ime_finalize_lab.py) verifies it end-to-end."""
+        if not self.activated:
+            return protocol.make_reply(rid, "cancel", result="refused", t_ms=0.0)
+        t0 = time.monotonic()
+        dones_before = self.dones
+        try:
+            before = int(obj.get("before", 0) or 0)
+            self.c.request(self.im, IFACE, "delete_surrounding_text", before, 0)
+            self.c.request(self.im, IFACE, "commit_string", "")   # empty-text triple variant
+            self.c.request(self.im, IFACE, "commit", self.dones)
+        except Exception:  # wire send failed → outcome unverifiable; NEVER retry (R.5)
+            return protocol.make_reply(rid, "cancel", result="unknown",
+                                       t_ms=round((time.monotonic() - t0) * 1000, 3))
+        deadline = time.monotonic() + SHOW_CONFIRM_WAIT  # same bounded confirm loop as _show
+        while True:
+            self._drain_events()
+            if self.dones > dones_before:
+                return protocol.make_reply(rid, "cancel", result="applied",
+                                           t_ms=round((time.monotonic() - t0) * 1000, 3))
+            if self.stopped or time.monotonic() >= deadline:
+                return protocol.make_reply(rid, "cancel", result="unknown",
                                            t_ms=round((time.monotonic() - t0) * 1000, 3))
             time.sleep(0.01)
 

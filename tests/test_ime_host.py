@@ -98,11 +98,63 @@ def test_blank_line_is_silently_skipped():
     assert out.getvalue() == ""
 
 
-def test_cancel_reserved():
+# --- live cancel dispatch (P1.M4.T3.S3 lifts the reservation) -----------------
+
+CANCEL_OBJ = {"id": 5, "cmd": "cancel", "before": 7}
+
+
+def test_cancel_missing_before_is_error_and_host_keeps_serving():
     host, _wire, out = _make_host()
-    lines = _feed(host, out, {"id": 5, "cmd": "cancel"})
-    assert lines[0]["id"] == 5
-    assert lines[0]["error"] == "cancel reserved (P1.M4.T3.S3)"
+    lines = _feed(host, out, {"id": 5, "cmd": "cancel"},
+                  {"id": 6, "cmd": "ping"})  # a bad row must not stop the loop
+    assert lines[0]["id"] == 5 and "before" in lines[0]["error"]
+    assert lines[1] == {"id": 6, "reply": "ping", "activated": False, "dones": 0}
+
+
+def test_cancel_not_activated_refused_without_wire_sends():
+    host, wire, out = _make_host()
+    lines = _feed(host, out, CANCEL_OBJ)
+    assert lines[0]["result"] == "refused" and lines[0]["reply"] == "cancel"
+    assert wire.requests == []  # nothing went out on the wire
+
+
+def test_cancel_applied_on_scripted_done_sends_delete_empty_commit():
+    host, wire, out = _make_host()
+    host.activated = True
+    host.im = 11
+    host.dones = 4
+    wire.script = [Event(11, "zwp_input_method_v2", "done", ())]
+    lines = _feed(host, out, CANCEL_OBJ)
+    replies = [d for d in lines if "reply" in d]
+    assert replies[0]["result"] == "applied" and isinstance(replies[0]["t_ms"], float)
+    sent = [(i, n, a) for _o, i, n, a in wire.requests]
+    assert sent == [("zwp_input_method_v2", "delete_surrounding_text", (7, 0)),
+                    ("zwp_input_method_v2", "commit_string", ("",)),
+                    ("zwp_input_method_v2", "commit", (4,))]  # ONE commit per op
+
+
+def test_cancel_wire_exception_maps_unknown():
+    host, wire, out = _make_host()
+    host.activated = True
+    host.im = 11
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("wire down")
+
+    wire.request = _boom
+    lines = _feed(host, out, CANCEL_OBJ)
+    assert [d["result"] for d in lines if "reply" in d] == ["unknown"]  # never retry (R.5)
+    assert [d for d in lines if "error" in d] == []      # a reply, not a crash
+
+
+def test_cancel_unknown_on_timeout(monkeypatch):
+    import voice_typing.ime.ime_host as ime_host_mod
+    monkeypatch.setattr(ime_host_mod, "SHOW_CONFIRM_WAIT", 0.05)  # bounded wait, kept short
+    host, wire, out = _make_host()
+    host.activated = True
+    host.im = 11
+    lines = _feed(host, out, CANCEL_OBJ)  # no scripted done
+    assert [d["result"] for d in lines if "reply" in d] == ["unknown"]
 
 
 def test_show_missing_field_is_error_not_crash():

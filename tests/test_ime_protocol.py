@@ -41,6 +41,8 @@ def test_validate_request_legal_cmds():
         obj = {"id": 1, "cmd": cmd}
         if cmd == "show":
             obj.update({f: 1 for f in protocol.SHOW_FIELDS})
+        if cmd == "cancel":
+            obj["before"] = 0
         got, err = protocol.validate_request(obj)
         assert err is None and got == cmd
 
@@ -55,9 +57,44 @@ def test_validate_request_unknown_cmd():
     assert cmd is None and "bogus" in err
 
 
-def test_validate_request_cancel_reserved():
+# --- cancel validation (P1.M4.T3.S3 lifts the reservation; before is required) ---
+
+def test_validate_request_cancel_valid_with_before_zero():
+    cmd, err = protocol.validate_request({"id": 1, "cmd": "cancel", "before": 0})
+    assert err is None and cmd == "cancel"
+
+
+def test_validate_request_cancel_valid_with_positive_before():
+    cmd, err = protocol.validate_request({"id": 1, "cmd": "cancel", "before": 7})
+    assert err is None and cmd == "cancel"
+
+
+def test_validate_request_cancel_missing_before_errors():
     cmd, err = protocol.validate_request({"id": 1, "cmd": "cancel"})
-    assert cmd is None and err == "cancel reserved (P1.M4.T3.S3)"
+    assert cmd is None and "before" in err
+
+
+def test_validate_request_cancel_string_before_errors():
+    cmd, err = protocol.validate_request({"id": 1, "cmd": "cancel", "before": "7"})
+    assert cmd is None and "before" in err
+
+
+def test_validate_request_cancel_negative_before_errors():
+    cmd, err = protocol.validate_request({"id": 1, "cmd": "cancel", "before": -1})
+    assert cmd is None and "before" in err
+
+
+def test_validate_request_cancel_boolean_before_errors():
+    # bool is an int subclass — must NOT pass as a wire byte count.
+    cmd, err = protocol.validate_request({"id": 1, "cmd": "cancel", "before": True})
+    assert cmd is None and "before" in err
+
+
+def test_validate_request_show_fields_unchanged_by_cancel_lift():
+    obj = {"id": 1, "cmd": "show", "session": 9, "utterance": "u", "seq": 1,
+           "expected_revision": 0}  # text missing — SHOW_FIELDS untouched by the lift
+    cmd, err = protocol.validate_request(obj)
+    assert cmd is None and "text" in err
 
 
 def test_validate_request_show_missing_field_names_it():
