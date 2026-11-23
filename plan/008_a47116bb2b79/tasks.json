@@ -693,7 +693,7 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Cooperating-editor pi-prompt adapter + remaining G3 rows + conditional clipboard fallback",
-          "status": "Ready",
+          "status": "Complete",
           "description": "The terminal chat prompt is the FIRST milestone target (R.3): a pi extension CustomEditor + control socket as a second real TargetAdapter, proven in isolated Ghostty; then graphical-editor and browser-field rows; clipboard insert-fallback only if the refreshed matrix still needs it.",
           "tasks": [
             {
@@ -784,14 +784,14 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "Clipboard insert-fallback adapter (conditional on the refreshed matrix)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "R.6: clipboard ONLY as insert fallback for ghostty-class terminals, ONLY if the re-run matrix still shows ghostty IM-dead AND a row needs it; strict preservation contract or the adapter is unavailable.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "Conditional clipboard insert-fallback + G4 gate (or recorded skip)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T5.S2"
@@ -818,14 +818,14 @@
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "Utterance identities + session generation through the recorder relay",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Extend the partial/final payloads with utterance_id + session_gen assigned at the decode source; late events keep their own identity; dropped/filtered finals still close the boundary.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Payload helper at the five final sites + partial site",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -850,7 +850,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T2.S1",
                   "title": "Dispatch wiring + bulk cancel intercept",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S3",
