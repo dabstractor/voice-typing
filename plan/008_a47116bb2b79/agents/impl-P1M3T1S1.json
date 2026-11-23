@@ -1,0 +1,18 @@
+{
+  "role": "impl",
+  "item": "P1.M3.T1.S1",
+  "key": "P1M3T1S1",
+  "agent": "pizf",
+  "session": "prd-impl-P1M3T1S1",
+  "tag": "impl-P1M3T1S1-2416237",
+  "cwd": "/home/dustin/projects/voice-typing",
+  "prompt_file": "/home/dustin/projects/voice-typing/plan/008_a47116bb2b79/agents/impl-P1M3T1S1.prompt.md",
+  "started": 1795440203,
+  "artifacts": [
+    "The item's PRP: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/P1M3T1S1/PRP.md",
+    "Research notes: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/P1M3T1S1/research/",
+    "Task tree: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/tasks.json",
+    "Static part of your kickoff prompt: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/agents/_template-impl.md"
+  ],
+  "args": []
+}

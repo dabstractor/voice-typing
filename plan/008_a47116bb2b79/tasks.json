@@ -377,14 +377,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Define bulk delivery contracts (protocol, results, zero-diff guard)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "New code separate from legacy: DeliveryTarget protocol (acquire/show/finalize/leave/cancel), ShowResult taxonomy, handle+revision types, units mapping, and the generalized rendered-compare zero-diff guard. No typing surface anywhere.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Contracts module: protocol + result taxonomy + zero-diff guard",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 contract; MUST be separate from StreamingOutput (voice_typing/streaming.py:180) and typing_backends.py — the bulk adapter MUST NOT expose type_character/press_backspace or any typing fallback (d2_bulk_delivery_map.md §3 lists the do-not-touch surface). 'Bytes sent is not applied; unknown is not delivered.'\n2. INPUT: none (first D2 code subtask).\n3. LOGIC: new voice_typing/bulk_delivery.py: DeliveryTarget Protocol (acquire → opaque handle + revision; show(session, utterance, seq, expected_revision, complete rendered span) → applied|unchanged|refused|unknown; finalize; leave; cancel), units-mapping contract (map positions to the target's own units; never slice via a lowercased/normalized copy); rendered-span equality guard — strings that render identically after the existing language/spacing guards ⇒ zero events; real case/punctuation/word differences never equal. Pure unit tests incl Unicode.\n4. OUTPUT: contracts consumed by P1.M3.T2.S1 and both adapters (M4/M5).\n5. DOCS: Mode A — module docstring carries the R.2/R.3 contract summary.",
