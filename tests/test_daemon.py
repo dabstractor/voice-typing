@@ -5192,3 +5192,49 @@ def test_fresh_arm_clears_suppress_since():
     d.start()  # _arm() under the lock
     assert d._cancel_suppress_final is False
     assert d._cancel_suppress_since is None
+
+
+# ===========================================================================
+# P1.M1.T4.S1 — suppression-window re-latch chain bound (D3.3)
+# (every Backspace press re-latches + re-stamps the suppression window, so a
+#  cancel -> re-speak -> cancel loop chained it open indefinitely when the
+#  sentinel was lost — each re-said sentence's final dropped, no bound firing.
+#  The bound: a cap on CONSECUTIVE dropped finals since the last HEALTHY close;
+#  a re-press re-stamp does NOT restore the budget. See daemon.py on_final.)
+# ===========================================================================
+def test_cancel_suppression_drop_cap_force_closes_window_and_processes_final():
+    """D3.3: with the sentinel lost, at most _CANCEL_SUPPRESS_MAX_DROPS consecutive finals
+    are dropped; the next one force-closes the window (WARNING) and is PROCESSED — the
+    silent 'missing sections' chain terminates."""
+    d, fb = _make_cancel_daemon(); be = d._backend; host = d._host
+    d.cancel()                      # latch; sentinel will be LOST
+    d.on_final("first")             # drop 1
+    d.on_final("second")            # drop 2
+    assert be.typed == [] and fb.finals == []
+    d.on_final("third")             # drop 3 == cap -> force-close + process
+    assert d._cancel_suppress_final is False and d._cancel_suppress_drops == 0
+    assert "third" in "".join(x for x in be.typed if isinstance(x, str))
+    assert fb.finals == ["third"]
+
+def test_cancel_suppression_repress_restamp_does_not_reset_drop_counter():
+    """The CHAIN bound (the incident shape, minimal): a re-press re-stamps the window but
+    does NOT restore the drop budget — only a healthy close does. press->drop->press->drop->
+    third final processed."""
+    d, fb = _make_cancel_daemon(); be = d._backend
+    d.cancel(); d.on_final("one")           # drop 1
+    d.cancel()                              # re-latch + re-stamp (counter SURVIVES)
+    d.on_final("two")                       # drop 2
+    assert be.typed == []
+    d.on_final("three")                     # cap -> processed
+    assert d._cancel_suppress_final is False
+    assert "three" in "".join(x for x in be.typed if isinstance(x, str))
+
+def test_cancel_suppression_drop_counter_resets_on_sentinel_close():
+    """A healthy sentinel close restores the full drop budget (a subsequent lost-sentinel
+    window starts from 0)."""
+    d, _fb = _make_cancel_daemon(); host = d._host
+    d.cancel(); d.on_final("one"); d.on_final("two")   # drops 1-2, sentinel lost
+    assert d._cancel_suppress_drops == 2
+    d.cancel(); host.mark_cancel_sentinel(); d.on_final("")  # healthy close
+    assert d._cancel_suppress_final is False
+    assert d._cancel_suppress_drops == 0

@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "G1 regression baseline + legacy defect closure (D3)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Record the pre-change G1 baseline, then close the three §8 defects: merge fix/ydotoold-datagram + add the 6 ms socket contact gap, close the cancel auto-repeat audit, and fix the cancel-suppression latch chaining that dropped finals 4×/week.",
           "tasks": [
             {
@@ -156,14 +156,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "Fix the cancel-suppression window latch chaining (D3.3)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "The latch re-stamps per Backspace press and drops every final inside the 5 s bound; a cancel→re-speak→cancel chain keeps dropping re-said finals with no bound — the 4×/week 'missing sections' incident. Research says NOT closed at HEAD.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Bound the suppression-window re-latch chain",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -179,7 +179,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T4.S2",
                   "title": "Replay the 4× incident sequence as a regression test",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T4.S1"

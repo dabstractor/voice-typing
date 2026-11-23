@@ -163,6 +163,13 @@ _DRAIN_TIMEOUT_S: float = 5.0
 # on_final closes the window and PROCESSES it.
 _CANCEL_SUPPRESS_TIMEOUT_S: float = 5.0
 
+# D3.3 RE-LATCH CHAIN BOUND (P1.M1.T4.S1): max CONSECUTIVE dropped finals since the last
+# HEALTHY close (sentinel consume / timeout self-heal / this cap / fresh arm). Deliberately
+# NOT reset by a re-press re-stamp: each press refreshing the budget would re-open the
+# unbounded cancel→re-speak chain (one drop per latch, cap never reached) — see on_final's
+# drop path. A code constant, not config: a self-protection bound like the timeout above.
+_CANCEL_SUPPRESS_MAX_DROPS: int = 3
+
 
 def _resolve_device_config(cfg: VoiceTypingConfig) -> dict[str, str]:
     """Build cuda_check defaults from cfg, then resolve (applies PRD §4.4 CPU fallback).
@@ -676,6 +683,11 @@ class VoiceTypingDaemon:
         # the window is closed. Read here by on_final (under _on_final_lock) to bound the
         # suppression window — same atomic-store discipline as the flag itself.
         self._cancel_suppress_since: float | None = None
+        # D3.3 chain bound (P1.M1.T4.S1): consecutive dropped finals since the last HEALTHY
+        # close. Same ownership discipline as the flag: on_final (under _on_final_lock) owns
+        # increments + the close resets, _arm() (under _lock) owns the fresh-session reset —
+        # each writer owns the full transition, no shared read-modify-write.
+        self._cancel_suppress_drops = 0
         self._start_monotonic: float | None = None
         # Idle auto-stop: timestamp of the last recognized speech; the _idle_watchdog thread disarms
         # when now - this exceeds cfg.asr.auto_stop_idle_seconds. None while NOT listening. Set on
@@ -1176,6 +1188,7 @@ class VoiceTypingDaemon:
                     )
                     self._cancel_suppress_final = False
                     self._cancel_suppress_since = None
+                    self._cancel_suppress_drops = 0  # healthy close: fresh drop budget
                     # TAIL-ACCUMULATION FIX: while the window was latched, dropped finals
                     # never reset the boundary — partials kept typing and the tail grew
                     # across utterances, so THIS commit rewound "way farther than it ever
@@ -1195,6 +1208,7 @@ class VoiceTypingDaemon:
                             False  # sentinel seen; pipeline re-armed
                         )
                         self._cancel_suppress_since = None
+                        self._cancel_suppress_drops = 0  # healthy close: fresh drop budget
                         # BUG-007 / P1.M2.T7.S1: the cancelled utterance is bookended HERE — its
                         # audio was discarded, so no further final can ever come for it. Clear
                         # _final_pending so _request_stop takes the immediate path (a drain would
@@ -1209,13 +1223,48 @@ class VoiceTypingDaemon:
                     # TAIL-ACCUMULATION FIX (latched window): each dropped final is still an
                     # utterance boundary — absorb the tail into the checkpoint (no keystrokes)
                     # so it can never grow across dropped finals into a mass rewind.
-                    if self._cfg.output.streaming:
+                    # Same shape as the timeout self-heal's absorb above: gate on a PENDING
+                    # tail. With no tail there is nothing to absorb, and an unconditional
+                    # session freeze would leave the engine frozen at the cap force-close's
+                    # commit below — the engine's frozen path absorbs WITHOUT keystrokes, so
+                    # the force-closed final could never type (P1.M1.T4.S1). A pending tail
+                    # still absorbs + resets the boundary exactly as before (the tail can
+                    # never grow across dropped finals into a mass rewind).
+                    if self._cfg.output.streaming and self._pending_tail_len() > 0:
                         self._stream.freeze(
                             "final dropped (cancel suppression window latched)",
                             session=True,
                         )
                         self._stream.reset_boundary()
-                    return  # dropped: no clean, no type_text, no record_final
+                    if self._cancel_suppress_final:
+                        # D3.3 re-latch chain bound (P1.M1.T4.S1) — PRODUCT DECISION: cap
+                        # consecutive dropped finals since the last HEALTHY close (sentinel
+                        # consume / timeout self-heal / this cap / fresh arm). The counter is
+                        # deliberately NOT reset by a re-press re-stamp: each press refreshing
+                        # it would re-open the unbounded cancel→re-speak chain (one drop per
+                        # latch, cap never reached). Closing on a fresh partial was REJECTED:
+                        # stray late partials of the cancelled utterance are indistinguishable
+                        # from new speech (_touch_speech's documented strays) and a premature
+                        # close would admit the racing real final (the double-type bug class
+                        # this window exists to prevent). 3 covers the racing final + duplicate
+                        # finals; the NEXT drop is by construction the user's re-said sentence.
+                        self._cancel_suppress_drops += 1
+                        if self._cancel_suppress_drops >= _CANCEL_SUPPRESS_MAX_DROPS:
+                            logger.warning(
+                                "cancel: suppression window dropped %d consecutive finals "
+                                "(sentinel lost + re-latch chain) — force-closing and "
+                                "processing this final",
+                                self._cancel_suppress_drops,
+                            )
+                            self._cancel_suppress_final = False
+                            self._cancel_suppress_since = None
+                            self._cancel_suppress_drops = 0
+                            # fall through: the boundary was just reset above; process this
+                            # final (same shape + residual risk as the timeout self-heal)
+                        else:
+                            return  # dropped: no clean, no type_text, no record_final
+                    else:
+                        return  # sentinel consumed (healthy close above): its final is dropped
             cleaned = textproc.clean(text, self._cfg.filter)
             if not cleaned:  # rejected: blocklist hallucination / below min_chars
                 # P1.M2.T6.S2: under streaming a rejected final FREEZES the tail as-is
@@ -1372,6 +1421,7 @@ class VoiceTypingDaemon:
             False  # P1.M2.T7.S1: a fresh arm re-arms the final pipeline
         )
         self._cancel_suppress_since = None  # LOST-SENTINEL SELF-HEAL: fresh arm, fresh window
+        self._cancel_suppress_drops = 0  # D3.3: fresh arm, fresh (full) drop budget
         stream_reset = getattr(
             self._stream, "reset_session", None
         )  # P1.M2.T6.S2: NEW session
@@ -1766,6 +1816,9 @@ class VoiceTypingDaemon:
         racing the child's text() boundary — see recorder_host's stale-signal check, which closes
         that at the source), on_final self-heals after the bound instead of dropping every later
         final (the stuck "everything after the Backspace keeps rewinding to the edit point" bug).
+        The suppression window is doubly bounded: the 5 s lost-sentinel timeout AND a
+        3-consecutive-dropped-finals cap (D3.3) that a re-press re-stamp does NOT reset — see
+        on_final's drop path.
 
         Idempotent (PRD §4.2quater freeze-rule): when NOT armed, or armed with NO pending tail,
         this issues no backspace and still replies ok — further Backspaces are plain user edits,
