@@ -249,3 +249,19 @@ PER-CHANGE PROTOCOL (for P1.M1.T2/T3/T4 and any streaming/daemon-touching change
 to make them pass. The (i) reds STAY RED: reconciling them with the lazy-separator contract is
 a deliberate, separately-decided change — it must never happen as a side effect of an unrelated
 task. The (i) set above is the invariant later subtasks diff against.
+
+### Addendum: post-baseline spot run (L3 gate, same session)
+
+| Test | Spot run 4 |
+|---|---|
+| test_a_delta_cadence | FAIL |
+| test_b_commit_rewind_exact | FAIL |
+| test_f_user_key_freeze | FAIL |
+| test_g_stranded_tail | **pass** |
+
+Totals: **3 failed / 4 passed** (g flipped to green). This contradicts the
+3-run table only for `test_g_stranded_tail` and CONFIRMS it as **FLAKY**: recorded population
+is now record F, S1 P, S2 F/F/F, S2-spot P → **4F / 2P over 6 observations**. Its F5 (i)
+classification is unchanged; single observations of g must never be read as a fix or a break.
+`test_a_delta_cadence` / `test_b_commit_rewind_exact` / `test_f_user_key_freeze` are now
+red across 4 consecutive observations each — stable-red conclusion strengthened.
