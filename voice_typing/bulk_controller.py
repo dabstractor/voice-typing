@@ -365,6 +365,23 @@ class BulkController:
                         exc_info=True,
                     )
 
+    def halt_for_takeover(self, reason: str) -> None:
+        """Takeover halt (P1.M4.T4.S1): record THE reason — "takeover:
+        <reason>", the one-concise-reason law (R.5) — through the SAME
+        _stop_locked transition, then re-run the existing stop(leave=True)
+        teardown (writer exit bounded-join, runner shutdown(wait=False) so the
+        abandoned op drains into the late-result discard path, target.leave()
+        exactly once). stop()'s own _stop_locked("stopped") is a no-op by then,
+        so the takeover reason is NEVER masked. Idempotent: a second call (or
+        a later stop()) no-ops and cannot overwrite the recorded reason. Safe
+        on the manager's reader thread (the TakeoverWatch feed): the writer
+        join is bounded (5 s) and skipped for the writer itself; the runner
+        shutdown never waits.
+        """
+        with self._cond:
+            self._stop_locked(f"takeover: {reason}")  # False (no-op) unless THIS is the first stop
+        self.stop(leave=True)  # the existing teardown, re-used — never duplicated
+
     def cancel(self, *, gen: int | None = None) -> bool:
         """R.5/R.3 cancel at the controller seam: discard the pending
         utterance's recognition (purge its queued events, close its boundary)

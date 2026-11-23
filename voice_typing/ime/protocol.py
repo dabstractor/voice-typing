@@ -20,6 +20,12 @@ Requests (every request carries a caller-supplied `id`; the reply echoes it):
         bytes backward from the caret in ONE commit cycle
         (delete_surrounding_text(before, 0) + commit_string("") + commit).
         K ≥ 0 and an int — validate_request refuses anything else.
+  {"id": N, "cmd": "grab"}
+      → reply {ok, reason?} — engage the compositor keyboard grab
+        (grab_keyboard on a new zwp_input_method_keyboard_grab_v2). Grabbed
+        keys arrive as grab_key events and are NOT forwarded to the app
+        (im-lab row O) — the takeover detector's only key source; `leave`
+        releases it (every acquisition exit path must).
 
 Replies carry `reply` = the cmd; events are ASYNC and id-less:
   {"ev": name, "t_ms": ..., ...}
@@ -37,7 +43,8 @@ import json
 import time
 from pathlib import Path
 
-REQUEST_CMDS = ("acquire", "show", "verify", "leave", "ping", "cancel")  # cancel live (T3.S3)
+REQUEST_CMDS = ("acquire", "show", "verify", "leave", "ping", "cancel",  # cancel live (T3.S3)
+                "grab")  # grab live (T4.S1): engage the keyboard grab
 SHOW_RESULTS = ("applied", "unchanged", "refused", "unknown")   # == ShowResult values, verbatim
 LOG_CAP_BYTES = 64 * 1024                                       # im_probe lineage
 SHOW_FIELDS = ("session", "utterance", "seq", "expected_revision", "text")

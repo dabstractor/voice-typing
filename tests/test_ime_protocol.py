@@ -144,3 +144,17 @@ def test_event_log_writer_none_disables():
     w = protocol.EventLogWriter(None)
     w.append({"ev": "noop"})  # must not raise, write nothing anywhere
     assert w.bytes == 0
+
+
+# --- grab vocabulary (P1.M4.T4.S1): engage the keyboard grab -------------------
+
+def test_request_cmds_include_grab():
+    assert "grab" in protocol.REQUEST_CMDS
+
+
+def test_validate_request_grab_needs_no_fields():
+    assert protocol.validate_request({"id": 9, "cmd": "grab"}) == ("grab", None)
+
+
+def test_validate_request_grab_extra_fields_tolerated():
+    assert protocol.validate_request({"id": 10, "cmd": "grab", "x": 1}) == ("grab", None)

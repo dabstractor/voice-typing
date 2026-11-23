@@ -46,6 +46,14 @@ from .protocol import (
     make_reply,
     validate_request,
 )
+from .takeover import (
+    CHORD_KEY,
+    CHORD_MODS,
+    KEY_D,
+    MODIFIER_KEYCODES,
+    TakeoverDetector,
+    TakeoverWatch,
+)
 
 __all__ = [
     "LOG_CAP_BYTES",
@@ -54,6 +62,12 @@ __all__ = [
     "SHOW_RESULTS",
     "EventLogWriter",
     "ProtocolError",
+    "TakeoverDetector",
+    "TakeoverWatch",
+    "CHORD_KEY",
+    "CHORD_MODS",
+    "KEY_D",
+    "MODIFIER_KEYCODES",
     "decode",
     "encode",
     "make_error",

@@ -769,3 +769,23 @@ def test_stats_stopped_at_ms_and_deadline_counters():
         assert _wait_until(lambda: ctl.stats()["late_results_discarded"] == 1)
     finally:
         fake.gate.set()
+
+
+# ---------------------------------------------------------------------------
+# takeover halt (P1.M4.T4.S1): halt_for_takeover — the one-concise-reason law
+# ---------------------------------------------------------------------------
+
+
+def test_halt_for_takeover_records_one_reason_leaves_once_idempotent():
+    ctrl, fake = _armed()
+    ctrl.on_partial("x", utterance="u1", seq=1, gen=GEN)
+    ctrl.drain()                                   # "x" dispatched → one show call
+    ctrl.halt_for_takeover("user key 32")
+    ctrl.halt_for_takeover("user key 33")          # second revoke — reason NOT masked
+    ctrl.stop()                                    # a later ordinary stop cannot mask it either
+    assert ctrl.stats()["stopped_reason"] == "takeover: user key 32"
+    assert ctrl.is_active() is False
+    assert _methods(fake).count("leave") == 1      # exactly once
+    ctrl.on_partial("y", utterance="u2", seq=1, gen=GEN)  # post-halt → rejected
+    ctrl.drain()
+    assert _spans(fake) == ["x"]                   # no post-halt target mutations

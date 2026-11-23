@@ -18,7 +18,9 @@ the route unavailable).
 
 TRANSPORT ONLY: acquire's handle/revision is a placeholder passthrough; show
 does no ownership/units verification and no chunking strategy (T2/T3); no
-takeover policy (T4 — it only forwards the event lines); no subprocess
+takeover POLICY — that lives daemon-side (voice_typing.ime.takeover, T4): the
+host only engages/releases the keyboard grab (`grab` request / `leave`) and
+forwards the event lines the daemon's detector consumes. no subprocess
 supervision (S2). show NEVER retries (R.5): one bounded wait for the
 compositor `done`, then `unknown` and the loop moves on.
 """
@@ -143,6 +145,8 @@ class ImeHost:
             return self._show(rid, obj)
         if cmd == "cancel":
             return self._cancel(rid, obj)
+        if cmd == "grab":
+            return self._grab(rid)
         if cmd == "verify":
             return self._verify(rid)
         if cmd == "leave":
@@ -226,6 +230,25 @@ class ImeHost:
                 return protocol.make_reply(rid, "cancel", result="unknown",
                                            t_ms=round((time.monotonic() - t0) * 1000, 3))
             time.sleep(0.01)
+
+    def _grab(self, rid) -> dict:
+        """(P1.M4.T4.S1) Engage the keyboard grab: a new
+        zwp_input_method_keyboard_grab_v2 object + grab_keyboard — the exact
+        im_probe-proven sequence (tools/im-lab/im_probe.py:112-114). While the
+        grab is live, physical keys arrive here as grab_key events and are NOT
+        forwarded to the app (im-lab row O) — the takeover detector's only key
+        source, which is also why revocation MUST release it AT THE TARGET
+        (`_leave` below releases when held). Additive arm; release stays in
+        _leave — this handler never releases."""
+        if not self.activated:
+            return protocol.make_reply(rid, "grab", ok=False, reason="not activated")
+        try:
+            grab = self.c.new(GRAB_IFACE)
+            self.c.request(self.im, IFACE, "grab_keyboard", grab)
+        except Exception:  # wire send failed → nothing engaged; the caller may retry
+            return protocol.make_reply(rid, "grab", ok=False, reason="grab failed")
+        self.grab = grab
+        return protocol.make_reply(rid, "grab", ok=True)
 
     def _verify(self, rid) -> dict:
         # T2: the same bounded snapshot shape acquire replies (+ activated/dones).

@@ -409,3 +409,42 @@ def test_verify_no_snapshot_refused_with_state():
     lines = _feed(host, out, {"id": 25, "cmd": "verify"})
     assert lines[0] == {"id": 25, "reply": "verify", "activated": False, "dones": 0,
                         "ok": False, "reason": "no surrounding text"}
+
+
+# --- grab engagement (P1.M4.T4.S1) ----------------------------------------------
+
+def test_grab_sends_grab_keyboard_and_replies_ok():
+    host, wire, out = _make_host()
+    host.activated = True
+    host.im = 5
+    lines = _feed(host, out, {"id": 21, "cmd": "grab"}, {"id": 22, "cmd": "ping"})
+    assert lines[0] == {"id": 21, "reply": "grab", "ok": True}
+    assert host.grab == 11  # c.new() assigned the grab object id
+    assert wire.requests == [(5, "zwp_input_method_v2", "grab_keyboard", (11,))]
+    assert lines[1]["reply"] == "ping"  # host keeps serving
+
+
+def test_grab_while_unactivated_refused_without_wire_sends():
+    host, wire, out = _make_host()
+    lines = _feed(host, out, {"id": 23, "cmd": "grab"})
+    assert lines[0]["id"] == 23 and lines[0]["ok"] is False
+    assert lines[0]["reason"] == "not activated"
+    assert wire.requests == []
+
+
+def test_grabbed_keys_forwarded_then_leave_releases_grab():
+    host, wire, out = _make_host()
+    host.activated = True
+    host.im = 5
+    _feed(host, out, {"id": 24, "cmd": "grab"})
+    grab = host.grab
+    assert grab != 0
+    wire.script = [Event(12, "zwp_input_method_keyboard_grab_v2", "key", (1, 2, 30, 1))]
+    lines = _feed(host, out, {"id": 25, "cmd": "ping"})   # the drain forwards grabbed keys
+    evs = [d for d in lines if "ev" in d]
+    assert len(evs) == 1 and evs[0]["ev"] == "grab_key"
+    assert evs[0]["key"] == 30 and evs[0]["state"] == 1
+    lines = _feed(host, out, {"id": 26, "cmd": "leave"})
+    assert lines[0] == {"id": 26, "reply": "leave", "ok": True}
+    assert wire.requests[-1] == (grab, "zwp_input_method_keyboard_grab_v2", "release", ())
+    assert host.grab == 0

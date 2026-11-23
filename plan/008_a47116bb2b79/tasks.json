@@ -626,14 +626,14 @@
               "type": "Task",
               "id": "P1.M4.T4",
               "title": "Takeover revocation at the target",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Any ordinary physical key, caret move, selection change, click, focus change, tab/pane switch, or target death revokes the handle AT THE TARGET; queued ops re-check at mutation time.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T4.S1",
                   "title": "Takeover detection + revocation + mutation-time re-checks",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T3.S3"
