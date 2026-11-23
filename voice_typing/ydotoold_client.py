@@ -19,6 +19,11 @@ This is the message shape `ydotool key -d 6 14:1 14:0` writes per event — minu
 the process spawn, connect, and exit per batch. A dropped connection self-heals
 on the next call; ANY failure raises and the backend falls back to the paced
 CLI path.
+
+Pacing: each press is held ~6 ms before its release (`_CONTACT_GAP_S`, matching
+the CLI's per-event gap — apps need minimum contact time to register a
+keypress) and successive keys are separated by 12 ms (`_CHAR_GAP_S`, the
+text-path pace) — 18 ms per character.
 """
 from __future__ import annotations
 
@@ -32,7 +37,11 @@ logger = logging.getLogger(__name__)
 
 _MSG = struct.Struct("<6I")  # 24 bytes: 4 zero u32 + [code<<16|type] + value
 _BACKSPACE = 14  # evdev KEY_BACKSPACE keycode
-_CHAR_GAP_S = 0.012  # Rev 3d: 12 ms/char — same pace as the text path
+_CHAR_GAP_S = 0.012  # Rev 3d/3e: inter-char (release -> next press); 18 ms/char with the contact gap
+_CONTACT_GAP_S = 0.006  # P1.M1.T2.S2 (PRD §8 protocol finding): press->release contact time.
+#   The CLI (`ydotool key -d 6`) gaps EVERY event; zero-contact pairs can read as no keypress
+#   in contact-sensitive apps. Socket-path parity for the contact half; the inter-char gap
+#   above stays 12 ms (matches the text path) -> 18 ms/char total.
 
 
 class YdotoolClient:
@@ -78,9 +87,11 @@ class YdotoolClient:
             self._sock = None
 
     def press_backspace(self, n: int) -> None:
-        """n backspaces at the Rev 3d pace; raises on transport failure."""
+        """n backspaces at the 18 ms/char pace (6 ms contact + 12 ms inter-char); raises on
+        transport failure."""
         for i in range(n):
             if i:
-                time.sleep(_CHAR_GAP_S)
+                time.sleep(_CHAR_GAP_S)      # inter-char: release -> next press
             self._key(_BACKSPACE, 1)
+            time.sleep(_CONTACT_GAP_S)       # press->release contact (P1.M1.T2.S2; CLI -d 6 parity)
             self._key(_BACKSPACE, 0)

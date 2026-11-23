@@ -31,6 +31,7 @@ import pytest
 from voice_typing.ydotoold_client import (
     _BACKSPACE,
     _CHAR_GAP_S,
+    _CONTACT_GAP_S,
     _MSG,
     YdotoolClient,
 )
@@ -46,6 +47,7 @@ class FakeYdotoold:
     def __init__(self, socket_path: str) -> None:
         self.path = socket_path
         self.datagrams: list[tuple[bytes, object]] = []
+        self.times: list[float] = []  # arrival time.monotonic() per datagram, parallel to datagrams
         self._stop = threading.Event()
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self._sock.bind(self.path)  # file exists from here on — safe client fallback
@@ -62,6 +64,7 @@ class FakeYdotoold:
             except OSError:
                 break  # socket closed underneath us
             self.datagrams.append((data, src))
+            self.times.append(time.monotonic())
 
     def stop(self) -> None:
         """Close the server and unlink its socket file (kill the daemon)."""
@@ -265,7 +268,39 @@ def test_press_backspace_3_latency_under_100ms(client, fake_daemon):
     dt = time.perf_counter() - t0
     fake_daemon.wait_for(12)
     assert dt < 0.100, f"press_backspace(3) took {dt * 1000:.1f} ms (> 100 ms budget)"
-    # Pacing sanity (Rev 3d): 2 inter-char gaps of _CHAR_GAP_S each must elapse.
-    assert dt >= 2 * _CHAR_GAP_S - 0.002, (
+    # Pacing sanity (Rev 3d): the 2 inter-char gaps + the 3 contact gaps must elapse — the
+    # precise per-event spacing is pinned by test_press_backspace_contact_gap_spacing below.
+    assert dt >= 2 * _CHAR_GAP_S + 3 * _CONTACT_GAP_S - 0.002, (
         f"{dt * 1000:.1f} ms is implausibly fast — pacing regression?"
     )
+
+
+def test_press_backspace_contact_gap_spacing(client, fake_daemon):
+    """P1.M1.T2.S2 (PRD §8 protocol finding): the socket path MUST gap press→release contact
+    time (~6 ms, CLI `-d 6` parity — the CLI gaps EVERY event) and keep the 12 ms inter-char
+    gap — zero-contact pairs can read as no keypress in contact-sensitive apps. Arrival deltas
+    track send deltas (AF_UNIX datagrams are µs-scale); slack 0.002 = the file's style.
+    """
+    client.press_backspace(3)
+    fake_daemon.wait_for(12)
+    keys = [  # (arrival_time, value) for the KEY events only, in order
+        (t, decoded["value"])
+        for t, decoded in (
+            (tm, _decode_event(d))
+            for d, tm in zip(fake_daemon.payloads, fake_daemon.times)
+        )
+        if decoded["ev_type"] == 0x01  # EV_KEY (the SYN datagrams interleave between events)
+    ]
+    assert [v for _t, v in keys] == [1, 0, 1, 0, 1, 0], (
+        f"expected press/release × 3 in order; got {[v for _t, v in keys]!r}"
+    )
+    for i in range(0, len(keys), 2):
+        press_t, release_t = keys[i][0], keys[i + 1][0]
+        assert release_t - press_t >= _CONTACT_GAP_S - 0.002, (
+            f"key {i // 2}: press->release contact {(release_t - press_t) * 1000:.1f} ms < 6 ms"
+        )
+        if i + 2 < len(keys):
+            next_press_t = keys[i + 2][0]
+            assert next_press_t - release_t >= _CHAR_GAP_S - 0.002, (
+                f"key {i // 2 + 1}: inter-char {(next_press_t - release_t) * 1000:.1f} ms < 12 ms"
+            )

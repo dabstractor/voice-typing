@@ -137,7 +137,7 @@ class YdotoolBackend(TypingBackend):
             return
         if self._client is not None:
             try:
-                self._client.press_backspace(n)  # persistent socket, 12 ms/char (3e)
+                self._client.press_backspace(n)  # persistent socket, 18 ms/char (contact 6 + inter 12; P1.M1.T2.S2)
                 return
             except Exception:  # noqa: BLE001 — transport hiccup: fall back to CLI
                 logger.warning(
