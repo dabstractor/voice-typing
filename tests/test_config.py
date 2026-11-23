@@ -272,9 +272,10 @@ def test_duck_volume_pct_rejects_non_int():
         with pytest.raises(TypeError, match="duck_volume_pct"):
             VoiceTypingConfig.from_toml({"audio": {"duck_volume_pct": bad}})
 
-def test_audio_defaults_ship_off():
+def test_audio_defaults_mpris():
+    """P1.M2.T4 flipped the default: duck_mode ships "mpris" (ducker landed, PRD §4.2quinquies)."""
     a = VoiceTypingConfig().audio
-    assert a.duck_mode == "off" and a.duck_volume_pct == 15
+    assert a.duck_mode == "mpris" and a.duck_volume_pct == 15
 
 
 # ---------------------------------------------------------------------------

@@ -2671,9 +2671,13 @@ class VoiceTypingDaemon:
         can exit before the worker finishes resuming — media stuck despite the seam. 2 s fits
         the TimeoutStopSec=15 budget (5 s bounded teardown + 2 s flush + headroom). Swallow-all:
         ducking is an enhancement, never a gate — a flush failure is one WARNING and exit
-        proceeds. Runs on every shutdown() exit path that follows teardown coordination (the
+        proceeds. Called on every shutdown() exit path that follows teardown coordination (the
         wait-success path, the no-host path, and the normal teardown tail); the fallback-teardown
-        path falls through to the tail call. self._ducker is None for duck_mode="off" ⇒ no-op
+        path falls through past it. FLUSH-ONLY (P1.M2.T4 correction): it NEVER runs the teardown
+        itself — every caller has already run (or deliberately deferred) _bounded_shutdown() +
+        _teardown_done.set(); a duplicated teardown tail here re-ran teardown on EVERY exit path
+        once a ducker existed (dormant while duck_mode="off" early-returned; the P1.M2.T4 default
+        flip to "mpris" activated it). self._ducker is None for duck_mode="off" ⇒ no-op
         (byte-identical behavior to pre-D1).
         """
         if self._ducker is None:
@@ -2682,16 +2686,13 @@ class VoiceTypingDaemon:
             self._ducker.flush(2.0)
         except Exception:  # pylint: disable=broad-except — teardown is best-effort
             logger.warning("ducking: flush at quit failed (ignored)")
-        try:
-            self._bounded_shutdown()
-        except Exception:
-            # Defensive belt-and-suspenders: _bounded_shutdown is already best-effort, but
-            # shutdown() itself must NEVER re-raise (a teardown failure must not mask the original
-            # shutdown reason).
-            logger.exception("bounded teardown failed (best-effort; ignored)")
-        finally:
-            # P1.M1.T2.S1: signal any waiter (covers the called-first path + the fallback path).
-            self._teardown_done.set()
+        # P1.M2.T4 correction: this seam is FLUSH-ONLY. A duplicated
+        # _bounded_shutdown()/_teardown_done.set() tail used to live here and re-ran the teardown
+        # on every shutdown() exit path once a ducker existed — dormant while duck_mode="off"
+        # early-returned; the P1.M2.T4 default flip to "mpris" activated it (3× shutdown() →
+        # rec.shutdowns == 4, breaking every single-teardown contract). Every caller of this
+        # method has ALREADY run (or deliberately defers to the fallback path) the teardown tail,
+        # so the only job left here is the bounded flush above.
 
 
 # --- ControlServer (P1.M4.T2.S1; PRD §4.2(3), §4.8) -----------------------------------------

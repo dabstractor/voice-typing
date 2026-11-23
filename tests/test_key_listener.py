@@ -491,8 +491,15 @@ def test_no_warning_when_keyboards_watched(monkeypatch, caplog):
 
 def test_no_warning_before_listener_started(caplog):
     """Pure-construction daemon (tests never call run()): _arm() must NOT warn and must NOT
-    start the listener — hermeticity is the whole point of the run()-time start."""
-    d, _fb = _wire_daemon()
+    start the listener — hermeticity is the whole point of the run()-time start.
+
+    Explicit duck_mode="off": P1.M2.T4 flipped the default to "mpris", so a default-cfg daemon
+    now builds a ducker whose engage dispatch (busctl absent in unit tests) logs its own
+    failure-discipline WARNING — noise unrelated to THIS test's listener-hermeticity assertion.
+    """
+    cfg = VoiceTypingConfig()
+    cfg.audio.duck_mode = "off"
+    d, _fb = _wire_daemon(cfg)
     with caplog.at_level(logging.WARNING, logger="voice_typing.daemon"):
         d._arm()
     assert d._key_listener.started is False

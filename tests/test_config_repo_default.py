@@ -46,7 +46,7 @@ def test_repo_config_toml_has_no_extra_keys():
         },
         "output": {"backend", "append_space", "streaming"},  # streaming: PRD §4.2quater
         "cancel": {"on_backspace", "devices", "keypress_action"},  # §4.2quater + 2026-10 halt rule
-        "audio": {"duck_mode", "duck_volume_pct"},   # §4.2quinquies media ducking (D1; ships "off")
+        "audio": {"duck_mode", "duck_volume_pct"},   # §4.2quinquies media ducking (D1)
         "feedback": {"state_file", "hypr_notify", "notify_ms", "notify_on_final"},
         "filter": {"min_chars", "blocklist"},
         "log": {"level"},

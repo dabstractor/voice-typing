@@ -320,8 +320,8 @@ class _DuckingFakeFeedback(_DaemonFakeFeedback):
 def _make_ducking_daemon(cfg=None, *, duck: bool = True):
     """Copy of tests/test_daemon.py::_make_daemon passing ducker=fake through the new seam.
 
-    duck=False builds the daemon with NO ducker injected (the off-mode default path:
-    duck_mode="off" ⇒ _ducker is None ⇒ byte-identical behavior).
+    duck=False builds the daemon with NO ducker injected (combine with an explicit
+    duck_mode="off" cfg for the off path: _ducker is None ⇒ byte-identical behavior).
     """
     cfg = cfg or VoiceTypingConfig()
     fb = _DuckingFakeFeedback()
@@ -440,8 +440,11 @@ def test_ducking_no_release_on_cancel():
 
 
 def test_ducking_off_mode_no_ducker_zero_calls():
-    """duck_mode="off" (the shipped default) ⇒ _ducker is None ⇒ byte-identical behavior."""
-    d, fb, _rec, _be, _fake = _make_ducking_daemon(cfg=VoiceTypingConfig(), duck=False)
+    """duck_mode="off" ⇒ _ducker is None ⇒ byte-identical behavior (P1.M2.T4 flipped the DEFAULT
+    to "mpris", so the off path is constructed EXPLICITLY here — never via the default)."""
+    off_cfg = VoiceTypingConfig()
+    off_cfg.audio.duck_mode = "off"
+    d, fb, _rec, _be, _fake = _make_ducking_daemon(cfg=off_cfg, duck=False)
     assert d._ducker is None  # the ctor factory never built one
     d.start()  # every seam no-ops; set_ducked is never called
     d.stop()
@@ -454,7 +457,8 @@ def test_ducking_default_factory_builds_by_mode():
     from voice_typing.ducking_mpris import MprisBusctlBackend
     from voice_typing.ducking_volume import WpctlVolumeBackend
 
-    off = VoiceTypingConfig()  # duck_mode ships "off"
+    off = VoiceTypingConfig()  # explicit off mode (P1.M2.T4: the DEFAULT is now "mpris")
+    off.audio.duck_mode = "off"
     d = daemon.VoiceTypingDaemon(
         off, _DuckingFakeFeedback(), recorder=_StubRecorder(),
         backend=_CtlFakeBackend(), mic_prober=_ok_probe,
@@ -681,8 +685,14 @@ def test_shutdown_flushes_ducker():
 
 
 def test_shutdown_flush_noop_without_ducker():
-    """duck_mode=off ⇒ _ducker None ⇒ shutdown() runs byte-identically (no flush attempt)."""
-    d, _fb, _rec, _be, _fake = _make_ducking_daemon(duck=False)
+    """duck_mode=off ⇒ _ducker None ⇒ shutdown() runs byte-identically (no flush attempt).
+
+    Explicit off cfg: P1.M2.T4 flipped the default to "mpris", and this test is about the OFF
+    path specifically (no ducker ⇒ no flush), not about whatever the default is.
+    """
+    off_cfg = VoiceTypingConfig()
+    off_cfg.audio.duck_mode = "off"
+    d, _fb, _rec, _be, _fake = _make_ducking_daemon(cfg=off_cfg, duck=False)
     assert d._ducker is None
     d.shutdown()  # must not raise / must not touch the (absent) ducker
     assert d._ducker is None

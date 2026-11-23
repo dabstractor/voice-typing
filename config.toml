@@ -57,7 +57,7 @@ devices     = []        # keyboard device node(s) to watch for the physical-Back
 
 
 [audio]   # media ducking while listening (PRD §4.2quinquies): get media out of the way for exactly as long as the mic is hot
-duck_mode        = "off"   # "mpris" = pause MPRIS players at arm, resume at stop (only what WE paused, only if still paused — user sovereignty); "volume" = duck the default sink's volume at arm, restore at stop (only if the user didn't touch volume mid-dictation); "off" = do nothing. Ships "off" until the feature lands; the default becomes "mpris" then.
+duck_mode        = "mpris"  # "mpris" = pause MPRIS players at arm, resume at stop (only what WE paused, only if still paused — user sovereignty); "volume" = duck the default sink's volume at arm, restore at stop (only if the user didn't touch volume mid-dictation); "off" = do nothing. Default is "mpris" (P1.M2.T4 — landed): arming while music plays pauses it within ~1 s and your stop resumes exactly what the daemon paused; set "off" to restore pre-D1 behavior byte-for-byte.
 duck_volume_pct  = 15      # target sink volume % for the "volume" tier (wpctl). Restore is compare-before-restore — a manual mid-dictation volume change always wins.
 
 

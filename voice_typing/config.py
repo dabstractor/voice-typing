@@ -218,12 +218,13 @@ class CancelConfig:
 class AudioConfig:
     """[audio] — media ducking while listening (PRD §4.2quinquies).
 
-    Ships duck_mode="off": the [audio] SURFACE lands before the AudioDucker (later D1
-    subtasks); the default flips to "mpris" the round the ducker lands (P1.M2.T4).
-    "off" is byte-identical to pre-D1 behavior (no audio subprocess is ever spawned).
+    Defaults to duck_mode="mpris" (P1.M2.T4 — the ducker landed; this IS that round): MPRIS
+    players pause at arm, and at disarm we resume ONLY what WE paused (still paused) — user
+    sovereignty. "off" is byte-identical to pre-D1 behavior (no audio subprocess is ever
+    spawned).
     """
 
-    duck_mode: str = "off"        # "mpris" (pause players at arm) | "volume" (duck sink) | "off"
+    duck_mode: str = "mpris"      # "mpris" (pause players at arm) | "volume" (duck sink) | "off"
     duck_volume_pct: int = 15     # target sink volume % for the "volume" tier (wpctl)
 
     def __post_init__(self) -> None:
