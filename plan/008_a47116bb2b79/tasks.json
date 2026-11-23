@@ -693,7 +693,7 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Cooperating-editor pi-prompt adapter + remaining G3 rows + conditional clipboard fallback",
-          "status": "Planned",
+          "status": "Ready",
           "description": "The terminal chat prompt is the FIRST milestone target (R.3): a pi extension CustomEditor + control socket as a second real TargetAdapter, proven in isolated Ghostty; then graphical-editor and browser-field rows; clipboard insert-fallback only if the refreshed matrix still needs it.",
           "tasks": [
             {
@@ -740,14 +740,14 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "G3 rows: pi prompt in isolated Ghostty (first), graphical editor, browser field",
-              "status": "Planned",
+              "status": "Ready",
               "description": "R.3: prove pi's real input editor inside isolated Ghostty with scripted partials/finals, asserting exact editor text + caret + the VISIBLE prompt; then the graphical-editor and browser-field rows G6 requires.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "pi-prompt-in-isolated-Ghostty row",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S2",
@@ -764,7 +764,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T2.S2",
                   "title": "Graphical editor + browser text field rows",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T5.S1",
@@ -784,14 +784,14 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "Clipboard insert-fallback adapter (conditional on the refreshed matrix)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "R.6: clipboard ONLY as insert fallback for ghostty-class terminals, ONLY if the re-run matrix still shows ghostty IM-dead AND a row needs it; strict preservation contract or the adapter is unavailable.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "Conditional clipboard insert-fallback + G4 gate (or recorded skip)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T5.S2"
