@@ -544,13 +544,22 @@ def test_sustained_backspace_hold_fires_one_cancel_and_never_restamps():
     AUDIT NOTE (D3.2 residual window — the written finding for S2 / P1.M1.T3.S2):
     the daemon sees ONLY the press (key_listener.py:81 drops value!=1), but the OS autorepeat
     keeps deleting REAL on-screen characters. Repeats landing while the daemon's paced
-    press_backspace(n) burst runs (~12 ms/char on the D3.1 socket path; ≤150 ms for ~80 chars)
-    interleave with it: total deleted = n+1+R vs n+1 believed → belief-desync of R chars.
-    BOUND: R ≈ repeat_rate × burst_duration — at a typical ~30 cps autorepeat, R ≤ ~4-5 chars
-    worst case during the burst; repeats after the burst delete committed/user text with the
-    accounting already zeroed (plain user edits — uncompensable by design). Mitigation vs
-    acceptance is S2's decision; this test pins the CURRENT contract so any change (e.g.
-    observing value==2 to compensate holds) is a deliberate, visible red.
+    press_backspace(n) burst runs interleave with it: total deleted = n+1+R vs n+1 believed
+    → belief-desync of R chars.
+    BOUND (corrected P1.M1.T3.S2; the earlier ≤150-ms-for-~80-chars / R≈4-5 figure was
+    arithmetically stale): R ≤ repeat_rate × (n × per_char_pace + spawn_gap) — pace 12 ms/char
+    (wtype '-d 12'; ydotool CLI '-d 6' × 2 events) or 18 ms/char (ydotoold socket: contact 6 +
+    inter 12), spawn floor 25 ms once, ~30 cps OS autorepeat. Typical tails (n=10-40, VAD
+    commits at 0.6/0.8 s silences) → R ≈ 4-22 chars; a pathological n=80 tail → R ≈ 30-45.
+    Every factor is finite and regression-pinned (test_typing_backends.py press_backspace
+    argv pins; streaming.py clamps every rewind to the engine's own tail). Repeats after the
+    burst delete committed/user text with the accounting already zeroed (plain user edits —
+    uncompensable by design).
+    S2 CLOSURE (P1.M1.T3.S2): the window is BOUNDED — accepted, NO mitigation. Post-burst
+    repeats are provably user edits (idempotence; the engine owns nothing once the tail
+    resets), and a compensation that observed holds would re-fire cancels per repeat — the
+    exact regression this test pins as a deliberate red. D3.2 closed: this test + the
+    recorded evidence (plan/008_a47116bb2b79/P1M1T3S2/research/d32_closure_decision.md).
     """
     d, _fb = _wire_daemon()
     be = d._backend
