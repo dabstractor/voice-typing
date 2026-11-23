@@ -236,7 +236,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "AudioDucker core + backend protocol + bookkeeping",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -251,7 +251,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S2",
                   "title": "MPRIS tier: tracked pause set via busctl",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S1"
@@ -266,7 +266,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S3",
                   "title": "Volume tier: wpctl snapshot + conditional restore",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S1"
