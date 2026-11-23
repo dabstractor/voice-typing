@@ -400,14 +400,14 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Implement the bulk controller (ordering, failure, G2 gate)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "The controller between recognition events and a DeliveryTarget: bounded queue (32) with ordered barriers, newest-partial-wins, one writer/one op in flight, 250 ms deadline, disarm-on-failure with no retries, and the full G2 fake-target trace matrix.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T2.S1",
                   "title": "Ordering core: bounded queue, barriers, one writer",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -422,7 +422,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Failure handling: 250 ms deadline, disarm-on-unknown, no retries",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S1"
@@ -437,7 +437,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S3",
                   "title": "G2 gate: full fake-target trace matrix green + evidence record",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S2"
