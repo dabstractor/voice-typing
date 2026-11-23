@@ -14,7 +14,7 @@ import dataclasses
 
 import pytest
 
-from voice_typing.bulk_delivery import TargetUnits
+from voice_typing.bulk_delivery import ShowResult, TargetUnits
 from voice_typing.ime.target import FieldBinding, ImeTarget
 
 
@@ -245,3 +245,175 @@ def test_field_binding_is_frozen():
     b = FieldBinding(im_handle="im", cursor_bytes=1, anchor_bytes=1, pre_caret="x", revision=0)
     with pytest.raises(dataclasses.FrozenInstanceError):
         b.cursor_bytes = 2  # the handle must be immutable once acquired
+
+
+# ------------------------------------------------------------------ show ---
+# P1.M4.T3.S1 — the INSERT path: ordering zero-diff → extension → recheck →
+# cap → ONE atomic request; mapping applied/unchanged/refused/unknown; state
+# advances ONLY on APPLIED; cumulative UTF-8 inserted_bytes (astral = 4).
+
+_SHOW_FIELDS = ("session", "utterance", "seq", "expected_revision", "text")
+
+
+def _showreply(result="applied", t_ms=31.0, **over):
+    r = {"id": 3, "reply": "show", "result": result, "t_ms": t_ms}
+    r.update(over)
+    return r
+
+
+def test_show_not_acquired_refuses_without_any_request():
+    proc = _FakeProc([])
+    target = ImeTarget(proc)
+    assert target.show(1, "u1", 1, 2, "hello") is ShowResult.REFUSED
+    assert target.last_reason == "not acquired"
+    assert proc.calls == []  # nothing went near the wire
+
+
+def test_show_pure_extension_sends_one_atomic_insert():
+    target, proc, _ = _bound(_verify("héllo Hel", 7, 7), _showreply())
+    r = target.show(1, "u1", 1, 3, "Hel")
+    assert r is ShowResult.APPLIED
+    assert len(proc.calls) == 3  # acquire + verify + exactly ONE show
+    cmd, timeout, fields = proc.calls[-1]
+    assert (cmd, timeout) == ("show", 0.25)  # the 250 ms deadline budget
+    for f in _SHOW_FIELDS:
+        assert f in fields  # protocol.validate_request demands all five
+    assert fields["text"] == "Hel" and fields["before"] == 0  # pure insert
+    assert (fields["session"], fields["utterance"], fields["seq"],
+            fields["expected_revision"]) == (1, "u1", 1, 3)
+    assert target._last_applied_span == "Hel" and target._inserted_bytes == 3
+    assert target.last_reason == ""
+
+
+def test_show_zero_diff_after_applied_emits_zero_requests():
+    target, proc, _ = _bound(_verify("héllo Hel", 7, 7), _showreply())
+    assert target.show(1, "u1", 1, 3, "Hel") is ShowResult.APPLIED
+    n = len(proc.calls)
+    assert target.show(1, "u1", 2, 4, "Hel") is ShowResult.UNCHANGED
+    assert len(proc.calls) == n  # zero-diff ⇒ ZERO events (R.1)
+
+
+def test_show_not_acquired_guard_precedes_zero_diff():
+    # The binding guard is FIRST: even a render-empty span on a never-acquired
+    # target refuses — zero-diff is not consulted, no request is sent.
+    proc = _FakeProc([])
+    target = ImeTarget(proc)
+    assert target.show(1, "u1", 1, 1, "") is ShowResult.REFUSED
+    assert target.last_reason == "not acquired"
+    assert proc.calls == []
+
+
+def test_show_render_equal_spacing_only_is_unchanged():
+    # verify carries the PRE-mutation caret (7 = binding point, nothing sent yet).
+    target, proc, _ = _bound(_verify("héllo Hello world", 7, 7), _showreply())
+    assert target.show(1, "u1", 1, 3, "Hello world") is ShowResult.APPLIED
+    n = len(proc.calls)
+    assert target.show(1, "u1", 2, 4, "Hello  world ") is ShowResult.UNCHANGED
+    assert len(proc.calls) == n  # rendered_equal consumed, not reimplemented
+
+
+def test_show_second_extension_delta_new_part_recheck_cumulative_bytes():
+    target, proc, _ = _bound(
+        _verify("héllo Hel", 7, 7), _showreply(),
+        _verify("héllo Hello w", 10, 10), _showreply(t_ms=33.0),
+    )
+    assert target.show(1, "u1", 1, 3, "Hel") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "Hello w") is ShowResult.APPLIED
+    fields = proc.calls[-1][2]
+    assert fields["text"] == "lo w" and fields["before"] == 0  # delta only
+    # The 2nd recheck passed only because expected caret == 7 + 3 (cumulative
+    # bytes of the FIRST delta): the scripted cursor 10 refuses otherwise.
+    assert target._inserted_bytes == 7 and target._last_applied_span == "Hello w"
+
+
+def test_show_astral_delta_counts_four_utf8_bytes():
+    # "𝄞" is ONE char but FOUR UTF-8 bytes: applying just it advances
+    # _inserted_bytes by 4 — the byte (not char) accounting, pinned directly.
+    target, proc, _ = _bound(_verify("héllo ", 7, 7), _showreply())
+    assert target.show(1, "u1", 1, 3, "𝄞") is ShowResult.APPLIED
+    assert target._inserted_bytes == 4
+
+
+def test_show_reply_unknown_maps_unknown_state_not_advanced():
+    target, proc, _ = _bound(_verify("héllo Hel", 7, 7),
+                             _showreply(result="unknown", t_ms=250.0))
+    assert target.show(1, "u1", 1, 3, "Hel") is ShowResult.UNKNOWN
+    assert target.last_reason == "host result 'unknown'"
+    assert target._last_applied_span == "" and target._inserted_bytes == 0
+
+
+def test_show_reply_refused_maps_refused():
+    target, proc, _ = _bound(_verify("héllo Hel", 7, 7), _showreply(result="refused"))
+    assert target.show(1, "u1", 1, 3, "Hel") is ShowResult.REFUSED
+    assert target.last_reason == "host refused"
+    assert target._last_applied_span == ""  # state NEVER advances on refused
+
+
+def test_show_no_reply_maps_unknown():
+    target, proc, _ = _bound(_verify("héllo Hel", 7, 7), None)
+    assert target.show(1, "u1", 1, 3, "Hel") is ShowResult.UNKNOWN
+    assert target.last_reason == "ime no reply"
+
+
+def test_show_reply_missing_result_field_maps_unknown():
+    target, proc, _ = _bound(_verify("héllo Hel", 7, 7),
+                             {"id": 3, "reply": "show", "t_ms": 1.0})
+    assert target.show(1, "u1", 1, 3, "Hel") is ShowResult.UNKNOWN
+    assert target.last_reason == "host result None"  # odd reply ⇒ defensive UNKNOWN, no crash
+
+
+def test_show_recheck_caret_moved_refuses_before_any_show_request():
+    target, proc, _ = _bound(_verify("héllo X", 8, 8))  # caret moved, inserted 0
+    r = target.show(1, "u1", 1, 3, "Hel")
+    assert r is ShowResult.REFUSED
+    assert target.last_reason == "recheck: caret moved"
+    assert [c[0] for c in proc.calls] == ["acquire", "verify"]  # NO show on the wire
+
+
+def test_show_recheck_selection_refuses():
+    target, proc, _ = _bound(_verify("héllo Hel", 9, 7))  # fresh user selection
+    r = target.show(1, "u1", 1, 3, "Hel")
+    assert r is ShowResult.REFUSED
+    assert target.last_reason == "recheck: user selection present"
+    assert [c[0] for c in proc.calls] == ["acquire", "verify"]
+
+
+def test_show_delta_over_commit_cap_refused_after_recheck_no_request():
+    span = "x" * 4001  # 4001 ASCII bytes — one over the per-commit cap
+    target, proc, _ = _bound(_verify("héllo ", 7, 7))  # recheck passes FIRST (ordering)
+    r = target.show(1, "u1", 1, 3, span)
+    assert r is ShowResult.REFUSED
+    assert target.last_reason == "commit cap 4000B exceeded (4001B)"
+    assert [c[0] for c in proc.calls] == ["acquire", "verify"]  # never chunked, never sent
+
+
+def test_show_delta_exactly_at_cap_is_one_commit():
+    span = "y" * 4000  # == cap: allowed (the check is >, not >=)
+    target, proc, _ = _bound(_verify("héllo ", 7, 7), _showreply())
+    assert target.show(1, "u1", 1, 3, span) is ShowResult.APPLIED
+    assert target._inserted_bytes == 4000
+
+
+def test_show_non_extension_span_refused_correction_not_sent():
+    target, proc, _ = _bound(_verify("héllo ", 7, 7), _showreply())
+    assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    r = target.show(1, "u1", 2, 4, "xello")  # a correction, not an extension
+    assert r is ShowResult.REFUSED
+    assert target.last_reason == "correction not implemented (P1.M4.T3.S2)"
+    assert [c[0] for c in proc.calls] == ["acquire", "verify", "show"]  # refusal BEFORE recheck
+
+
+def test_show_state_not_advanced_on_refusal_next_delta_vs_last_applied():
+    target, proc, _ = _bound(
+        _verify("héllo ", 7, 7), _showreply(),               # "hello" applied (5 B)
+        _verify("héllo hello world", 18, 18),                 # caret ran ahead → refused
+        _verify("héllo hello world", 12, 12), _showreply(),   # retry with settled caret
+    )
+    assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "hello world") is ShowResult.REFUSED
+    # Retry of the IDENTICAL span: delta computed vs the last APPLIED span —
+    # the wire carries only " world" (NOT " world world"); the recheck's
+    # expected caret 7+5==12 proves inserted_bytes did NOT double-count.
+    assert target.show(1, "u1", 3, 5, "hello world") is ShowResult.APPLIED
+    assert proc.calls[-1][2]["text"] == " world"
+    assert target._inserted_bytes == 11 and target._last_applied_span == "hello world"

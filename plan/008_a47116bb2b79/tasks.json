@@ -572,14 +572,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "show()/finalize: atomic insert, atomic correction, finalize semantics",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Insert = commit_string+commit; correction = delete_surrounding_text(before,0)+commit_string+commit in ONE atomic commit; >4000-byte chunk-or-refuse; finalize = zero-diff ⇒ zero edits, differing ⇒ one replacement.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "Insert path (commit_string + commit)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T2.S1"
@@ -594,7 +594,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T3.S2",
                   "title": "Correction path (one atomic range replacement)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T3.S1"
@@ -609,7 +609,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T3.S3",
                   "title": "finalize/leave/cancel semantics",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T3.S2"

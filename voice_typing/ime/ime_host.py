@@ -35,7 +35,9 @@ from .wlwire import Client, WlError
 IFACE = "zwp_input_method_v2"
 MANAGER_IFACE = "zwp_input_method_manager_v2"
 GRAB_IFACE = "zwp_input_method_keyboard_grab_v2"
-SHOW_CONFIRM_WAIT = 0.5  # s — ONE bounded wait for the compositor `done`; no retry, ever
+SHOW_CONFIRM_WAIT = 0.22  # s — ONE bounded wait for the compositor `done`; no retry, ever.
+                          # ≤0.22 so the receiver's verdict precedes the daemon's 0.25 s
+                          # give-up on the show request (P1.M4.T3.S1 deadline budget)
 _SNAPSHOT_HEAD_BYTES = 64 * 1024   # generous vs the ~4 KiB practical cap; refuse rather than mis-slice
 _SURROUND_WAIT_S = 1.0             # bounded poll for a first surrounding_text after activation
 

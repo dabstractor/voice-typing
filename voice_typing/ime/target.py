@@ -32,16 +32,28 @@ CONSUMES: a proc duck with request(cmd, timeout=..., **fields) -> dict | None
 CONSUMED BY: P1.M4.T3.S1 show() (recheck + to_bytes_span + binding_caret_after
 before every mutation); P1.M4.T4 takeover (the mutation-time half of R.5);
 P1.M6.T2.S1 constructs ImeTarget(ImeProcess(...)) in the daemon.
-FENCES: no show/finalize/cancel/leave semantics (T3); no takeover policy (T4);
-no manager/daemon/feedback import.
+FENCES: show() INSERT path only (P1.M4.T3.S1): corrections (before>0) are
+T3.S2 — REFUSED here, never approximated with N inserts; finalize/leave/cancel
+are T3.S3; no takeover policy (T4); no manager/daemon/feedback import.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
-from voice_typing.bulk_delivery import AcquireResult, TargetUnits, map_span
+from voice_typing.bulk_delivery import (
+    AcquireResult,
+    ShowResult,
+    TargetUnits,
+    map_span,
+    rendered_equal,
+)
+
+logger = logging.getLogger(__name__)
 
 _ACQUIRE_TIMEOUT_S = 2.5  # > host _SURROUND_WAIT_S (1.0) + margin; S2's default is 1.0 — PASS EXPLICITLY
+_SHOW_TIMEOUT_S = 0.25    # fits the controller's 250 ms failure deadline (M3.T2.S2)
+_COMMIT_CAP_BYTES = 4000  # ≤4000 B/commit — engineering rule (item contract); larger ⇒ REFUSED, never chunked
 
 
 @dataclass(frozen=True)
@@ -72,6 +84,10 @@ class ImeTarget:
 
     def __init__(self, proc):  # duck: ImeProcess (S2) or a test fake
         self._proc = proc
+        self._binding: "FieldBinding | None" = None
+        self._last_applied_span = ""  # the last APPLIED complete rendered span ("" until applied)
+        self._inserted_bytes = 0      # cumulative UTF-8 bytes WE committed this acquisition
+        self.last_reason = ""         # machine-readable refusal/unknown taxonomy (R.5 logs)
 
     # --- acquire (R.3): bind the FIELD, verify via target-CONFIRMED snapshot ---
     def acquire(self) -> AcquireResult:
@@ -95,6 +111,9 @@ class ImeTarget:
                                anchor_bytes=anchor,
                                pre_caret=raw[:cursor].decode("utf-8", errors="ignore"),
                                revision=int(r.get("revision", 0)))
+        self._binding = binding
+        self._last_applied_span = ""  # fresh acquisition: nothing applied yet
+        self._inserted_bytes = 0
         return AcquireResult(ok=True, handle=binding, revision=binding.revision)
 
     # --- mutation-time re-check (R.5): ONE fresh verify pull; NEVER mutates ---
@@ -121,6 +140,62 @@ class ImeTarget:
         if not text.encode("utf-8")[:expected].startswith(binding.pre_caret.encode("utf-8")):
             return False, "adjacent text changed", rev  # user text BEFORE our point was touched
         return True, "", rev  # post-caret changes do NOT revoke (typing itself is T4's signal)
+
+    # --- show (R.3/R.5, P1.M4.T3.S1): the INSERT path ------------------------
+    def show(self, session: int, utterance: str, seq: int,
+             expected_revision: int, span: str) -> ShowResult:
+        """Insert path (R.3/R.5; P1.M4.T3.S1): extend our confirmed span at the caret.
+
+        ONE atomic commit per change: commit_string(delta) + commit. Zero-diff ⇒ zero events.
+        Corrections (non-extension spans) are REFUSED here — the correction path is P1.M4.T3.S2.
+        State advances ONLY on applied; unknown is never retried by the caller (controller).
+        """
+        binding = self._binding
+        if binding is None:
+            self.last_reason = "not acquired"
+            return ShowResult.REFUSED
+        # (1) zero-diff guard FIRST — render-equal ⇒ ZERO events (R.1 event-count law)
+        if rendered_equal(self._last_applied_span, span):
+            return ShowResult.UNCHANGED
+        # (2) insert condition: pure extension of the last APPLIED span, on ORIGINAL strings
+        if not span.startswith(self._last_applied_span):
+            self.last_reason = "correction not implemented (P1.M4.T3.S2)"
+            return ShowResult.REFUSED
+        delta = span[len(self._last_applied_span):]
+        # (3) mutation-time re-check (R.5): fresh verify — activation/caret/selection/adjacency
+        ok, reason, _rev = self.recheck(binding, inserted_bytes=self._inserted_bytes)
+        if not ok:
+            self.last_reason = f"recheck: {reason}"
+            return ShowResult.REFUSED                 # NO request sent
+        # (4) the per-commit byte cap (engineering rule; never chunk inside show())
+        delta_bytes = len(delta.encode("utf-8"))
+        if delta_bytes > _COMMIT_CAP_BYTES:
+            self.last_reason = f"commit cap {_COMMIT_CAP_BYTES}B exceeded ({delta_bytes}B)"
+            return ShowResult.REFUSED                 # NO request sent
+        # (5) ONE atomic insert: commit_string(delta) + commit   (before=0 → no delete)
+        r = self._proc.request("show", timeout=_SHOW_TIMEOUT_S, session=session,
+                               utterance=utterance, seq=seq, expected_revision=expected_revision,
+                               text=delta, before=0)
+        # (6) honest mapping — bytes-sent ≠ applied; None/odd ⇒ unknown; never retry (R.5)
+        if r is None:
+            self.last_reason = "ime no reply"
+            logger.warning("ime show: no reply (session=%s seq=%s span_chars=%d)",
+                           session, seq, len(span))
+            return ShowResult.UNKNOWN
+        result = r.get("result")
+        if result == "applied":
+            self._last_applied_span = span            # advance ONLY on applied (Critical #1)
+            self._inserted_bytes += delta_bytes
+            self.last_reason = ""
+            logger.info("ime show applied: session=%s seq=%s delta_bytes=%d t_ms=%s total=%d",
+                        session, seq, delta_bytes, r.get("t_ms"), self._inserted_bytes)
+            return ShowResult.APPLIED
+        if result == "refused":
+            self.last_reason = "host refused"
+            return ShowResult.REFUSED
+        self.last_reason = f"host result {result!r}"
+        logger.warning("ime show unknown: session=%s seq=%s result=%r", session, seq, result)
+        return ShowResult.UNKNOWN
 
     # --- units plumbing for T3 (never hand-roll offsets) ---------------------
     @staticmethod
