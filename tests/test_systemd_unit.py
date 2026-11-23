@@ -375,3 +375,17 @@ def test_install_sh_cleans_stale_default_target_symlink():
         "install.sh must remove a stale default.target.wants symlink (VT-004 WantedBy migration)."
     )
     assert "rm -f" in text, "install.sh must rm the stale symlink (VT-004)."
+
+
+def test_execstoppost_ducking_crash_heal():
+    """ExecStopPost runs the ducking crash-heal (best-effort media restore; PRD §4.2quinquies).
+
+    systemd runs ExecStopPost on EVERY stop — clean exit, failure, AND SIGKILL/timeout — which
+    makes it the crash net for ducked media: the heal module is flag-gated, so it no-ops
+    (exit 0, zero backend calls) on every clean stop where the daemon already released +
+    flushed itself. The exact-line assert doubles as the __REPO__-placeholder pin (install.sh
+    substitutes it file-wide via the `sed s#__REPO__#$REPO#g` at install time).
+    """
+    lines = [ln for ln in _unit_lines() if ln.startswith("ExecStopPost=")]
+    assert len(lines) == 1, lines
+    assert lines[0] == "ExecStopPost=__REPO__/.venv/bin/python -m voice_typing.ducking_heal", lines[0]

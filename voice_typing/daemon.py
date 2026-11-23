@@ -74,6 +74,12 @@ duck_mode="off" (the shipped default; P1.M2.T4 flips it) ⇒ self._ducker is Non
 no-ops: behavior byte-identical to pre-D1. Ducking is an enhancement, NEVER a gate: a dispatch
 failure is one WARNING and the arm proceeds. Feedback.set_ducked() mirrors the DESIRED state at
 each seam ("ducked" in state.json — the crash-safety signal T3.S2's boot self-heal reads).
+CRASH SAFETY (PRD §4.2quinquies, P1.M2.T3.S2): the boot reads the persisted `ducked` flag BEFORE
+any Feedback write (the boot set_models_loaded write would clobber it to the seeded False) and,
+when set, spawns the one-shot vt-duck-heal thread (ducking_heal.heal, force=True). shutdown()
+ends with a bounded ducker.flush(2.0) so S1's async release lands before process exit, and the
+systemd unit's ExecStopPost runs `python -m voice_typing.ducking_heal` on every stop (flag-gated:
+no-ops unless a crash left the flag set).
 
 PURE IMPORTS at module top (inspect, logging, threading, time, typing, voice_typing.config,
 voice_typing.cuda_check, voice_typing.textproc, voice_typing.typing_backends — all cheap stdlib +
@@ -122,6 +128,7 @@ from voice_typing.audio_ducking import AudioDucker
 from voice_typing.ducking_async import AsyncDucker
 from voice_typing.ducking_mpris import MprisBusctlBackend
 from voice_typing.ducking_volume import WpctlVolumeBackend
+import voice_typing.ducking_heal as ducking_heal  # crash-safety heal (P1.M2.T3.S2; stdlib-light)
 
 if TYPE_CHECKING:
     # Type hint only — never executed at runtime, so importing daemon.py is safe even while
@@ -666,6 +673,13 @@ class VoiceTypingDaemon:
         ducker: Any = None,
     ) -> None:
         self._cfg = cfg
+        # P1.M2.T3.S2 crash safety (PRD §4.2quinquies): read the persisted `ducked` flag FIRST —
+        # BEFORE any Feedback write this ctor can trigger (set_models_loaded below resets `ducked`
+        # to the seeded False). Feedback.__init__ itself never writes, so a crashed session's
+        # flag is still on disk right here; the boot write that follows self-clears it, and the
+        # heal thread spawned at the end of __init__ restores the orphaned media. Never raises
+        # (read_ducked_flag is swallow-all): boot must not depend on a readable state file.
+        self._startup_ducked = ducking_heal.read_ducked_flag(cfg)
         self._feedback = feedback
         # VT-001: seed the status device cache with the UN-PROBED config values so the first
         # `voicectl status` (and install.sh's readiness poll) NEVER calls into cuda_check -> the
@@ -875,6 +889,22 @@ class VoiceTypingDaemon:
         self._ducker: Any = ducker
         if self._ducker is None and cfg.audio.duck_mode != "off":
             self._ducker = _build_default_ducker(cfg)
+        # P1.M2.T3.S2 crash safety (PRD §4.2quinquies): a `ducked` flag that survived a crash
+        # means media may be stuck paused/ducked. Best-effort heal on a ONE-SHOT daemon thread —
+        # never blocks boot, never runs under _lock, never gates anything. force=True because
+        # _startup_ducked was read pre-clobber above; re-reading inside the thread could race
+        # the boot set_models_loaded write (which resets the flag) and silently no-op.
+        if self._startup_ducked:
+            logger.info(
+                "voice-typing: crash-recovery: ducked flag set at boot; best-effort media release"
+            )
+            threading.Thread(
+                target=ducking_heal.heal,
+                args=(cfg,),
+                kwargs={"force": True},
+                daemon=True,
+                name="vt-duck-heal",
+            ).start()
         # Once-only latch for the zero-keyboard WARNING (P1.M2.T7.S2 fail-safe): logged at the
         # FIRST _arm() after the listener started with nothing watchable; later arms stay
         # silent forever. Plain bool, written only under _lock (via _arm) — same discipline
@@ -2598,6 +2628,10 @@ class VoiceTypingDaemon:
         if already_claimed:
             # Another path is doing (or did) the teardown — wait for it, do NOT start a second one.
             if self._teardown_done.wait(timeout=_TEARDOWN_WAIT_TIMEOUT):
+                # P1.M2.T3.S2: THAT path dispatches the ducking release (request_shutdown seam);
+                # this is the systemd-stop path's only exit — flush here too so the async
+                # release lands before process exit (see _duck_flush_at_quit).
+                self._duck_flush_at_quit()
                 return  # in-flight teardown finished -> done (no second teardown)
             logger.warning(
                 "shutdown(): in-flight teardown did not signal within %.1fs; proceeding with fallback",
@@ -2613,7 +2647,41 @@ class VoiceTypingDaemon:
             # full _TEARDOWN_WAIT_TIMEOUT on an event that would never fire while process exit
             # kills it mid-wait (the lost `voicectl quit` reply on an unloaded daemon).
             self._teardown_done.set()
+            self._duck_flush_at_quit()
             return
+        try:
+            self._bounded_shutdown()
+        except Exception:
+            # Defensive belt-and-suspenders: _bounded_shutdown is already best-effort, but
+            # shutdown() itself must NEVER re-raise (a teardown failure must not mask the original
+            # shutdown reason).
+            logger.exception("bounded teardown failed (best-effort; ignored)")
+        finally:
+            # P1.M1.T2.S1: signal any waiter (covers the called-first path + the fallback path).
+            self._teardown_done.set()
+        # P1.M2.T3.S2 (PRD §4.2quinquies): LAST act of teardown — join the async ducking worker
+        # (bounded) so S1's dispatched release actually completes before the process exits.
+        self._duck_flush_at_quit()
+
+    def _duck_flush_at_quit(self) -> None:
+        """Bounded join of S4's async ducking worker at quit (P1.M2.T3.S2, PRD §4.2quinquies).
+
+        S1's request_shutdown() seam only DISPATCHES the release (AsyncDucker returns
+        immediately, by the NEW-2 never-block-under-lock rule); without this flush the process
+        can exit before the worker finishes resuming — media stuck despite the seam. 2 s fits
+        the TimeoutStopSec=15 budget (5 s bounded teardown + 2 s flush + headroom). Swallow-all:
+        ducking is an enhancement, never a gate — a flush failure is one WARNING and exit
+        proceeds. Runs on every shutdown() exit path that follows teardown coordination (the
+        wait-success path, the no-host path, and the normal teardown tail); the fallback-teardown
+        path falls through to the tail call. self._ducker is None for duck_mode="off" ⇒ no-op
+        (byte-identical behavior to pre-D1).
+        """
+        if self._ducker is None:
+            return
+        try:
+            self._ducker.flush(2.0)
+        except Exception:  # pylint: disable=broad-except — teardown is best-effort
+            logger.warning("ducking: flush at quit failed (ignored)")
         try:
             self._bounded_shutdown()
         except Exception:

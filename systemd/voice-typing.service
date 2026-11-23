@@ -50,6 +50,13 @@ ExecStartPre=/usr/bin/systemctl --user import-environment WAYLAND_DISPLAY DISPLA
 ExecStart=__REPO__/voice_typing/launch_daemon.sh
 Restart=on-failure
 RestartSec=2
+# Crash safety (PRD §4.2quinquies): if the daemon dies while media is ducked (crash, SIGKILL at
+# TimeoutStopSec, OOM), its in-memory restore bookkeeping is gone. The persisted `ducked` flag in
+# $XDG_RUNTIME_DIR/voice-typing/state.json is the orphan signal: this best-effort restore resumes
+# paused MPRIS players and warns when the sink was left at duck volume (it never guesses a volume
+# restore). No-ops (exit 0) when the flag is unset — i.e. on every clean stop, where the daemon
+# already released + flushed ducking itself. Runs on every stop per systemd semantics.
+ExecStopPost=__REPO__/.venv/bin/python -m voice_typing.ducking_heal
 # KillMode=mixed (bugfix Issue 1 / PRD §4.2bis,§8,§7.9): systemd's DEFAULT is control-group, which
 # sends SIGTERM to EVERY process in the unit's cgroup SIMULTANEOUSLY — the daemon AND the
 # recorder-host child AND the multiprocessing resource tracker. The recorder-host child does NOT

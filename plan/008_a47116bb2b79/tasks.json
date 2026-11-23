@@ -299,7 +299,7 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Wire ducking lifecycle into the daemon + crash safety",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Engage at the single arm choke point; release on every disarm path (manual, drain, idle auto-stop, HALT, quit/SIGTERM, dead-host) but NOT Backspace-cancel; ducked state field with post-crash self-heal and ExecStopPost.",
               "subtasks": [
                 {
@@ -322,7 +322,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S2",
                   "title": "Crash safety: ducked flag, startup self-heal, ExecStopPost",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T3.S1"

@@ -477,3 +477,212 @@ def test_ducking_default_factory_builds_by_mode():
     assert isinstance(dv, AsyncDucker)
     assert isinstance(dv._ducker._backend, WpctlVolumeBackend)
     assert dv._ducker._volume_pct == 25.0
+
+
+# ===========================================================================
+# P1.M2.T3.S2 — crash safety: ducked-flag self-heal + shutdown flush (PRD §4.2quinquies)
+# ===========================================================================
+# ducking_heal.heal() is the post-crash media restore, shared by TWO consumers: the daemon's
+# boot self-heal thread (reads the persisted `ducked` flag BEFORE the boot Feedback writes
+# clobber it) and systemd's ExecStopPost (`python -m voice_typing.ducking_heal`, flag-gated →
+# no-ops on clean stops). A _HealBackend double (same recording style as the core _FakeBackend)
+# rides in through the backend= seam; state.json lives in tmp_path via
+# FeedbackConfig(state_file=...). No subprocess, no busctl, no PipeWire — hermetic.
+
+import json  # noqa: E402 (heal-section imports; module top owns the core + S1 lifecycle tests)
+
+import voice_typing.ducking_heal as ducking_heal  # noqa: E402
+from voice_typing.config import AudioConfig, FeedbackConfig  # noqa: E402
+from voice_typing.feedback import Feedback  # noqa: E402
+
+
+class _HealBackend:
+    """DuckBackend double for the crash-heal: records resume/set calls; raises on demand.
+
+    Separate from the core _FakeBackend because the heal only ever RESUMES (never pauses, and
+    never sets volume — warn-only) — the recorded surface is exactly what the heal may call.
+    `fail` names methods that RAISE (simulating a misbehaving subprocess backend); volume=None
+    models a tier/backend that cannot read the sink (mpris stub semantics).
+    """
+
+    def __init__(self, players=(), volume=None, fail=()):
+        self.players = list(players)
+        self.volume = volume
+        self.fail = set(fail)
+        self.resumed: list[str] = []
+        self.set_calls: list[float] = []
+        self.call_log: list[str] = []
+        # Set on the FIRST backend call — lets a test wait for the heal to reach the backend
+        # WITHOUT racing thread-exit (a finished vt-duck-heal thread vanishes from
+        # threading.enumerate(), so name-based join alone is a flake).
+        self.reached = threading.Event()
+
+    def _enter(self, method: str) -> None:
+        self.call_log.append(method)
+        self.reached.set()
+        if method in self.fail:
+            raise RuntimeError(f"{method} failed (simulated)")
+
+    def list_players(self):
+        self._enter("list_players")
+        return list(self.players)
+
+    def resume_player(self, name: str) -> bool:
+        self._enter("resume_player")
+        self.resumed.append(name)
+        return True
+
+    def get_sink_volume_pct(self):
+        self._enter("get_sink_volume_pct")
+        return self.volume
+
+    def set_sink_volume_pct(self, pct: float) -> bool:
+        self._enter("set_sink_volume_pct")
+        self.set_calls.append(float(pct))
+        return True
+
+
+def _heal_cfg(tmp_path, *, ducked, duck_volume_pct=15):
+    """(cfg, state_path) with the state file in tmp_path, seeded with the given flag.
+
+    ducked=None leaves the file ABSENT (fresh-boot / wiped-runtime-dir case). state_file is set
+    explicitly so tests never touch the real session's state.json.
+    """
+    state = tmp_path / "state.json"
+    if ducked is not None:
+        state.write_text(json.dumps({"ducked": ducked}), encoding="utf-8")
+    cfg = VoiceTypingConfig(
+        feedback=FeedbackConfig(state_file=str(state)),
+        audio=AudioConfig(duck_mode="off", duck_volume_pct=duck_volume_pct),
+    )
+    return cfg, state
+
+
+def test_heal_noop_when_ducked_false(tmp_path):
+    """ducked:false (the clean-stop case) → heal makes ZERO backend calls (success crit. b)."""
+    cfg, _state = _heal_cfg(tmp_path, ducked=False)
+    be = _HealBackend(players=[PlayerState("org.mpris.a", playing=False)], volume=15.0)
+    ducking_heal.heal(cfg, backend=be)
+    assert be.call_log == [], "flag-gate must run BEFORE any backend call"
+    assert be.resumed == []
+
+
+def test_heal_noop_when_state_file_missing(tmp_path):
+    """Absent state file (fresh boot) → zero calls, no raise: 'can't read' == 'not flagged'."""
+    cfg, state = _heal_cfg(tmp_path, ducked=None)
+    be = _HealBackend(players=[PlayerState("org.mpris.a", playing=False)], volume=15.0)
+    ducking_heal.heal(cfg, backend=be)
+    assert not state.exists()
+    assert be.call_log == []
+
+
+def test_heal_resumes_paused_players_when_ducked(tmp_path):
+    """ducked:true → currently-Paused players resumed; Playing players NEVER touched (PRD f)."""
+    cfg, _state = _heal_cfg(tmp_path, ducked=True)
+    be = _HealBackend(
+        players=[
+            PlayerState("org.mpris.paused", playing=False),
+            PlayerState("org.mpris.playing", playing=True),
+        ],
+        volume=70.0,
+    )
+    ducking_heal.heal(cfg, backend=be)
+    assert be.resumed == ["org.mpris.paused"]
+    assert be.call_log.count("resume_player") == 1, "only the Paused player is resumed"
+    assert be.set_calls == [], "volume 70 != duck 15 → no volume interaction at all"
+
+
+def test_heal_volume_warn_only(tmp_path, caplog):
+    """ducked:true + sink at duck pct → ONE warning, NO volume set (the warn-only decision)."""
+    cfg, _state = _heal_cfg(tmp_path, ducked=True, duck_volume_pct=15)
+    be = _HealBackend(players=[PlayerState("org.mpris.paused", playing=False)], volume=15.0)
+    with caplog.at_level(logging.INFO, logger="voice_typing.ducking_heal"):
+        ducking_heal.heal(cfg, backend=be)
+    assert be.set_calls == [], "never guesses a restore (a clobbering restore is worse than not ducking)"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "duck level" in warnings[0].getMessage()
+    assert any(r.levelname == "INFO" and "resumed" in r.getMessage() for r in caplog.records)
+
+
+def test_heal_always_exits_zero_on_backend_failure(tmp_path, caplog):
+    """Backend raising on every call → swallowed (one warning each), nothing propagates."""
+    cfg, _state = _heal_cfg(tmp_path, ducked=True)
+    be_dead = _HealBackend(
+        players=[PlayerState("org.mpris.paused", playing=False)], volume=70.0,
+        fail={"list_players", "get_sink_volume_pct"},
+    )
+    ducking_heal.heal(cfg, backend=be_dead)  # must NOT raise
+    assert be_dead.call_log == ["list_players", "get_sink_volume_pct"]
+    be_resume = _HealBackend(
+        players=[PlayerState("org.mpris.paused", playing=False)], volume=70.0,
+        fail={"resume_player"},
+    )
+    ducking_heal.heal(cfg, backend=be_resume)  # per-player failure swallowed, loop continues
+    assert "resume_player" in be_resume.call_log
+    failures = [r for r in caplog.records if r.levelname == "WARNING" and "failed; continuing" in r.getMessage()]
+    assert len(failures) == 3  # list_players + get_sink_volume_pct + resume_player: ONE each
+
+
+def test_daemon_startup_heals_ducked_flag(tmp_path, monkeypatch, caplog):
+    """Boot reads ducked:true BEFORE the Feedback writes and heals off-thread (PRD case f).
+
+    Drives the REAL wiring: real Feedback ctor (writes nothing — the flag survives), real daemon
+    ctor (pre-read → boot set_models_loaded write self-clears the flag → heal thread spawned).
+    The heal's MprisBusctlBackend is monkeypatched to the fake; the vt-duck-heal thread is
+    joined (bounded) before asserting.
+    """
+    cfg, state = _heal_cfg(tmp_path, ducked=True)
+    be = _HealBackend(players=[PlayerState("org.mpris.paused", playing=False)], volume=70.0)
+    monkeypatch.setattr(ducking_heal, "MprisBusctlBackend", lambda: be)
+    fb = Feedback(cfg.feedback)  # REAL Feedback: ctor does not write (the flag survives boot)
+    with caplog.at_level(logging.INFO):
+        daemon.VoiceTypingDaemon(
+            cfg, fb, recorder=_StubRecorder(), backend=_CtlFakeBackend(), mic_prober=_ok_probe,
+        )
+    # The boot write ALREADY self-cleared the flag (set_models_loaded resets ducked to seeded
+    # False) — exactly why the pre-read + force=True exist (the heal must not re-read).
+    assert json.loads(state.read_text(encoding="utf-8"))["ducked"] is False
+    # Wait for the daemon-spawned heal to REACH the fake backend (bounded), then join the
+    # thread best-effort — it may already have exited (a finished thread leaves enumerate).
+    assert be.reached.wait(timeout=5.0), "heal thread never reached the backend"
+    heal_t = next((t for t in threading.enumerate() if t.name == "vt-duck-heal"), None)
+    if heal_t is not None:
+        heal_t.join(timeout=5.0)
+        assert not heal_t.is_alive()
+    assert be.resumed == ["org.mpris.paused"], "heal ran on the daemon-spawned thread"
+    assert any("crash-recovery" in r.getMessage() for r in caplog.records), "one INFO line"
+
+
+class _FlushRecordingDucker(_FakeDucker):
+    """_FakeDucker + flush() recorder (S2's contract: shutdown() flushes the async worker).
+
+    Local extension — S1's _FakeDucker has no flush() (it predates S2); extending here, not in
+    S1's class, keeps the lifecycle contract byte-identical for its own tests.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.flushes: list[float] = []
+
+    def flush(self, timeout: float = 2.0) -> bool:
+        self.flushes.append(float(timeout))
+        return True
+
+
+def test_shutdown_flushes_ducker():
+    """shutdown() ends with a bounded ducker.flush(2.0) — closes S1's async-release gap (crit. c)."""
+    fake = _FlushRecordingDucker()
+    d = daemon.VoiceTypingDaemon(
+        VoiceTypingConfig(), _DuckingFakeFeedback(), recorder=_StubRecorder(),
+        backend=_CtlFakeBackend(), mic_prober=_ok_probe, ducker=fake,
+    )
+    d.shutdown()
+    assert fake.flushes == [2.0], "exactly one flush, bounded at 2 s (TimeoutStopSec=15 budget)"
+
+
+def test_shutdown_flush_noop_without_ducker():
+    """duck_mode=off ⇒ _ducker None ⇒ shutdown() runs byte-identically (no flush attempt)."""
+    d, _fb, _rec, _be, _fake = _make_ducking_daemon(duck=False)
+    assert d._ducker is None
+    d.shutdown()  # must not raise / must not touch the (absent) ducker
+    assert d._ducker is None
