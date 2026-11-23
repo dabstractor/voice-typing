@@ -500,7 +500,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "IM-v2 primary adapter: transport, acquire, show, takeover, real-field proof",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Productize the proven tools/im-lab wire client into a daemon-owned input-method-v2 adapter subprocess; implement acquire/verification, atomic insert+correct, takeover revocation; prove insert AND correct in real fields (G3 core) and refresh the field-class matrix at installed versions. Route is DECIDED — no discovery work.",
           "tasks": [
             {
@@ -650,7 +650,7 @@
               "type": "Task",
               "id": "P1.M4.T5",
               "title": "Real-field proof + field-class matrix re-run (G3 core)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "R.4 order: prove insert AND correct in real fields BEFORE any mic integration. Productize the isolated-compositor harness, run GTK rows with visibility instrumentation, and refresh the foot/kitty/ghostty matrix at the versions now installed (they drifted).",
               "subtasks": [
                 {
@@ -673,7 +673,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T5.S2",
                   "title": "Field-class matrix re-run at installed versions (drift!)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T5.S1"
