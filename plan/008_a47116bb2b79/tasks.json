@@ -115,14 +115,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Close the cancel auto-repeat compensation audit (D3.2)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Physical Backspace auto-repeat violates one-keystroke=one-character. Listener-level filtering exists; audit the daemon-side accounting against sustained holds and close with a regression test or recorded evidence.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Replay a sustained-Backspace hold as a regression test + audit trace",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -138,7 +138,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T3.S2",
                   "title": "Mitigate or record the residual desync window",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T3.S1"

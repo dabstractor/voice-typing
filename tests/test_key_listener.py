@@ -505,3 +505,84 @@ def test_no_listener_warns_nothing_when_disabled():
     d, _fb = _wire_daemon(cfg)
     d._warn_no_keyboards_once()  # no listener -> pure no-op, never raises
     assert d._cancel_listener_warned is False
+
+
+# ---------------------------------------------------------------------------
+# D3.2 hold trace (P1.M1.T3.S1): a sustained Backspace hold through the REAL
+# listener→daemon seams — press(1) + repeats(2)×R + release(0), armed, tail in flight.
+# ---------------------------------------------------------------------------
+
+
+class _HoldStream:
+    """Pending-tail double: 8 chars; reset_after_cancel() zeroes + counts (mirrors _FakeStream)."""
+
+    _len = 8
+    reset_calls = 0
+
+    def pending_tail_len(self) -> int:
+        return self._len
+
+    def reset_after_cancel(self) -> None:
+        self.reset_calls += 1
+        self._len = 0
+
+
+class _HoldHost:
+    """Host double: cancel() counts (the in-flight-utterance discard seam)."""
+
+    def __init__(self) -> None:
+        self.cancel_calls = 0
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+
+
+def test_sustained_backspace_hold_fires_one_cancel_and_never_restamps():
+    """D3.2 (P1.M1.T3.S1): a HELD Backspace through the real seams — exactly ONE cancel; the
+    autorepeats never re-latch/re-stamp the cancel-suppression window; the release is inert.
+
+    AUDIT NOTE (D3.2 residual window — the written finding for S2 / P1.M1.T3.S2):
+    the daemon sees ONLY the press (key_listener.py:81 drops value!=1), but the OS autorepeat
+    keeps deleting REAL on-screen characters. Repeats landing while the daemon's paced
+    press_backspace(n) burst runs (~12 ms/char on the D3.1 socket path; ≤150 ms for ~80 chars)
+    interleave with it: total deleted = n+1+R vs n+1 believed → belief-desync of R chars.
+    BOUND: R ≈ repeat_rate × burst_duration — at a typical ~30 cps autorepeat, R ≤ ~4-5 chars
+    worst case during the burst; repeats after the burst delete committed/user text with the
+    accounting already zeroed (plain user edits — uncompensable by design). Mitigation vs
+    acceptance is S2's decision; this test pins the CURRENT contract so any change (e.g.
+    observing value==2 to compensate holds) is a deliberate, visible red.
+    """
+    d, _fb = _wire_daemon()
+    be = d._backend
+    d._stream = _HoldStream()
+    d._host = _HoldHost()
+    d._listening.set()          # armed (the listener's is_active gate reads this Event)
+    d._text_in_flight.set()     # required or cancel() skips the suppression-window latch
+    kl = d._key_listener
+    assert kl.cancel_cb == d._on_cancel_backspace   # the REAL seam, no monkeypatching
+
+    R = 6   # a realistic short hold; > the ≤5 worst-case during-burst repeats
+    _pump_events(
+        [_BS_PRESS] + [_BS_REPEAT] * R + [_BS_RELEASE, _SYN],
+        cancel_cb=kl.cancel_cb,
+        other_key_cb=kl.other_key_cb,
+        is_active=kl._is_active,
+    )
+    # Exactly ONE cancel: one compensation batch (n = 8-1), one host discard, window latched once.
+    assert be.calls == [("bs", 7)], be.calls
+    assert d._host.cancel_calls == 1
+    assert d._cancel_suppress_final is True
+    stamp = d._cancel_suppress_since
+    assert stamp is not None
+    assert d._stream.reset_calls == 1 and d._stream._len == 0
+
+    # Repeats NEVER re-latch/re-stamp: a second pure-repeat burst changes nothing. (A re-fired
+    # cancel would re-stamp time.monotonic() — a different float — AND re-call host.cancel().)
+    _pump_events(
+        [_BS_REPEAT] * R,
+        cancel_cb=kl.cancel_cb,
+        other_key_cb=kl.other_key_cb,
+        is_active=kl._is_active,
+    )
+    assert d._cancel_suppress_since == stamp, "autorepeats must never re-stamp the window"
+    assert d._host.cancel_calls == 1 and be.calls == [("bs", 7)]

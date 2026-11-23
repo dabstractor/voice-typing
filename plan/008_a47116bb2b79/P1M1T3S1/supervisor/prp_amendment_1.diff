@@ -1,0 +1,35 @@
+--- plan/008_a47116bb2b79/P1M1T3S1/supervisor/PRP.before-decision_1.md	2026-11-23 04:59:55.157582626 -0500
++++ plan/008_a47116bb2b79/P1M1T3S1/PRP.md	2026-11-23 05:02:05.490253296 -0500
+@@ -348,6 +348,32 @@
+ - ❌ Don't touch `tests/test_typing_backends.py` (parallel T2.S3) or `tests/test_daemon.py` (reference only).
+ - ❌ Don't run pytest without timeout/full paths; don't invent ruff/mypy gates.
+ 
++## Supervisor Amendments
++
++### 2026-11-23 — Round 1: how to CLOSE the criterion (d) daemon-half gate (procedural only)
++
++Reason: the implementation agent misread the daemon half of Success Definition (d) as an absolute
++"stays green" gate (a phrase that appears nowhere in this PRP) and reported `issue` instead of
++`done`, although the work met every criterion. This amendment restates the existing gate's
++verification procedure; it changes no scope, no acceptance criteria, and no required tests.
++
++- Criterion (d)'s daemon half is, as Success Definition (d) and CRITICAL #1b already state, a
++  **before/after FAILURE-LIST comparison, not a green gate**. It is satisfied when the
++  `tests/test_daemon.py -k cancel` failure list with this task's edit applied is **identical** to
++  the pre-change baseline.
++- The BEFORE list may be taken as this PRP's documented research-HEAD state (CRITICAL #1b:
++  `test_cancel_suppression_drops_racing_final_and_clears_on_sentinel` failing with
++  `['fresh sentence ']` vs `['fresh sentence', ' ']`; 1 failed / 10 passed on `-k cancel`) when the
++  edit is already applied — provided an isolated after-run (`timeout 600 .venv/bin/python -m
++  pytest tests/test_daemon.py -q -k cancel` — test_daemon.py only, never importing
++  test_key_listener.py) reproduces exactly that failure list. Since this task adds zero source
++  changes and a file test_daemon.py does not import, list identity is the expected and sufficient
++  proof.
++- The pre-existing daemon reds are owned by the G1 reconciliation workstream (P1.M1.T1;
++  BUG-003/plan/007 legacy-separator class). Record them in the final report as an **FYI audit
++  note**, not as a gate miss or an open issue. Do not edit `daemon.py` or `tests/test_daemon.py`
++  (Gotcha #7 unchanged).
++
+ ---
+ 
+ ## Confidence Score
