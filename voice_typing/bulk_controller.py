@@ -365,6 +365,90 @@ class BulkController:
                         exc_info=True,
                     )
 
+    def cancel(self, *, gen: int | None = None) -> bool:
+        """R.5/R.3 cancel at the controller seam: discard the pending
+        utterance's recognition (purge its queued events, close its boundary)
+        and remove ONLY the verified owned range via ONE target.cancel op —
+        the mic stays armed on success. Nothing pending => True with ZERO
+        target calls and no edit (idempotent). Uncertain (inactive, unknown
+        generation) or refused/unknown/deadlined => False via the SAME
+        one-reason stop path as any other failed op, never retried. NO
+        physical-character compensation: the len(tail)-1 backspace math is
+        the legacy path (daemon.cancel, P1.M6.T2.S1's intercept routes here).
+        """
+        with self._cond:
+            if not self._active:
+                return False
+            if gen is not None and gen != self._session_gen:
+                return False
+            cur = self._session_gen
+            # Pending = open utterances of this generation with controller-side
+            # evidence (a shown span, or a queued partial). Finals/boundaries
+            # already closed their utterance — nothing pending there.
+            pending = {k for k in self._shown_span if k[0] == cur and k not in self._closed}
+            pending |= {
+                (it.gen, it.utterance)
+                for it in self._dq
+                if isinstance(it, _Partial) and it.gen == cur
+                and (it.gen, it.utterance) not in self._closed
+            }
+            if not pending:
+                return True
+            # Purge their queued partials, close the boundaries (late strays
+            # discard on sight), kill the mutation-time re-check, drop the
+            # shown spans — the owned range is about to leave the field.
+            self._dq = collections.deque(
+                it for it in self._dq
+                if not (isinstance(it, _Partial) and (it.gen, it.utterance) in pending)
+            )
+            self._closed.update(pending)
+            self._closed_dispatched.update(pending)
+            for key in pending:
+                self._shown_span.pop(key, None)
+            revision = self._expected_revision
+            epoch = self._dispatch_epoch  # give-up guard: captured BEFORE submit
+
+        # ONE target.cancel OUTSIDE _cond, through the same single-worker op
+        # runner as show/finalize (one op in flight; the deadline applies).
+        runner = self._ensure_runner()
+        stopped = False
+        with self._cond:
+            if not self._active or epoch != self._dispatch_epoch:
+                return True  # a stop raced the purge: dead on arrival, ZERO target calls
+        future = runner.submit(self._target.cancel)
+        future.add_done_callback(lambda f: self._note_late(f, epoch))
+        try:
+            result = future.result(timeout=self._op_deadline)
+        except self._futures.TimeoutError:
+            with self._cond:
+                self._stats["deadline_exceeded"] += 1
+                stopped = self._stop_locked("op-deadline")
+            if stopped:
+                self._fire_on_stopped()
+            return False
+        except Exception as exc:  # noqa: BLE001 — child death / adapter crash
+            with self._cond:
+                self._stats["target_errors"] += 1
+                self._last_target_error = type(exc).__name__
+                stopped = self._stop_locked("target-error")
+            if stopped:
+                self._fire_on_stopped()
+            logger.warning("bulk_controller: target cancel raised %s", type(exc).__name__)
+            return False
+
+        with self._cond:
+            if epoch != self._dispatch_epoch or not self._active:
+                return False  # LATE: the stop path owns the discard
+            if result is ShowResult.APPLIED:
+                self._expected_revision = revision + 1  # +1 ONLY on applied
+                return True  # owned range removed; STAYS active (mic keeps listening)
+            if result is ShowResult.UNCHANGED:
+                return True  # nothing owned at the target — fine
+            stopped = self._stop_locked(result.value)  # REFUSED / UNKNOWN — never retry
+        if stopped:
+            self._fire_on_stopped()
+        return False
+
     # -- event entries (reader/control threads: enqueue-and-return ONLY) -----
 
     def arm(self, gen: int) -> bool:

@@ -370,7 +370,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Bulk delivery controller core + config gate (D2, G2)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "The paste-as-policy controller and TargetAdapter contracts, separate from StreamingOutput/typing_backends: result taxonomy, zero-diff guard, bounded queue with barriers, failure/disarm rules, the G2 fake-target trace gate, the output.delivery config gate, and the delivery status surface.",
           "tasks": [
             {
@@ -400,7 +400,7 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Implement the bulk controller (ordering, failure, G2 gate)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "The controller between recognition events and a DeliveryTarget: bounded queue (32) with ordered barriers, newest-partial-wins, one writer/one op in flight, 250 ms deadline, disarm-on-failure with no retries, and the full G2 fake-target trace matrix.",
               "subtasks": [
                 {
@@ -437,7 +437,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S3",
                   "title": "G2 gate: full fake-target trace matrix green + evidence record",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S2"
@@ -455,14 +455,14 @@
               "type": "Task",
               "id": "P1.M3.T3",
               "title": "output.delivery config gate + delivery status surface",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Config key with the precondition triple enforced at load, plus delivery_mode/delivery_state/delivery_reason/last-confirmed-op through feedback state and voicectl status.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T3.S1",
                   "title": "output.delivery key + precondition triple enforcement",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -478,7 +478,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T3.S2",
                   "title": "Delivery status surface: feedback fields + voicectl status rendering",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T3.S1",
