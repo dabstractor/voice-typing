@@ -58,14 +58,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Merge fix/ydotoold-datagram and add the 6 ms socket contact gap",
-              "status": "Planned",
+              "status": "Ready",
               "description": "D3.1: land the SOCK_DGRAM fix (33321c6, 11 tests, clean merge per research), then add the 6 ms press→release contact gap the CLI path has and the socket path lacks, plus a journal-noise regression guard.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Merge fix/ydotoold-datagram onto main",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -81,7 +81,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Add the 6 ms press→release contact gap on the socket path",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1"
@@ -97,7 +97,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "Journal-noise regression guard (no per-burst fallback storms)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2"
