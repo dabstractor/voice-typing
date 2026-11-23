@@ -335,6 +335,86 @@ def test_press_backspace_nonpositive_spawns_nothing(recorder, caplog, n):
     )  # no spurious WARNING
 
 
+# ===========================================================================
+# P1.M1.T2.S3 — journal-noise regression guard (D3.1, PRD §8 known defects):
+# a healthy ydotoold DATAGRAM socket must NEVER degrade to per-burst CLI spawns
+# + WARNINGs (the pre-merge Errno-91 storm: 56 journal warnings/week); a single
+# socket death costs exactly ONE fallback spawn + ONE warning, then heals.
+# Counts-only assertions (no timing) — delta acceptance #3: tests, not scraping.
+# ===========================================================================
+
+
+def _dgram_server(tmp_path):
+    """In-process AF_UNIX SOCK_DGRAM stand-in for ydotoold (self-contained — S3 deliberately
+    does not import S1's test_ydotoold_client module). Returns (sock, received, path, stop)."""
+    import socket as _s, threading as _t
+    sock = _s.socket(_s.AF_UNIX, _s.SOCK_DGRAM)
+    path = str(tmp_path / "ydotoold-test.sock")
+    sock.bind(path)
+    received: list[bytes] = []
+    stop = _t.Event()
+
+    def _drain():
+        while not stop.is_set():
+            try:
+                data, _ = sock.recvfrom(4096)
+            except OSError:
+                break
+            received.append(data)
+
+    th = _t.Thread(target=_drain, daemon=True); th.start()
+    return sock, received, path, stop
+
+
+def test_socket_healthy_datagram_zero_cli_spawns_zero_warnings(recorder, caplog, tmp_path):
+    """D3.1 regression: a healthy datagram socket routes EVERY burst over the socket —
+    zero CLI spawns, zero 'falling back' warnings (pre-merge: N spawns + N warnings)."""
+    from voice_typing.ydotoold_client import YdotoolClient
+
+    sock, received, path, stop = _dgram_server(tmp_path)
+    try:
+        backend = YdotoolBackend(client=YdotoolClient(socket_path=path))
+        with caplog.at_level(logging.WARNING, logger="voice_typing.typing_backends"):
+            for _ in range(8):                       # N consecutive bursts
+                backend.press_backspace(2)
+        assert recorder.argvs == [], f"healthy socket spawned CLI: {recorder.argvs}"
+        storms = [r for r in caplog.records if "falling back" in r.getMessage()]
+        assert storms == [], f"healthy socket warned: {[r.getMessage() for r in storms]}"
+        assert len(received) > 0                     # datagrams actually flowed
+    finally:
+        stop.set(); sock.close()
+
+
+class _DyingOnceClient:
+    """Socket-death double: fails the FIRST call (Errno-91 flavor) then succeeds — models the
+    real client's self-heal reconnect (restart coverage: S1's test_ydotoold_client)."""
+
+    def __init__(self):
+        self.calls = 0
+        self._died = False
+
+    def press_backspace(self, n: int) -> None:
+        self.calls += 1
+        if not self._died:
+            self._died = True
+            raise RuntimeError("Protocol wrong type for socket (Errno 91)")
+
+
+def test_socket_death_one_fallback_spawn_one_warning_then_heals(recorder, caplog):
+    """One socket death = exactly ONE CLI fallback spawn + ONE WARNING, then the healed client
+    serves the rest with zero further spawns/warnings (the no-storm property)."""
+    client = _DyingOnceClient()
+    backend = YdotoolBackend(client=client)
+    with caplog.at_level(logging.WARNING, logger="voice_typing.typing_backends"):
+        for _ in range(6):                           # N total bursts, first one dies
+            backend.press_backspace(2)
+    assert client.calls == 6                         # every burst routed to the client first
+    assert len(recorder.argvs) == 1, f"expected exactly ONE fallback spawn: {recorder.argvs}"
+    assert recorder.argvs[0][:4] == ("ydotool", "key", "-d", "6")   # the CLI fallback argv
+    warns = [r for r in caplog.records if "ydotoold client failed" in r.getMessage()]
+    assert len(warns) == 1, f"expected exactly ONE warning: {[r.getMessage() for r in warns]}"
+
+
 def test_press_backspace_n80_is_one_invocation(recorder):
     # The budget contract (PRD §4.2quater): ~80 chars must rewind via ONE subprocess call.
     WtypeBackend().press_backspace(80)
