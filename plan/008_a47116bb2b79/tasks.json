@@ -740,7 +740,7 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "G3 rows: pi prompt in isolated Ghostty (first), graphical editor, browser field",
-              "status": "Ready",
+              "status": "Complete",
               "description": "R.3: prove pi's real input editor inside isolated Ghostty with scripted partials/finals, asserting exact editor text + caret + the VISIBLE prompt; then the graphical-editor and browser-field rows G6 requires.",
               "subtasks": [
                 {
@@ -764,7 +764,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T2.S2",
                   "title": "Graphical editor + browser text field rows",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T5.S1",

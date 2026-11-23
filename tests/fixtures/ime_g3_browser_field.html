@@ -1,0 +1,112 @@
+<!doctype html>
+<!-- ime_g3_browser_field — the G3 browser text-field fixture (P1.M5.T2.S2).
+
+A REAL DOM <input> (the browser text-field class) with SELF-WITNESSING JS:
+every assertion the lab makes about this field comes from THIS page's own
+state pushes (or the document.title fallback) — never a pixel scrape, never
+CDP injection. The IM-v2 adapter's commits are the only writer.
+
+Channels:
+  PRIMARY  fetch POST (Content-Type: text/plain — a simple request, no CORS
+           preflight from the file:// null origin) of the full state JSON to
+           the ?push= URL; the lab's server replies 204 + ACAO:*.
+  FALLBACK document.title = "vtg3-browser[-ro]|{counts+hashes only}" (~<=200
+           chars), read by the lab via swaymsg get_tree — used verbatim when
+           fetch is blocked; the lab records which channel it used.
+
+Witness state (the event-count law's counters):
+  n       cumulative `input` events (beforeinput captures the pre-value)
+  k       cumulative keydowns (grabbed keys never reach the page — stays 0)
+  ring    last 32 input events: [fnv1a32(v0), fnv1a32(v1), len16(v0), len16(v1)]
+  frames  last 64 rAF value-hashes (the transient-frame oracle's feed) + f
+  sel     [selectionStart, selectionEnd] (UTF-16 units), on selectionchange
+
+The hash is 32-bit FNV-1a over TextEncoder UTF-8 bytes — EXACTLY the
+fnv1a32() twin in tests/ime_g3_editor_browser_support.py (pinned by unit
+tests). ?mode=ro boots the REFUSING variant: <input readonly> (the adapter
+may not modify it; n must stay 0).
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>vtg3-browser</title>
+<style>
+  body { font: 14px monospace; margin: 24px; background: #fff; }
+  #field { width: 90%; font: 14px monospace; padding: 6px; }
+</style>
+</head>
+<body>
+<input id="field" autofocus>
+<script>
+"use strict";
+const q = new URLSearchParams(location.search);
+const RO = q.get("mode") === "ro";
+const PUSH = q.get("push");
+const field = document.getElementById("field");
+if (RO) field.setAttribute("readonly", "");
+const BASE = "vtg3-browser" + (RO ? "-ro" : "");
+
+const MAX_RING = 32, MAX_FRAMES = 256;
+const S = { n: 0, k: 0, ring: [], frames: [], f: 0, sel: [0, 0],
+            last: field.value, v0: null };
+
+function h8(s) {                       // fnv1a32 twin (support module pins this)
+  let h = 2166136261;
+  const b = new TextEncoder().encode(s);
+  for (let i = 0; i < b.length; i++) {
+    h ^= b[i];
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+function state() {
+  return { n: S.n, k: S.k, sel: S.sel.slice(), len: field.value.length,
+           text: field.value, ring: S.ring.slice(), frames: S.frames.slice(),
+           f: S.f, ro: RO };
+}
+
+function titleFallback() {             // counts + hashes ONLY (~<=200 chars)
+  document.title = BASE + "|" + JSON.stringify(
+    { n: S.n, k: S.k, f: S.f, v: h8(field.value), s: S.sel[0], ro: RO });
+}
+
+function push() {
+  titleFallback();
+  if (!PUSH) return;
+  fetch(PUSH, { method: "POST",
+                headers: { "Content-Type": "text/plain" },
+                body: JSON.stringify(state()) }).catch(() => {});
+}
+
+field.addEventListener("beforeinput", () => { S.v0 = field.value; });
+field.addEventListener("input", () => {
+  const v0 = S.v0 !== null ? S.v0 : S.last;
+  const v1 = field.value;
+  S.n += 1;
+  S.ring.push([h8(v0), h8(v1), v0.length, v1.length]);
+  if (S.ring.length > MAX_RING) S.ring.shift();
+  S.last = v1;
+  S.v0 = null;
+  S.sel = [field.selectionStart, field.selectionEnd];
+  push();                              // immediate witness of THIS event
+});
+window.addEventListener("keydown", () => { S.k += 1; });
+document.addEventListener("selectionchange", () => {
+  if (document.activeElement === field) {
+    S.sel = [field.selectionStart, field.selectionEnd];
+    push();
+  }
+});
+(function tick() {                     // per-frame value-hash oracle feed
+  S.frames.push(h8(field.value));
+  if (S.frames.length > MAX_FRAMES) S.frames.shift();
+  S.f += 1;
+  requestAnimationFrame(tick);
+})();
+setInterval(push, 200);                // heartbeat (fresh frames + liveness)
+field.focus();                         // DOM focus drives text-input enable
+push();                                // the lab's readiness witness
+</script>
+</body>
+</html>
