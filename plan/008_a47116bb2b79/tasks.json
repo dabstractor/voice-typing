@@ -700,14 +700,14 @@
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "pi chat-prompt cooperating-editor adapter (extension seam)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "A project-local pi extension installs a CustomEditor owning the prompt buffer plus an AF_UNIX control socket; a daemon-side TargetAdapter speaks that socket. Documented seam — no fork.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "pi extension: CustomEditor + AF_UNIX control socket",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -722,7 +722,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S2",
                   "title": "Daemon-side cooperating-editor TargetAdapter",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S1",
@@ -747,7 +747,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "pi-prompt-in-isolated-Ghostty row",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S2",
