@@ -25,7 +25,7 @@ def test_repo_config_toml_equals_defaults():
 
 
 def test_repo_config_toml_has_no_extra_keys():
-    """The repo default must carry only the 24 schema keys."""
+    """The repo default must carry only the 26 schema keys."""
     import tomllib
 
     with open(_repo_config_path(), "rb") as fh:
@@ -46,6 +46,7 @@ def test_repo_config_toml_has_no_extra_keys():
         },
         "output": {"backend", "append_space", "streaming"},  # streaming: PRD §4.2quater
         "cancel": {"on_backspace", "devices", "keypress_action"},  # §4.2quater + 2026-10 halt rule
+        "audio": {"duck_mode", "duck_volume_pct"},   # §4.2quinquies media ducking (D1; ships "off")
         "feedback": {"state_file", "hypr_notify", "notify_ms", "notify_on_final"},
         "filter": {"min_chars", "blocklist"},
         "log": {"level"},

@@ -56,6 +56,11 @@ on_backspace = true     # enable the cancel gesture (PRD §4.2quater): while dic
 devices     = []        # keyboard device node(s) to watch for the physical-Backspace gesture, e.g. ["/dev/input/event3"]. Empty list = auto-detect keyboards exposing KEY_BACKSPACE (virtual uinput/ydotool devices are always excluded, so self-typing cannot self-cancel). Nothing readable -> one journal warning at the first arm; the Alt+Super+Backspace fallback bind still works.
 
 
+[audio]   # media ducking while listening (PRD §4.2quinquies): get media out of the way for exactly as long as the mic is hot
+duck_mode        = "off"   # "mpris" = pause MPRIS players at arm, resume at stop (only what WE paused, only if still paused — user sovereignty); "volume" = duck the default sink's volume at arm, restore at stop (only if the user didn't touch volume mid-dictation); "off" = do nothing. Ships "off" until the feature lands; the default becomes "mpris" then.
+duck_volume_pct  = 15      # target sink volume % for the "volume" tier (wpctl). Restore is compare-before-restore — a manual mid-dictation volume change always wins.
+
+
 [feedback]   # runtime state file + Hyprland notifications
 
 state_file  = ""        # "" (empty) -> resolved at runtime to $XDG_RUNTIME_DIR/voice-typing/state.json (set by systemd user sessions). Set an absolute path to override. If empty AND XDG_RUNTIME_DIR is unset, the daemon raises at write time (no silent fallback). Leave empty for normal use.

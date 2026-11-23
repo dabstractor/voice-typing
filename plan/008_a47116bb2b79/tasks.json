@@ -206,14 +206,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Add the [audio] config surface in lockstep",
-              "status": "Ready",
+              "status": "Complete",
               "description": "duck_mode (\"off\"|\"mpris\"|\"volume\") and duck_volume_pct (15) in config.py + config.toml, with the key-set pinning test updated 24 → 26.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "AudioConfig dataclass + config.toml table + key-set pin 24→26",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: exact recipe in plan/008_a47116bb2b79/architecture/d1_ducking_seams.md §3 — AudioConfig dataclass after CancelConfig (~config.py:216) with duck_mode guard copying keypress_action (config.py:201-206, allowed (\"off\",\"mpris\",\"volume\")) and duck_volume_pct int guard; field on VoiceTypingConfig (:341-346); \"audio\" in _KNOWN_TABLES (:337); audio=_overlay(AudioConfig,\"audio\") in from_toml (:385-391); config.toml [audio] table after [cancel] (~line 55), inline-comment style per config.toml:31-47. Key-set pin lives ONLY in tests/test_config_repo_default.py:37-63 (docstring \"24 schema keys\" line 38; verified 24 at HEAD) → 26.\n2. INPUT: none (first D1 subtask).\n3. LOGIC: TDD — extend the pin test first (audio: {duck_mode, duck_volume_pct}, docstring 24→26), add type/value guard tests beside tests/test_config.py:143-201, then implement; SHIPS duck_mode=\"off\".\n4. OUTPUT: config surface + green test_config_repo_default/test_config (run `timeout 300 .venv/bin/pytest tests/test_config_repo_default.py tests/test_config.py -q`).\n5. DOCS: Mode A — config.toml [audio] comments are the user-facing reference; ride here.",

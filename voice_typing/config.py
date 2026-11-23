@@ -215,6 +215,32 @@ class CancelConfig:
 
 
 @dataclass
+class AudioConfig:
+    """[audio] — media ducking while listening (PRD §4.2quinquies).
+
+    Ships duck_mode="off": the [audio] SURFACE lands before the AudioDucker (later D1
+    subtasks); the default flips to "mpris" the round the ducker lands (P1.M2.T4).
+    "off" is byte-identical to pre-D1 behavior (no audio subprocess is ever spawned).
+    """
+
+    duck_mode: str = "off"        # "mpris" (pause players at arm) | "volume" (duck sink) | "off"
+    duck_volume_pct: int = 15     # target sink volume % for the "volume" tier (wpctl)
+
+    def __post_init__(self) -> None:
+        """Validate at construction = load time (mirrors CancelConfig's guards)."""
+        if self.duck_mode not in ("off", "mpris", "volume"):
+            raise TypeError(
+                f"[audio] duck_mode expects 'off', 'mpris', or 'volume', got "
+                f"{self.duck_mode!r}"
+            )
+        if isinstance(self.duck_volume_pct, bool) or not isinstance(self.duck_volume_pct, int):
+            raise TypeError(
+                f"[audio] duck_volume_pct expects int, got "
+                f"{type(self.duck_volume_pct).__name__}: {self.duck_volume_pct!r}"
+            )
+
+
+@dataclass
 class FeedbackConfig:
     """[feedback] — state file + Hyprland notification settings."""
 
@@ -334,7 +360,7 @@ class LogConfig:
 # silently disable the whole feature. Rejected loudly in from_toml (TypeError), matching
 # the unknown-KEY rejection the dataclass __init__ already performs. ALL-CAPS literal
 # (cf. textproc._TRAILING_PUNCT): one definition, never re-typed at the check site.
-_KNOWN_TABLES = frozenset({"asr", "output", "cancel", "feedback", "filter", "log"})
+_KNOWN_TABLES = frozenset({"asr", "output", "cancel", "audio", "feedback", "filter", "log"})
 
 
 @dataclass
@@ -344,6 +370,7 @@ class VoiceTypingConfig:
     asr: AsrConfig = field(default_factory=AsrConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     cancel: CancelConfig = field(default_factory=CancelConfig)
+    audio: AudioConfig = field(default_factory=AudioConfig)
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
     filter: FilterConfig = field(default_factory=FilterConfig)
     log: LogConfig = field(default_factory=LogConfig)
@@ -354,7 +381,7 @@ class VoiceTypingConfig:
     def from_toml(cls, data: Mapping[str, Any]) -> VoiceTypingConfig:
         """Build a config from an already-parsed TOML mapping.
 
-        Each table ([asr]/[output]/[cancel]/[feedback]/[filter]/[log]) overlays its
+        Each table ([asr]/[output]/[cancel]/[audio]/[feedback]/[filter]/[log]) overlays its
         dataclass defaults — only present keys override; missing tables/keys keep
         defaults. Unknown keys raise TypeError (dataclass __init__ rejects them) so a
         typo'd config key surfaces loudly instead of being silently ignored. Unknown
@@ -385,6 +412,7 @@ class VoiceTypingConfig:
             asr=_overlay(AsrConfig, "asr"),
             output=_overlay(OutputConfig, "output"),
             cancel=_overlay(CancelConfig, "cancel"),
+            audio=_overlay(AudioConfig, "audio"),
             feedback=_overlay(FeedbackConfig, "feedback"),
             filter=_overlay(FilterConfig, "filter"),
             log=_overlay(LogConfig, "log"),

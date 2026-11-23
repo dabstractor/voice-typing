@@ -250,6 +250,34 @@ def test_cancel_unknown_key_raises():
 
 
 # ---------------------------------------------------------------------------
+# [audio] media-ducking keys (PRD §4.2quinquies / D1): duck_mode + duck_volume_pct.
+# duck_mode is a closed enum (the CancelConfig.keypress_action guard style);
+# duck_volume_pct is a genuine int (bool rejected — the notify_ms guard style).
+# ---------------------------------------------------------------------------
+
+def test_duck_mode_rejects_unknown_value():
+    with pytest.raises(TypeError, match="duck_mode"):
+        VoiceTypingConfig.from_toml({"audio": {"duck_mode": "loud"}})
+
+def test_duck_mode_accepts_all_three_values():
+    for v in ("off", "mpris", "volume"):
+        assert VoiceTypingConfig.from_toml({"audio": {"duck_mode": v}}).audio.duck_mode == v
+
+def test_duck_volume_pct_rejects_bool():
+    with pytest.raises(TypeError, match="duck_volume_pct"):
+        VoiceTypingConfig.from_toml({"audio": {"duck_volume_pct": True}})
+
+def test_duck_volume_pct_rejects_non_int():
+    for bad in ("15", 15.0, None, [15]):
+        with pytest.raises(TypeError, match="duck_volume_pct"):
+            VoiceTypingConfig.from_toml({"audio": {"duck_volume_pct": bad}})
+
+def test_audio_defaults_ship_off():
+    a = VoiceTypingConfig().audio
+    assert a.duck_mode == "off" and a.duck_volume_pct == 15
+
+
+# ---------------------------------------------------------------------------
 # BUG-006: unknown top-level TABLES are rejected exactly like unknown keys
 # ---------------------------------------------------------------------------
 
