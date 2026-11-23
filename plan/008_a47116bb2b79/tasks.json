@@ -507,7 +507,7 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Productize the IM-v2 wire transport into a daemon-owned subprocess",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Evolve tools/im-lab wlwire.py + im_probe.py into voice_typing/ime/ (stdlib wire client — pywayland is NOT in the venv and stays out), with a JSONL protocol to the daemon and managed lifecycle incl. the exclusive-seat unavailable event.",
               "subtasks": [
                 {
@@ -529,7 +529,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Subprocess lifecycle: spawn/monitor/teardown + unavailable handling",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1"
@@ -548,14 +548,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "acquire + ownership verification",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Bind the SPECIFIC editable field; verify via surrounding_text; fail BEFORE delivery for non-editable/password/selected/unidentified fields.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "acquire(): field binding, verification, units mapping",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S2"
@@ -579,7 +579,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "Insert path (commit_string + commit)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T2.S1"
