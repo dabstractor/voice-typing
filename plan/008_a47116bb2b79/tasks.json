@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Record the G1 regression baseline at pre-change HEAD",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Run the protected pure-python suites at HEAD 2335a9e, record exact pass/fail counts and failure reasons, and classify every red against the legacy lazy-separator contract so NEW failures introduced by this delta are separable.",
               "subtasks": [
                 {
@@ -39,7 +39,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Classify reds vs the lazy-separator contract",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -65,7 +65,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Merge fix/ydotoold-datagram onto main",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
