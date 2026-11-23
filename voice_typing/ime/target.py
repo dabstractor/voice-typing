@@ -29,11 +29,10 @@ guessed heuristic; R.3's password rule is enforced where a signal exists
 
 CONSUMES: a proc duck with request(cmd, timeout=..., **fields) -> dict | None
 (the S2 ImeProcess surface, P1.M4.T1.S2 — duck-typed; NEVER imported here).
-CONSUMED BY: P1.M4.T3.S1 show() (recheck + to_bytes_span + binding_caret_after
+CONSUMED BY: P1.M4.T3.S1/S2 show() (recheck + to_bytes_span + binding_caret_after
 before every mutation); P1.M4.T4 takeover (the mutation-time half of R.5);
 P1.M6.T2.S1 constructs ImeTarget(ImeProcess(...)) in the daemon.
-FENCES: show() INSERT path only (P1.M4.T3.S1): corrections (before>0) are
-T3.S2 — REFUSED here, never approximated with N inserts; finalize/leave/cancel
+FENCES: show() = insert (T3.S1) + correction (T3.S2) only — finalize/leave/cancel
 are T3.S3; no takeover policy (T4); no manager/daemon/feedback import.
 """
 from __future__ import annotations
@@ -141,42 +140,79 @@ class ImeTarget:
             return False, "adjacent text changed", rev  # user text BEFORE our point was touched
         return True, "", rev  # post-caret changes do NOT revoke (typing itself is T4's signal)
 
-    # --- show (R.3/R.5, P1.M4.T3.S1): the INSERT path ------------------------
+    # --- show (R.3/R.5): insert (P1.M4.T3.S1) + correction (P1.M4.T3.S2) ------
     def show(self, session: int, utterance: str, seq: int,
              expected_revision: int, span: str) -> ShowResult:
-        """Insert path (R.3/R.5; P1.M4.T3.S1): extend our confirmed span at the caret.
+        """Insert OR correction (R.3/R.5; P1.M4.T3.S1 insert + P1.M4.T3.S2 correction).
 
-        ONE atomic commit per change: commit_string(delta) + commit. Zero-diff ⇒ zero events.
-        Corrections (non-extension spans) are REFUSED here — the correction path is P1.M4.T3.S2.
-        State advances ONLY on applied; unknown is never retried by the caller (controller).
+        Extension of the owned span  → ONE atomic insert   (commit_string(delta)+commit,
+        before=0). Any non-extension span → ONE atomic range replacement
+        (delete_surrounding_text(before,0) + commit_string(span) + commit) — verified-owned:
+        the delete counts BACKWARD from the caret, so recheck proves the caret sits at the
+        END of our range and _owned_region_intact proves the range's content is still ours.
+        Reach is bounded by OWNERSHIP, never size (user decision 2026-11-19); an unchunkable
+        (> 4000 B) correction is REFUSED, never split (N chunks = N visible edits, R.1).
+        Zero-diff ⇒ zero events. State advances ONLY on applied (the controller +1s
+        expected_revision only on applied); unknown is never retried by the caller.
         """
         binding = self._binding
         if binding is None:
             self.last_reason = "not acquired"
             return ShowResult.REFUSED
-        # (1) zero-diff guard FIRST — render-equal ⇒ ZERO events (R.1 event-count law)
+        # (1) zero-diff guard FIRST — render-equal ⇒ ZERO events (R.1 event-count law),
+        #     including for spans that would take the correction branch.
         if rendered_equal(self._last_applied_span, span):
             return ShowResult.UNCHANGED
-        # (2) insert condition: pure extension of the last APPLIED span, on ORIGINAL strings
-        if not span.startswith(self._last_applied_span):
-            self.last_reason = "correction not implemented (P1.M4.T3.S2)"
+        # (2) revision-regression guard: the caller seeds expected_revision from the
+        #     acquire revision and ONLY +1s on applied — anything lower (or non-int) is a
+        #     stale/desynced caller; refuse BEFORE any request (R.5).
+        if not isinstance(expected_revision, int) or expected_revision < binding.revision:
+            self.last_reason = "revision regression"
             return ShowResult.REFUSED
-        delta = span[len(self._last_applied_span):]
-        # (3) mutation-time re-check (R.5): fresh verify — activation/caret/selection/adjacency
-        ok, reason, _rev = self.recheck(binding, inserted_bytes=self._inserted_bytes)
-        if not ok:
-            self.last_reason = f"recheck: {reason}"
-            return ShowResult.REFUSED                 # NO request sent
-        # (4) the per-commit byte cap (engineering rule; never chunk inside show())
-        delta_bytes = len(delta.encode("utf-8"))
-        if delta_bytes > _COMMIT_CAP_BYTES:
-            self.last_reason = f"commit cap {_COMMIT_CAP_BYTES}B exceeded ({delta_bytes}B)"
-            return ShowResult.REFUSED                 # NO request sent
-        # (5) ONE atomic insert: commit_string(delta) + commit   (before=0 → no delete)
-        r = self._proc.request("show", timeout=_SHOW_TIMEOUT_S, session=session,
-                               utterance=utterance, seq=seq, expected_revision=expected_revision,
-                               text=delta, before=0)
-        # (6) honest mapping — bytes-sent ≠ applied; None/odd ⇒ unknown; never retry (R.5)
+        owned = self._last_applied_span
+        owned_bytes = len(owned.encode("utf-8"))      # wire units: UTF-8 bytes (astral = 4)
+        span_bytes = len(span.encode("utf-8"))
+        correction = False
+        if span.startswith(owned):
+            # ---- INSERT path (P1.M4.T3.S1, unchanged behavior) ---------------------
+            delta = span[len(owned):]
+            delta_bytes = span_bytes - owned_bytes
+            # mutation-time re-check (R.5): fresh verify — activation/caret/selection/adjacency
+            ok, reason, _rev = self.recheck(binding, inserted_bytes=self._inserted_bytes)
+            if not ok:
+                self.last_reason = f"recheck: {reason}"
+                return ShowResult.REFUSED             # NO request sent
+            # per-commit byte cap (engineering rule; never chunk inside show())
+            if delta_bytes > _COMMIT_CAP_BYTES:
+                self.last_reason = f"commit cap {_COMMIT_CAP_BYTES}B exceeded ({delta_bytes}B)"
+                return ShowResult.REFUSED             # NO request sent
+            before, text_bytes = 0, delta_bytes
+            r = self._proc.request("show", timeout=_SHOW_TIMEOUT_S, session=session,
+                                   utterance=utterance, seq=seq,
+                                   expected_revision=expected_revision, text=delta, before=0)
+        else:
+            # ---- CORRECTION path (P1.M4.T3.S2): ONE atomic range replacement --------
+            # (a) caret at the END of the owned range — the delete counts backward from it
+            ok, reason, _rev = self.recheck(binding, inserted_bytes=owned_bytes)
+            if not ok:
+                self.last_reason = f"recheck: {reason}"
+                return ShowResult.REFUSED             # NO request sent
+            # (b) the range's CURRENT content is still exactly ours (verified-owned range)
+            if not self._owned_region_intact(binding, owned):
+                self.last_reason = "owned region diverged"
+                return ShowResult.REFUSED             # NO request sent
+            # (c) unchunkable ⇒ refuse — never split (N commits = N visible edits, R.1)
+            if span_bytes > _COMMIT_CAP_BYTES:
+                self.last_reason = (f"unchunkable correction {span_bytes}B "
+                                    f"> {_COMMIT_CAP_BYTES}B cap")
+                return ShowResult.REFUSED             # NO request sent
+            correction = True
+            before, text_bytes = owned_bytes, span_bytes
+            r = self._proc.request("show", timeout=_SHOW_TIMEOUT_S, session=session,
+                                   utterance=utterance, seq=seq,
+                                   expected_revision=expected_revision, text=span,
+                                   before=owned_bytes)
+        # ---- honest mapping (both paths; bytes-sent ≠ applied) ---------------------
         if r is None:
             self.last_reason = "ime no reply"
             logger.warning("ime show: no reply (session=%s seq=%s span_chars=%d)",
@@ -184,11 +220,16 @@ class ImeTarget:
             return ShowResult.UNKNOWN
         result = r.get("result")
         if result == "applied":
-            self._last_applied_span = span            # advance ONLY on applied (Critical #1)
-            self._inserted_bytes += delta_bytes
+            self._last_applied_span = span            # advance ONLY on applied
+            if correction:
+                self._inserted_bytes = span_bytes     # SET to the owned size (shrink-safe)
+            else:
+                self._inserted_bytes += delta_bytes
             self.last_reason = ""
-            logger.info("ime show applied: session=%s seq=%s delta_bytes=%d t_ms=%s total=%d",
-                        session, seq, delta_bytes, r.get("t_ms"), self._inserted_bytes)
+            # counts + times only — NEVER the span text (R.5)
+            logger.info("ime show applied: session=%s seq=%s before=%d text_bytes=%d "
+                        "total_bytes=%d t_ms=%s", session, seq, before, text_bytes,
+                        self._inserted_bytes, r.get("t_ms"))
             return ShowResult.APPLIED
         if result == "refused":
             self.last_reason = "host refused"
@@ -196,6 +237,19 @@ class ImeTarget:
         self.last_reason = f"host result {result!r}"
         logger.warning("ime show unknown: session=%s seq=%s result=%r", session, seq, result)
         return ShowResult.UNKNOWN
+
+    def _owned_region_intact(self, binding: "FieldBinding", owned: str) -> bool:
+        """(P1.M4.T3.S2) ONE fresh verify pull: the byte range we are about to delete must
+        still contain EXACTLY our owned span — a verified-owned range (R.3: never touch
+        adjacent user text). Corrections only; inserts do not pay this roundtrip."""
+        r = self._proc.request("verify", timeout=_ACQUIRE_TIMEOUT_S)
+        if r is None or not r.get("ok", False) or r.get("text") is None:
+            return False
+        raw = r["text"].encode("utf-8")                   # ORIGINAL bytes, never normalized
+        end = binding.cursor_bytes + len(owned.encode("utf-8"))
+        if r.get("snapshot_truncated") and end > len(raw):
+            return False                                  # cannot verify through the cap
+        return raw[binding.cursor_bytes:end] == owned.encode("utf-8")
 
     # --- units plumbing for T3 (never hand-roll offsets) ---------------------
     @staticmethod

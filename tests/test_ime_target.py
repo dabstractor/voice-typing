@@ -394,13 +394,23 @@ def test_show_delta_exactly_at_cap_is_one_commit():
     assert target._inserted_bytes == 4000
 
 
-def test_show_non_extension_span_refused_correction_not_sent():
-    target, proc, _ = _bound(_verify("héllo ", 7, 7), _showreply())
+def test_show_non_extension_span_takes_correction_path():
+    # Supersedes S1's placeholder pin ("correction not implemented (P1.M4.T3.S2)"):
+    # P1.M4.T3.S2 lands the real correction — ONE atomic verified-owned replacement.
+    target, proc, _ = _bound(
+        _verify("héllo hello", 7, 7), _showreply(),   # insert lands "hello" (5 B)
+        _verify("héllo hello", 12, 12),                 # correction recheck (caret at end)
+        _verify("héllo hello", 12, 12),                 # owned-region pull
+        _showreply(),                                   # the ONE atomic commit
+    )
     assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
-    r = target.show(1, "u1", 2, 4, "xello")  # a correction, not an extension
-    assert r is ShowResult.REFUSED
-    assert target.last_reason == "correction not implemented (P1.M4.T3.S2)"
-    assert [c[0] for c in proc.calls] == ["acquire", "verify", "show"]  # refusal BEFORE recheck
+    assert target.show(1, "u1", 2, 4, "xello") is ShowResult.APPLIED  # not an extension
+    cmd, timeout, fields = proc.calls[-1]
+    assert (cmd, timeout) == ("show", 0.25)
+    assert fields["before"] == 5 and fields["text"] == "xello"  # FULL span, not a diff
+    assert [c[0] for c in proc.calls] == \
+        ["acquire", "verify", "show", "verify", "verify", "show"]
+    assert target._last_applied_span == "xello" and target._inserted_bytes == 5
 
 
 def test_show_state_not_advanced_on_refusal_next_delta_vs_last_applied():
@@ -417,3 +427,233 @@ def test_show_state_not_advanced_on_refusal_next_delta_vs_last_applied():
     assert target.show(1, "u1", 3, 5, "hello world") is ShowResult.APPLIED
     assert proc.calls[-1][2]["text"] == " world"
     assert target._inserted_bytes == 11 and target._last_applied_span == "hello world"
+
+
+# ------------------------------------------- show(): correction path (P1.M4.T3.S2) ---
+# A non-extension span is ONE atomic range replacement of the VERIFIED-OWNED range:
+# recheck proves the caret sits at the END of our owned span (the delete counts
+# backward from the caret), then _owned_region_intact re-reads the field and proves
+# the range's CURRENT content is still exactly ours — only then ONE show request
+# with before == UTF-8 bytes of the owned span and text == the FULL corrected span.
+
+
+def test_show_prefix_divergent_correction_one_atomic_replacement():
+    target, proc, _ = _bound(
+        _verify("héllo helllo w", 7, 7), _showreply(),   # insert lands "helllo w" (8 B)
+        _verify("héllo helllo w", 15, 15),                 # correction recheck
+        _verify("héllo helllo w", 15, 15),                 # owned-region pull
+        _showreply(),                                      # the ONE atomic commit
+    )
+    assert target.show(1, "u1", 1, 3, "helllo w") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "hello world") is ShowResult.APPLIED
+    assert [c[0] for c in proc.calls] == \
+        ["acquire", "verify", "show", "verify", "verify", "show"]  # 2 pulls + ONE show
+    cmd, timeout, fields = proc.calls[-1]
+    assert (cmd, timeout) == ("show", 0.25)               # the 250 ms deadline budget
+    for f in _SHOW_FIELDS:
+        assert f in fields                                 # ALL SHOW_FIELDS on the wire
+    assert fields["before"] == len("helllo w".encode()) == 8  # UTF-8 bytes, backward delete
+    assert fields["text"] == "hello world"                 # the FULL corrected span
+    assert target._last_applied_span == "hello world"
+    assert target._inserted_bytes == 11                    # SET to the owned size
+    assert target.last_reason == ""
+
+
+def test_show_shrink_correction_sets_inserted_bytes_to_owned_size():
+    # A shrink makes the caret EARLIER: _inserted_bytes must be SET to the new owned
+    # size (2), never += (13) — recheck's caret arithmetic depends on the invariant.
+    target, proc, _ = _bound(
+        _verify("héllo hello world", 7, 7), _showreply(),  # insert "hello world" (11 B)
+        _verify("héllo hello world", 18, 18),                # recheck
+        _verify("héllo hello world", 18, 18),                # owned-region pull
+        _showreply(),                                        # replacement commit
+    )
+    assert target.show(1, "u1", 1, 3, "hello world") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "hi") is ShowResult.APPLIED
+    fields = proc.calls[-1][2]
+    assert fields["text"] == "hi" and fields["before"] == 11
+    assert target._inserted_bytes == 2                       # SET — not 13
+    assert target._last_applied_span == "hi"
+
+
+def test_show_correction_after_correction_before_vs_first_corrected_span():
+    target, proc, _ = _bound(
+        _verify("héllo hello world", 7, 7), _showreply(),  # insert (11 B)
+        _verify("héllo hello world", 18, 18),
+        _verify("héllo hello world", 18, 18), _showreply(),  # correction 1 → "jello world"
+        _verify("héllo jello world", 18, 18),
+        _verify("héllo jello world", 18, 18), _showreply(), # correction 2 → "bellow world"
+    )
+    assert target.show(1, "u1", 1, 3, "hello world") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "jello world") is ShowResult.APPLIED
+    assert target.show(1, "u1", 3, 5, "bellow world") is ShowResult.APPLIED
+    assert proc.calls[-1][2]["before"] == len("jello world".encode()) == 11  # state chaining
+    assert target._last_applied_span == "bellow world" and target._inserted_bytes == 12
+
+
+def test_show_correction_astral_chars_count_utf8_bytes():
+    # "😀" and "🙂" are ONE char but FOUR UTF-8 bytes each: before counts 4 for the
+    # astral char — the wire's byte units (an off-by-one here eats user text).
+    target, proc, _ = _bound(
+        _verify("héllo hi \U0001F600 you", 7, 7), _showreply(),  # insert (11 B)
+        _verify("héllo hi \U0001F600 you", 18, 18),
+        _verify("héllo hi \U0001F600 you", 18, 18), _showreply(),
+    )
+    assert target.show(1, "u1", 1, 3, "hi \U0001F600 you") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "hi \U0001F642 you") is ShowResult.APPLIED
+    fields = proc.calls[-1][2]
+    assert fields["before"] == len("hi \U0001F600 you".encode("utf-8")) == 11
+    assert fields["text"] == "hi \U0001F642 you"
+    assert target._inserted_bytes == 11
+
+
+def test_show_owned_region_diverged_refused_no_show_request():
+    # recheck alone passes (caret restored, same length): only the second pull sees
+    # that [cursor, cursor+owned) no longer holds OUR bytes — the verified-owned guard.
+    target, proc, _ = _bound(
+        _verify("héllo hello", 7, 7), _showreply(),   # insert "hello" (5 B)
+        _verify("héllo hello", 12, 12),                 # recheck passes
+        _verify("héllo Xello", 12, 12),                 # same-length in-region edit
+    )
+    assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "jello") is ShowResult.REFUSED
+    assert target.last_reason == "owned region diverged"
+    assert [c[0] for c in proc.calls] == \
+        ["acquire", "verify", "show", "verify", "verify"]  # NO show request
+    assert target._last_applied_span == "hello" and target._inserted_bytes == 5
+
+
+def test_show_owned_region_snapshot_truncated_past_range_refused():
+    target, proc, _ = _bound(
+        _verify("héllo hello", 7, 7), _showreply(),
+        _verify("héllo hello", 12, 12),                       # recheck passes
+        _verify("héllo hel", 12, 12, snapshot_truncated=True),  # cap cut INSIDE our range
+    )
+    assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "jello") is ShowResult.REFUSED
+    assert target.last_reason == "owned region diverged"       # cannot verify through the cap
+    assert [c[0] for c in proc.calls] == ["acquire", "verify", "show", "verify", "verify"]
+
+
+def test_show_recheck_caret_moved_on_correction_refuses_no_show_request():
+    target, proc, _ = _bound(
+        _verify("héllo hello", 7, 7), _showreply(),
+        _verify("héllo hello world", 18, 18),           # caret ran past our range end
+    )
+    assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "jello") is ShowResult.REFUSED
+    assert target.last_reason == "recheck: caret moved"
+    assert [c[0] for c in proc.calls] == ["acquire", "verify", "show", "verify"]
+
+
+def test_show_unchunkable_correction_refused_no_request():
+    span = "b" + "x" * 4000                             # 4001 B, divergent from owned "a"
+    target, proc, _ = _bound(
+        _verify("héllo a", 7, 7), _showreply(),          # insert "a" (1 B)
+        _verify("héllo a", 8, 8),                        # recheck
+        _verify("héllo a", 8, 8),                        # owned-region pull
+    )
+    assert target.show(1, "u1", 1, 3, "a") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, span) is ShowResult.REFUSED
+    assert target.last_reason == "unchunkable correction 4001B > 4000B cap"
+    assert [c[0] for c in proc.calls] == \
+        ["acquire", "verify", "show", "verify", "verify"]  # never chunked, never sent
+    assert target._last_applied_span == "a" and target._inserted_bytes == 1
+
+
+def test_show_revision_regression_refused_no_request_and_equal_proceeds():
+    target, proc, _ = _bound(
+        _verify("héllo hello", 7, 7), _showreply(),
+    )
+    assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 2, "jello") is ShowResult.REFUSED  # 2 < acquire revision 3
+    assert target.last_reason == "revision regression"
+    assert [c[0] for c in proc.calls] == ["acquire", "verify", "show"]  # NO further request
+    # The equal case still proceeds (controller seeds from acquire, only +1s):
+    target2, proc2, _ = _bound(
+        _verify("héllo hello", 7, 7), _showreply(),
+        _verify("héllo hello", 12, 12),
+        _verify("héllo hello", 12, 12), _showreply(),
+    )
+    assert target2.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    assert target2.show(1, "u1", 2, 3, "jello") is ShowResult.APPLIED  # == revision: fine
+
+
+def test_show_extension_after_correction_uses_new_owned_state():
+    # After the shrink to "hi" the owned state is 2 B: the next extension takes the
+    # INSERT path against the NEW span (before=0, delta only) — the SET pin's payoff.
+    target, proc, _ = _bound(
+        _verify("héllo hello world", 7, 7), _showreply(),  # insert (11 B)
+        _verify("héllo hello world", 18, 18),
+        _verify("héllo hello world", 18, 18), _showreply(),  # shrink correction → "hi"
+        _verify("héllo hi", 9, 9), _showreply(),             # settled post-shrink field
+    )
+    assert target.show(1, "u1", 1, 3, "hello world") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "hi") is ShowResult.APPLIED
+    assert target.show(1, "u1", 3, 5, "hi!") is ShowResult.APPLIED
+    fields = proc.calls[-1][2]
+    assert fields["before"] == 0 and fields["text"] == "!"   # extension fast-path preserved
+    assert target._inserted_bytes == 3 and target._last_applied_span == "hi!"
+
+
+def test_show_render_equal_would_be_correction_is_unchanged_zero_requests():
+    target, proc, _ = _bound(
+        _verify("héllo hello world", 7, 7), _showreply(),
+    )
+    assert target.show(1, "u1", 1, 3, "hello world") is ShowResult.APPLIED
+    n = len(proc.calls)
+    assert target.show(1, "u1", 2, 4, "hello world") is ShowResult.UNCHANGED   # exact
+    assert target.show(1, "u1", 3, 5, "hello  world ") is ShowResult.UNCHANGED  # spacing-only
+    assert len(proc.calls) == n   # zero-diff FIRST — even for correction-shaped spans (R.1)
+
+
+def test_show_correction_no_reply_maps_unknown_state_not_advanced():
+    target, proc, _ = _bound(
+        _verify("héllo helllo w", 7, 7), _showreply(),
+        _verify("héllo helllo w", 15, 15),
+        _verify("héllo helllo w", 15, 15), None,             # the IM died before the commit
+    )
+    assert target.show(1, "u1", 1, 3, "helllo w") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "hello world") is ShowResult.UNKNOWN
+    assert target.last_reason == "ime no reply"              # never retried by the caller
+    assert target._last_applied_span == "helllo w" and target._inserted_bytes == 8
+
+
+def test_show_correction_host_refused_maps_refused_state_not_advanced():
+    target, proc, _ = _bound(
+        _verify("héllo helllo w", 7, 7), _showreply(),
+        _verify("héllo helllo w", 15, 15),
+        _verify("héllo helllo w", 15, 15), _showreply(result="refused"),
+    )
+    assert target.show(1, "u1", 1, 3, "helllo w") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "hello world") is ShowResult.REFUSED
+    assert target.last_reason == "host refused"
+    assert target._last_applied_span == "helllo w" and target._inserted_bytes == 8
+
+
+def test_show_correction_odd_result_maps_unknown():
+    target, proc, _ = _bound(
+        _verify("héllo helllo w", 7, 7), _showreply(),
+        _verify("héllo helllo w", 15, 15),
+        _verify("héllo helllo w", 15, 15), _showreply(result="weird"),
+    )
+    assert target.show(1, "u1", 1, 3, "helllo w") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "hello world") is ShowResult.UNKNOWN
+    assert target.last_reason == "host result 'weird'"       # defensive, no crash
+    assert target._last_applied_span == "helllo w" and target._inserted_bytes == 8
+
+
+def test_show_correction_refusal_then_retry_recomputes_vs_last_applied_span():
+    target, proc, _ = _bound(
+        _verify("héllo hello", 7, 7), _showreply(),        # insert "hello" (5 B)
+        _verify("héllo hello", 12, 12),
+        _verify("héllo hello", 12, 12), _showreply(result="refused"),  # attempt 1 refused
+        _verify("héllo hello", 12, 12),
+        _verify("héllo hello", 12, 12), _showreply(),        # retry: fresh pulls again
+    )
+    assert target.show(1, "u1", 1, 3, "hello") is ShowResult.APPLIED
+    assert target.show(1, "u1", 2, 4, "jello") is ShowResult.REFUSED
+    assert target.show(1, "u1", 3, 5, "jello") is ShowResult.APPLIED
+    assert proc.calls[-1][2]["before"] == 5   # vs the last APPLIED span — state NOT advanced
+    assert proc.calls[-1][2]["text"] == "jello"
+    assert target._inserted_bytes == 5 and target._last_applied_span == "jello"
