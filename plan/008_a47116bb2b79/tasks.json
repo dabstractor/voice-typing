@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Delta Rev 3/4 remainder — media ducking (D1), bulk text delivery (D2), legacy defect pipeline (D3)",
-      "status": "Ready",
+      "status": "Planned",
       "description": "Implement the three unimplemented work packages of PRD Rev 4 at HEAD 2335a9e: D1 media ducking (§4.2quinquies), D2 bulk text delivery over input-method-v2 (§4.2sexies R.1–R.8), D3 legacy defect closure (§8 triage). Everything in the delta PRD's LANDED rows (Rev 3 machinery, minimal-diff revision, compute_type) is DONE — do not re-implement. Research grounding lives in plan/008_a47116bb2b79/architecture/ (d1_ducking_seams.md, d2_bulk_delivery_map.md, d3_defects_g1_baseline.md, external_tech_notes.md). All work obeys AGENTS.md (two timeouts on every non-trivial command; never foreground the daemon; bounded scratch).",
       "milestones": [
         {
@@ -18,28 +18,39 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Record the G1 regression baseline at pre-change HEAD",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Run the protected pure-python suites at HEAD 2335a9e, record exact pass/fail counts and failure reasons, and classify every red against the legacy lazy-separator contract so NEW failures introduced by this delta are separable.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S1",
                   "title": "Run and record the baseline suite numbers",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: numbers already measured at 2335a9e — see plan/008_a47116bb2b79/architecture/d3_defects_g1_baseline.md Part A: 379 passed / 20 failed across 15 pure suites (commit 10F/22P; core 2F/32P; freeze 4F/22P; test_streaming.py 3P/4F real-model 106 s; zero_diff_rewind 3/3; all others green).\n2. INPUT: repo at 2335a9e, tree clean except plan/.\n3. LOGIC: re-run the 15 suites listed in the research doc, one file per call, `timeout 300 /home/dustin/.local/bin/uv run pytest <file> -q` with bash-tool timeout above it (AGENTS.md discipline; NEVER run test_feed_audio/test_daemon/test_recorder_host/test_cuda_check, tests/*.sh, the daemon, or voicectl untimed). Write the durable baseline (counts + failure names + one-line reasons) to tests/G1_BASELINE.md — bounded, no transcripts.\n4. OUTPUT: committed baseline doc; numbers must match the research record (investigate any drift before any code change).\n5. DOCS: Mode A — tests/G1_BASELINE.md is the doc; nothing else changes."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: numbers already measured at 2335a9e — see plan/008_a47116bb2b79/architecture/d3_defects_g1_baseline.md Part A: 379 passed / 20 failed across 15 pure suites (commit 10F/22P; core 2F/32P; freeze 4F/22P; test_streaming.py 3P/4F real-model 106 s; zero_diff_rewind 3/3; all others green).\n2. INPUT: repo at 2335a9e, tree clean except plan/.\n3. LOGIC: re-run the 15 suites listed in the research doc, one file per call, `timeout 300 /home/dustin/.local/bin/uv run pytest <file> -q` with bash-tool timeout above it (AGENTS.md discipline; NEVER run test_feed_audio/test_daemon/test_recorder_host/test_cuda_check, tests/*.sh, the daemon, or voicectl untimed). Write the durable baseline (counts + failure names + one-line reasons) to tests/G1_BASELINE.md — bounded, no transcripts.\n4. OUTPUT: committed baseline doc; numbers must match the research record (investigate any drift before any code change).\n5. DOCS: Mode A — tests/G1_BASELINE.md is the doc; nothing else changes.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Classify reds vs the lazy-separator contract",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1"],
-                  "prd_selectors": ["h2.3", "h3.6", "h3.4", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: all 10 commit + 2 core + 4 freeze + streaming f/g failures are legacy lazy-separator contract reds (tests encode the eager separator; HEAD defers it since 26d570b) — d3_defects_g1_baseline.md §A.1 items 1–18. test_streaming.py test_a_delta_cadence + test_b_commit_rewind_exact are NOT separator-shaped (extend/rewind cadence — possible late regression or real-model flake).\n2. INPUT: baseline from P1.M1.T1.S1.\n3. LOGIC: classify each failure (i) legacy-separator vs (ii) new/unexpected; define a pre/post re-run protocol for the two (ii) candidates (re-run before and after every D3 change to disambiguate regression vs flake). NO blanket skips, NO legacy behavior edits to fake parity.\n4. OUTPUT: classification table appended to tests/G1_BASELINE.md; the (ii) list becomes the phase's watch set.\n5. DOCS: none beyond the baseline doc."
+                  "dependencies": [
+                    "P1.M1.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: all 10 commit + 2 core + 4 freeze + streaming f/g failures are legacy lazy-separator contract reds (tests encode the eager separator; HEAD defers it since 26d570b) — d3_defects_g1_baseline.md §A.1 items 1–18. test_streaming.py test_a_delta_cadence + test_b_commit_rewind_exact are NOT separator-shaped (extend/rewind cadence — possible late regression or real-model flake).\n2. INPUT: baseline from P1.M1.T1.S1.\n3. LOGIC: classify each failure (i) legacy-separator vs (ii) new/unexpected; define a pre/post re-run protocol for the two (ii) candidates (re-run before and after every D3 change to disambiguate regression vs flake). NO blanket skips, NO legacy behavior edits to fake parity.\n4. OUTPUT: classification table appended to tests/G1_BASELINE.md; the (ii) list becomes the phase's watch set.\n5. DOCS: none beyond the baseline doc.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h3.4",
+                    "h2.5"
+                  ]
                 }
               ]
             },
@@ -54,11 +65,17 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Merge fix/ydotoold-datagram onto main",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h2.7", "h2.3", "h3.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: branch = single commit 33321c6 on merge-base f0d8d0a; touches only voice_typing/ydotoold_client.py (_connect SOCK_STREAM→SOCK_DGRAM; bug site on main is ydotoold_client.py:41) + new tests/test_ydotoold_client.py (11 tests, in-process FakeYdotoold). Zero file overlap with main since f0d8d0a → clean merge (d3_defects_g1_baseline.md Part B).\n2. INPUT: baseline recorded (P1.M1.T1.S2).\n3. LOGIC: `git merge fix/ydotoold-datagram` as a normal reviewable merge (no squash); run `timeout 300 .venv/bin/pytest tests/test_ydotoold_client.py tests/test_typing_backends.py tests/test_key_listener.py -q`; re-run the M1.T1.S2 watch set.\n4. OUTPUT: merged main with the datagram socket live; the Errno-91 CLI fallback path (typing_backends.py:138-149) goes cold.\n5. DOCS: none — commit message carries it."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: branch = single commit 33321c6 on merge-base f0d8d0a; touches only voice_typing/ydotoold_client.py (_connect SOCK_STREAM→SOCK_DGRAM; bug site on main is ydotoold_client.py:41) + new tests/test_ydotoold_client.py (11 tests, in-process FakeYdotoold). Zero file overlap with main since f0d8d0a → clean merge (d3_defects_g1_baseline.md Part B).\n2. INPUT: baseline recorded (P1.M1.T1.S2).\n3. LOGIC: `git merge fix/ydotoold-datagram` as a normal reviewable merge (no squash); run `timeout 300 .venv/bin/pytest tests/test_ydotoold_client.py tests/test_typing_backends.py tests/test_key_listener.py -q`; re-run the M1.T1.S2 watch set.\n4. OUTPUT: merged main with the datagram socket live; the Errno-91 CLI fallback path (typing_backends.py:138-149) goes cold.\n5. DOCS: none — commit message carries it.",
+                  "prd_selectors": [
+                    "h2.7",
+                    "h2.3",
+                    "h3.7"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -66,9 +83,15 @@
                   "title": "Add the 6 ms press→release contact gap on the socket path",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T2.S1"],
-                  "prd_selectors": ["h2.7", "h2.3", "h3.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: the gap exists in NEITHER socket path — press/release are back-to-back in `_key` (ydotoold_client.py:66-72); only the CLI fallback gaps events (`ydotool key -d 6`, typing_backends.py:148). Pacing constants: _CHAR_GAP_S=0.012 (ydotoold_client.py:25), _MIN_SPAWN_GAP_S=0.025 (typing_backends.py:58).\n2. INPUT: merged socket client from P1.M1.T2.S1.\n3. LOGIC: insert ~6 ms contact time between press and release in the socket path (new constant beside _CHAR_GAP_S), keeping the 12 ms inter-char gap; extend tests/test_ydotoold_client.py to assert per-key press→release spacing ≥6 ms and inter-key ≥12 ms (mirror the existing latency test's measurement-bound style).\n4. OUTPUT: gapped socket path, suite green.\n5. DOCS: Mode A — module docstring note on the gap rationale (rides here)."
+                  "dependencies": [
+                    "P1.M1.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: the gap exists in NEITHER socket path — press/release are back-to-back in `_key` (ydotoold_client.py:66-72); only the CLI fallback gaps events (`ydotool key -d 6`, typing_backends.py:148). Pacing constants: _CHAR_GAP_S=0.012 (ydotoold_client.py:25), _MIN_SPAWN_GAP_S=0.025 (typing_backends.py:58).\n2. INPUT: merged socket client from P1.M1.T2.S1.\n3. LOGIC: insert ~6 ms contact time between press and release in the socket path (new constant beside _CHAR_GAP_S), keeping the 12 ms inter-char gap; extend tests/test_ydotoold_client.py to assert per-key press→release spacing ≥6 ms and inter-key ≥12 ms (mirror the existing latency test's measurement-bound style).\n4. OUTPUT: gapped socket path, suite green.\n5. DOCS: Mode A — module docstring note on the gap rationale (rides here).",
+                  "prd_selectors": [
+                    "h2.7",
+                    "h2.3",
+                    "h3.7"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -76,9 +99,15 @@
                   "title": "Journal-noise regression guard (no per-burst fallback storms)",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T2.S2"],
-                  "prd_selectors": ["h2.7", "h2.3", "h3.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: while broken, every backspace burst degraded to one CLI spawn + one WARNING (56/week; warning site typing_backends.py:143-144). Delta acceptance #3: assert via tests, not journal scraping.\n2. INPUT: P1.M1.T2.S2.\n3. LOGIC: unit test asserting: with a healthy datagram socket, N consecutive press_backspace calls produce ZERO CLI subprocess spawns and zero warnings; on socket death exactly ONE fallback spawn + one WARNING, then self-heal reconnect (restart coverage already exists — pin the no-storm property).\n4. OUTPUT: D3.1 closed; regression test green against recorded test doubles.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M1.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: while broken, every backspace burst degraded to one CLI spawn + one WARNING (56/week; warning site typing_backends.py:143-144). Delta acceptance #3: assert via tests, not journal scraping.\n2. INPUT: P1.M1.T2.S2.\n3. LOGIC: unit test asserting: with a healthy datagram socket, N consecutive press_backspace calls produce ZERO CLI subprocess spawns and zero warnings; on socket death exactly ONE fallback spawn + one WARNING, then self-heal reconnect (restart coverage already exists — pin the no-storm property).\n4. OUTPUT: D3.1 closed; regression test green against recorded test doubles.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.7",
+                    "h2.3",
+                    "h3.7"
+                  ]
                 }
               ]
             },
@@ -95,9 +124,15 @@
                   "title": "Replay a sustained-Backspace hold as a regression test + audit trace",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h2.7", "h2.3", "h3.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: key_listener.py:81 drops value!=1 (autorepeat invisible by design); compensation is daemon.py:1779 `n=max(tail_len-1,0)` + press_backspace at :1781; during the paced burst OS autorepeat deletes REAL chars the daemon cannot observe (belief-desync). Existing coverage filters value-2 events (test_key_listener.py:61-65, :218-228) but NO test simulates the R extra OS-level deletions of a hold (d3_defects_g1_baseline.md Part C).\n2. INPUT: baseline + merged D3.1.\n3. LOGIC: write the hold-trace test (armed + tail in flight; press(1) + repeats(2)×R + release(0)) asserting: exactly ONE cancel; repeats never re-latch/re-stamp the suppression window; document the residual unobservable-deletion window (repeats landing during the paced burst) with its bound, in the test docstring.\n4. OUTPUT: regression test + written audit finding for S2.\n5. DOCS: Mode A — audit note in the test file docstring."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: key_listener.py:81 drops value!=1 (autorepeat invisible by design); compensation is daemon.py:1779 `n=max(tail_len-1,0)` + press_backspace at :1781; during the paced burst OS autorepeat deletes REAL chars the daemon cannot observe (belief-desync). Existing coverage filters value-2 events (test_key_listener.py:61-65, :218-228) but NO test simulates the R extra OS-level deletions of a hold (d3_defects_g1_baseline.md Part C).\n2. INPUT: baseline + merged D3.1.\n3. LOGIC: write the hold-trace test (armed + tail in flight; press(1) + repeats(2)×R + release(0)) asserting: exactly ONE cancel; repeats never re-latch/re-stamp the suppression window; document the residual unobservable-deletion window (repeats landing during the paced burst) with its bound, in the test docstring.\n4. OUTPUT: regression test + written audit finding for S2.\n5. DOCS: Mode A — audit note in the test file docstring.",
+                  "prd_selectors": [
+                    "h2.7",
+                    "h2.3",
+                    "h3.4"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -105,9 +140,15 @@
                   "title": "Mitigate or record the residual desync window",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T3.S1"],
-                  "prd_selectors": ["h2.7", "h2.3", "h3.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD fix rules already hold (cancel fires only while armed AND a tail is pending; idempotent; compensation by subtraction). The open question is only whether the hold window is bounded.\n2. INPUT: audit finding from P1.M1.T3.S1.\n3. LOGIC: if the audit shows unbounded desync, apply the smallest PRD-sanctioned mitigation (e.g. bound the burst so a hold past the burst is provably a user edit, documented); if bounded and correct-by-design, record the evidence and STOP — do not gold-plate (delta D3.2).\n4. OUTPUT: D3.2 closed with test or recorded evidence.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M1.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD fix rules already hold (cancel fires only while armed AND a tail is pending; idempotent; compensation by subtraction). The open question is only whether the hold window is bounded.\n2. INPUT: audit finding from P1.M1.T3.S1.\n3. LOGIC: if the audit shows unbounded desync, apply the smallest PRD-sanctioned mitigation (e.g. bound the burst so a hold past the burst is provably a user edit, documented); if bounded and correct-by-design, record the evidence and STOP — do not gold-plate (delta D3.2).\n4. OUTPUT: D3.2 closed with test or recorded evidence.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.7",
+                    "h2.3",
+                    "h3.4"
+                  ]
                 }
               ]
             },
@@ -124,9 +165,15 @@
                   "title": "Bound the suppression-window re-latch chain",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h2.7", "h2.3", "h3.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: latch at daemon.py:1788-1792 (`_cancel_suppress_final` + `_cancel_suppress_since`, refreshed per press); within the bound on_final :1158-1217 drops EVERY final; partials do NOT close the daemon latch (_touch_speech :1460-1499 lifts only the engine `_suppressed`); healthy exits: sentinel consume :1194-1197, timeout self-heal :1166-1189, fresh arm :1371-1374; every dropped final still resets the boundary :1213-1216 (KEEP this invariant). Incident occurred WITH 4640041 backstops live (d3_defects_g1_baseline.md Part D).\n2. INPUT: baseline.\n3. LOGIC: implement ONE product decision (log it in a code comment): (a) cap consecutive dropped finals per latch, or (b) close the window on genuinely-fresh speech (partial after latch with no sentinel). Keep all existing healthy-exit paths and the boundary-reset invariant unchanged.\n4. OUTPUT: bounded window; decision recorded.\n5. DOCS: Mode A — daemon cancel docstring notes the bound."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: latch at daemon.py:1788-1792 (`_cancel_suppress_final` + `_cancel_suppress_since`, refreshed per press); within the bound on_final :1158-1217 drops EVERY final; partials do NOT close the daemon latch (_touch_speech :1460-1499 lifts only the engine `_suppressed`); healthy exits: sentinel consume :1194-1197, timeout self-heal :1166-1189, fresh arm :1371-1374; every dropped final still resets the boundary :1213-1216 (KEEP this invariant). Incident occurred WITH 4640041 backstops live (d3_defects_g1_baseline.md Part D).\n2. INPUT: baseline.\n3. LOGIC: implement ONE product decision (log it in a code comment): (a) cap consecutive dropped finals per latch, or (b) close the window on genuinely-fresh speech (partial after latch with no sentinel). Keep all existing healthy-exit paths and the boundary-reset invariant unchanged.\n4. OUTPUT: bounded window; decision recorded.\n5. DOCS: Mode A — daemon cancel docstring notes the bound.",
+                  "prd_selectors": [
+                    "h2.7",
+                    "h2.3",
+                    "h3.4"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -134,9 +181,15 @@
                   "title": "Replay the 4× incident sequence as a regression test",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T4.S1"],
-                  "prd_selectors": ["h2.7", "h2.3", "h3.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: exact 7-step scenario in d3_defects_g1_baseline.md Part D (arm → partials → Backspace#1 → sentinel LOST → re-speak → final <5 s DROPPED → Backspace#2 re-latch → ×4). Mirror the style of tests/test_daemon.py:5142 test_lost_sentinel_self_heals_after_timeout (mock host, no CUDA).\n2. INPUT: bounded window from P1.M1.T4.S1.\n3. LOGIC: daemon-level test replaying the chained sequence; assert the chain terminates (re-said finals land typed/recorded, or the window closes) and the boundary-reset invariant holds on every drop.\n4. OUTPUT: D3.3 closed with the incident pinned green.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M1.T4.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: exact 7-step scenario in d3_defects_g1_baseline.md Part D (arm → partials → Backspace#1 → sentinel LOST → re-speak → final <5 s DROPPED → Backspace#2 re-latch → ×4). Mirror the style of tests/test_daemon.py:5142 test_lost_sentinel_self_heals_after_timeout (mock host, no CUDA).\n2. INPUT: bounded window from P1.M1.T4.S1.\n3. LOGIC: daemon-level test replaying the chained sequence; assert the chain terminates (re-said finals land typed/recorded, or the window closes) and the boundary-reset invariant holds on every drop.\n4. OUTPUT: D3.3 closed with the incident pinned green.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.7",
+                    "h2.3",
+                    "h3.4"
+                  ]
                 }
               ]
             }
@@ -163,8 +216,12 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3", "h3.5", "h3.9"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: exact recipe in plan/008_a47116bb2b79/architecture/d1_ducking_seams.md §3 — AudioConfig dataclass after CancelConfig (~config.py:216) with duck_mode guard copying keypress_action (config.py:201-206, allowed (\"off\",\"mpris\",\"volume\")) and duck_volume_pct int guard; field on VoiceTypingConfig (:341-346); \"audio\" in _KNOWN_TABLES (:337); audio=_overlay(AudioConfig,\"audio\") in from_toml (:385-391); config.toml [audio] table after [cancel] (~line 55), inline-comment style per config.toml:31-47. Key-set pin lives ONLY in tests/test_config_repo_default.py:37-63 (docstring \"24 schema keys\" line 38; verified 24 at HEAD) → 26.\n2. INPUT: none (first D1 subtask).\n3. LOGIC: TDD — extend the pin test first (audio: {duck_mode, duck_volume_pct}, docstring 24→26), add type/value guard tests beside tests/test_config.py:143-201, then implement; SHIPS duck_mode=\"off\".\n4. OUTPUT: config surface + green test_config_repo_default/test_config (run `timeout 300 .venv/bin/pytest tests/test_config_repo_default.py tests/test_config.py -q`).\n5. DOCS: Mode A — config.toml [audio] comments are the user-facing reference; ride here."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: exact recipe in plan/008_a47116bb2b79/architecture/d1_ducking_seams.md §3 — AudioConfig dataclass after CancelConfig (~config.py:216) with duck_mode guard copying keypress_action (config.py:201-206, allowed (\"off\",\"mpris\",\"volume\")) and duck_volume_pct int guard; field on VoiceTypingConfig (:341-346); \"audio\" in _KNOWN_TABLES (:337); audio=_overlay(AudioConfig,\"audio\") in from_toml (:385-391); config.toml [audio] table after [cancel] (~line 55), inline-comment style per config.toml:31-47. Key-set pin lives ONLY in tests/test_config_repo_default.py:37-63 (docstring \"24 schema keys\" line 38; verified 24 at HEAD) → 26.\n2. INPUT: none (first D1 subtask).\n3. LOGIC: TDD — extend the pin test first (audio: {duck_mode, duck_volume_pct}, docstring 24→26), add type/value guard tests beside tests/test_config.py:143-201, then implement; SHIPS duck_mode=\"off\".\n4. OUTPUT: config surface + green test_config_repo_default/test_config (run `timeout 300 .venv/bin/pytest tests/test_config_repo_default.py tests/test_config.py -q`).\n5. DOCS: Mode A — config.toml [audio] comments are the user-facing reference; ride here.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.5",
+                    "h3.9"
+                  ]
                 }
               ]
             },
@@ -181,9 +238,14 @@
                   "title": "AudioDucker core + backend protocol + bookkeeping",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T1.S1"],
-                  "prd_selectors": ["h2.3", "h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: new module voice_typing/audio_ducking.py (only feedback.py/typing_backends.py import subprocess today — keeps the third import local); NO subprocess.run(...,timeout=) exists in voice_typing/ — copy the swallow-discipline of feedback.py:247-261 and ADD timeout (d1_ducking_seams.md §1e).\n2. INPUT: config from P1.M2.T1.S1 (duck_mode, duck_volume_pct).\n3. LOGIC: AudioDucker.engage()/release() over an injectable Backend protocol; idempotent both directions; release-without-engage = no-op; bookkeeping state = paused-player ledger (name, was Playing) and volume snapshot, consumed by the tiers. Unit tests with a fake backend in tests/test_ducking.py.\n4. OUTPUT: AudioDucker + Backend protocol for S2/S3.\n5. DOCS: Mode A — module docstring states tiers + sovereignty rules."
+                  "dependencies": [
+                    "P1.M2.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: new module voice_typing/audio_ducking.py (only feedback.py/typing_backends.py import subprocess today — keeps the third import local); NO subprocess.run(...,timeout=) exists in voice_typing/ — copy the swallow-discipline of feedback.py:247-261 and ADD timeout (d1_ducking_seams.md §1e).\n2. INPUT: config from P1.M2.T1.S1 (duck_mode, duck_volume_pct).\n3. LOGIC: AudioDucker.engage()/release() over an injectable Backend protocol; idempotent both directions; release-without-engage = no-op; bookkeeping state = paused-player ledger (name, was Playing) and volume snapshot, consumed by the tiers. Unit tests with a fake backend in tests/test_ducking.py.\n4. OUTPUT: AudioDucker + Backend protocol for S2/S3.\n5. DOCS: Mode A — module docstring states tiers + sovereignty rules.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -191,9 +253,14 @@
                   "title": "MPRIS tier: tracked pause set via busctl",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T2.S1"],
-                  "prd_selectors": ["h2.3", "h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: NO D-Bus libs in .venv (probed) → subprocess busctl only; exact argv forms in plan/008_a47116bb2b79/architecture/external_tech_notes.md §3 (ListNames / get-property PlaybackStatus / Pause / Play). Research FORBIDS `playerctl --all-players pause` + bare `play` (misses late players; bare play targets most-recent only) — use the tracked-pause-set design even if playerctl is used for individual ops.\n2. INPUT: Backend protocol from P1.M2.T2.S1.\n3. LOGIC: engage: enumerate org.mpris.MediaPlayer2.* names, pause each with PlaybackStatus==Playing (respect CanPause), store the exact name set. Release: resume ONLY players (a) we paused, (b) that were Playing before, (c) still Paused now (intersect stored set with fresh ListNames) — a player the user started mid-dictation is never resumed (PRD test case a). Every call `timeout` ≤1 s; failure journals ONE line.\n4. OUTPUT: MPRIS tier green against fakes (case a pinned).\n5. DOCS: none (module docstring covers)."
+                  "dependencies": [
+                    "P1.M2.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: NO D-Bus libs in .venv (probed) → subprocess busctl only; exact argv forms in plan/008_a47116bb2b79/architecture/external_tech_notes.md §3 (ListNames / get-property PlaybackStatus / Pause / Play). Research FORBIDS `playerctl --all-players pause` + bare `play` (misses late players; bare play targets most-recent only) — use the tracked-pause-set design even if playerctl is used for individual ops.\n2. INPUT: Backend protocol from P1.M2.T2.S1.\n3. LOGIC: engage: enumerate org.mpris.MediaPlayer2.* names, pause each with PlaybackStatus==Playing (respect CanPause), store the exact name set. Release: resume ONLY players (a) we paused, (b) that were Playing before, (c) still Paused now (intersect stored set with fresh ListNames) — a player the user started mid-dictation is never resumed (PRD test case a). Every call `timeout` ≤1 s; failure journals ONE line.\n4. OUTPUT: MPRIS tier green against fakes (case a pinned).\n5. DOCS: none (module docstring covers).",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -201,9 +268,14 @@
                   "title": "Volume tier: wpctl snapshot + conditional restore",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T2.S1"],
-                  "prd_selectors": ["h2.3", "h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: wpctl grammar `Volume: <float>[ MUTED]`; bare `15%` = ABSOLUTE set; @DEFAULT_AUDIO_SINK@ re-resolves per invocation → snapshot the CONCRETE sink node id at engage and restore by id (external_tech_notes.md §4).\n2. INPUT: Backend protocol from P1.M2.T2.S1.\n3. LOGIC: engage: read+store node id + float volume + mute state, then set duck_volume_pct absolute. Release: restore stored float + mute ONLY if the current volume still equals what we last set (user sovereignty — PRD test case b); skip gracefully if the node is gone. ≤1 s timeouts; one-line failure logs.\n4. OUTPUT: volume tier green against fakes (case b pinned).\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M2.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: wpctl grammar `Volume: <float>[ MUTED]`; bare `15%` = ABSOLUTE set; @DEFAULT_AUDIO_SINK@ re-resolves per invocation → snapshot the CONCRETE sink node id at engage and restore by id (external_tech_notes.md §4).\n2. INPUT: Backend protocol from P1.M2.T2.S1.\n3. LOGIC: engage: read+store node id + float volume + mute state, then set duck_volume_pct absolute. Release: restore stored float + mute ONLY if the current volume still equals what we last set (user sovereignty — PRD test case b); skip gracefully if the node is gone. ≤1 s timeouts; one-line failure logs.\n4. OUTPUT: volume tier green against fakes (case b pinned).\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -211,9 +283,15 @@
                   "title": "Failure discipline: non-blocking, bounded, idempotent",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T2.S2", "P1.M2.T2.S3"],
-                  "prd_selectors": ["h2.3", "h3.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: the arm toast site runs UNDER self._lock — engage must spawn a short-lived daemon thread (precedent: signal-handler spawn daemon.py:2738-2742; abort-out-of-lock discipline NEW-2, _disarm docstring :1422-1436). Ducking is an enhancement, NEVER a gate (PRD failure discipline).\n2. INPUT: both tiers from P1.M2.T2.S2 + P1.M2.T2.S3.\n3. LOGIC: engage/release wrappers that (a) never block the caller (async dispatch), (b) survive a hung backend call — a mocked 5 s sleep must not delay arm beyond bound (PRD case d), (c) stay idempotent under repeated arms (case e).\n4. OUTPUT: discipline tests green; ducker ready to wire.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M2.T2.S2",
+                    "P1.M2.T2.S3"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: the arm toast site runs UNDER self._lock — engage must spawn a short-lived daemon thread (precedent: signal-handler spawn daemon.py:2738-2742; abort-out-of-lock discipline NEW-2, _disarm docstring :1422-1436). Ducking is an enhancement, NEVER a gate (PRD failure discipline).\n2. INPUT: both tiers from P1.M2.T2.S2 + P1.M2.T2.S3.\n3. LOGIC: engage/release wrappers that (a) never block the caller (async dispatch), (b) survive a hung backend call — a mocked 5 s sleep must not delay arm beyond bound (PRD case d), (c) stay idempotent under repeated arms (case e).\n4. OUTPUT: discipline tests green; ducker ready to wire.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.5"
+                  ]
                 }
               ]
             },
@@ -230,9 +308,15 @@
                   "title": "Engage/release at the arm/disarm seams (spawned, never under _lock)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M2.T2.S4"],
-                  "prd_selectors": ["h2.3", "h3.5", "h3.1"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: choke points (d1_ducking_seams.md §1): engage at the _arm() toast site daemon.py:1415 (covers every arm); release at _disarm() after :1454 (manual stop/toggle-off, drain completion :1817-1818, idle auto-stop :1871-1872, HALT :1598-1601) AND request_shutdown() after :2177 (quit + SIGTERM); cancel() :1754 must NOT release (mic stays hot); ducker ctor seam mirrors key_listener= (daemon.py:574-576/802-812), default built from cfg.audio when duck_mode!=\"off\". EDGE: _handle_dead_host (:1050) fires the stop toast without _disarm — add release there too (child death while ducked).\n2. INPUT: AudioDucker from P1.M2.T2.S4.\n3. LOGIC: spawn engage/release threads at the sites (never inline under _lock); feedback.set_ducked() from the ducker thread; PRD case (c) — release fires on every disarm path incl HALT and auto-stop — pinned via a _FakeDucker injected through a copy of _make_daemon (tests/test_daemon.py:682-700 pattern).\n4. OUTPUT: wired daemon; lifecycle cases green in tests/test_ducking.py.\n5. DOCS: Mode A — daemon.py module docstring gains the ducking note."
+                  "dependencies": [
+                    "P1.M2.T2.S4"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: choke points (d1_ducking_seams.md §1): engage at the _arm() toast site daemon.py:1415 (covers every arm); release at _disarm() after :1454 (manual stop/toggle-off, drain completion :1817-1818, idle auto-stop :1871-1872, HALT :1598-1601) AND request_shutdown() after :2177 (quit + SIGTERM); cancel() :1754 must NOT release (mic stays hot); ducker ctor seam mirrors key_listener= (daemon.py:574-576/802-812), default built from cfg.audio when duck_mode!=\"off\". EDGE: _handle_dead_host (:1050) fires the stop toast without _disarm — add release there too (child death while ducked).\n2. INPUT: AudioDucker from P1.M2.T2.S4.\n3. LOGIC: spawn engage/release threads at the sites (never inline under _lock); feedback.set_ducked() from the ducker thread; PRD case (c) — release fires on every disarm path incl HALT and auto-stop — pinned via a _FakeDucker injected through a copy of _make_daemon (tests/test_daemon.py:682-700 pattern).\n4. OUTPUT: wired daemon; lifecycle cases green in tests/test_ducking.py.\n5. DOCS: Mode A — daemon.py module docstring gains the ducking note.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.5",
+                    "h3.1"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -240,9 +324,16 @@
                   "title": "Crash safety: ducked flag, startup self-heal, ExecStopPost",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T3.S1"],
-                  "prd_selectors": ["h2.3", "h3.5", "h3.10", "h3.13"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: feedback recipe (d1_ducking_seams.md §2): \"ducked\": False in _state (feedback.py:95-109) + set_ducked() cloning set_models_loaded (:135-145), always-write, never notifies; snapshot() exposes it free. systemd unit has NO ExecStopPost today; tests/test_systemd_unit.py lockstep pattern at :94-96; install.sh seds __REPO__ in ExecStart only — verify substitution coverage before referencing a repo path in ExecStopPost.\n2. INPUT: P1.M2.T3.S1.\n3. LOGIC: state field + setter; at daemon startup, if state.json ducked==true → best-effort release (PRD case f); add ExecStopPost= best-effort restore + a unit-test assertion mirroring :94-96.\n4. OUTPUT: crash-recovery case green; systemd lockstep green.\n5. DOCS: Mode A — ExecStopPost comment in the unit explains the crash-safety rationale."
+                  "dependencies": [
+                    "P1.M2.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: feedback recipe (d1_ducking_seams.md §2): \"ducked\": False in _state (feedback.py:95-109) + set_ducked() cloning set_models_loaded (:135-145), always-write, never notifies; snapshot() exposes it free. systemd unit has NO ExecStopPost today; tests/test_systemd_unit.py lockstep pattern at :94-96; install.sh seds __REPO__ in ExecStart only — verify substitution coverage before referencing a repo path in ExecStopPost.\n2. INPUT: P1.M2.T3.S1.\n3. LOGIC: state field + setter; at daemon startup, if state.json ducked==true → best-effort release (PRD case f); add ExecStopPost= best-effort restore + a unit-test assertion mirroring :94-96.\n4. OUTPUT: crash-recovery case green; systemd lockstep green.\n5. DOCS: Mode A — ExecStopPost comment in the unit explains the crash-safety rationale.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.5",
+                    "h3.10",
+                    "h3.13"
+                  ]
                 }
               ]
             },
@@ -259,9 +350,17 @@
                   "title": "Default flip + acceptance evidence",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M2.T2.S4", "P1.M2.T3.S1", "P1.M2.T3.S2"],
-                  "prd_selectors": ["h2.3", "h3.5", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: key-set pin stays at 26 (values change, not keys); tests/test_config_repo_default.py test_repo_config_toml_equals_defaults pins the new default automatically once config.toml flips.\n2. INPUT: all D1 tests green (P1.M2.T2.*, P1.M2.T3.*).\n3. LOGIC: flip default to \"mpris\" in config.py + config.toml lockstep; run the §4.2quinquies acceptance scenarios (music→arm→pause ≤1 s→resume at stop; duck_mode=\"volume\" ducks to 15% and restores exactly; user changes never overridden; duck_mode=\"off\" byte-identical to today; journal shows engage/release lines) — scripted where possible against harmless targets, else documented operator checks with expected journal lines.\n4. OUTPUT: default \"mpris\" landed with recorded evidence.\n5. DOCS: Mode A — config.toml comment updated; README section is Mode B (P1.M7.T2), NOT here."
+                  "dependencies": [
+                    "P1.M2.T2.S4",
+                    "P1.M2.T3.S1",
+                    "P1.M2.T3.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: key-set pin stays at 26 (values change, not keys); tests/test_config_repo_default.py test_repo_config_toml_equals_defaults pins the new default automatically once config.toml flips.\n2. INPUT: all D1 tests green (P1.M2.T2.*, P1.M2.T3.*).\n3. LOGIC: flip default to \"mpris\" in config.py + config.toml lockstep; run the §4.2quinquies acceptance scenarios (music→arm→pause ≤1 s→resume at stop; duck_mode=\"volume\" ducks to 15% and restores exactly; user changes never overridden; duck_mode=\"off\" byte-identical to today; journal shows engage/release lines) — scripted where possible against harmless targets, else documented operator checks with expected journal lines.\n4. OUTPUT: default \"mpris\" landed with recorded evidence.\n5. DOCS: Mode A — config.toml comment updated; README section is Mode B (P1.M7.T2), NOT here.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.5",
+                    "h2.6"
+                  ]
                 }
               ]
             }
@@ -288,8 +387,12 @@
                   "status": "Planned",
                   "story_points": 2,
                   "dependencies": [],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 contract; MUST be separate from StreamingOutput (voice_typing/streaming.py:180) and typing_backends.py — the bulk adapter MUST NOT expose type_character/press_backspace or any typing fallback (d2_bulk_delivery_map.md §3 lists the do-not-touch surface). 'Bytes sent is not applied; unknown is not delivered.'\n2. INPUT: none (first D2 code subtask).\n3. LOGIC: new voice_typing/bulk_delivery.py: DeliveryTarget Protocol (acquire → opaque handle + revision; show(session, utterance, seq, expected_revision, complete rendered span) → applied|unchanged|refused|unknown; finalize; leave; cancel), units-mapping contract (map positions to the target's own units; never slice via a lowercased/normalized copy); rendered-span equality guard — strings that render identically after the existing language/spacing guards ⇒ zero events; real case/punctuation/word differences never equal. Pure unit tests incl Unicode.\n4. OUTPUT: contracts consumed by P1.M3.T2.S1 and both adapters (M4/M5).\n5. DOCS: Mode A — module docstring carries the R.2/R.3 contract summary."
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 contract; MUST be separate from StreamingOutput (voice_typing/streaming.py:180) and typing_backends.py — the bulk adapter MUST NOT expose type_character/press_backspace or any typing fallback (d2_bulk_delivery_map.md §3 lists the do-not-touch surface). 'Bytes sent is not applied; unknown is not delivered.'\n2. INPUT: none (first D2 code subtask).\n3. LOGIC: new voice_typing/bulk_delivery.py: DeliveryTarget Protocol (acquire → opaque handle + revision; show(session, utterance, seq, expected_revision, complete rendered span) → applied|unchanged|refused|unknown; finalize; leave; cancel), units-mapping contract (map positions to the target's own units; never slice via a lowercased/normalized copy); rendered-span equality guard — strings that render identically after the existing language/spacing guards ⇒ zero events; real case/punctuation/word differences never equal. Pure unit tests incl Unicode.\n4. OUTPUT: contracts consumed by P1.M3.T2.S1 and both adapters (M4/M5).\n5. DOCS: Mode A — module docstring carries the R.2/R.3 contract summary.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.6"
+                  ]
                 }
               ]
             },
@@ -306,9 +409,14 @@
                   "title": "Ordering core: bounded queue, barriers, one writer",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M3.T1.S1"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.5 — RecorderHost._dispatch invokes _on_partial/on_final ON the reader thread; bulk mode MUST enqueue and return (no subprocess/editor wait/display poll there or under the daemon control lock). Bounded queue default 32; overflow STOPS delivery rather than dropping a barrier; finals and boundaries are ordered barriers, never overwritten.\n2. INPUT: contracts from P1.M3.T1.S1.\n3. LOGIC: controller state machine: session generation, utterance ids, seq, expected_revision; one writer per target; one operation in flight; newest partial wins for the current utterance (superseded partials coalesce). Unit tests with an in-process fake target: append; first-word change; identical update (zero events); retraction; Unicode.\n4. OUTPUT: ordering core for P1.M3.T2.S2.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.5 — RecorderHost._dispatch invokes _on_partial/on_final ON the reader thread; bulk mode MUST enqueue and return (no subprocess/editor wait/display poll there or under the daemon control lock). Bounded queue default 32; overflow STOPS delivery rather than dropping a barrier; finals and boundaries are ordered barriers, never overwritten.\n2. INPUT: contracts from P1.M3.T1.S1.\n3. LOGIC: controller state machine: session generation, utterance ids, seq, expected_revision; one writer per target; one operation in flight; newest partial wins for the current utterance (superseded partials coalesce). Unit tests with an in-process fake target: append; first-word change; identical update (zero events); retraction; Unicode.\n4. OUTPUT: ordering core for P1.M3.T2.S2.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -316,9 +424,14 @@
                   "title": "Failure handling: 250 ms deadline, disarm-on-unknown, no retries",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M3.T2.S1"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.5 — any unknown/refused/stalled operation (250 ms engineering deadline) disarms bulk delivery AND recording, retains recoverable recognition, reports ONE concise reason; NEVER retry an operation that may already have landed; validate deadlines in the RECEIVER so a late op cannot mutate after give-up.\n2. INPUT: P1.M3.T2.S1.\n3. LOGIC: implement deadline + result handling; unit-test: timeout-after-apply (treated unknown ⇒ disarm, no retry); held key; out-of-order results; stop + immediate re-arm; child death; focus change mid-operation. Keep three values distinct: latest recognized text, filter-accepted final, last target-CONFIRMED visible text.\n4. OUTPUT: failure-complete controller.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M3.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.5 — any unknown/refused/stalled operation (250 ms engineering deadline) disarms bulk delivery AND recording, retains recoverable recognition, reports ONE concise reason; NEVER retry an operation that may already have landed; validate deadlines in the RECEIVER so a late op cannot mutate after give-up.\n2. INPUT: P1.M3.T2.S1.\n3. LOGIC: implement deadline + result handling; unit-test: timeout-after-apply (treated unknown ⇒ disarm, no retry); held key; out-of-order results; stop + immediate re-arm; child death; focus change mid-operation. Keep three values distinct: latest recognized text, filter-accepted final, last target-CONFIRMED visible text.\n4. OUTPUT: failure-complete controller.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -326,9 +439,15 @@
                   "title": "G2 gate: full fake-target trace matrix green + evidence record",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M3.T2.S2"],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: G2 list is enumerated in R.7; G2 is necessary, NEVER sufficient — a G2 pass never marks a field row verified.\n2. INPUT: P1.M3.T2.S2.\n3. LOGIC: run + record the complete matrix: append; first-word change; identical update and final; retraction; Unicode; rejected/lost final; repeated cancel; timeout-after-apply; held key; out-of-order results; stop + immediate re-arm; child death; focus change mid-operation. Assert exact text/caret, bounded queue, ZERO legacy-backend calls (no type_text/press_backspace reachable in bulk mode), no duplicates, no extra writes, no post-takeover mutations. Evidence bounded in tests/.\n4. OUTPUT: G2 pass recorded as the gate artifact.\n5. DOCS: gate record file only."
+                  "dependencies": [
+                    "P1.M3.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: G2 list is enumerated in R.7; G2 is necessary, NEVER sufficient — a G2 pass never marks a field row verified.\n2. INPUT: P1.M3.T2.S2.\n3. LOGIC: run + record the complete matrix: append; first-word change; identical update and final; retraction; Unicode; rejected/lost final; repeated cancel; timeout-after-apply; held key; out-of-order results; stop + immediate re-arm; child death; focus change mid-operation. Assert exact text/caret, bounded queue, ZERO legacy-backend calls (no type_text/press_backspace reachable in bulk mode), no duplicates, no extra writes, no post-takeover mutations. Evidence bounded in tests/.\n4. OUTPUT: G2 pass recorded as the gate artifact.\n5. DOCS: gate record file only.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.5"
+                  ]
                 }
               ]
             },
@@ -345,9 +464,15 @@
                   "title": "output.delivery key + precondition triple enforcement",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h2.3", "h3.6", "h3.9"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: OutputConfig is config.py:140-168; key-set pin (tests/test_config_repo_default.py:37-63) goes 26 → 27 after [audio] lands (coordinate with P1.M2.T1.S1's 24→26).\n2. INPUT: baseline P1.M1.T1.S2 (no legacy config behavior change).\n3. LOGIC: add delivery=\"stream-edit\" to OutputConfig + config.toml; enforce at load: \"bulk-text\" requires streaming=true AND graceful_stop=false AND keypress_action=\"disarm\", else a clear ValueError naming all three violated keys; default stays \"stream-edit\" (opt-in until G6); config.toml comment documents opt-in status.\n4. OUTPUT: config gate green; key-set pin at 27.\n5. DOCS: Mode A — config.toml output.delivery comment."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: OutputConfig is config.py:140-168; key-set pin (tests/test_config_repo_default.py:37-63) goes 26 → 27 after [audio] lands (coordinate with P1.M2.T1.S1's 24→26).\n2. INPUT: baseline P1.M1.T1.S2 (no legacy config behavior change).\n3. LOGIC: add delivery=\"stream-edit\" to OutputConfig + config.toml; enforce at load: \"bulk-text\" requires streaming=true AND graceful_stop=false AND keypress_action=\"disarm\", else a clear ValueError naming all three violated keys; default stays \"stream-edit\" (opt-in until G6); config.toml comment documents opt-in status.\n4. OUTPUT: config gate green; key-set pin at 27.\n5. DOCS: Mode A — config.toml output.delivery comment.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h3.9"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -355,9 +480,17 @@
                   "title": "Delivery status surface: feedback fields + voicectl status rendering",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M3.T3.S1", "P1.M3.T1.S1"],
-                  "prd_selectors": ["h2.3", "h3.6", "h3.10", "h3.12"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: additive-key recipe (d2_bulk_delivery_map.md §4): add delivery_mode, delivery_state (inactive|active|unsupported|fault), delivery_reason, last_confirmed_op to feedback _state (:92-105) with set_phase-style setters (always write, never notify; the bulk controller is the ONLY writer — never hijack `partial`); status_snapshot (daemon.py:2275-2318) additive keys (mic_*/context_prompt precedents); ctl format_result status branch (:126-171) renders delivery lines after context-prompt.\n2. INPUT: P1.M3.T3.S1 + P1.M3.T1.S1.\n3. LOGIC: TDD through the existing feedback/ctl test seams; state NEVER carries the surrounding user document; logs on the bulk path carry counts and times, not recognition text.\n4. OUTPUT: status surface consumed by M4/M6 wiring.\n5. DOCS: Mode A — feedback.py state-field docs + ctl.py status help."
+                  "dependencies": [
+                    "P1.M3.T3.S1",
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: additive-key recipe (d2_bulk_delivery_map.md §4): add delivery_mode, delivery_state (inactive|active|unsupported|fault), delivery_reason, last_confirmed_op to feedback _state (:92-105) with set_phase-style setters (always write, never notify; the bulk controller is the ONLY writer — never hijack `partial`); status_snapshot (daemon.py:2275-2318) additive keys (mic_*/context_prompt precedents); ctl format_result status branch (:126-171) renders delivery lines after context-prompt.\n2. INPUT: P1.M3.T3.S1 + P1.M3.T1.S1.\n3. LOGIC: TDD through the existing feedback/ctl test seams; state NEVER carries the surrounding user document; logs on the bulk path carry counts and times, not recognition text.\n4. OUTPUT: status surface consumed by M4/M6 wiring.\n5. DOCS: Mode A — feedback.py state-field docs + ctl.py status help.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h3.10",
+                    "h3.12"
+                  ]
                 }
               ]
             }
@@ -383,9 +516,14 @@
                   "title": "Wire transport package + JSONL protocol",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M3.T1.S1"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tools/im-lab/wlwire.py is a stdlib-only hand-rolled Wayland wire client (core + zwp_input_method_v2 + keyboard grab); pywayland NOT importable in the daemon .venv — wlwire lineage is the decided transport; opcode tables must match the vendored input-method-unstable-v2.xml (im-lab README:29-33); im_probe.py already speaks a JSON command socket (insert/replace/preedit/endpreedit/grab) with a 64 KiB-capped event log (d2_bulk_delivery_map.md §5).\n2. INPUT: contracts from P1.M3.T1.S1.\n3. LOGIC: move/evolve wlwire+im_probe into a voice_typing/ime/ package: JSONL request/reply protocol to the daemon (acquire/show/verify/leave + result events), capped event log, tests for opcode tables vs the XML and JSONL framing. Development MUST NOT change the operator's service/config/bindings.\n4. OUTPUT: transport package for P1.M4.T1.S2.\n5. DOCS: Mode A — package docstring carries the R.2 evidence trail (26–40 ms insert; atomic commit order; surrounding_text byte-exact; commit_string generates zero key events)."
+                  "dependencies": [
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tools/im-lab/wlwire.py is a stdlib-only hand-rolled Wayland wire client (core + zwp_input_method_v2 + keyboard grab); pywayland NOT importable in the daemon .venv — wlwire lineage is the decided transport; opcode tables must match the vendored input-method-unstable-v2.xml (im-lab README:29-33); im_probe.py already speaks a JSON command socket (insert/replace/preedit/endpreedit/grab) with a 64 KiB-capped event log (d2_bulk_delivery_map.md §5).\n2. INPUT: contracts from P1.M3.T1.S1.\n3. LOGIC: move/evolve wlwire+im_probe into a voice_typing/ime/ package: JSONL request/reply protocol to the daemon (acquire/show/verify/leave + result events), capped event log, tests for opcode tables vs the XML and JSONL framing. Development MUST NOT change the operator's service/config/bindings.\n4. OUTPUT: transport package for P1.M4.T1.S2.\n5. DOCS: Mode A — package docstring carries the R.2 evidence trail (26–40 ms insert; atomic commit order; surrounding_text byte-exact; commit_string generates zero key events).",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -393,9 +531,16 @@
                   "title": "Subprocess lifecycle: spawn/monitor/teardown + unavailable handling",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T1.S1"],
-                  "prd_selectors": ["h2.3", "h3.6", "h3.1", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: subprocess isolation mirrors the recorder_host pattern (bounded join then killpg); the seat IM slot is EXCLUSIVE — a user IME (fcitx5) holding the seat sends `unavailable`; handle it by reporting delivery_state=unsupported with ONE reason, never displace/disable the user's IME, no auto-retry fighting it (stay unsupported until next arm). IM process crash = delivery fault, not daemon death.\n2. INPUT: transport from P1.M4.T1.S1 + status surface from P1.M3.T3.S2.\n3. LOGIC: spawn/monitor/restart policy (no unbounded retry loops), bounded teardown, delivery_state transitions wired to feedback.\n4. OUTPUT: managed ime subprocess consumed by T2/T3.\n5. DOCS: none (package docstring covers)."
+                  "dependencies": [
+                    "P1.M4.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: subprocess isolation mirrors the recorder_host pattern (bounded join then killpg); the seat IM slot is EXCLUSIVE — a user IME (fcitx5) holding the seat sends `unavailable`; handle it by reporting delivery_state=unsupported with ONE reason, never displace/disable the user's IME, no auto-retry fighting it (stay unsupported until next arm). IM process crash = delivery fault, not daemon death.\n2. INPUT: transport from P1.M4.T1.S1 + status surface from P1.M3.T3.S2.\n3. LOGIC: spawn/monitor/restart policy (no unbounded retry loops), bounded teardown, delivery_state transitions wired to feedback.\n4. OUTPUT: managed ime subprocess consumed by T2/T3.\n5. DOCS: none (package docstring covers).",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h3.1",
+                    "h2.7"
+                  ]
                 }
               ]
             },
@@ -412,9 +557,14 @@
                   "title": "acquire(): field binding, verification, units mapping",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T1.S2"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 — bind the editable FIELD, not a window/process/position; a pane/tab/inner editor can change without the window changing; verification via surrounding_text (byte-exact cursor/anchor = target-CONFIRMED text, the third distinct value of R.5); never replace a pre-existing user selection by default; adjacent user text/whitespace/formatting never touched (d2_bulk_delivery_map.md §1/§9).\n2. INPUT: managed subprocess from P1.M4.T1.S2.\n3. LOGIC: acquire() returning opaque handle + revision; per-field units mapping (UTF-8 bytes/chars/UTF-16/markers); mutation-time re-check helpers (focus/caret/selection/ownership) consumed by show(). Test against the fake wire and the GTK harness field.\n4. OUTPUT: verified acquire for P1.M4.T3.S1.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M4.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 — bind the editable FIELD, not a window/process/position; a pane/tab/inner editor can change without the window changing; verification via surrounding_text (byte-exact cursor/anchor = target-CONFIRMED text, the third distinct value of R.5); never replace a pre-existing user selection by default; adjacent user text/whitespace/formatting never touched (d2_bulk_delivery_map.md §1/§9).\n2. INPUT: managed subprocess from P1.M4.T1.S2.\n3. LOGIC: acquire() returning opaque handle + revision; per-field units mapping (UTF-8 bytes/chars/UTF-16/markers); mutation-time re-check helpers (focus/caret/selection/ownership) consumed by show(). Test against the fake wire and the GTK harness field.\n4. OUTPUT: verified acquire for P1.M4.T3.S1.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 }
               ]
             },
@@ -431,9 +581,14 @@
                   "title": "Insert path (commit_string + commit)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T2.S1"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: insert proven 26–40 ms cmd→field on GTK4; commit_string generates ZERO key events (delivery cannot self-trigger takeover); payloads >4000 bytes chunk without violating the one-edit rule or refuse with delivery_reason (origin of the cap unresolved in research — treat ≤4000 B/commit as the engineering rule).\n2. INPUT: acquire from P1.M4.T2.S1.\n3. LOGIC: show() executed on the target's event loop; only if focus/caret/selection/ownership still match; result mapping to applied|unchanged|refused|unknown (bytes-sent ≠ applied); 250 ms deadline with receiver-side validation.\n4. OUTPUT: insert-capable adapter.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M4.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: insert proven 26–40 ms cmd→field on GTK4; commit_string generates ZERO key events (delivery cannot self-trigger takeover); payloads >4000 bytes chunk without violating the one-edit rule or refuse with delivery_reason (origin of the cap unresolved in research — treat ≤4000 B/commit as the engineering rule).\n2. INPUT: acquire from P1.M4.T2.S1.\n3. LOGIC: show() executed on the target's event loop; only if focus/caret/selection/ownership still match; result mapping to applied|unchanged|refused|unknown (bytes-sent ≠ applied); 250 ms deadline with receiver-side validation.\n4. OUTPUT: insert-capable adapter.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -441,9 +596,14 @@
                   "title": "Correction path (one atomic range replacement)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T3.S1"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: correction = delete_surrounding_text(before,0) + commit_string + commit(serial) in ONE atomic commit — proven byte-exact on a 1024-byte span; GTK decomposes it internally into 1–2 changed signals within one commit cycle (frame-level single-edit verification is the G3 concern, P1.M4.T5.S1); correction reach is bounded by OWNERSHIP, never size (user decision 2026-11-19).\n2. INPUT: P1.M4.T3.S1.\n3. LOGIC: verified-owned-range replacement; never touches adjacent user text; expected_revision guard; refuse with delivery_reason when a span cannot be corrected atomically (e.g. unchunkable >4000 B).\n4. OUTPUT: full show().\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M4.T3.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: correction = delete_surrounding_text(before,0) + commit_string + commit(serial) in ONE atomic commit — proven byte-exact on a 1024-byte span; GTK decomposes it internally into 1–2 changed signals within one commit cycle (frame-level single-edit verification is the G3 concern, P1.M4.T5.S1); correction reach is bounded by OWNERSHIP, never size (user decision 2026-11-19).\n2. INPUT: P1.M4.T3.S1.\n3. LOGIC: verified-owned-range replacement; never touches adjacent user text; expected_revision guard; refuse with delivery_reason when a span cannot be corrected atomically (e.g. unchunkable >4000 B).\n4. OUTPUT: full show().\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -451,9 +611,14 @@
                   "title": "finalize/leave/cancel semantics",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T3.S2"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 — final matching visible text ⇒ NO further edit (ownership ends; commit side effects must not visibly change/duplicate); differing final ⇒ ONE replacement; final with no preceding partial inserts once AND counts as a missed live update in latency evidence; rejected final never auto-erases visible words; leave: stop preserves last visible words, NO post-stop writes anywhere including a newly focused field; deliberate cancel removes the owned fragment in ONE op, drops buffered audio, keeps listening — bulk cancel performs NO len(tail)−1 physical-character compensation (legacy-only).\n2. INPUT: P1.M4.T3.S2.\n3. LOGIC: implement + unit-test each branch.\n4. OUTPUT: adapter complete for takeover work.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M4.T3.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 — final matching visible text ⇒ NO further edit (ownership ends; commit side effects must not visibly change/duplicate); differing final ⇒ ONE replacement; final with no preceding partial inserts once AND counts as a missed live update in latency evidence; rejected final never auto-erases visible words; leave: stop preserves last visible words, NO post-stop writes anywhere including a newly focused field; deliberate cancel removes the owned fragment in ONE op, drops buffered audio, keeps listening — bulk cancel performs NO len(tail)−1 physical-character compensation (legacy-only).\n2. INPUT: P1.M4.T3.S2.\n3. LOGIC: implement + unit-test each branch.\n4. OUTPUT: adapter complete for takeover work.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 }
               ]
             },
@@ -470,9 +635,14 @@
                   "title": "Takeover detection + revocation + mutation-time re-checks",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T3.S3"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.5 + im-lab evidence — grab_keyboard key events reach the adapter while the field stays untouched; synthetic delivery events cannot self-trigger HALT or leave modifiers held; the arming chord is ignored (NOT a blanket grace window); pointer motion alone is not an edit; daemon-side flags alone do not suffice — revoke AT THE TARGET.\n2. INPUT: P1.M4.T3.S3.\n3. LOGIC: takeover listeners (key events, surrounding_text caret/selection deltas, focus/deactivate, target death), handle revocation, queued-op re-check hooks at mutation time.\n4. OUTPUT: takeover-complete adapter ready for G3.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M4.T3.S3"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.5 + im-lab evidence — grab_keyboard key events reach the adapter while the field stays untouched; synthetic delivery events cannot self-trigger HALT or leave modifiers held; the arming chord is ignored (NOT a blanket grace window); pointer motion alone is not an edit; daemon-side flags alone do not suffice — revoke AT THE TARGET.\n2. INPUT: P1.M4.T3.S3.\n3. LOGIC: takeover listeners (key events, surrounding_text caret/selection deltas, focus/deactivate, target death), handle revocation, queued-op re-check hooks at mutation time.\n4. OUTPUT: takeover-complete adapter ready for G3.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 }
               ]
             },
@@ -489,9 +659,15 @@
                   "title": "G3 harness + GTK field rows (insert AND correct, visible)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T4.S1"],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: reuse the im-lab pattern — imlab_run.py (private Xvfb seat + private D-Bus + Sway x11 backend), field_gtk.py (real GTK4 Gtk.Entry dumping text+cursor+edit-count atomically); gtk4-demo/gtk3-demo are MISSING — hand-written field apps only; system PyGObject Gtk 4.24 verified working (d2_bulk_delivery_map.md §5/§6). A byte reader/scrollback/fake editor never substitutes for visibility; add frame-level single-edit instrumentation (GTK fires 1–2 changed signals per commit cycle; no transient delete/retype frames).\n2. INPUT: adapter from P1.M4.T4.S1.\n3. LOGIC: productize the runner (automation NEVER exercises the live desktop/real clipboard/default mic/active service; private compositor + synthetic input; evidence bounded, only fixtures enter git — AGENTS.md Rule 3). Rows: short updates; a 20-sentence first-word correction; repeated identical finals; long + Unicode payloads; a refusing target. Assert editor contents + cursor + the visible field.\n4. OUTPUT: GTK-class rows reporting verified (versions + evidence) — a G2 pass never marks a row verified.\n5. DOCS: bounded row-report file."
+                  "dependencies": [
+                    "P1.M4.T4.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: reuse the im-lab pattern — imlab_run.py (private Xvfb seat + private D-Bus + Sway x11 backend), field_gtk.py (real GTK4 Gtk.Entry dumping text+cursor+edit-count atomically); gtk4-demo/gtk3-demo are MISSING — hand-written field apps only; system PyGObject Gtk 4.24 verified working (d2_bulk_delivery_map.md §5/§6). A byte reader/scrollback/fake editor never substitutes for visibility; add frame-level single-edit instrumentation (GTK fires 1–2 changed signals per commit cycle; no transient delete/retype frames).\n2. INPUT: adapter from P1.M4.T4.S1.\n3. LOGIC: productize the runner (automation NEVER exercises the live desktop/real clipboard/default mic/active service; private compositor + synthetic input; evidence bounded, only fixtures enter git — AGENTS.md Rule 3). Rows: short updates; a 20-sentence first-word correction; repeated identical finals; long + Unicode payloads; a refusing target. Assert editor contents + cursor + the visible field.\n4. OUTPUT: GTK-class rows reporting verified (versions + evidence) — a G2 pass never marks a row verified.\n5. DOCS: bounded row-report file.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -499,9 +675,15 @@
                   "title": "Field-class matrix re-run at installed versions (drift!)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T5.S1"],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: VERSION DRIFT — installed hyprland 0.57.2 / kitty 0.51.0 / ghostty 1.4.0 vs the measured matrix (0.56.2 / 0.49.1 / 1.3.1): the ghostty version watch has TRIGGERED (a gtk-ime fix may have landed in 1.4.0 — retest before trusting \"ghostty = unavailable\"); kitty 0.49→0.51 may change the delete_surrounding/surrounding-text verdicts; the Hyprland relay row needs an isolated real Hyprland attempt (nested failed: aquamarine CBackend::create under software rendering) — recording blocked(reason) is a legitimate result (d2_bulk_delivery_map.md §6, §9 risks 1–2, 5).\n2. INPUT: harness from P1.M4.T5.S1.\n3. LOGIC: re-run foot/kitty/ghostty rows + attempt a Hyprland row; rows report untested | insert-only | blocked (reason) | verified (versions + evidence); insert-only rows NEVER run as full dictation; terminals never send surrounding_text → terminal verification is app-side only.\n4. OUTPUT: refreshed matrix; the route table that decides whether the P1.M5.T3 clipboard fallback is needed at all.\n5. DOCS: bounded matrix report."
+                  "dependencies": [
+                    "P1.M4.T5.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: VERSION DRIFT — installed hyprland 0.57.2 / kitty 0.51.0 / ghostty 1.4.0 vs the measured matrix (0.56.2 / 0.49.1 / 1.3.1): the ghostty version watch has TRIGGERED (a gtk-ime fix may have landed in 1.4.0 — retest before trusting \"ghostty = unavailable\"); kitty 0.49→0.51 may change the delete_surrounding/surrounding-text verdicts; the Hyprland relay row needs an isolated real Hyprland attempt (nested failed: aquamarine CBackend::create under software rendering) — recording blocked(reason) is a legitimate result (d2_bulk_delivery_map.md §6, §9 risks 1–2, 5).\n2. INPUT: harness from P1.M4.T5.S1.\n3. LOGIC: re-run foot/kitty/ghostty rows + attempt a Hyprland row; rows report untested | insert-only | blocked (reason) | verified (versions + evidence); insert-only rows NEVER run as full dictation; terminals never send surrounding_text → terminal verification is app-side only.\n4. OUTPUT: refreshed matrix; the route table that decides whether the P1.M5.T3 clipboard fallback is needed at all.\n5. DOCS: bounded matrix report.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.7"
+                  ]
                 }
               ]
             }
@@ -527,9 +709,14 @@
                   "title": "pi extension: CustomEditor + AF_UNIX control socket",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M3.T1.S1"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PIN the seam doc copy /home/dustin/.pi/agent/npm/node_modules/@mariozechner/pi-coding-agent-*/docs/extensions.md (a second differing copy exists — d2_bulk_delivery_map.md §7). ctx.ui.setEditorComponent(factory) (:2258-2268): extend CustomEditor (NOT Editor) to keep app keybindings, call super.handleInput(data) for unhandled keys, capture/wrap the previous editor via ctx.ui.getEditorComponent() (single slot), gate installs on ctx.hasUI. ctx.fork(entryId,{position:\"before\"}) is a session-tree restore primitive, NOT a text-injection API — the adapter gets text in via its own editor. The API's exact write/caret control is NOT yet exercised — prove it with a minimal proof FIRST (R.2: \"prove at G3\").\n2. INPUT: contracts from P1.M3.T1.S1.\n3. LOGIC: project-local .pi/extensions/*.ts on session_start: CustomEditor subclass owning the prompt buffer + AF_UNIX control socket speaking one-JSON-line ops (insert/replace/cancel/read) applied as buffer edits on pi's event loop (true range replacement, zero keystrokes).\n4. OUTPUT: extension + socket protocol for P1.M5.T1.S2.\n5. DOCS: Mode A — extension README/JSdoc describing the socket protocol."
+                  "dependencies": [
+                    "P1.M3.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PIN the seam doc copy /home/dustin/.pi/agent/npm/node_modules/@mariozechner/pi-coding-agent-*/docs/extensions.md (a second differing copy exists — d2_bulk_delivery_map.md §7). ctx.ui.setEditorComponent(factory) (:2258-2268): extend CustomEditor (NOT Editor) to keep app keybindings, call super.handleInput(data) for unhandled keys, capture/wrap the previous editor via ctx.ui.getEditorComponent() (single slot), gate installs on ctx.hasUI. ctx.fork(entryId,{position:\"before\"}) is a session-tree restore primitive, NOT a text-injection API — the adapter gets text in via its own editor. The API's exact write/caret control is NOT yet exercised — prove it with a minimal proof FIRST (R.2: \"prove at G3\").\n2. INPUT: contracts from P1.M3.T1.S1.\n3. LOGIC: project-local .pi/extensions/*.ts on session_start: CustomEditor subclass owning the prompt buffer + AF_UNIX control socket speaking one-JSON-line ops (insert/replace/cancel/read) applied as buffer edits on pi's event loop (true range replacement, zero keystrokes).\n4. OUTPUT: extension + socket protocol for P1.M5.T1.S2.\n5. DOCS: Mode A — extension README/JSdoc describing the socket protocol.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -537,9 +724,15 @@
                   "title": "Daemon-side cooperating-editor TargetAdapter",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M5.T1.S1", "P1.M3.T2.S2"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: same contracts as the IM adapter (P1.M4.T2/T3/T4) — acquire/show/finalize/leave/cancel, results taxonomy, takeover (the extension reports editor focus/keystrokes), ops executed on the target's event loop, 250 ms deadline, never retry a may-have-landed op.\n2. INPUT: extension socket from P1.M5.T1.S1 + failure-complete controller from P1.M3.T2.S2.\n3. LOGIC: TargetAdapter speaking the extension's AF_UNIX socket; map editor events to the shared takeover taxonomy.\n4. OUTPUT: second real adapter for G3 rows.\n5. DOCS: Mode A — module docstring carrying the R.3 contract."
+                  "dependencies": [
+                    "P1.M5.T1.S1",
+                    "P1.M3.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: same contracts as the IM adapter (P1.M4.T2/T3/T4) — acquire/show/finalize/leave/cancel, results taxonomy, takeover (the extension reports editor focus/keystrokes), ops executed on the target's event loop, 250 ms deadline, never retry a may-have-landed op.\n2. INPUT: extension socket from P1.M5.T1.S1 + failure-complete controller from P1.M3.T2.S2.\n3. LOGIC: TargetAdapter speaking the extension's AF_UNIX socket; map editor events to the shared takeover taxonomy.\n4. OUTPUT: second real adapter for G3 rows.\n5. DOCS: Mode A — module docstring carrying the R.3 contract.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 }
               ]
             },
@@ -556,9 +749,16 @@
                   "title": "pi-prompt-in-isolated-Ghostty row",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M5.T1.S2", "P1.M4.T5.S2"],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 — the terminal chat prompt is the FIRST milestone: assert the editor's own text + caret + the visible prompt (never a byte reader, scrollback, or fake editor); reuse the paste-lab private headless Sway + ghostty launch pattern; the refreshed matrix (P1.M4.T5.S2) decides whether this row rides the cooperating-editor seam or (if ghostty 1.4.0 grew IM support) the IM route — terminal corrections ride the cooperating-editor seam, NEVER IM delete.\n2. INPUT: adapter from P1.M5.T1.S2 + matrix verdict from P1.M4.T5.S2.\n3. LOGIC: scripted partials/finals through the real pi editor in isolated Ghostty; assert no folded-paste placeholders, no shortcut execution/submission, no neighbor changes; missing visibility instrumentation means \"not verified\", not \"passed\".\n4. OUTPUT: pi-prompt row verified | blocked (reason) with evidence links.\n5. DOCS: bounded row report."
+                  "dependencies": [
+                    "P1.M5.T1.S2",
+                    "P1.M4.T5.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.3 — the terminal chat prompt is the FIRST milestone: assert the editor's own text + caret + the visible prompt (never a byte reader, scrollback, or fake editor); reuse the paste-lab private headless Sway + ghostty launch pattern; the refreshed matrix (P1.M4.T5.S2) decides whether this row rides the cooperating-editor seam or (if ghostty 1.4.0 grew IM support) the IM route — terminal corrections ride the cooperating-editor seam, NEVER IM delete.\n2. INPUT: adapter from P1.M5.T1.S2 + matrix verdict from P1.M4.T5.S2.\n3. LOGIC: scripted partials/finals through the real pi editor in isolated Ghostty; assert no folded-paste placeholders, no shortcut execution/submission, no neighbor changes; missing visibility instrumentation means \"not verified\", not \"passed\".\n4. OUTPUT: pi-prompt row verified | blocked (reason) with evidence links.\n5. DOCS: bounded row report.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.5"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -566,9 +766,17 @@
                   "title": "Graphical editor + browser text field rows",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T5.S1", "P1.M4.T5.S2", "P1.M4.T3.S3"],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: G6 requires verified rows for the pi prompt + a graphical editor + a browser field; browser field = a real browser text input in the isolated compositor (not a mock DOM); never claim \"works on Wayland\" from one row.\n2. INPUT: harness from P1.M4.T5.S1 + adapter from P1.M4.T3.S3.\n3. LOGIC: run both rows with the same assertions (contents + cursor + visible field; one-edit corrections; zero-diff ⇒ zero events; takeover revocation); report each field class honestly (verified | insert-only | blocked).\n4. OUTPUT: the remaining G3 rows G6 needs.\n5. DOCS: bounded row report."
+                  "dependencies": [
+                    "P1.M4.T5.S1",
+                    "P1.M4.T5.S2",
+                    "P1.M4.T3.S3"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: G6 requires verified rows for the pi prompt + a graphical editor + a browser field; browser field = a real browser text input in the isolated compositor (not a mock DOM); never claim \"works on Wayland\" from one row.\n2. INPUT: harness from P1.M4.T5.S1 + adapter from P1.M4.T3.S3.\n3. LOGIC: run both rows with the same assertions (contents + cursor + visible field; one-edit corrections; zero-diff ⇒ zero events; takeover revocation); report each field class honestly (verified | insert-only | blocked).\n4. OUTPUT: the remaining G3 rows G6 needs.\n5. DOCS: bounded row report.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.5"
+                  ]
                 }
               ]
             },
@@ -585,9 +793,15 @@
                   "title": "Conditional clipboard insert-fallback + G4 gate (or recorded skip)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M4.T5.S2"],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.7"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: paste-lab evidence — 951-byte Unicode payload delivered intact as ONE bracketed paste, 153/175 ms (clipboard pre-staged; mechanism only, NOT G5 evidence); pasted 0x08 bytes arrive as SPACES → bulk-Backspace-over-paste is DEAD → insert-only by design; wl-copy cannot restore multi-format offers; clipboard managers snapshot every offer; PRIMARY untouched (external_tech_notes.md §5).\n2. INPUT: matrix verdict from P1.M4.T5.S2 (ghostty row at 1.4.0).\n3. LOGIC: IF the condition holds: implement the insert-only clipboard adapter under the R.6 contract (preserve all prior formats/bytes — if unprovable with the local manager, the adapter is UNAVAILABLE, never disable the manager; distinguish original ownership from a later identical copy; protect a simultaneous user paste; keep partials out of the history watcher) and run the G4 gate (private manager with text+image watchers; simultaneous copies incl identical bytes; user paste during transfer; empty/rich/image offers; failure before/after the data request; process death — verify contents/history/formats/target, never exit codes). ELSE record \"not needed at current versions\" citing the matrix and close.\n4. OUTPUT: conditional adapter + G4 evidence, or a recorded skip decision.\n5. DOCS: Mode A — module docstring carrying the R.6 contract."
+                  "dependencies": [
+                    "P1.M4.T5.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: paste-lab evidence — 951-byte Unicode payload delivered intact as ONE bracketed paste, 153/175 ms (clipboard pre-staged; mechanism only, NOT G5 evidence); pasted 0x08 bytes arrive as SPACES → bulk-Backspace-over-paste is DEAD → insert-only by design; wl-copy cannot restore multi-format offers; clipboard managers snapshot every offer; PRIMARY untouched (external_tech_notes.md §5).\n2. INPUT: matrix verdict from P1.M4.T5.S2 (ghostty row at 1.4.0).\n3. LOGIC: IF the condition holds: implement the insert-only clipboard adapter under the R.6 contract (preserve all prior formats/bytes — if unprovable with the local manager, the adapter is UNAVAILABLE, never disable the manager; distinguish original ownership from a later identical copy; protect a simultaneous user paste; keep partials out of the history watcher) and run the G4 gate (private manager with text+image watchers; simultaneous copies incl identical bytes; user paste during transfer; empty/rich/image offers; failure before/after the data request; process death — verify contents/history/formats/target, never exit codes). ELSE record \"not needed at current versions\" citing the matrix and close.\n4. OUTPUT: conditional adapter + G4 evidence, or a recorded skip decision.\n5. DOCS: Mode A — module docstring carrying the R.6 contract.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.7"
+                  ]
                 }
               ]
             }
@@ -613,9 +827,15 @@
                   "title": "Payload helper at the five final sites + partial site",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T1.S2"],
-                  "prd_selectors": ["h2.3", "h3.6", "h3.1"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: exact recipe d2_bulk_delivery_map.md §1 — the FIVE (\"final\",…) puts are recorder_host.py:644, :742, :745, :1052, :1054; partial put at :1100; wrap them in ONE payload helper adding utterance_id + session_gen (additive keys; `cancelled` and `context_prompt` are the precedents); daemon consumes at the single choke point _dispatch :426-479; RecorderHost.text() and the run loop need no change. The child already owns a per-utterance lifecycle (:631-643) the id piggybacks on.\n2. INPUT: baseline (no behavior change to stream-edit).\n3. LOGIC: child assigns ids at the decode source; a late event keeps its own identity (never relabeled as newer); daemon discards late post-final partials, duplicate finals, canceled-utterance events; a dropped or filtered final still closes its utterance boundary; keep the existing arm/disarm audio purges. Unit-test the relay round-trip with the existing recorder-host test doubles.\n4. OUTPUT: identity-carrying events for P1.M6.T2.S1.\n5. DOCS: Mode A — recorder_host.py protocol docstring update."
+                  "dependencies": [
+                    "P1.M1.T1.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: exact recipe d2_bulk_delivery_map.md §1 — the FIVE (\"final\",…) puts are recorder_host.py:644, :742, :745, :1052, :1054; partial put at :1100; wrap them in ONE payload helper adding utterance_id + session_gen (additive keys; `cancelled` and `context_prompt` are the precedents); daemon consumes at the single choke point _dispatch :426-479; RecorderHost.text() and the run loop need no change. The child already owns a per-utterance lifecycle (:631-643) the id piggybacks on.\n2. INPUT: baseline (no behavior change to stream-edit).\n3. LOGIC: child assigns ids at the decode source; a late event keeps its own identity (never relabeled as newer); daemon discards late post-final partials, duplicate finals, canceled-utterance events; a dropped or filtered final still closes its utterance boundary; keep the existing arm/disarm audio purges. Unit-test the relay round-trip with the existing recorder-host test doubles.\n4. OUTPUT: identity-carrying events for P1.M6.T2.S1.\n5. DOCS: Mode A — recorder_host.py protocol docstring update.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h3.1"
+                  ]
                 }
               ]
             },
@@ -632,9 +852,17 @@
                   "title": "Dispatch wiring + bulk cancel intercept",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M3.T2.S3", "P1.M6.T1.S1", "P1.M4.T3.S3"],
-                  "prd_selectors": ["h2.3", "h3.6", "h3.1"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: on_final daemon.py:1142 / _on_partial :1500 route into StreamingOutput (ctor :780-785; commit :1281; on_partial :1516). Bulk cancel MUST branch at the TOP of VoiceTypingDaemon.cancel() (daemon.py:1754, after the not-armed return :1775-1778) BEFORE the legacy compensation (:1779 n=max(tail_len−1,0); :1781 press_backspace) — keep host.cancel + suppression-window logic shared. Entries: socket cancel :2691-2694 AND evdev _on_cancel_backspace :1621-1630 (d2_bulk_delivery_map.md §2).\n2. INPUT: G2-passed controller (P1.M3.T2.S3), identity events (P1.M6.T1.S1), at least one real adapter (P1.M4.T3.S3 and/or P1.M5.T1.S2).\n3. LOGIC: delivery=bulk-text routes partial/final to the bulk controller enqueue-and-return on the reader thread (no subprocess/editor wait under the daemon control lock); stop/toggle-off/idle-stop disarm immediately, no late flush; takeover/unknown/refused/stall ⇒ disarm bulk delivery AND recording with ONE reason via delivery_reason; stream-edit default behavior byte-identical (G1 watch set green).\n4. OUTPUT: end-to-end bulk path (mic→field) behind the opt-in flag.\n5. DOCS: Mode A — daemon docstring delivery note."
+                  "dependencies": [
+                    "P1.M3.T2.S3",
+                    "P1.M6.T1.S1",
+                    "P1.M4.T3.S3"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: on_final daemon.py:1142 / _on_partial :1500 route into StreamingOutput (ctor :780-785; commit :1281; on_partial :1516). Bulk cancel MUST branch at the TOP of VoiceTypingDaemon.cancel() (daemon.py:1754, after the not-armed return :1775-1778) BEFORE the legacy compensation (:1779 n=max(tail_len−1,0); :1781 press_backspace) — keep host.cancel + suppression-window logic shared. Entries: socket cancel :2691-2694 AND evdev _on_cancel_backspace :1621-1630 (d2_bulk_delivery_map.md §2).\n2. INPUT: G2-passed controller (P1.M3.T2.S3), identity events (P1.M6.T1.S1), at least one real adapter (P1.M4.T3.S3 and/or P1.M5.T1.S2).\n3. LOGIC: delivery=bulk-text routes partial/final to the bulk controller enqueue-and-return on the reader thread (no subprocess/editor wait under the daemon control lock); stop/toggle-off/idle-stop disarm immediately, no late flush; takeover/unknown/refused/stall ⇒ disarm bulk delivery AND recording with ONE reason via delivery_reason; stream-edit default behavior byte-identical (G1 watch set green).\n4. OUTPUT: end-to-end bulk path (mic→field) behind the opt-in flag.\n5. DOCS: Mode A — daemon docstring delivery note.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h3.1"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -642,9 +870,14 @@
                   "title": "Session recovery memory (R.6)",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M6.T2.S1"],
-                  "prd_selectors": ["h2.3", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.6 recovery — daemon MEMORY (no crash persistence, no new transcript-bearing logs; bulk logs carry counts/times, not text).\n2. INPUT: P1.M6.T2.S1.\n3. LOGIC: hold the LAST nonempty arm→disarm session: accepted final per utterance + last visible/recognized unfinished tail, exactly once each; a rejected final retains only the shown tail; deliberate cancels and late finals excluded; the previous completed session survives empty or failed arms; ≤2 sessions × 1 MiB UTF-8 (on overflow keep the newest complete text that fits and report truncation); cleared at daemon exit. Unit-test every exclusion rule.\n4. OUTPUT: recovery store for P1.M6.T2.S3.\n5. DOCS: none."
+                  "dependencies": [
+                    "P1.M6.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: R.6 recovery — daemon MEMORY (no crash persistence, no new transcript-bearing logs; bulk logs carry counts/times, not text).\n2. INPUT: P1.M6.T2.S1.\n3. LOGIC: hold the LAST nonempty arm→disarm session: accepted final per utterance + last visible/recognized unfinished tail, exactly once each; a rejected final retains only the shown tail; deliberate cancels and late finals excluded; the previous completed session survives empty or failed arms; ≤2 sessions × 1 MiB UTF-8 (on overflow keep the newest complete text that fits and report truncation); cleared at daemon exit. Unit-test every exclusion rule.\n4. OUTPUT: recovery store for P1.M6.T2.S3.\n5. DOCS: none.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -652,9 +885,16 @@
                   "title": "voicectl session [--copy]",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M6.T2.S2", "P1.M3.T3.S2"],
-                  "prd_selectors": ["h2.3", "h3.6", "h3.12"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: ctl recipe d2_bulk_delivery_map.md §4 — add \"session\" to _COMMANDS (ctl.py:42-49); send_command (:167-210) sends {\"cmd\":cmd} only → extend with extra payload keys (daemon _dispatch ignores unknown keys today — old daemons fail safe); format_result session branch; wl-copy staging pattern at tools/paste-lab/ghostty_probe.py:102 with wl-paste --no-newline verify :109; external_tech_notes.md §5.7: `printf %s \"$text\" | wl-copy -t text/plain` (clipboard selection only, PRIMARY untouched, explicit MIME).\n2. INPUT: recovery store from P1.M6.T2.S2 + status surface from P1.M3.T3.S2.\n3. LOGIC: `voicectl session` prints the most recent COMPLETED session (never a moving draft); `--copy` copies exactly that text — no added newline, never types/erases/submits; exit 1 with clipboard untouched when none exists; truncation reported on stderr and in the reply; daemon-side session_reply in _dispatch; the bind is USER-assigned — never install one, never touch hypr-binds.conf.\n4. OUTPUT: session command green (unit + socket tests).\n5. DOCS: Mode A — ctl.py docstring + --help epilog gain session."
+                  "dependencies": [
+                    "P1.M6.T2.S2",
+                    "P1.M3.T3.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: ctl recipe d2_bulk_delivery_map.md §4 — add \"session\" to _COMMANDS (ctl.py:42-49); send_command (:167-210) sends {\"cmd\":cmd} only → extend with extra payload keys (daemon _dispatch ignores unknown keys today — old daemons fail safe); format_result session branch; wl-copy staging pattern at tools/paste-lab/ghostty_probe.py:102 with wl-paste --no-newline verify :109; external_tech_notes.md §5.7: `printf %s \"$text\" | wl-copy -t text/plain` (clipboard selection only, PRIMARY untouched, explicit MIME).\n2. INPUT: recovery store from P1.M6.T2.S2 + status surface from P1.M3.T3.S2.\n3. LOGIC: `voicectl session` prints the most recent COMPLETED session (never a moving draft); `--copy` copies exactly that text — no added newline, never types/erases/submits; exit 1 with clipboard untouched when none exists; truncation reported on stderr and in the reply; daemon-side session_reply in _dispatch; the bind is USER-assigned — never install one, never touch hypr-binds.conf.\n4. OUTPUT: session command green (unit + socket tests).\n5. DOCS: Mode A — ctl.py docstring + --help epilog gain session.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h3.12"
+                  ]
                 }
               ]
             },
@@ -671,9 +911,15 @@
                   "title": "Bulk-mode prompt source decision + implementation",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M6.T2.S1"],
-                  "prd_selectors": ["h2.3", "h3.6", "h3.4"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: risk #7 (d2_bulk_delivery_map.md §9): daemon.py:1735-1747 pushes rolling_context_prompt(self._stream.committed) to the child; prompt_engine.rolling_context_prompt (prompt_engine.py:119, 200-token cap) still applies; in bulk mode the committed checkpoint lives in the bulk controller (last target-CONFIRMED text), not in StreamingOutput.\n2. INPUT: P1.M6.T2.S1.\n3. LOGIC: in bulk mode the prompt push reads the bulk controller's last-confirmed text (its own mirror; read-only from _stream, never writing it); context still trims at the sentence boundary; both modes keep working; no cross-mode state bleed (unit-test both modes' prompt content).\n4. OUTPUT: prompt context correct in both modes.\n5. DOCS: code comment documenting the decision (no user-facing surface)."
+                  "dependencies": [
+                    "P1.M6.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: risk #7 (d2_bulk_delivery_map.md §9): daemon.py:1735-1747 pushes rolling_context_prompt(self._stream.committed) to the child; prompt_engine.rolling_context_prompt (prompt_engine.py:119, 200-token cap) still applies; in bulk mode the committed checkpoint lives in the bulk controller (last target-CONFIRMED text), not in StreamingOutput.\n2. INPUT: P1.M6.T2.S1.\n3. LOGIC: in bulk mode the prompt push reads the bulk controller's last-confirmed text (its own mirror; read-only from _stream, never writing it); context still trims at the sentence boundary; both modes keep working; no cross-mode state bleed (unit-test both modes' prompt content).\n4. OUTPUT: prompt context correct in both modes.\n5. DOCS: code comment documenting the decision (no user-facing surface).",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h3.4"
+                  ]
                 }
               ]
             },
@@ -690,9 +936,16 @@
                   "title": "G5 harness + per-route timing evidence",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M6.T2.S1", "P1.M5.T2.S1"],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: G5 rules — callback cadence and the silence detector are NOT the speech clock; word-aligned replay of real voice (tools/asr-lab/voice/ clips), warm GPU, monotonic clocks; missing words are misses, not zero-latency samples; a sustained five-word backlog or a sentence-end dump fails regardless of medians; asr-lab context: turbo@float16 = 382 ms median word lag (external timing reference, not the delivery clock).\n2. INPUT: bulk path from P1.M6.T2.S1 + at least one verified route (P1.M5.T2.S1 or P1.M4.T5 rows).\n3. LOGIC: build the bounded measurement harness (private compositor + synthetic input; automation NEVER exercises the live desktop/real clipboard/default mic/active service; only fixtures enter git); publish per-route counts, median, p95, worst gap, max words outstanding; report failures, never average them away.\n4. OUTPUT: G5 evidence per claimed route.\n5. DOCS: bounded timing report."
+                  "dependencies": [
+                    "P1.M6.T2.S1",
+                    "P1.M5.T2.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: G5 rules — callback cadence and the silence detector are NOT the speech clock; word-aligned replay of real voice (tools/asr-lab/voice/ clips), warm GPU, monotonic clocks; missing words are misses, not zero-latency samples; a sustained five-word backlog or a sentence-end dump fails regardless of medians; asr-lab context: turbo@float16 = 382 ms median word lag (external timing reference, not the delivery clock).\n2. INPUT: bulk path from P1.M6.T2.S1 + at least one verified route (P1.M5.T2.S1 or P1.M4.T5 rows).\n3. LOGIC: build the bounded measurement harness (private compositor + synthetic input; automation NEVER exercises the live desktop/real clipboard/default mic/active service; only fixtures enter git); publish per-route counts, median, p95, worst gap, max words outstanding; report failures, never average them away.\n4. OUTPUT: G5 evidence per claimed route.\n5. DOCS: bounded timing report.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.5"
+                  ]
                 }
               ]
             }
@@ -718,9 +971,18 @@
                   "title": "Assemble G6 assessment; conditionally flip the default",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M5.T2.S1", "P1.M5.T2.S2", "P1.M6.T4.S1"],
-                  "prd_selectors": ["h2.3", "h3.6", "h2.6", "h2.5"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: G6 — never claim \"works on Wayland\" from one row; a passing transport probe NEVER flips a NOT VERIFIED claim to passed; graduation requires ≥3 representative completed writing sessions where usable proofread wpm (counting corrections, recovery, rereading) beats 110 — operator-dependent evidence.\n2. INPUT: G3 rows (P1.M5.T2.S1, P1.M5.T2.S2), G5 evidence (P1.M6.T4.S1), integrity-failure log.\n3. LOGIC: assemble the assessment; IF AND ONLY IF all G6 conditions are met, flip output.delivery default to \"bulk-text\" in lockstep (config.py + config.toml + tests; precondition triple still enforced); OTHERWISE record explicitly unmet and stay opt-in. No fabricated user acceptance.\n4. OUTPUT: graduation report + conditional default flip.\n5. DOCS: bounded assessment doc."
+                  "dependencies": [
+                    "P1.M5.T2.S1",
+                    "P1.M5.T2.S2",
+                    "P1.M6.T4.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: G6 — never claim \"works on Wayland\" from one row; a passing transport probe NEVER flips a NOT VERIFIED claim to passed; graduation requires ≥3 representative completed writing sessions where usable proofread wpm (counting corrections, recovery, rereading) beats 110 — operator-dependent evidence.\n2. INPUT: G3 rows (P1.M5.T2.S1, P1.M5.T2.S2), G5 evidence (P1.M6.T4.S1), integrity-failure log.\n3. LOGIC: assemble the assessment; IF AND ONLY IF all G6 conditions are met, flip output.delivery default to \"bulk-text\" in lockstep (config.py + config.toml + tests; precondition triple still enforced); OTHERWISE record explicitly unmet and stay opt-in. No fabricated user acceptance.\n4. OUTPUT: graduation report + conditional default flip.\n5. DOCS: bounded assessment doc.",
+                  "prd_selectors": [
+                    "h2.3",
+                    "h3.6",
+                    "h2.6",
+                    "h2.5"
+                  ]
                 }
               ]
             },
@@ -737,9 +999,60 @@
                   "title": "README.md: ducking + bulk delivery sections, config table, troubleshooting",
                   "status": "Planned",
                   "story_points": 2,
-                  "dependencies": ["P1.M1.T2.S1", "P1.M1.T2.S2", "P1.M1.T2.S3", "P1.M1.T3.S1", "P1.M1.T3.S2", "P1.M1.T4.S1", "P1.M1.T4.S2", "P1.M2.T1.S1", "P1.M2.T2.S1", "P1.M2.T2.S2", "P1.M2.T2.S3", "P1.M2.T2.S4", "P1.M2.T3.S1", "P1.M2.T3.S2", "P1.M2.T4.S1", "P1.M3.T1.S1", "P1.M3.T2.S1", "P1.M3.T2.S2", "P1.M3.T2.S3", "P1.M3.T3.S1", "P1.M3.T3.S2", "P1.M4.T1.S1", "P1.M4.T1.S2", "P1.M4.T2.S1", "P1.M4.T3.S1", "P1.M4.T3.S2", "P1.M4.T3.S3", "P1.M4.T4.S1", "P1.M4.T5.S1", "P1.M4.T5.S2", "P1.M5.T1.S1", "P1.M5.T1.S2", "P1.M5.T2.S1", "P1.M5.T2.S2", "P1.M5.T3.S1", "P1.M6.T1.S1", "P1.M6.T2.S1", "P1.M6.T2.S2", "P1.M6.T2.S3", "P1.M6.T3.S1", "P1.M6.T4.S1", "P1.M7.T1.S1"],
-                  "prd_selectors": ["h2.6", "h2.3", "h3.5", "h3.6", "h3.9", "h3.12", "h3.13"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: delta PRD §4 Mode B list — README gains: a Media ducking section (tiers, config, sovereignty guarantees), a Bulk text delivery section (opt-in flag, delivery states, voicectl session, EXPLICIT \"unverified until G3/G6\" framing per R.2's no-over-claim rule), config table rows for [audio] + output.delivery, troubleshooting additions (seat IM exclusivity/fcitx5, terminal field-class matrix, clipboard contract).\n2. INPUT: all implementing subtasks listed in dependencies (their landed behavior + evidence records).\n3. LOGIC: update README.md to describe exactly what landed — no aspirational prose; unverified fields/latencies stay labeled unverified; verify every statement against the code and evidence files.\n4. OUTPUT: README current with the whole changeset.\n5. DOCS: Mode B by definition — this IS the doc task."
+                  "dependencies": [
+                    "P1.M1.T2.S1",
+                    "P1.M1.T2.S2",
+                    "P1.M1.T2.S3",
+                    "P1.M1.T3.S1",
+                    "P1.M1.T3.S2",
+                    "P1.M1.T4.S1",
+                    "P1.M1.T4.S2",
+                    "P1.M2.T1.S1",
+                    "P1.M2.T2.S1",
+                    "P1.M2.T2.S2",
+                    "P1.M2.T2.S3",
+                    "P1.M2.T2.S4",
+                    "P1.M2.T3.S1",
+                    "P1.M2.T3.S2",
+                    "P1.M2.T4.S1",
+                    "P1.M3.T1.S1",
+                    "P1.M3.T2.S1",
+                    "P1.M3.T2.S2",
+                    "P1.M3.T2.S3",
+                    "P1.M3.T3.S1",
+                    "P1.M3.T3.S2",
+                    "P1.M4.T1.S1",
+                    "P1.M4.T1.S2",
+                    "P1.M4.T2.S1",
+                    "P1.M4.T3.S1",
+                    "P1.M4.T3.S2",
+                    "P1.M4.T3.S3",
+                    "P1.M4.T4.S1",
+                    "P1.M4.T5.S1",
+                    "P1.M4.T5.S2",
+                    "P1.M5.T1.S1",
+                    "P1.M5.T1.S2",
+                    "P1.M5.T2.S1",
+                    "P1.M5.T2.S2",
+                    "P1.M5.T3.S1",
+                    "P1.M6.T1.S1",
+                    "P1.M6.T2.S1",
+                    "P1.M6.T2.S2",
+                    "P1.M6.T2.S3",
+                    "P1.M6.T3.S1",
+                    "P1.M6.T4.S1",
+                    "P1.M7.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: delta PRD §4 Mode B list — README gains: a Media ducking section (tiers, config, sovereignty guarantees), a Bulk text delivery section (opt-in flag, delivery states, voicectl session, EXPLICIT \"unverified until G3/G6\" framing per R.2's no-over-claim rule), config table rows for [audio] + output.delivery, troubleshooting additions (seat IM exclusivity/fcitx5, terminal field-class matrix, clipboard contract).\n2. INPUT: all implementing subtasks listed in dependencies (their landed behavior + evidence records).\n3. LOGIC: update README.md to describe exactly what landed — no aspirational prose; unverified fields/latencies stay labeled unverified; verify every statement against the code and evidence files.\n4. OUTPUT: README current with the whole changeset.\n5. DOCS: Mode B by definition — this IS the doc task.",
+                  "prd_selectors": [
+                    "h2.6",
+                    "h2.3",
+                    "h3.5",
+                    "h3.6",
+                    "h3.9",
+                    "h3.12",
+                    "h3.13"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -747,9 +1060,29 @@
                   "title": "tests/ACCEPTANCE.md rows + install.sh usage",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M1.T1.S1", "P1.M1.T1.S2", "P1.M1.T2.S3", "P1.M1.T3.S2", "P1.M1.T4.S2", "P1.M2.T4.S1", "P1.M3.T2.S3", "P1.M4.T5.S2", "P1.M5.T2.S1", "P1.M5.T2.S2", "P1.M6.T2.S3", "P1.M6.T4.S1", "P1.M7.T1.S1"],
-                  "prd_selectors": ["h2.6", "h2.5", "h2.3", "h3.5", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/ACCEPTANCE.md row 11 is STALE (claims test_streaming.py 7/7 and 77 passed across the trio; HEAD measures 3/7 and 76/18) — refresh with re-measured numbers reconciled against the G1 baseline classification (lazy-separator legacy reds separated from NEW failures; no parity faking); row 12 refresh if D3 changed cancel behavior; totals line updated.\n2. INPUT: baseline + all gate/evidence subtasks in dependencies.\n3. LOGIC: add the ducking acceptance row (P1.M2 evidence) and row #13 (§7 item 13) with actual command-output links; refresh rows 11/12; install.sh printed usage gains the `session` command.\n4. OUTPUT: acceptance dossier current; install.sh usage current.\n5. DOCS: Mode B by definition."
+                  "dependencies": [
+                    "P1.M1.T1.S1",
+                    "P1.M1.T1.S2",
+                    "P1.M1.T2.S3",
+                    "P1.M1.T3.S2",
+                    "P1.M1.T4.S2",
+                    "P1.M2.T4.S1",
+                    "P1.M3.T2.S3",
+                    "P1.M4.T5.S2",
+                    "P1.M5.T2.S1",
+                    "P1.M5.T2.S2",
+                    "P1.M6.T2.S3",
+                    "P1.M6.T4.S1",
+                    "P1.M7.T1.S1"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: tests/ACCEPTANCE.md row 11 is STALE (claims test_streaming.py 7/7 and 77 passed across the trio; HEAD measures 3/7 and 76/18) — refresh with re-measured numbers reconciled against the G1 baseline classification (lazy-separator legacy reds separated from NEW failures; no parity faking); row 12 refresh if D3 changed cancel behavior; totals line updated.\n2. INPUT: baseline + all gate/evidence subtasks in dependencies.\n3. LOGIC: add the ducking acceptance row (P1.M2 evidence) and row #13 (§7 item 13) with actual command-output links; refresh rows 11/12; install.sh printed usage gains the `session` command.\n4. OUTPUT: acceptance dossier current; install.sh usage current.\n5. DOCS: Mode B by definition.",
+                  "prd_selectors": [
+                    "h2.6",
+                    "h2.5",
+                    "h2.3",
+                    "h3.5",
+                    "h3.6"
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -757,9 +1090,17 @@
                   "title": "Final consistency sweep + commit discipline",
                   "status": "Planned",
                   "story_points": 1,
-                  "dependencies": ["P1.M7.T2.S1", "P1.M7.T2.S2"],
-                  "prd_selectors": ["h2.6", "h2.3", "h3.5", "h3.6"],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: delta acceptance #4 — everything committed to main with sensible messages; no over-claiming anywhere.\n2. INPUT: P1.M7.T2.S1 + P1.M7.T2.S2.\n3. LOGIC: walk README/ACCEPTANCE/config.toml comments/voicectl --help against actual landed behavior; confirm every unverified claim stays labeled unverified; confirm the G1 watch set has no unexplained new failures vs tests/G1_BASELINE.md; confirm repo clean and all work committed on main.\n4. OUTPUT: final sign-off note in the acceptance dossier.\n5. DOCS: Mode B (verification of the doc sweep itself)."
+                  "dependencies": [
+                    "P1.M7.T2.S1",
+                    "P1.M7.T2.S2"
+                  ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: delta acceptance #4 — everything committed to main with sensible messages; no over-claiming anywhere.\n2. INPUT: P1.M7.T2.S1 + P1.M7.T2.S2.\n3. LOGIC: walk README/ACCEPTANCE/config.toml comments/voicectl --help against actual landed behavior; confirm every unverified claim stays labeled unverified; confirm the G1 watch set has no unexplained new failures vs tests/G1_BASELINE.md; confirm repo clean and all work committed on main.\n4. OUTPUT: final sign-off note in the acceptance dossier.\n5. DOCS: Mode B (verification of the doc sweep itself).",
+                  "prd_selectors": [
+                    "h2.6",
+                    "h2.3",
+                    "h3.5",
+                    "h3.6"
+                  ]
                 }
               ]
             }
