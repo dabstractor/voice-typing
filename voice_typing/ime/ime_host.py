@@ -36,6 +36,8 @@ IFACE = "zwp_input_method_v2"
 MANAGER_IFACE = "zwp_input_method_manager_v2"
 GRAB_IFACE = "zwp_input_method_keyboard_grab_v2"
 SHOW_CONFIRM_WAIT = 0.5  # s — ONE bounded wait for the compositor `done`; no retry, ever
+_SNAPSHOT_HEAD_BYTES = 64 * 1024   # generous vs the ~4 KiB practical cap; refuse rather than mis-slice
+_SURROUND_WAIT_S = 1.0             # bounded poll for a first surrounding_text after activation
 
 
 class ImeHost:
@@ -144,12 +146,28 @@ class ImeHost:
         return protocol.make_error(rid, f"unknown request {cmd!r}")
 
     def _acquire(self, rid) -> dict:
-        # PLACEHOLDER handle/revision (T2 replaces with verified binding semantics).
+        # T2: snapshot-carrying acquire (transport-level; the daemon's ImeTarget
+        # owns interpretation — selection/consistency/refusal taxonomy).
         if not self.activated:
             return protocol.make_reply(rid, "acquire", ok=False, handle="",
                                        revision=0, reason="not activated")
+        # Bounded wait for a cached surrounding_text snapshot (the text-input side
+        # PUSHES it; the IM cannot request it). Pump _drain_events so it can arrive.
+        deadline = time.monotonic() + _SURROUND_WAIT_S
+        while self.surround is None and time.monotonic() < deadline:
+            self._drain_events()
+            if self.surround is not None:
+                break
+            time.sleep(0.02)
+        if self.surround is None:
+            return protocol.make_reply(rid, "acquire", ok=False, handle="", revision=0,
+                                       reason="no surrounding text")
+        text, cursor, anchor = self.surround["text"], self.surround["cursor"], self.surround["anchor"]
         return protocol.make_reply(rid, "acquire", ok=True, handle=str(self.im),
-                                   revision=self.dones)
+                                   revision=self.dones,
+                                   text=text[:_SNAPSHOT_HEAD_BYTES],  # str slice keeps chars whole
+                                   cursor=cursor, anchor=anchor,
+                                   snapshot_truncated=len(text) > _SNAPSHOT_HEAD_BYTES)
 
     def _show(self, rid, obj: dict) -> dict:
         if not self.activated:
@@ -177,11 +195,19 @@ class ImeHost:
             time.sleep(0.01)
 
     def _verify(self, rid) -> dict:
-        s = self.surround or {}
-        head = s.get("text") or ""
-        return protocol.make_reply(rid, "verify", text_head=head[:80],
-                                   cursor=s.get("cursor", 0), anchor=s.get("anchor", 0),
-                                   bytes=len(head.encode()))
+        # T2: the same bounded snapshot shape acquire replies (+ activated/dones).
+        # text_head/bytes are the legacy S1 reply fields (the pinned S1 test
+        # asserts them); the FULL bounded snapshot rides in text/cursor/anchor.
+        s = self.surround
+        if s is None:
+            return protocol.make_reply(rid, "verify", activated=self.activated, dones=self.dones,
+                                       ok=False, reason="no surrounding text")
+        text, cursor, anchor = s["text"], s["cursor"], s["anchor"]
+        head = text[:_SNAPSHOT_HEAD_BYTES]
+        return protocol.make_reply(rid, "verify", activated=self.activated, dones=self.dones,
+                                   ok=True, text=head, cursor=cursor, anchor=anchor,
+                                   snapshot_truncated=len(text) > _SNAPSHOT_HEAD_BYTES,
+                                   text_head=head[:80], bytes=len(text.encode()))
 
     def _leave(self, rid) -> dict:
         if self.grab:

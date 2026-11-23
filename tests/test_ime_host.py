@@ -264,3 +264,96 @@ def test_serve_stops_after_unavailable(tmp_path):
     assert host.stopped
     logged = [protocol.decode(l) for l in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert logged[-1]["ev"] == "exit"
+
+
+# ---- P1.M4.T2.S1: snapshot-carrying acquire + full-snapshot verify (appended) ----
+
+
+def _surround(text, cursor, anchor):
+    return Event(11, "zwp_input_method_v2", "surrounding_text", (text, cursor, anchor))
+
+
+def test_acquire_activated_with_cached_snapshot():
+    host, wire, out = _make_host()
+    host.activated = True
+    host.im = 11
+    host.dones = 3
+    wire.script = [_surround("héllo ", 7, 7)]
+    host._drain_events()  # the text-input side pushed the snapshot before acquire
+    lines = _feed(host, out, {"id": 20, "cmd": "acquire"})
+    r = lines[0]
+    assert r == {"id": 20, "reply": "acquire", "ok": True, "handle": "11", "revision": 3,
+                 "text": "héllo ", "cursor": 7, "anchor": 7, "snapshot_truncated": False}
+
+
+def test_acquire_activated_no_snapshot_refused(monkeypatch):
+    import voice_typing.ime.ime_host as ime_host_mod
+    monkeypatch.setattr(ime_host_mod, "_SURROUND_WAIT_S", 0.05)  # bounded wait, kept short in test
+    host, _wire, out = _make_host()  # no snapshot is ever pushed (foot/kitty class)
+    host.activated = True
+    lines = _feed(host, out, {"id": 21, "cmd": "acquire"})
+    assert lines[0] == {"id": 21, "reply": "acquire", "ok": False, "handle": "",
+                        "revision": 0, "reason": "no surrounding text"}
+
+
+def test_acquire_snapshot_arrives_late_within_wait(monkeypatch):
+    import voice_typing.ime.ime_host as ime_host_mod
+    monkeypatch.setattr(ime_host_mod, "_SURROUND_WAIT_S", 0.5)
+    host, wire, out = _make_host()
+    host.activated = True
+    host.im = 11
+    host.dones = 1
+    wire.script = [_surround("late", 4, 4)]  # delivered by acquire's own drain pump
+    lines = _feed(host, out, {"id": 22, "cmd": "acquire"})
+    r = next(d for d in lines if "reply" in d)
+    assert r["ok"] is True and r["text"] == "late" and r["cursor"] == 4
+    assert any(d.get("ev") == "surrounding_text" for d in lines)  # event still forwarded id-less
+
+
+def test_acquire_truncates_by_chars_not_bytes():
+    # The head cap is a STR slice (chars whole); the flag reports an actual cut.
+    host, wire, out = _make_host()
+    host.activated = True
+    host.im = 11
+    text = "x" * 70000                       # 70000 chars > the 65536-char cap → really cut
+    wire.script = [_surround(text, 70000, 70000)]
+    host._drain_events()
+    lines = _feed(host, out, {"id": 23, "cmd": "acquire"})
+    r = lines[0]
+    assert r["ok"] is True and r["snapshot_truncated"] is True
+    assert r["text"] == "x" * 65536
+
+
+def test_acquire_multibyte_text_over_byte_budget_but_uncut():
+    # 40000 é chars = 80000 BYTES but only 40000 CHARS: the char slice sends the
+    # full text untouched — nothing was cut, so truncated stays False.
+    host, wire, out = _make_host()
+    host.activated = True
+    text = "é" * 40000
+    wire.script = [_surround(text, 80000, 80000)]
+    host._drain_events()
+    lines = _feed(host, out, {"id": 26, "cmd": "acquire"})
+    r = lines[0]
+    assert r["ok"] is True and r["snapshot_truncated"] is False
+    assert r["text"] == text and len(r["text"].encode()) == 80000
+
+
+def test_verify_replies_full_snapshot_with_state():
+    host, wire, out = _make_host()
+    wire.script = [_surround("x" * 200, 200, 200)]
+    host._drain_events()
+    lines = _feed(host, out, {"id": 24, "cmd": "verify"})
+    r = lines[0]
+    assert r["reply"] == "verify" and r["ok"] is True
+    assert r["text"] == "x" * 200            # FULL bounded text, NOT the :80 head
+    assert r["cursor"] == 200 and r["anchor"] == 200 and r["snapshot_truncated"] is False
+    assert r["activated"] is False and r["dones"] == 0  # state echoed with the snapshot
+    assert r["text_head"] == "x" * 80       # legacy S1 fields kept for the pinned shape
+    assert r["bytes"] == 200
+
+
+def test_verify_no_snapshot_refused_with_state():
+    host, _wire, out = _make_host()
+    lines = _feed(host, out, {"id": 25, "cmd": "verify"})
+    assert lines[0] == {"id": 25, "reply": "verify", "activated": False, "dones": 0,
+                        "ok": False, "reason": "no surrounding text"}
