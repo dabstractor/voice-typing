@@ -5238,3 +5238,110 @@ def test_cancel_suppression_drop_counter_resets_on_sentinel_close():
     d.cancel(); host.mark_cancel_sentinel(); d.on_final("")  # healthy close
     assert d._cancel_suppress_final is False
     assert d._cancel_suppress_drops == 0
+
+
+# ===========================================================================
+# P1.M1.T4.S2 — D3.3 incident replay (the 2026-11-12..18 "dropped finals 4×"
+# session): every Backspace re-latches AND re-stamps the cancel-suppression
+# window (daemon.py cancel(): "refreshed per press"), so each re-said
+# sentence's final lands <5 s after ITS OWN press — inside the timeout bound —
+# and was dropped, chaining the window open indefinitely (4 missing sections
+# in one session, with both 4640041 backstops live). P1.M1.T4.S1 bounds the
+# chain: at most _CANCEL_SUPPRESS_MAX_DROPS (3) consecutive dropped finals
+# since the last healthy close; a re-press re-stamp does NOT restore the
+# budget. This replay pins the incident GREEN: the chain TERMINATES (the 3rd
+# re-said final is force-closed and typed + recorded) and the boundary-reset
+# invariant (every dropped final resets the utterance boundary — PRD
+# §4.2quater) holds on every drop. Style: test_lost_sentinel_self_heals_
+# after_timeout (:5142) — mock host, no CUDA, sentinel deliberately LOST.
+# ===========================================================================
+def test_incident_replay_chained_cancel_respeak_terminates_at_drop_cap():
+    """D3.3 regression: arm → partial (tail pending) → Backspace → sentinel LOST →
+    re-speak → final <5 s DROPPED → Backspace re-latch → ... — the exact PART D
+    7-step sequence. Asserts: (1) finals 1-2 silently dropped with the window
+    still latched and the boundary reset on each drop; (2) the 3rd consecutive
+    dropped final hits the T4.S1 cap — window force-closed, final typed +
+    recorded; (3) the per-press re-stamp fires (stamp strictly increases) while
+    the drop budget does NOT reset; (4) full recovery on the next utterance
+    (the incident's 4th drop is unreachable).
+    """
+    d, fb = _make_cancel_daemon()
+    be = d._backend
+    host = d._host
+
+    # Step 1 — armed, text() in flight (harness sets _text_in_flight), tail pending.
+    d._touch_speech()
+    d._on_partial("bad fragment")
+    assert "bad fragment" in "".join(x for x in be.typed if isinstance(x, str))
+
+    # --- press #1: latch + stamp S1; the physical keystroke compensates the tail ---
+    d.cancel()
+    assert d.is_listening() is True          # cancel never disarms
+    assert d._cancel_suppress_final is True
+    stamp1 = d._cancel_suppress_since
+    assert stamp1 is not None
+    assert host.cancel_calls == 1
+    assert any(isinstance(t, tuple) and t[0] == "bs" for t in be.typed)
+    # sentinel LOST (PART D step 3): mark_cancel_sentinel() deliberately NEVER called.
+    # Re-speak: speech event lifts engine suppression + the drop-freeze; partial types.
+    d._touch_speech()
+    d._on_partial("re-said one")
+    assert d._stream.pending_tail_len() > 0   # tail grew — the invariant has teeth
+    d.on_final("sentence one")                # <5 s after S1 -> DROP 1
+    assert d._cancel_suppress_final is True   # still latched, within bound
+    assert d._cancel_suppress_drops == 1
+    assert fb.finals == [] and "sentence one" not in "".join(
+        x for x in be.typed if isinstance(x, str)
+    )
+    assert d._stream.pending_tail_len() == 0  # boundary reset on EVERY drop
+
+    # --- press #2: re-latch + RE-STAMP (the defect's fuel); budget NOT restored ---
+    d.cancel()
+    stamp2 = d._cancel_suppress_since
+    assert stamp2 is not None and stamp2 > stamp1      # per-press re-stamp pinned
+    assert d._cancel_suppress_drops == 1               # budget SURVIVES the re-press
+    assert host.cancel_calls == 2
+    d._touch_speech()
+    d._on_partial("re-said two")
+    assert d._stream.pending_tail_len() > 0
+    d.on_final("sentence two")                # <5 s after S2 -> DROP 2
+    assert d._cancel_suppress_final is True
+    assert d._cancel_suppress_drops == 2
+    assert fb.finals == [] and "sentence two" not in "".join(
+        x for x in be.typed if isinstance(x, str)
+    )
+    assert d._stream.pending_tail_len() == 0
+
+    # --- press #3: the chain TERMINATES at the cap — final 3 processed ---
+    # LANDED SHAPE (daemon.py drop path, P1.M1.T4.S1): a PENDING tail at the cap
+    # force-close would freeze the engine (drop path: freeze(session=True) runs
+    # before the cap check) and the engine's frozen commit absorbs WITHOUT
+    # keystrokes — "the force-closed final could never type" (daemon.py comment).
+    # So the re-speak's speech event lifts the previous drop's freeze, but the
+    # final lands with NO pending tail (the same shape as T4.S1's own cap test):
+    # the force-closed commit then TYPES + RECORDS. The boundary-reset invariant
+    # is asserted non-vacuously on the two real silent drops above; here the
+    # landed design deliberately skips the freeze ("with no tail there is
+    # nothing to absorb") — the tail is still 0 after the final.
+    d.cancel()
+    stamp3 = d._cancel_suppress_since
+    assert stamp3 is not None and stamp3 > stamp2
+    assert d._cancel_suppress_drops == 2
+    assert host.cancel_calls == 3
+    d._touch_speech()                          # re-speak begins: lifts the drop-freeze
+    d.on_final("sentence three")              # 3rd consecutive drop == cap
+    assert d._cancel_suppress_final is False  # force-closed
+    assert d._cancel_suppress_since is None
+    assert d._cancel_suppress_drops == 0      # healthy close restores the budget
+    assert fb.finals == ["sentence three"]
+    assert "sentence three" in "".join(x for x in be.typed if isinstance(x, str))
+    assert d._stream.pending_tail_len() == 0
+
+    # --- recovery: the would-be 4th incident utterance, NO press -> normal ---
+    d._touch_speech()
+    d._on_partial("kept speaking")
+    d.on_final("sentence four")
+    assert d._cancel_suppress_final is False and d._cancel_suppress_drops == 0
+    assert fb.finals == ["sentence three", "sentence four"]
+    assert "sentence four" in "".join(x for x in be.typed if isinstance(x, str))
+    assert d.is_listening() is True
