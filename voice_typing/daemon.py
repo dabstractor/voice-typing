@@ -59,9 +59,26 @@ CONSUMED BY:
     uptime_s/request_shutdown.
   - the daemon entry point (P1.M4.T3.S1): VoiceTypingDaemon.run() under `if __name__ == "__main__":`.
   - install.sh CUDA smoke (P1.M6.T1.S1): may import cfg_to_kwargs.
+MEDIA DUCKING (PRD §4.2quinquies, P1.M2.T3.S1): while armed, the daemon ducks the user's media
+(mpris tier pauses playing players; volume tier lowers the sink) and releases it on EVERY disarm
+path. Engage happens at ONE choke point — _arm()'s set_listening(True) toast site (covers every
+arm: start, toggle, warm/cold). Release happens at _disarm()'s set_listening(False) (which manual
+stop/toggle-off immediate + graceful-drain completion + idle auto-stop + Rev-3 HALT all funnel
+into), in request_shutdown() (quit + SIGTERM), and in _handle_dead_host() (child death while
+ducked — that path fires the stop toast WITHOUT _disarm). cancel() must NEVER release: Backspace-
+cancel keeps the mic hot. All dispatch is non-blocking: every seam calls the injected/self-built
+AsyncDucker (ducking_async.py), whose engage()/release() return immediately — the subprocess work
+runs on its vt-ducking worker — because _arm()/_disarm()/_handle_dead_host() run UNDER self._lock
+and nothing blocking may ever be added there (the NEW-2 control-lock wedge class). cfg.audio
+duck_mode="off" (the shipped default; P1.M2.T4 flips it) ⇒ self._ducker is None ⇒ every seam
+no-ops: behavior byte-identical to pre-D1. Ducking is an enhancement, NEVER a gate: a dispatch
+failure is one WARNING and the arm proceeds. Feedback.set_ducked() mirrors the DESIRED state at
+each seam ("ducked" in state.json — the crash-safety signal T3.S2's boot self-heal reads).
+
 PURE IMPORTS at module top (inspect, logging, threading, time, typing, voice_typing.config,
 voice_typing.cuda_check, voice_typing.textproc, voice_typing.typing_backends — all cheap stdlib +
-already-landed pure-stdlib modules). RealtimeSTT is imported LAZILY inside build_recorder so
+already-landed pure-stdlib modules; plus the ducking stack audio_ducking/ducking_async/
+ducking_mpris/ducking_volume, equally cheap). RealtimeSTT is imported LAZILY inside build_recorder so
 `import voice_typing.daemon` stays cheap and unit tests never touch torch/ctranslate2. Feedback is
 imported only under TYPE_CHECKING. The daemon class holds self._recorder as a REFERENCE, never
 importing AudioToTextRecorder (so import purity holds).
@@ -95,6 +112,16 @@ from voice_typing.key_listener import KeyListener
 from voice_typing.recorder_host import (
     RecorderHost,
 )  # P1.M3.T2.S2: child-subprocess recorder owner
+
+# P1.M2.T3.S1: the media-ducking stack (PRD §4.2quinquies). All four modules are
+# stdlib+subprocess-light — the import-purity rule holds (RealtimeSTT stays lazy inside
+# build_recorder; these import no torch/RealtimeSTT). S1 owns AudioDucker (FROZEN), S2/S3 own the
+# tier backends, S4 owns AsyncDucker; this module only CALLS them (via _build_default_ducker +
+# the _duck_engage/_duck_release dispatch helpers).
+from voice_typing.audio_ducking import AudioDucker
+from voice_typing.ducking_async import AsyncDucker
+from voice_typing.ducking_mpris import MprisBusctlBackend
+from voice_typing.ducking_volume import WpctlVolumeBackend
 
 if TYPE_CHECKING:
     # Type hint only — never executed at runtime, so importing daemon.py is safe even while
@@ -591,6 +618,29 @@ class _LegacyRecorderHostAdapter:
             pass
 
 
+def _build_default_ducker(cfg: VoiceTypingConfig) -> Any:
+    """Build the production ducker for the daemon's arm/disarm seams (P1.M2.T3.S1).
+
+    Tier backend chosen by cfg.audio.duck_mode ("mpris" → busctl MPRIS over
+    ducking_mpris.MprisBusctlBackend; "volume" → wpctl sink volume over
+    ducking_volume.WpctlVolumeBackend), wrapped in S4's AsyncDucker so engage()/release()
+    dispatch returns immediately (safe inline under self._lock — the NEW-2 wedge class) and
+    the backend subprocess work runs on the vt-ducking worker, never on the caller's thread.
+    Returns None for duck_mode="off" (the ctor also guards, but the factory stays honest on
+    its own — off ⇒ no ducker ⇒ byte-identical behavior).
+    CONSTRUCTION IS PURE (mirrors the key_listener rule above): no subprocess runs and no
+    thread starts here — the factory only assembles objects; AsyncDucker's worker spawns
+    lazily on the first dispatch and the backends shell out only inside their primitives.
+    """
+    if cfg.audio.duck_mode == "off":
+        return None
+    if cfg.audio.duck_mode == "mpris":
+        backend: Any = MprisBusctlBackend()
+    else:  # "volume" (config __post_init__ guards the enum)
+        backend = WpctlVolumeBackend()
+    return AsyncDucker(AudioDucker.from_config(cfg, backend))
+
+
 class VoiceTypingDaemon:
     """The listen-forever daemon core: recorder loop + on_final→type + listening gate + toggle.
 
@@ -613,6 +663,7 @@ class VoiceTypingDaemon:
         latency: "LatencyLog | None" = None,
         mic_prober: Callable[[], tuple[bool, str | None]] | None = None,
         key_listener: KeyListener | None = None,
+        ducker: Any = None,
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
@@ -814,6 +865,16 @@ class VoiceTypingDaemon:
                 is_active=lambda: self._listening.is_set(),
                 devices=list(cfg.cancel.devices),
             )
+        # P1.M2.T3.S1: media ducking (PRD §4.2quinquies). Injected via ducker= (test double —
+        # same seam pattern as backend=/latency=/mic_prober=/key_listener=) or built from
+        # cfg.audio by _build_default_ducker above. duck_mode="off" (the shipped default) ⇒
+        # self._ducker stays None ⇒ every _duck_engage/_duck_release seam no-ops: behavior
+        # byte-identical to pre-D1 (PRD acceptance). CONSTRUCTION IS PURE: the factory runs
+        # no subprocess and starts no thread — AsyncDucker's vt-ducking worker spawns lazily
+        # on the first dispatch, exactly like the key_listener's reader threads start in run().
+        self._ducker: Any = ducker
+        if self._ducker is None and cfg.audio.duck_mode != "off":
+            self._ducker = _build_default_ducker(cfg)
         # Once-only latch for the zero-keyboard WARNING (P1.M2.T7.S2 fail-safe): logged at the
         # FIRST _arm() after the listener started with nothing watchable; later arms stay
         # silent forever. Plain bool, written only under _lock (via _arm) — same discipline
@@ -1103,6 +1164,7 @@ class VoiceTypingDaemon:
             self._feedback.set_phase("unloaded")
             self._feedback.set_models_loaded(False)
             self._feedback.set_listening(False)
+            self._duck_release()  # §4.2quinquies EDGE: child died while ducked — no _disarm ran
             self._load_error = "recorder-host child died unexpectedly"
             self._disarmed_monotonic = None
             self._last_speech_monotonic = None
@@ -1406,6 +1468,46 @@ class VoiceTypingDaemon:
                 # the next decode on the rolling committed context.
                 self._refresh_context_prompt()
 
+    def _duck_engage(self) -> None:
+        """Best-effort media-ducking engage at the arm seam (PRD §4.2quinquies, P1.M2.T3.S1).
+
+        Called from _arm() immediately after set_listening(True) — the ONE engage choke point
+        (covers every arm: start, toggle, warm/cold). _arm() runs UNDER self._lock, so this is
+        safe only because the AsyncDucker dispatch returns immediately (the subprocess work
+        runs on its vt-ducking worker — nothing blocking is ever added at this seam, the NEW-2
+        wedge class). set_ducked(True) mirrors the DESIRED state into state.json — the
+        crash-safety signal T3.S2's boot self-heal reads (conservative: errs "ducked" if we die
+        between dispatch and apply, where a boot-time release is a safe no-op when wrong).
+        Enhancement, NEVER a gate: any failure is one WARNING and the arm proceeds.
+        """
+        d = self._ducker
+        if d is None:  # duck_mode="off" (default) ⇒ no-op: byte-identical behavior
+            return
+        try:
+            d.engage()  # AsyncDucker: non-blocking dispatch (S4); idempotent, coalesced
+            self._feedback.set_ducked(True)
+        except Exception:
+            logger.warning("ducking: engage dispatch failed (ignored)")
+
+    def _duck_release(self) -> None:
+        """Best-effort media-ducking release on EVERY disarm path (PRD §4.2quinquies).
+
+        Called from _disarm()'s toast site (manual stop / toggle-off immediate + graceful-drain
+        completion + idle auto-stop + Rev-3 HALT all funnel into _disarm), from
+        request_shutdown() right after _shutdown.set() (quit + SIGTERM), and from
+        _handle_dead_host() (child death while ducked — that path fires the stop toast WITHOUT
+        _disarm). NOT from cancel(): Backspace-cancel keeps the mic hot (PRD). Same discipline
+        as _duck_engage — never a gate, one WARNING max, safe under self._lock.
+        """
+        d = self._ducker
+        if d is None:
+            return
+        try:
+            d.release()  # AsyncDucker: non-blocking dispatch (S4); idempotent, latest-wins
+            self._feedback.set_ducked(False)
+        except Exception:
+            logger.warning("ducking: release dispatch failed (ignored)")
+
     def _arm(self) -> None:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle.
 
@@ -1463,6 +1565,7 @@ class VoiceTypingDaemon:
             "lite"
         )  # Rev 2 single-mode constant (§4.6 schema stable; ctl renders it)
         self._feedback.set_listening(True)
+        self._duck_engage()  # §4.2quinquies: duck media while armed (non-blocking dispatch)
         self._refresh_mic_status()  # TTL-cached (Issue 3 / P1.M2.T2.S1): re-probes at most once / 30s
         # P1.M2.T7.S2: once-only zero-keyboard WARNING (latched — see _warn_no_keyboards_once).
         self._warn_no_keyboards_once()
@@ -1502,6 +1605,7 @@ class VoiceTypingDaemon:
         if self._host is not None:
             self._host.set_microphone(False)
         self._feedback.set_listening(False)
+        self._duck_release()  # §4.2quinquies: EVERY disarm path unducks (stop/toggle-off/drain/auto-stop/HALT)
         self._feedback.set_phase(
             "idle"
         )  # Issue 2 / P1.M2.T1.S1: 'loaded / not listening' ⇒ phase idle (PRD §4.2bis, §4.6)
@@ -2229,6 +2333,7 @@ class VoiceTypingDaemon:
         _shutdown.set() is the real signal the run() loop checks.
         """
         self._shutdown.set()
+        self._duck_release()  # §4.2quinquies: quit/SIGTERM must never leave media ducked
         # Cancel any pending graceful-stop drain watchdog so it can't fire mid-teardown.
         timer, self._drain_timer = self._drain_timer, None
         if timer is not None:

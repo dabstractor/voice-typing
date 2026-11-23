@@ -199,7 +199,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Media ducking while listening (D1, §4.2quinquies)",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Best-effort AudioDucker: MPRIS pause tier + sink-volume duck tier, engaged at arm and released on every disarm path, crash-safe, never a gate on arm. Ships duck_mode=\"off\" then flips default to \"mpris\" once tests pass.",
           "tasks": [
             {
@@ -299,14 +299,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Wire ducking lifecycle into the daemon + crash safety",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Engage at the single arm choke point; release on every disarm path (manual, drain, idle auto-stop, HALT, quit/SIGTERM, dead-host) but NOT Backspace-cancel; ducked state field with post-crash self-heal and ExecStopPost.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Engage/release at the arm/disarm seams (spawned, never under _lock)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T2.S4"
@@ -322,7 +322,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S2",
                   "title": "Crash safety: ducked flag, startup self-heal, ExecStopPost",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T3.S1"
@@ -341,14 +341,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "Flip duck_mode default to mpris with evidence",
-              "status": "Planned",
+              "status": "Ready",
               "description": "PRD: ships \"off\" until implemented; default flips to \"mpris\" the round this lands, once tests pass. Capture the §4.2quinquies acceptance evidence.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "Default flip + acceptance evidence",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T2.S4",

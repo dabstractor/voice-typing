@@ -8,7 +8,9 @@ cold model load) a one-shot 'Loading…' toast before the start.
 
 STATE FILE (PRD §4.6), written atomically (tempfile + os.replace) to
 $XDG_RUNTIME_DIR/voice-typing/state.json (overridable via feedback.state_file):
-    {"listening": true, "phase": "speaking", "models_loaded": true, "partial": "...", "last_final": "...", "ts": 1783718400.123}
+    {"listening": true, "phase": "speaking", "models_loaded": true, "mode": "lite", "ducked": false, "partial": "...", "last_final": "...", "ts": 1783718400.123}
+"ducked" (PRD §4.2quinquies, P1.M2.T3.S1) mirrors the DESIRED media-ducking state —
+the crash-safety signal a post-crash boot reads to self-heal a stuck duck (T3.S2).
 While models are not yet loaded (boot) or mid-load, phase is 'unloaded' or 'loading' and
 models_loaded is false (§4.2bis); once loaded, phase cycles idle/listening/speaking.
 Consumed by `voicectl status` and polled by the E2E tests (which verify finals through it).
@@ -99,6 +101,10 @@ class Feedback:
             "mode": "lite",          # Rev 2 constant (§4.2quater): ALWAYS "lite" — seeded "lite" at
                                      # boot too, so state.json never carries the retired "normal"
                                      # name in the boot→first-arm window (validation Issue 4)
+            "ducked": False,          # P1.M2.T3.S1 (§4.2quinquies): DESIRED ducking state, mirrored
+                                     # by Feedback.set_ducked at each engage/release seam; the
+                                     # crash-safety signal T3.S2's boot self-heal reads ("ducked"
+                                     # here does NOT mean the backend already applied it)
             "partial": "",
             "last_final": "",
             "ts": 0.0,
@@ -150,6 +156,21 @@ class Feedback:
         is active. Always writes; never notifies (not a start/final/stop event).
         """
         self._state["mode"] = mode
+        self._write()
+
+    def set_ducked(self, ducked: bool) -> None:
+        """Record the DESIRED media-ducking state (PRD §4.2quinquies / P1.M2.T3.S1).
+
+        Driven by the daemon's _duck_engage()/_duck_release() at each lifecycle seam
+        (engage at the _arm() toast site; release on EVERY disarm path — _disarm(),
+        request_shutdown(), _handle_dead_host() — but NOT cancel(), which keeps the mic
+        hot). This mirrors what the daemon ASKED the ducker for, not what the backend has
+        applied yet (the AsyncDucker apply is asynchronous): conservative for crash
+        safety — if the daemon dies between dispatch and apply, the flag errs "ducked"
+        and the boot-time release (T3.S2) is a safe no-op when wrong. Always writes;
+        never notifies (same anti-spam rule as set_phase/set_models_loaded).
+        """
+        self._state["ducked"] = bool(ducked)
         self._write()
 
     def record_final(self, text: str) -> None:

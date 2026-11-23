@@ -248,3 +248,232 @@ def test_from_config_reads_audio_section():
     assert d.engaged is True
     d.release()
     assert b.set_calls == [25.0, 50.0]
+
+
+# ===========================================================================
+# P1.M2.T3.S1 — daemon lifecycle wiring (PRD §4.2quinquies "Lifecycle wiring")
+# ===========================================================================
+# The daemon's arm/disarm seams, driven WITHOUT the run loop (mirroring the
+# test_daemon.py precedents): d.start()/d.stop()/d.toggle() for immediate
+# disarm, _touch_speech + _text_in_flight + _complete_drain for the graceful
+# drain, _last_speech_monotonic + _maybe_auto_stop() for the idle auto-stop,
+# note_user_keypress() past the 1.5 s arm-chord grace for the Rev-3 HALT,
+# request_shutdown() for quit/SIGTERM, _handle_dead_host() for the child-death
+# edge (which fires the stop toast WITHOUT _disarm), and cancel() as the
+# MUST-NOT-RELEASE control. A _FakeDucker rides in through the new ducker=
+# ctor seam (same injection pattern as backend=/mic_prober=/key_listener=).
+
+import threading  # noqa: E402 (lifecycle section imports; module top owns the core tests)
+import time as _time  # noqa: E402
+
+import voice_typing.daemon as daemon  # noqa: E402
+from test_daemon import (  # noqa: E402 (repo convention: tests import sibling fakes)
+    _DaemonFakeFeedback,
+    _StubRecorder,
+    _ok_probe,
+)
+from test_daemon import _FakeBackend as _CtlFakeBackend  # noqa: E402 — ALIASED: test_ducking's
+# own core-section _FakeBackend (the DuckBackend double) must keep its module-level name.
+from voice_typing.config import VoiceTypingConfig  # noqa: E402
+
+
+class _FakeDucker:
+    """Thread-safe duck-typed AsyncDucker stand-in: records engage/release call order.
+
+    Records CALLS at the seams (not the applied state) — the contract under test is the
+    daemon's dispatch discipline, not S4's worker internals. Thread-safe because the
+    seams run under self._lock while an AsyncDucker worker could run concurrently.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.calls: list[str] = []
+
+    def engage(self) -> None:
+        with self._lock:
+            self.calls.append("engage")
+
+    def release(self) -> None:
+        with self._lock:
+            self.calls.append("release")
+
+    @property
+    def engages(self) -> int:
+        return self.calls.count("engage")
+
+    @property
+    def releases(self) -> int:
+        return self.calls.count("release")
+
+
+class _DuckingFakeFeedback(_DaemonFakeFeedback):
+    """_DaemonFakeFeedback + set_ducked recording (the ducked write side under test)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ducked_states: list[bool] = []
+
+    def set_ducked(self, ducked: bool) -> None:
+        self.ducked_states.append(bool(ducked))
+
+
+def _make_ducking_daemon(cfg=None, *, duck: bool = True):
+    """Copy of tests/test_daemon.py::_make_daemon passing ducker=fake through the new seam.
+
+    duck=False builds the daemon with NO ducker injected (the off-mode default path:
+    duck_mode="off" ⇒ _ducker is None ⇒ byte-identical behavior).
+    """
+    cfg = cfg or VoiceTypingConfig()
+    fb = _DuckingFakeFeedback()
+    rec = _StubRecorder()
+    be = _CtlFakeBackend()
+    fake = _FakeDucker()
+    extra = {"ducker": fake} if duck else {}
+    d = daemon.VoiceTypingDaemon(
+        cfg,
+        fb,
+        recorder=rec,
+        backend=be,
+        mic_prober=_ok_probe,
+        **extra,
+    )
+    return d, fb, rec, be, fake
+
+
+def test_ducking_engage_on_arm():
+    """Arm via start() → the ducker is engaged and state mirrors ducked=True (PRD a)."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d.start()
+    assert fake.calls == ["engage"]
+    assert fb.ducked_states == [True]
+    d.stop()  # cleanup so the fake ledger is consistent for later runs
+
+
+def test_ducking_release_on_stop():
+    """Manual stop → release dispatched + ducked=False mirrored (PRD b)."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d.start()
+    d.stop()
+    assert fake.calls == ["engage", "release"]
+    assert fb.ducked_states == [True, False]
+    assert d.is_listening() is False
+
+
+def test_ducking_release_on_toggle_off():
+    """toggle-off (the hotkey) releases exactly like stop() (PRD b)."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d.start()
+    d.toggle()  # armed -> the disarm branch
+    assert fake.calls == ["engage", "release"]
+    assert fb.ducked_states == [True, False]
+    assert d.is_listening() is False
+
+
+def test_ducking_release_on_drain_completion():
+    """Graceful-stop drain holds the duck until the final lands, then _complete_drain releases."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d._cfg.asr.graceful_stop = True  # drain is opt-in since 2026-10
+    d.start()
+    d._touch_speech()  # speech happened -> _final_pending=True
+    d._text_in_flight.set()  # simulate the run loop blocked inside text()
+    d.stop()  # graceful stop -> drain: STILL listening, still ducked
+    assert d._drain is True and d.is_listening() is True
+    assert fake.releases == 0, "the duck must hold while the final model drains"
+    d._text_in_flight.clear()
+    d._complete_drain()  # what the run loop does once text() returns the final
+    assert fake.calls == ["engage", "release"]
+    assert fb.ducked_states == [True, False]
+
+
+def test_ducking_release_on_idle_auto_stop():
+    """The 30 s idle auto-stop (_maybe_auto_stop -> _disarm) releases (PRD b, case c)."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d.start()
+    d._last_speech_monotonic = _time.monotonic() - 31.0  # 31 s silent (> 30.0 default)
+    d._maybe_auto_stop()
+    assert d.is_listening() is False
+    assert fake.calls == ["engage", "release"]
+    assert fb.ducked_states == [True, False]
+
+
+def test_ducking_release_on_halt():
+    """Rev-3 HALT (a real keypress while armed, past the arm-chord grace) releases."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d._cfg.cancel.keypress_action = "disarm"  # HALT semantics (the 2026-10 default)
+    d.start()
+    assert fake.calls == ["engage"]
+    d._armed_monotonic = _time.monotonic() - 10.0  # past the 1.5 s arm-chord grace
+    d.note_user_keypress()  # -> with self._lock: _disarm()
+    assert d.is_listening() is False
+    assert fake.calls == ["engage", "release"]
+    assert fb.ducked_states == [True, False]
+
+
+def test_ducking_release_on_quit():
+    """request_shutdown() (quit + SIGTERM) releases — never leave media ducked at exit."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d.start()
+    d.request_shutdown()
+    assert fake.calls == ["engage", "release"]
+    assert fb.ducked_states == [True, False]
+    assert d._shutdown.is_set() is True
+
+
+def test_ducking_release_on_dead_host():
+    """Child death while ducked: _handle_dead_host releases WITHOUT any _disarm call."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d.start()
+    d._handle_dead_host()  # the run loop's dead-host path (child crash while armed)
+    assert fake.calls == ["engage", "release"]
+    assert fb.ducked_states == [True, False]
+    assert d.is_listening() is False
+
+
+def test_ducking_no_release_on_cancel():
+    """Backspace-cancel keeps the mic hot: NO release, ducked stays True (PRD b/c)."""
+    d, fb, _rec, _be, fake = _make_ducking_daemon()
+    d.start()
+    d.cancel()  # idempotent no-op with no pending tail — but MUST NOT release either way
+    assert fake.calls == ["engage"], "cancel() must never release (the mic stays hot)"
+    assert fb.ducked_states == [True]
+    assert d.is_listening() is True, "cancel keeps _listening set — it is not a disarm"
+
+
+def test_ducking_off_mode_no_ducker_zero_calls():
+    """duck_mode="off" (the shipped default) ⇒ _ducker is None ⇒ byte-identical behavior."""
+    d, fb, _rec, _be, _fake = _make_ducking_daemon(cfg=VoiceTypingConfig(), duck=False)
+    assert d._ducker is None  # the ctor factory never built one
+    d.start()  # every seam no-ops; set_ducked is never called
+    d.stop()
+    assert fb.ducked_states == []
+
+
+def test_ducking_default_factory_builds_by_mode():
+    """_build_default_ducker: off ⇒ None (ctor), mpris/volume ⇒ the AsyncDucker stack."""
+    from voice_typing.ducking_async import AsyncDucker
+    from voice_typing.ducking_mpris import MprisBusctlBackend
+    from voice_typing.ducking_volume import WpctlVolumeBackend
+
+    off = VoiceTypingConfig()  # duck_mode ships "off"
+    d = daemon.VoiceTypingDaemon(
+        off, _DuckingFakeFeedback(), recorder=_StubRecorder(),
+        backend=_CtlFakeBackend(), mic_prober=_ok_probe,
+    )
+    assert d._ducker is None
+    assert daemon._build_default_ducker(off) is None  # the factory itself: off ⇒ None
+
+    mpris_cfg = VoiceTypingConfig()
+    mpris_cfg.audio.duck_mode = "mpris"
+    dm = daemon._build_default_ducker(mpris_cfg)
+    assert isinstance(dm, AsyncDucker)
+    assert isinstance(dm._ducker, AudioDucker)
+    assert isinstance(dm._ducker._backend, MprisBusctlBackend)
+    assert dm._ducker._mode == "mpris"
+
+    vol_cfg = VoiceTypingConfig()
+    vol_cfg.audio.duck_mode = "volume"
+    vol_cfg.audio.duck_volume_pct = 25
+    dv = daemon._build_default_ducker(vol_cfg)
+    assert isinstance(dv, AsyncDucker)
+    assert isinstance(dv._ducker._backend, WpctlVolumeBackend)
+    assert dv._ducker._volume_pct == 25.0
