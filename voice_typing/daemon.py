@@ -2464,7 +2464,8 @@ class VoiceTypingDaemon:
         """The status payload for the control socket `status`/`toggle`/`start`/`stop` cmds.
 
         Returns {listening, mode, phase, models_loaded, load_error, partial, last_final, uptime_s,
-        device, compute_type, model, mic_ok, mic_error, context_prompt} — 14 keys. `mode` is the
+        device, compute_type, model, mic_ok, mic_error, context_prompt, delivery_mode,
+        delivery_state, delivery_reason, last_confirmed_op} — 18 keys. `mode` is the
         Rev 2 CONSTANT "lite" (§4.6 schema stability: state.json/ctl rendering unchanged; there is
         only one mode). phase/models_loaded come from the LIVE in-memory Feedback state (the lazy-load lifecycle,
         §4.2bis — unloaded/loading/idle/listening/speaking + models resident bool); load_error is
@@ -2475,8 +2476,13 @@ class VoiceTypingDaemon:
         come from the cached resolution (the child's 'ready' dict once armed — status matches the
         actually-loaded model). context_prompt (P1.M2.T5.S2) is a human label for the rolling
         prompt state: on / off (disabled by config) / off (degraded — context-free decoding) /
-        off (models not loaded) — ADDITIVE key, existing readers ignore it. Safe to call from the
-        socket thread; never raises (device probe failures degrade to 'unknown').
+        off (models not loaded) — ADDITIVE key, existing readers ignore it. The 4 delivery keys
+        (P1.M3.T3.S2, PRD §4.2sexies R.5) come from the LIVE feedback state too, read via .get
+        with defaults EQUAL to the Feedback seeds: they are written ONLY by the bulk wiring
+        (P1.M6.T2.S1 — the daemon core never calls those setters or reads the [output]
+        delivery config value),
+        so the defaults are the truthful "surface unwired" values (stream-edit/inactive/empty).
+        Safe to call from the socket thread; never raises (device probe failures degrade to 'unknown').
         """
         snap = self._feedback.snapshot()
         dev = self._resolved_device()
@@ -2503,6 +2509,13 @@ class VoiceTypingDaemon:
             "mic_error": self._mic_error
             or "",  # None -> "" so JSON always carries a string
             "context_prompt": self._context_prompt_label(),  # P1.M2.T5.S2: rolling-prompt state label
+            # P1.M3.T3.S2: bulk-delivery status surface (PRD §4.2sexies R.5) — ADDITIVE keys,
+            # .get defaults == the Feedback seeds so minimal snapshot() doubles keep working;
+            # written only by the bulk wiring (P1.M6.T2.S1).
+            "delivery_mode": snap.get("delivery_mode", "stream-edit"),
+            "delivery_state": snap.get("delivery_state", "inactive"),
+            "delivery_reason": snap.get("delivery_reason", ""),
+            "last_confirmed_op": snap.get("last_confirmed_op", ""),
         }
 
     def _resolved_device(self) -> dict[str, str]:

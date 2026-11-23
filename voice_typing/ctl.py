@@ -15,6 +15,7 @@ Subcommands (PRD §4.8):
     start    arm the mic (start listening)
     stop     disarm the mic (stop listening)
     status   pretty-print listening + mode + phase + partial + last final + uptime + device + mic
+             + context-prompt + delivery (mode/state, reason/op when present)
     quit     request a clean daemon shutdown (releases GPU workers)
     cancel   drop the pending dictation fragment and keep listening (Backspace keybind fallback)
 
@@ -85,7 +86,10 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
       - ok:false                      -> the daemon's error text ("error: <...>")
       - quit ({"ok":true,"shutting_down":true}) -> "shutting down"  (NO listening key -> branch first)
       - status                        -> multi-line: listening, mode, phase, partial, last_final, uptime,
-                                        device, compute_type, mic  (PRD §4.8; mic health per bugfix Issue 2)
+                                        device, compute_type, mic, context-prompt, delivery +
+                                        delivery reason/delivery op (only when non-empty)
+                                        (PRD §4.8; mic per bugfix Issue 2; context-prompt P1.M2.T5.S2;
+                                        delivery P1.M3.T3.S2 — PRD §4.2sexies R.5 status surface)
       - toggle/start/stop/cancel      -> "listening: on" / "listening: off"
 
     Defensive .get(...) everywhere so a missing key never raises (the protocol guarantees the 8-key
@@ -123,6 +127,13 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         # (on / off (disabled by config) / off (degraded — context-free decoding) /
         # off (models not loaded)); a missing key (old daemon) reads as 'unknown'.
         context_prompt = response.get("context_prompt", "") or "unknown"
+        # P1.M3.T3.S2: bulk-delivery status surface (PRD §4.2sexies R.5). Missing/empty keys
+        # (old daemon / surface unwired) read as 'unknown' — the context_prompt tolerance
+        # precedent. reason/op render ONLY when non-empty.
+        delivery_mode = response.get("delivery_mode", "") or "unknown"
+        delivery_state = response.get("delivery_state", "") or "unknown"
+        delivery_reason = response.get("delivery_reason", "") or ""
+        delivery_op = response.get("last_confirmed_op", "") or ""
         if mic_ok:
             mic_line = "mic: ok"
         elif mic_error:
@@ -138,8 +149,13 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
             f"uptime: {uptime}s\n"
             f"device: {device} ({compute_type})\n"
             f"{mic_line}\n"
-            f"context-prompt: {context_prompt}"
+            f"context-prompt: {context_prompt}\n"
+            f"delivery: {delivery_mode} ({delivery_state})"
         )
+        if delivery_reason:
+            text += f"\ndelivery reason: {delivery_reason}"
+        if delivery_op:
+            text += f"\ndelivery op: {delivery_op}"
         if load_error:  # surface §4.2bis load failures (absent on the happy path)
             text += f"\nload error: {load_error}"
         return text, 0

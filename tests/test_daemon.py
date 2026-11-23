@@ -1983,8 +1983,12 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
             "mic_ok",
             "mic_error",
             "context_prompt",
+            "delivery_mode",  # P1.M3.T3.S2: bulk-delivery status surface (R.5), additive
+            "delivery_state",
+            "delivery_reason",
+            "last_confirmed_op",
         }
-    )  # P1.M1.T2.S2: ONE 'model' key (Rev 2); + context_prompt (P1.M2.T5.S2, additive label)
+    )  # P1.M1.T2.S2: ONE 'model' key (Rev 2); + context_prompt (P1.M2.T5.S2, additive label); + 4 delivery keys (P1.M3.T3.S2)
     assert (
         s["listening"] is False
         and s["partial"] == "world"
@@ -1995,16 +1999,43 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
     )  # P1.M2.T2.S1: injected recorder -> loaded
     assert s["mode"] == "lite"  # Rev 2: the CONSTANT mode (§4.6 schema stable)
     # device/compute_type/model come from the UN-PROBED config (VT-001) until the child reports
-    # its actual resolved device on arm. The defaults happen to equal CUDA_DEFAULTS, so this also
-    # pins that the config<->cuda_check defaults have not drifted.
-    assert s["device"] == "cuda" and s["compute_type"] == "float32"
+    # its actual resolved device on arm. These mirror the config<->cuda_check shared defaults
+    # (float16 since bcfd171 — the Ampere RTX 3080 Ti daily-driver default), so this also pins
+    # that the config<->cuda_check defaults have not drifted.
+    assert s["device"] == "cuda" and s["compute_type"] == "float16"
     assert s["model"] == "small.en"
     assert (
         s["mic_ok"] is True and s["mic_error"] == ""
     )  # S1's _ok_probe via _make_daemon_with_feedback
+    # P1.M3.T3.S2: delivery keys come from the LIVE Feedback snapshot; with nothing wired
+    # they read as the seeds (surface unwired until P1.M6.T2.S1).
+    assert (
+        s["delivery_mode"] == "stream-edit"
+        and s["delivery_state"] == "inactive"
+        and s["delivery_reason"] == ""
+        and s["last_confirmed_op"] == ""
+    )
     assert calls["n"] == 0, (
         "status_snapshot must NOT call cuda_check.resolve_device_and_models (VT-001)"
     )
+
+
+def test_status_snapshot_reflects_live_delivery_surface(tmp_path, monkeypatch):
+    """P1.M3.T3.S2: the delivery keys read the LIVE in-memory Feedback state — the setters
+    the M4/M6 bulk wiring will call flow into the very next status_snapshot() (no disk)."""
+    d, fb = _make_daemon_with_feedback(tmp_path, monkeypatch)
+    assert d.status_snapshot()["delivery_state"] == "inactive"  # seeded default
+    fb.set_delivery_mode("bulk-text")
+    fb.set_delivery_state("fault", "op-deadline")
+    fb.record_confirmed_op("insert seq=7 rev=12 41ms")
+    s = d.status_snapshot()
+    assert s["delivery_mode"] == "bulk-text"
+    assert s["delivery_state"] == "fault"
+    assert s["delivery_reason"] == "op-deadline"
+    assert s["last_confirmed_op"] == "insert seq=7 rev=12 41ms"
+    fb.set_delivery_state("active")  # re-arm clears the stale reason (live)
+    s = d.status_snapshot()
+    assert s["delivery_state"] == "active" and s["delivery_reason"] == ""
 
 
 def test_status_snapshot_reflects_listening_toggle(tmp_path, monkeypatch):
@@ -3454,7 +3485,8 @@ def test_toggle_is_involution_single_mode():
 def test_status_snapshot_has_single_model_key():
     """status_snapshot: the CONSTANT mode 'lite' + ONE 'model' key (no two-model pair).
 
-    14 keys since P1.M2.T5.S2 added the additive 'context_prompt' state label.
+    18 keys since P1.M2.T5.S2 added the additive 'context_prompt' state label and
+    P1.M3.T3.S2 added the 4 bulk-delivery surface keys (PRD §4.2sexies R.5).
     """
     factory = _fake_host_factory(spawn_result=True)
     d, _fb = _make_lazy_daemon(host_factory=factory)
@@ -3462,7 +3494,7 @@ def test_status_snapshot_has_single_model_key():
     assert snap["mode"] == "lite"  # constant before AND after arming
     assert "model" in snap
     assert "final_model" not in snap and "realtime_model" not in snap
-    assert len(snap) == 14
+    assert len(snap) == 18
     d.start()
     assert d.status_snapshot()["mode"] == "lite"
 

@@ -126,7 +126,12 @@ def test_state_shape_has_the_documented_fields(feedback, tmp_path):
     fb, _rec, _clock = feedback
     fb.update_partial("x")
     state = _read_state(tmp_path)
-    assert set(state.keys()) == {"listening", "phase", "models_loaded", "mode", "ducked", "partial", "last_final", "ts"}
+    assert set(state.keys()) == {
+        "listening", "phase", "models_loaded", "mode", "ducked",
+        # P1.M3.T3.S2: bulk-delivery status surface (PRD §4.2sexies R.5) — always present
+        "delivery_mode", "delivery_state", "delivery_reason", "last_confirmed_op",
+        "partial", "last_final", "ts",
+    }
 
 
 def test_set_phase_round_trip(feedback, tmp_path):
@@ -438,7 +443,12 @@ def test_snapshot_returns_a_copy_with_the_state_keys(tmp_path, monkeypatch):
     fb.set_listening(True)
     fb.update_partial("hello")
     snap = fb.snapshot()
-    assert set(snap.keys()) == {"listening", "phase", "models_loaded", "mode", "ducked", "partial", "last_final", "ts"}
+    assert set(snap.keys()) == {
+        "listening", "phase", "models_loaded", "mode", "ducked",
+        # P1.M3.T3.S2: bulk-delivery status surface (PRD §4.2sexies R.5) — always present
+        "delivery_mode", "delivery_state", "delivery_reason", "last_confirmed_op",
+        "partial", "last_final", "ts",
+    }
     assert snap["listening"] is True and snap["partial"] == "hello"
 
 
@@ -457,6 +467,146 @@ def test_snapshot_reflects_recorded_final(tmp_path, monkeypatch):
     fb = Feedback(FeedbackConfig(state_file=str(tmp_path / "state.json")))
     fb.record_final("a final utterance")
     assert fb.snapshot()["last_final"] == "a final utterance"
+
+
+# ---------------------------------------------------------------------------
+# P1.M3.T3.S2: bulk-delivery status surface (PRD §4.2sexies R.5).
+# 4 always-present _state keys + 3 set_phase-style setters (always write, NEVER
+# notify) + the sanitizer guard (whitespace-collapse + 160-char cap) that keeps
+# delivery_reason/last_confirmed_op to counts/times — never recognition text or
+# the surrounding user document. Seed values are the truthful "surface unwired"
+# defaults until the bulk wiring (P1.M6.T2.S1) drives them.
+# ---------------------------------------------------------------------------
+
+
+def test_delivery_fields_seed_defaults(feedback, tmp_path):
+    """The 4 delivery keys exist from construction with the config-default literals
+    (surface unwired until M6.T2.S1 — the daemon core never writes them)."""
+    fb, _rec, _clock = feedback
+    snap = fb.snapshot()
+    assert snap["delivery_mode"] == "stream-edit"
+    assert snap["delivery_state"] == "inactive"
+    assert snap["delivery_reason"] == ""
+    assert snap["last_confirmed_op"] == ""
+    fb.set_listening(False)  # first write flushes the seeds to disk
+    state = _read_state(tmp_path)
+    assert (
+        state["delivery_mode"] == "stream-edit"
+        and state["delivery_state"] == "inactive"
+        and state["delivery_reason"] == ""
+        and state["last_confirmed_op"] == ""
+    )
+
+
+def test_set_delivery_mode_round_trips_both_legal_values(feedback, tmp_path):
+    fb, _rec, _clock = feedback
+    fb.set_delivery_mode("bulk-text")
+    assert _read_state(tmp_path)["delivery_mode"] == "bulk-text"
+    fb.set_delivery_mode("stream-edit")
+    assert _read_state(tmp_path)["delivery_mode"] == "stream-edit"
+
+
+def test_set_delivery_mode_rejects_non_member(feedback):
+    """Setter misuse = wiring bug — fail fast, and the message names the offending value."""
+    fb, _rec, _clock = feedback
+    with pytest.raises(ValueError, match=r"bulk-text"):
+        fb.set_delivery_mode("Bulk-Text")  # case-sensitive vocabulary
+    with pytest.raises(ValueError, match=r"bogus"):
+        fb.set_delivery_mode("bogus")
+    assert fb.snapshot()["delivery_mode"] == "stream-edit"  # unchanged on rejection
+
+
+def test_set_delivery_state_round_trips_state_and_reason(feedback, tmp_path):
+    fb, _rec, _clock = feedback
+    fb.set_delivery_state("fault", "op-deadline")
+    state = _read_state(tmp_path)
+    assert state["delivery_state"] == "fault"
+    assert state["delivery_reason"] == "op-deadline"
+    fb.set_delivery_state("active")  # legal re-arm
+    state = _read_state(tmp_path)
+    assert state["delivery_state"] == "active"
+
+
+def test_set_delivery_state_default_reason_clears_stale_reason(feedback, tmp_path):
+    """reason is ALWAYS overwritten: the default \"\" clears a stale fault reason on the
+    next healthy transition — never leave a dead fault label on a live session."""
+    fb, _rec, _clock = feedback
+    fb.set_delivery_state("fault", "queue-overflow")
+    assert _read_state(tmp_path)["delivery_reason"] == "queue-overflow"
+    fb.set_delivery_state("active")  # no reason arg
+    state = _read_state(tmp_path)
+    assert state["delivery_state"] == "active"
+    assert state["delivery_reason"] == ""  # cleared, not retained
+
+
+def test_set_delivery_state_rejects_taxonomy_misspell(feedback):
+    fb, _rec, _clock = feedback
+    with pytest.raises(ValueError, match=r"actve"):
+        fb.set_delivery_state("actve")
+    with pytest.raises(ValueError, match=r"Failed"):
+        fb.set_delivery_state("Failed", "target-error")
+    assert fb.snapshot()["delivery_state"] == "inactive"  # unchanged on rejection
+
+
+def test_record_confirmed_op_round_trip(feedback, tmp_path):
+    fb, _rec, _clock = feedback
+    fb.record_confirmed_op("insert utt=3 seq=7 rev=12 +34ch 41ms")
+    assert _read_state(tmp_path)["last_confirmed_op"] == "insert utt=3 seq=7 rev=12 +34ch 41ms"
+
+
+def test_sanitizer_caps_reason_and_op_to_single_line(feedback, tmp_path):
+    """THE privacy guard (R.5): a 500-char multi-line payload collapses to ONE line,
+    <=160 chars, in BOTH delivery_reason and last_confirmed_op — a pasted document can
+    never ride into state.json or break ctl's one-line rendering."""
+    fb, _rec, _clock = feedback
+    payload = "line one\n\tline two\n" + ("x" * 480)  # >160 chars, multi-line
+    fb.set_delivery_state("fault", payload)
+    fb.record_confirmed_op(payload)
+    state = _read_state(tmp_path)
+    for key in ("delivery_reason", "last_confirmed_op"):
+        assert "\n" not in state[key] and "\t" not in state[key]
+        assert len(state[key]) <= 160
+    assert state["delivery_reason"].startswith("line one line two xx")
+
+
+def test_delivery_setters_never_invoke_hyprctl(feedback):
+    """THE anti-spam contract: the delivery setters are set_phase-style — assign +
+    _write(), NO hyprctl call, NO throttle gate (write frequency is M6's concern)."""
+    fb, rec, _clock = feedback
+    fb.set_delivery_mode("bulk-text")
+    fb.set_delivery_state("fault", "op-deadline")
+    fb.set_delivery_state("active")
+    fb.record_confirmed_op("insert seq=1 rev=1 12ms")
+    assert rec.argvs == [], f"hyprctl was called {len(rec.argvs)} times by delivery setters"
+
+
+def test_partial_and_final_leave_delivery_fields_untouched(feedback):
+    """Critical #4 (one direction): recognition-text paths NEVER hijack the delivery
+    fields — partial/last_final carry text BY DESIGN, delivery carries state only."""
+    fb, _rec, _clock = feedback
+    fb.set_delivery_mode("bulk-text")
+    fb.set_delivery_state("fault", "op-deadline")
+    fb.record_confirmed_op("insert seq=9 rev=3 40ms")
+    fb.update_partial("some recognition text")
+    fb.record_final("a final sentence")
+    snap = fb.snapshot()
+    assert snap["delivery_mode"] == "bulk-text"
+    assert snap["delivery_state"] == "fault"
+    assert snap["delivery_reason"] == "op-deadline"
+    assert snap["last_confirmed_op"] == "insert seq=9 rev=3 40ms"
+    assert snap["partial"] == "a final sentence"  # recognition text lands where it belongs
+
+
+def test_delivery_setters_leave_partial_and_last_final_untouched(feedback):
+    """Critical #4 (other direction): delivery setters NEVER hijack partial/last_final."""
+    fb, _rec, _clock = feedback
+    fb.record_final("a final sentence")
+    fb.set_delivery_mode("bulk-text")
+    fb.set_delivery_state("fault", "target-error")
+    fb.record_confirmed_op("delete seq=2 rev=4 -7ch 9ms")
+    snap = fb.snapshot()
+    assert snap["partial"] == "a final sentence"
+    assert snap["last_final"] == "a final sentence"
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,19 @@ cold model load) a one-shot 'Loading…' toast before the start.
 
 STATE FILE (PRD §4.6), written atomically (tempfile + os.replace) to
 $XDG_RUNTIME_DIR/voice-typing/state.json (overridable via feedback.state_file):
-    {"listening": true, "phase": "speaking", "models_loaded": true, "mode": "lite", "ducked": false, "partial": "...", "last_final": "...", "ts": 1783718400.123}
+    {"listening": true, "phase": "speaking", "models_loaded": true, "mode": "lite", "ducked": false,
+     "delivery_mode": "stream-edit", "delivery_state": "inactive", "delivery_reason": "",
+     "last_confirmed_op": "", "partial": "...", "last_final": "...", "ts": 1783718400.123}
+DELIVERY FIELDS (PRD §4.2sexies R.5, P1.M3.T3.S2 — surface only, no writer wired yet):
+`delivery_mode` mirrors the configured bulk-delivery path ("stream-edit" | "bulk-text"); the
+seed is the config-default LITERAL — the bulk wiring (P1.M6.T2.S1) re-seeds it from
+[output] delivery at boot. `delivery_state` is the R.5 taxonomy
+(inactive | active | unsupported | fault); `delivery_reason` is ONE concise reason;
+`last_confirmed_op` is the last APPLIED bulk op as counts+times (verb + ids + revision +
+elapsed ms). reason/op pass through _sanitize_status_text (whitespace-collapsed, ≤160
+chars) so state NEVER carries recognition text or the surrounding user document, and
+`voicectl status` can render them as one line each. Written ONLY by the bulk wiring
+(P1.M4/P1.M6 setters) — until then the seeds are the truthful "surface unwired" values.
 "ducked" (PRD §4.2quinquies, P1.M2.T3.S1) mirrors the DESIRED media-ducking state —
 the crash-safety signal a post-crash boot reads to self-heal a stuck duck (T3.S2).
 While models are not yet loaded (boot) or mid-load, phase is 'unloaded' or 'loading' and
@@ -78,6 +90,25 @@ logger = logging.getLogger(__name__)
 # would freeze the partial forever). The ts FIELD still uses time.time() (wall epoch).
 _PARTIAL_WRITE_MIN_INTERVAL = 0.1
 
+# P1.M3.T3.S2: bulk-delivery status surface (PRD §4.2sexies R.5). The vocabularies mirror
+# the planning round (d2_bulk_delivery_map.md §4): modes mirror the [output] delivery value
+# space (P1.M3.T3.S1); states are the R.5 taxonomy; reason/op are capped so a pasted
+# document can never ride in state.json (the sanitizer is the mechanical guard).
+_DELIVERY_MODES = ("stream-edit", "bulk-text")
+_DELIVERY_STATES = ("inactive", "active", "unsupported", "fault")
+_STATUS_TEXT_MAX = 160
+
+
+def _sanitize_status_text(value: str) -> str:
+    """Collapse whitespace runs to single spaces + truncate — the R.5 guard that keeps
+    delivery_reason/last_confirmed_op to counts/times, never recognition text or the
+    surrounding user document (a newline in the value would break `voicectl status`'s
+    one-line rendering; anything longer than 160 chars is a document, not a reason).
+    Applied ONLY to the delivery reason/op fields — partial/last_final carry recognition
+    text BY DESIGN and are never sanitized.
+    """
+    return " ".join(value.split())[:_STATUS_TEXT_MAX]
+
 # hyprctl notify icon "-1" means "No icon" (verified: `hyprctl notify --help`) — so the
 # message text itself ('Recording' / 'Loading…' / 'Recording Stopped' / '✔ <text>') IS the
 # visual. Color is Nord frost (PRD §4.6).
@@ -105,6 +136,15 @@ class Feedback:
                                      # by Feedback.set_ducked at each engage/release seam; the
                                      # crash-safety signal T3.S2's boot self-heal reads ("ducked"
                                      # here does NOT mean the backend already applied it)
+            # P1.M3.T3.S2 (PRD §4.2sexies R.5): bulk-delivery status surface. Literal seeds
+            # (config default) — NO config read here (Feedback sees only FeedbackConfig);
+            # the bulk wiring (P1.M6.T2.S1) re-seeds delivery_mode from [output] delivery
+            # at boot and drives state/reason/op. Until then these are the truthful
+            # "surface unwired" values.
+            "delivery_mode": "stream-edit",   # mirrors [output] delivery ("stream-edit"|"bulk-text")
+            "delivery_state": "inactive",     # R.5 taxonomy: inactive|active|unsupported|fault
+            "delivery_reason": "",            # one concise reason (stop/acquire failure), sanitized
+            "last_confirmed_op": "",          # last APPLIED op descriptor (counts+times), sanitized
             "partial": "",
             "last_final": "",
             "ts": 0.0,
@@ -171,6 +211,60 @@ class Feedback:
         never notifies (same anti-spam rule as set_phase/set_models_loaded).
         """
         self._state["ducked"] = bool(ducked)
+        self._write()
+
+    def set_delivery_mode(self, mode: str) -> None:
+        """Record the armed bulk-delivery path (P1.M3.T3.S2; PRD §4.2sexies R.5 surface).
+
+        One of "stream-edit" | "bulk-text" — the value space of [output] delivery
+        (P1.M3.T3.S1). The __init__ seed is the config-default LITERAL; the bulk wiring
+        (P1.M6.T2.S1) calls this at boot with the [output] delivery config value. Mode is
+        orthogonal to
+        listening: it describes WHICH delivery path is live for the session, not whether
+        the mic is armed. Written ONLY by the bulk wiring — never by the daemon core.
+        Always writes; never notifies (same anti-spam rule as set_phase).
+        """
+        if mode not in _DELIVERY_MODES:
+            raise ValueError(
+                f"delivery_mode must be one of {_DELIVERY_MODES}, got {mode!r}"
+            )
+        self._state["delivery_mode"] = mode
+        self._write()
+
+    def set_delivery_state(self, state: str, reason: str = "") -> None:
+        """Record the bulk-delivery state + one concise reason (PRD §4.2sexies R.5; P1.M3.T3.S2).
+
+        Taxonomy: inactive | active | unsupported | fault. Written ONLY by the bulk-delivery
+        wiring (P1.M6.T2.S1 maps the controller's on_stopped/stats onto these): controller
+        stop reasons queue-overflow | op-deadline | refused | unknown | target-error ->
+        "fault" with that reason; a clean stop -> "inactive"; acquire failure ->
+        "unsupported" + the AcquireResult.reason; a successful acquire -> "active".
+        `reason` is ALWAYS overwritten (the default "" clears a stale fault reason on the
+        next healthy transition — never leave a dead fault label on a live session).
+        Sanitized via _sanitize_status_text: whitespace-collapsed, <=160 chars — counts and
+        times, never recognition text or the surrounding user document (R.5). Always
+        writes; never notifies (same anti-spam rule as set_phase).
+        """
+        if state not in _DELIVERY_STATES:
+            raise ValueError(
+                f"delivery_state must be one of {_DELIVERY_STATES}, got {state!r}"
+            )
+        self._state["delivery_state"] = state
+        self._state["delivery_reason"] = _sanitize_status_text(reason)
+        self._write()
+
+    def record_confirmed_op(self, op: str) -> None:
+        """Record the last APPLIED bulk-delivery op descriptor (PRD §4.2sexies R.5; P1.M3.T3.S2).
+
+        Called by the bulk wiring on each in-time ShowResult.APPLIED (controller law: ONLY
+        an applied op confirms — unchanged/refused/unknown never do). `op` format is
+        counts + times, never recognition text: verb + utterance/seq ids + revision +
+        elapsed ms, e.g. "insert utt=3 seq=7 rev=12 +34ch 41ms" (P1.M6 builds the string).
+        Sanitized via _sanitize_status_text (whitespace-collapsed, <=160 chars) so the
+        surrounding user document can never ride into state.json or the one-line status
+        rendering. Always writes; never notifies (same anti-spam rule as set_phase).
+        """
+        self._state["last_confirmed_op"] = _sanitize_status_text(op)
         self._write()
 
     def record_final(self, text: str) -> None:

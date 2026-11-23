@@ -121,6 +121,57 @@ def test_format_status_mic_defaults_healthy_when_key_absent():
     assert code == 0 and "mic: ok" in text
 
 
+# --- P1.M3.T3.S2: delivery status lines (PRD §4.2sexies R.5 surface) -----------------------
+
+
+def test_format_status_delivery_line_renders_after_context_prompt():
+    """Ordering pin: the delivery line lands AFTER context-prompt (before the optional
+    load error) — the G3/G5 evidence harnesses grep these lines in order."""
+    resp = {**_STATUS_ON, "delivery_mode": "bulk-text", "delivery_state": "active"}
+    text, code = ctl.format_result("status", resp)
+    assert code == 0
+    assert text.index("context-prompt:") < text.index("delivery: bulk-text (active)")
+
+
+def test_format_status_delivery_reason_and_op_render_when_populated():
+    resp = {
+        **_STATUS_ON,
+        "delivery_mode": "bulk-text",
+        "delivery_state": "fault",
+        "delivery_reason": "op-deadline",
+        "last_confirmed_op": "insert utt=3 seq=7 rev=12 +34ch 41ms",
+    }
+    text, code = ctl.format_result("status", resp)
+    assert code == 0
+    assert "delivery: bulk-text (fault)" in text
+    assert "delivery reason: op-deadline" in text
+    assert "delivery op: insert utt=3 seq=7 rev=12 +34ch 41ms" in text
+    assert "\ndelivery reason: op-deadline\n" in "\n" + text + "\n"  # exactly one line
+
+
+def test_format_status_delivery_reason_and_op_hidden_when_empty():
+    """The PRD R.5 default (stream-edit, nothing wired): exactly ONE new line, and the
+    reason/op lines are hidden while empty — no 'delivery reason:' noise."""
+    resp = {**_STATUS_ON, "delivery_mode": "stream-edit", "delivery_state": "inactive",
+            "delivery_reason": "", "last_confirmed_op": ""}
+    text, code = ctl.format_result("status", resp)
+    assert code == 0
+    assert "delivery: stream-edit (inactive)" in text
+    assert "delivery reason:" not in text
+    assert "delivery op:" not in text
+
+
+def test_format_status_delivery_defaults_unknown_when_keys_absent():
+    """Old-daemon tolerance (the context_prompt precedent): a reply with NO delivery keys
+    at all renders 'delivery: unknown (unknown)', never raises, exit 0."""
+    resp = {k: v for k, v in _STATUS_ON.items() if k not in
+            ("delivery_mode", "delivery_state", "delivery_reason", "last_confirmed_op")}
+    text, code = ctl.format_result("status", resp)
+    assert code == 0
+    assert "delivery: unknown (unknown)" in text
+    assert "delivery reason:" not in text and "delivery op:" not in text
+
+
 def test_format_ok_false_unknown_command():
     text, code = ctl.format_result("toggle", {"ok": False, "error": "unknown command: 'x'"})
     assert code == 1 and "unknown command" in text

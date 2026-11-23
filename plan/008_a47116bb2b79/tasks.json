@@ -370,7 +370,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Bulk delivery controller core + config gate (D2, G2)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "The paste-as-policy controller and TargetAdapter contracts, separate from StreamingOutput/typing_backends: result taxonomy, zero-diff guard, bounded queue with barriers, failure/disarm rules, the G2 fake-target trace gate, the output.delivery config gate, and the delivery status surface.",
           "tasks": [
             {
@@ -455,7 +455,7 @@
               "type": "Task",
               "id": "P1.M3.T3",
               "title": "output.delivery config gate + delivery status surface",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Config key with the precondition triple enforced at load, plus delivery_mode/delivery_state/delivery_reason/last-confirmed-op through feedback state and voicectl status.",
               "subtasks": [
                 {
@@ -478,7 +478,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T3.S2",
                   "title": "Delivery status surface: feedback fields + voicectl status rendering",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T3.S1",
@@ -507,14 +507,14 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Productize the IM-v2 wire transport into a daemon-owned subprocess",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Evolve tools/im-lab wlwire.py + im_probe.py into voice_typing/ime/ (stdlib wire client — pywayland is NOT in the venv and stays out), with a JSONL protocol to the daemon and managed lifecycle incl. the exclusive-seat unavailable event.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Wire transport package + JSONL protocol",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -529,7 +529,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Subprocess lifecycle: spawn/monitor/teardown + unavailable handling",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1"
