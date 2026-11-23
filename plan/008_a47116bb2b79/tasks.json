@@ -507,14 +507,14 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Productize the IM-v2 wire transport into a daemon-owned subprocess",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Evolve tools/im-lab wlwire.py + im_probe.py into voice_typing/ime/ (stdlib wire client — pywayland is NOT in the venv and stays out), with a JSONL protocol to the daemon and managed lifecycle incl. the exclusive-seat unavailable event.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Wire transport package + JSONL protocol",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -529,7 +529,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T1.S2",
                   "title": "Subprocess lifecycle: spawn/monitor/teardown + unavailable handling",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T1.S1"
