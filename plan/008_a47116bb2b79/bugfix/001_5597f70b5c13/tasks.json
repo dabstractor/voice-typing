@@ -139,7 +139,7 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Establish a comparable, representative G5 experiment",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Build a private callback A/B and independent field measurements with production-parity GTK startup and explicit Pi instrumentation limits.",
               "subtasks": [
                 {
@@ -217,7 +217,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S5",
                   "title": "Qualify a private Pi prompt frame observation",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S3",
@@ -235,7 +235,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S6",
                   "title": "Run the paired callback comparison and localize visible lag",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S3",

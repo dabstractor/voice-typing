@@ -329,3 +329,95 @@ the single parser-compatible current one.
   legacy tuple streams behave exactly as before this method (the 14
   pre-existing tests in tests/test_g5_timing_support.py are unchanged and
   green — the historical-comparability contract).
+
+## Pi frame observer qualification (P1.M2.T1.S5)
+
+Appended after the historical content above; every number above predates
+this section and is NOT recomputed. Prose and bullets only — deliberately
+no route×verdict table (the parser-owned verdict table at the top of this
+file remains the single current one).
+
+- Tools preflight (verified present on this machine before the run):
+  /usr/bin/grim, /usr/bin/swaymsg, /usr/bin/wtype, /usr/bin/ghostty; pi
+  resolved in the PARENT via PI_BIN (a missing binary is the existing
+  honest blocked outcome — preflight() was not changed).
+- Disposable-HOME isolation (what the ghostty+pi child sees):
+  HOME = <lab-root>/home (fresh scratch tree), XDG_CONFIG_HOME/CACHE/DATA/
+  STATE under it (created), PATH preserved, LD_LIBRARY_PATH stripped (the
+  GL/CUDA-LD recipe), and SWAYSOCK/WAYLAND_DISPLAY/XDG_RUNTIME_DIR passed
+  EXPLICITLY from the private session. Operator sessions, agent config and
+  global extensions NEVER load; the harness-owned extension still loads
+  project-locally from proj/.pi/extensions (cwd=proj; its socket derives
+  from XDG_RUNTIME_DIR, so it lands in the disposable root). One addition
+  was required to boot unattended: pi's first-run "Trust project folder?"
+  gate blocks extension loading under a fresh HOME (the old real-HOME runs
+  inherited the operator's existing trust record instead). The route now
+  pre-seeds ONLY the scratch project paths into the DISPOSABLE home's
+  trust store (<scratch-home>/.pi/agent/trust.json) — nothing is copied
+  from the real HOME. NO real-HOME fallback exists in code; a pi boot
+  failure under isolation surfaces as the existing honest RuntimeError
+  (observed twice during bring-up: the socket never appears, the route
+  exits 1, nothing is measured).
+- Observer method: after the editor read-poll starts, the route resolves
+  the private Ghostty window via swaymsg get_tree under an identity guard
+  — EXACTLY ONE node with a known ghostty app_id ("ghostty" or
+  "com.mitchellh.ghostty", the form this ghostty 1.4.0 actually maps as)
+  whose pid is in the lab's tracked spawn set; any other count is a
+  refusal (observer blocked, reason recorded). grim crops that region to a
+  PNG on stdout, which is sha256-digested in memory — no pixel bytes are
+  ever persisted; field_frames.jsonl carries digests only, capped like the
+  poll loop (g5.MAX_REPORT_LINES * 200 writes), in-RAM events bounded by a
+  4000-sample deque. Every observer subprocess (swaymsg/grim/wtype) gets
+  the explicit private compositor env — never a bare inherit.
+- Qualification run (the sanctioned env-gated private lab invocation,
+  `timeout -k 2 1500 env G5_TIMING_LAB=1 PI_BIN=… tests/g5_timing_lab.py
+  --route pi-ghostty`; 20 measured replays, G5_KEEP_SCRATCH=1 for
+  transcription, scratch deleted after): the run's final line carried
+  frame_observer=verified alongside an honest route timing FAIL (BUG-002
+  remains open; S6 owns remediation — S5 qualifies the OBSERVER, not the
+  route). Measured observer numbers from that run's artifact:
+  - digest loop cadence p50 69.8 ms / p95 87.4 ms (nominal 50 ms + grim
+    spawn cost), per-capture grim latency p50 19.6 ms / p95 37.3 ms
+    (window region 0,27 1024x741), 4000 in-RAM samples / 777 changed
+    digests, 0 capture errors, JSONL write cap not hit.
+  - Boot calibration (wtype into the focused private window, pre-warmup,
+    outside every measured window; chars + Backspace + Arrow keys, NEVER
+    Enter): 5 probes, 3/3 text-or-revert probes detected by BOTH the poll
+    and the observer, 2/2 arrow-key redraws detected as frame-only changes
+    (no text change — the cursor-redraw discriminandum). Resolution
+    (frame-detect minus poll-detect, text/revert probes): p50 35.2 ms,
+    p95 96.1 ms. This is the observer's resolution RELATIVE TO the poll
+    instrument; it is reported alongside latencies and NEVER subtracted
+    from them.
+  - Correlation classes across the run (attribution window 0.15 s =
+    2×cadence clamped to the 150 ms floor): visible_insert 399,
+    visible_correction 487, unchanged 121, unpaired_frame 22,
+    cursor_redraw 1, missed_below_resolution 0, ack_only 0, reset 0.
+    Every correlated field change painted within the window in this run —
+    but the CLASSES are per-run data, not a guarantee; a miss is a miss
+    wherever it occurs (counted, never latency-imputed).
+  - Per-record frame_qualified (≤20 entries: field_t/ack_ts/frame_t/
+    class/latency_ms) rides the artifact for S6's lag localization.
+- Proxy limits (the honesty contract): the editor read-poll remains the
+  ONLY visibility truth whenever the observer is blocked or unverified —
+  a blocked observer (grim missing, geometry-guard refusal, env guard) is
+  an explicit Pi coverage block in the artifact and the final line, and
+  frame metrics are then unverified, never synthetic. Digest observation
+  at ~70 ms cadence is a LOWER BOUND on paint time: it cannot certify the
+  ≤100/50 ms frame bars alone, and an ACK never upgrades a status (R.5 #3
+  — ack_only is only labeled when the observer demonstrably saw other
+  frames). The frozen S4 seams (_G5PiBundle/_CancelOnLeaveTarget/
+  bulk_target_factory/_poll_loop) are byte-identical; the observer is a
+  SECOND independent loop. S6 (paired comparison) and T2.S3 (production
+  qualification) consume the additive frame_observer block as recorded
+  here.
+- Defects found and fixed on the way (lab-side, all unit-proven now):
+  pi smoke crashed on field_log before boot (eager _log_path init, the
+  GtkRoute pattern); the geometry guard initially matched only app_id
+  "ghostty" and correctly refused this machine's com.mitchellh.ghostty
+  (allowlist widened, refusal behavior unchanged and still tested); the
+  observer's capture_ms aggregate was double-scaled ×1000 (the run's own
+  raw frames log exposed it — stats fixed, ms-scale regression test
+  added); the G5_KEEP_SCRATCH escape hatch never actually kept the root
+  (TemporaryDirectory deleted unconditionally — now mkdtemp + guarded
+  teardown).

@@ -1,0 +1,18 @@
+{
+  "role": "research",
+  "item": "P1.M2.T1.S6",
+  "key": "P1M2T1S6",
+  "agent": "piz",
+  "session": "prd-research-P1M2T1S6",
+  "tag": "research-P1M2T1S6-4111627",
+  "cwd": "/home/dustin/projects/voice-typing",
+  "prompt_file": "/home/dustin/projects/voice-typing/plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/agents/research-P1M2T1S6.prompt.md",
+  "started": 1795512322,
+  "artifacts": [
+    "The item's PRP: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/P1M2T1S6/PRP.md",
+    "Research notes: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/P1M2T1S6/research/",
+    "Task tree: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/tasks.json",
+    "Static part of your kickoff prompt: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/agents/_template-research.md"
+  ],
+  "args": []
+}

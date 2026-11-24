@@ -32,6 +32,19 @@ NOT a measurement — run both arms to validate the wiring):
     timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 \
         .venv/bin/python tests/g5_timing_lab.py --route im-gtk
     timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 \
+        .venv/bin/python tests/g5_timing_lab.py --route pi-ghostty
+
+P1.M2.T1.S5 (pi route): the ghostty+pi child runs under a DISPOSABLE
+HOME/XDG tree (PiGhosttyRoute._pi_window_env — no operator sessions, agent
+config or global extensions ever load; NO real-HOME fallback exists) and a
+bounded grim window-region frame observer (tests/g5_frame_observer.py;
+~50 ms sha256 digests, identity-guarded to the lab's OWN ghostty window,
+explicit private compositor env on every subprocess) is correlated with the
+10 ms editor read-poll into an 8-class frame qualification. The poll stays
+a LABELLED PROXY whenever the observer is blocked/unverified — frame
+metrics are never synthetic.
+
+    timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 \
         .venv/bin/python tests/g5_timing_lab.py --route im-gtk --partial-source plain
 
 A missing preflight binary/fixture (sway/xvfb-run/python3; ghostty/PI_BIN
@@ -73,6 +86,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import functools
 import json
 import os
 import platform
@@ -89,6 +103,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tests"))
 
+import g5_frame_observer as fo  # noqa: E402  (S5: pi route frame observer)
 import g5_timing_support as g5  # noqa: E402
 
 GATE_ENV = "G5_TIMING_LAB"
@@ -408,6 +423,55 @@ class PiGhosttyRoute(_Route):
         self.sock = lab.root / "voice-typing" / "pi-editor.sock"
         self._poll_stop = threading.Event()
         self._poll_thread: threading.Thread | None = None
+        # Eager field-log path (the GtkRoute pattern; Gotcha #9): field_log()
+        # must work pre-boot so pi --smoke (no compositor) stops crashing.
+        self._log_path = lab.root / "field_timing.jsonl"
+        # S5 frame-observer state (populated by boot(); inert in smoke):
+        self._observer = None
+        self._observer_geo = ""
+        self._observer_reason = "observer not started"
+        self._obs_env: dict | None = None
+        self._calibration: dict = {
+            "status": "skipped",
+            "reason": "observer unavailable",
+        }
+
+    def _pi_window_env(self) -> dict:
+        """Disposable HOME/XDG env for the ghostty+pi child (P1.M2.T1.S5
+        isolation; architecture § G5).
+
+        The child's HOME is a fresh scratch tree under lab.root: operator
+        sessions, agent config and global extensions are NEVER loaded, and
+        the harness-owned extension loads project-locally from
+        proj/.pi/extensions (cwd=proj). pi binary discovery happened in the
+        PARENT (PI_BIN env or shutil.which) — the child's HOME is never
+        consulted for it. PATH is preserved, LD_LIBRARY_PATH is stripped
+        (the GL/CUDA-LD conflict recipe), and the private compositor
+        identity (SWAYSOCK/WAYLAND_DISPLAY/XDG_RUNTIME_DIR) is passed
+        EXPLICITLY — the extension's socket derives from XDG_RUNTIME_DIR,
+        so it lands exactly where the route expects it.
+
+        NO real-HOME fallback exists: if pi cannot boot under this tree, the
+        route fails honestly through the existing until()/RuntimeError path
+        — the architecture mandate is block-and-record, never measure with
+        operator state loaded."""
+        home = self.lab.root / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+        env["HOME"] = str(home)
+        for key, sub in (
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_DATA_HOME", "data"),
+            ("XDG_STATE_HOME", "state"),
+        ):
+            p = home / sub
+            p.mkdir(parents=True, exist_ok=True)
+            env[key] = str(p)
+        for key in fo.PRIVATE_ENV_KEYS:
+            if key in os.environ:
+                env[key] = os.environ[key]
+        return env
 
     def boot(self) -> None:
         proj = self.lab.root / "proj"
@@ -417,8 +481,29 @@ class PiGhosttyRoute(_Route):
         if not pi_bin:
             raise RuntimeError("pi binary not found (set PI_BIN)")
         shell = f"cd {proj}; exec {pi_bin} 2>{self.lab.root / 'pi.err'}"
-        # ghostty renders via GL — same CUDA-LD conflict as the GTK field.
-        ghostty_env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+        # ghostty renders via GL — same CUDA-LD conflict as the GTK field —
+        # and (S5) runs under the disposable HOME/XDG tree: operator
+        # sessions/config/extensions never load. No real-HOME fallback.
+        ghostty_env = self._pi_window_env()
+        # Pre-trust ONLY the scratch project in the DISPOSABLE home's trust
+        # store: pi's first-run "Trust project folder?" gate would otherwise
+        # block extension loading forever (the old real-HOME runs inherited
+        # the operator's existing trust record instead). Nothing is copied
+        # from the real HOME — operator config/sessions/extensions still
+        # never load; the record covers just this scratch tree.
+        trust_dir = Path(ghostty_env["HOME"]) / ".pi" / "agent"
+        trust_dir.mkdir(parents=True, exist_ok=True)
+        (trust_dir / "trust.json").write_text(
+            json.dumps({str(proj): True, str(self.lab.root): True}, indent=2)
+            + "\n"
+        )
+        log(
+            {
+                "stage": "pi-isolation",
+                "home": ghostty_env["HOME"],
+                "xdg_config": ghostty_env["XDG_CONFIG_HOME"],
+            }
+        )
         self.lab.spawn(
             [
                 "ghostty",
@@ -452,12 +537,122 @@ class PiGhosttyRoute(_Route):
             target=self._poll_loop, name="g5-pi-poll", daemon=True
         )
         self._poll_thread.start()
+        self._start_frame_observer()
+
+    # --- S5 frame observer (a SECOND independent loop; _poll_loop untouched) ---
+
+    def _tracked_pids(self) -> set[int]:
+        """Every pid this lab spawned (own-process-group bookkeeping) — the
+        identity-guard allowlist for the window-geometry resolve."""
+        return {p.pid for p in self.lab.procs}
+
+    def _start_frame_observer(self) -> None:
+        """Identity-guarded geometry resolve + bounded grim digest loop, then
+        boot-time calibration probes (pre-warmup — this runs before the
+        daemon start/warmup, outside every measured window; chars +
+        Backspace + arrows, NEVER Enter). Never raises into boot: an
+        unavailable observer (grim missing / geometry guard refusal) means
+        status=blocked with a reason and the route still measures — the
+        editor read-poll stays the labelled proxy. stdout carries counts and
+        status ONLY (never transcript text)."""
+        self._observer = None
+        self._observer_geo = ""
+        self._observer_reason = "observer not started"
+        self._obs_env = None
+        self._calibration = {
+            "status": "skipped",
+            "reason": "observer unavailable",
+        }
+        try:
+            if not shutil.which("grim"):
+                self._observer_reason = "grim missing"
+            else:
+                obs_env = fo.compositor_env(self._pi_window_env())
+                geo, reason = fo.window_geometry(
+                    obs_env, allowed_pids=self._tracked_pids()
+                )
+                if geo is None:
+                    self._observer_reason = reason
+                else:
+                    self._observer_geo = geo
+                    self._obs_env = obs_env
+                    self._observer = fo.FrameObserver(
+                        capture_fn=functools.partial(
+                            fo.grim_capture, geo, obs_env
+                        ),
+                        jsonl_path=self.lab.root / "field_frames.jsonl",
+                    )
+                    self._observer.start()
+                    self._observer_reason = "ok"
+        except Exception as exc:  # noqa: BLE001 — the observer never kills boot
+            self._observer = None
+            self._observer_reason = f"observer start failed: {exc!r}"
+        log(
+            {
+                "stage": "frame-observer",
+                "status": "started" if self._observer else "blocked",
+                "reason": self._observer_reason,
+                "window_geo_present": bool(self._observer_geo),
+            }
+        )
+        if self._observer is not None and shutil.which("wtype"):
+            try:
+                self._calibration = fo.calibrate(
+                    type_fn=lambda tail: fo.run_wtype(tail, self._obs_env),
+                    read_text=self._read_text,
+                    frames_since=self._frames_since,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._calibration = {
+                    "status": "skipped",
+                    "reason": f"calibration failed: {exc!r}",
+                }
+        log(
+            {
+                "stage": "frame-calibration",
+                "status": self._calibration.get("status", "?"),
+                "probes": len(self._calibration.get("probes", [])),
+                "text_detections": self._calibration.get("text_detections", 0),
+                "redraw_detections": self._calibration.get(
+                    "redraw_detections", 0
+                ),
+            }
+        )
+
+    def _read_text(self) -> str:
+        """Editor read-op snapshot (the calibration poll sense); "" on any
+        failure so the probe degrades instead of crashing boot."""
+        try:
+            r = self._poll_client.request("read", timeout=2.0)
+            return str((r or {}).get("text", ""))
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _frames_since(self, t: float) -> list[float]:
+        """Changed-frame timestamps at/after t (the calibration frame
+        sense); [] when the observer is not running."""
+        if self._observer is None:
+            return []
+        return [
+            e.t_mono
+            for e in self._observer.events()
+            if e.changed and e.t_mono >= t
+        ]
 
     def _focus_ghostty(self) -> None:
         """Focus the private Ghostty window (the G3 pi-row lab's takeover
         step — the editor slot acks only when pi's prompt is focused/rendered;
         without focus the shows apply text but never confirm)."""
         try:
+            sp.run(
+                ["swaymsg", "-r", '[app_id="com.mitchellh.ghostty"] focus'],
+                stdin=sp.DEVNULL,
+                stdout=sp.DEVNULL,
+                stderr=sp.DEVNULL,
+                timeout=5,
+                check=False,
+                env=os.environ,
+            )
             sp.run(
                 ["swaymsg", "-r", '[app_id="ghostty"] focus'],
                 stdin=sp.DEVNULL,
@@ -625,7 +820,10 @@ class PiGhosttyRoute(_Route):
         return lambda cfg: _G5PiBundle()
 
     def preflight_note(self) -> str:
-        return "10 ms read-poll granularity (extension exposes no render callback)"
+        return (
+            "10 ms editor read-poll (proxy; extension exposes no render "
+            "callback) + grim frame observer @ ~50 ms (status per run)"
+        )
 
 
 ROUTES = {"im-gtk": GtkRoute, "pi-ghostty": PiGhosttyRoute}
@@ -1107,6 +1305,18 @@ def run_inner(
         records: list[g5.ReplayRecord] = []
         ins = cor = 0
         misses = 0
+        # S5 frame-qualification state (pi route only; additive, all bounded):
+        observer_ran = (
+            route_name == "pi-ghostty"
+            and route is not None
+            and getattr(route, "_observer", None) is not None
+        )
+        frame_window_s = 0.15
+        if observer_ran:
+            cad_p50 = route._observer.stats().get("cadence_ms_p50") or 50.0
+            frame_window_s = fo.attribution_window(cad_p50 / 1000.0)
+        class_counts: dict = {}
+        per_record_qualified: list[list[dict]] = []
         for rep in range(g5.REPLAY_BUDGET):
             control_send("stop", timeout=30)
             if not wait_listening(False, 30):
@@ -1163,6 +1373,30 @@ def run_inner(
                 heartbeats=hb,
             )
             records.append(rec)
+            # S5 per-record frame qualification (pi route; additive; the
+            # bounded ≤20-entry slice goes into the artifact as
+            # frame_qualified — misses carry frame_t=None, never imputed):
+            rec_qualified: list[dict] = []
+            if observer_ran:
+                frame_slice = [
+                    e
+                    for e in route._observer.events()
+                    if fs - 0.5 <= e.t_mono <= end_t
+                ]
+                acks = [
+                    e.ack_ts for e in win if getattr(e, "ack_ts", None) is not None
+                ]
+                corr = fo.correlate_frames(
+                    evs,
+                    frame_slice,
+                    acks,
+                    anchor_text,
+                    attrib_window_s=frame_window_s,
+                )
+                for cls_name, n in corr["classes"].items():
+                    class_counts[cls_name] = class_counts.get(cls_name, 0) + n
+                rec_qualified = corr["qualifications"][:20]
+            per_record_qualified.append(rec_qualified)
             m = g5.aggregate(records, route=route_name)
             ins, cor, misses = m.insertions, m.corrections, m.misses
             log(
@@ -1213,6 +1447,23 @@ def run_inner(
                 else "pi editor 10 ms read-poll",
             },
         }
+        frame_block = None
+        if route_name == "pi-ghostty" and route is not None:
+            obs = getattr(route, "_observer", None)
+            frame_block = fo.build_frame_block(
+                observer_stats=obs.stats() if obs is not None else None,
+                calibration=getattr(route, "_calibration", None)
+                or {"status": "skipped", "reason": "observer unavailable"},
+                classes=class_counts,
+                attrib_window_s=frame_window_s,
+                geo=getattr(route, "_observer_geo", ""),
+                reason=getattr(route, "_observer_reason", ""),
+            )
+            artifact["frame_observer"] = frame_block
+            artifact["frame_qualified"] = [
+                {"clip": r.clip, "qualified": q}
+                for r, q in zip(records, per_record_qualified)
+            ]
         (root / f"artifact-{route_name}.json").write_text(
             json.dumps(artifact, indent=2)
         )
@@ -1223,6 +1474,11 @@ def run_inner(
                 **artifact["metrics"],
                 "partial_source_requested": partial_source or "default",
                 "partial_callback_effective": getattr(host, "partial_callback", ""),
+                **(
+                    {"frame_observer": frame_block["status"]}
+                    if frame_block
+                    else {}
+                ),
             }
         )
         if not hb_ok:
@@ -1252,6 +1508,9 @@ def run_inner(
             pass
         if route is not None and hasattr(route, "_poll_stop"):
             route._poll_stop.set()
+        obs = getattr(route, "_observer", None) if route is not None else None
+        if obs is not None:
+            obs.stop()  # bounded digest loop joins; frames JSONL stays in scratch
         lab.kill_all()  # killpg our OWN session groups — never a pattern sweep
 
 
@@ -1333,24 +1592,26 @@ def run_route(route_name: str, smoke: bool, partial_source: str | None = None) -
             }
         )
         return 1
-    with tempfile.TemporaryDirectory(
-        prefix=PREFIX, ignore_cleanup_errors=True
-    ) as folder:
-        root = Path(folder)
+    # mkdtemp + manual teardown (NOT TemporaryDirectory): the G5_KEEP_SCRATCH
+    # escape hatch must actually keep the root (artifact, field_frames.jsonl)
+    # for post-run transcription — TemporaryDirectory deletes unconditionally,
+    # which silently defeated the documented hatch.
+    root = Path(tempfile.mkdtemp(prefix=PREFIX))
+    try:
         bus = root / "private-bus.conf"
         bus.write_text(
-            "<busconfig><type>session</type><listen>unix:tmpdir=" + folder + "</listen>"
+            "<busconfig><type>session</type><listen>unix:tmpdir=" + str(root) + "</listen>"
             '<policy context="default"><allow send_destination="*"/><allow own="*"/>'
             '<allow receive_sender="*"/></policy></busconfig>'
         )
-        argv = build_inner_argv(folder, route_name, smoke, partial_source)
+        argv = build_inner_argv(str(root), route_name, smoke, partial_source)
         timeout_s = 240 if smoke else 1440
         try:
             if smoke:
                 # no compositor at all: run in-place under the private runtime dir.
                 # Scrub the real session bus: NOTHING in this lab may reach live
                 # DBus services (MPRIS ducking, portals) — R.7 hygiene.
-                env_delta = desktop_env(folder, False)
+                env_delta = desktop_env(str(root), False)
                 for k in ("DBUS_SESSION_BUS_ADDRESS", "DBusActivatable"):
                     env_delta.pop(k, None)
                 env_delta["DBUS_SESSION_BUS_ADDRESS"] = (
@@ -1361,8 +1622,8 @@ def run_route(route_name: str, smoke: bool, partial_source: str | None = None) -
                 os.environ["LD_LIBRARY_PATH"] = (
                     os.environ.get("LD_LIBRARY_PATH", "") + ":" + cuda_ld_library_path()
                 ).strip(":")
-                os.environ["XDG_RUNTIME_DIR"] = folder
-                Path(folder, "voice-typing").mkdir(parents=True, exist_ok=True)
+                os.environ["XDG_RUNTIME_DIR"] = str(root)
+                Path(str(root), "voice-typing").mkdir(parents=True, exist_ok=True)
                 rc = run_inner(
                     root, route_name, smoke=True, partial_source=partial_source
                 )  # type: ignore[arg-type]
@@ -1376,7 +1637,7 @@ def run_route(route_name: str, smoke: bool, partial_source: str | None = None) -
                         "--",
                         *argv,
                     ],
-                    env=desktop_env(folder, needs_pi),
+                    env=desktop_env(str(root), needs_pi),
                     cwd=str(REPO),
                     start_new_session=True,
                 )
@@ -1401,6 +1662,11 @@ def run_route(route_name: str, smoke: bool, partial_source: str | None = None) -
                         break
                     except OSError:
                         time.sleep(0.5)
+    finally:
+        # outer backstop for the mkdtemp root: cleans up unless the escape
+        # hatch kept it (the inner finally already logged the decision).
+        if os.environ.get("G5_KEEP_SCRATCH") != "1":
+            shutil.rmtree(root, ignore_errors=True)
     return rc
 
 
