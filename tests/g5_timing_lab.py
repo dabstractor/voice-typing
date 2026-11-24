@@ -12,10 +12,34 @@ R.7 hygiene, Gotcha #10/#12):
     timeout -k 2 1500 env G5_TIMING_LAB=1 \
         .venv/bin/python tests/g5_timing_lab.py --route pi-ghostty
 
-Scaffold smoke (feed seam + real models + control socket, NO compositor):
+R.8 paired arms (P1.M2.T1.S4): --partial-source plain|stabilized selects the
+partial callback the SPAWN CHILD installs (S1's spawn-boundary seam). The
+flag is LAB-ONLY; omitting it keeps the production source (stabilized
+today) — the daemon seam materializes the default, argparse never does.
+Each (route, source) is ONE private CLI run; the warm line, the artifact
+and every record carry the requested-vs-effective provenance (the child's
+ready payload is the ONLY effective-source truth — a mismatch refuses to
+measure and exits 1):
+
+    timeout -k 2 1500 env G5_TIMING_LAB=1 \
+        .venv/bin/python tests/g5_timing_lab.py --route im-gtk --partial-source plain
+    timeout -k 2 1500 env G5_TIMING_LAB=1 PI_BIN=~/.local/bin/pi \
+        .venv/bin/python tests/g5_timing_lab.py --route pi-ghostty --partial-source plain
+
+Scaffold smoke (feed seam + real models + control socket, NO compositor;
+NOT a measurement — run both arms to validate the wiring):
 
     timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 \
         .venv/bin/python tests/g5_timing_lab.py --route im-gtk
+    timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 \
+        .venv/bin/python tests/g5_timing_lab.py --route im-gtk --partial-source plain
+
+A missing preflight binary/fixture (sway/xvfb-run/python3; ghostty/PI_BIN
+for pi-ghostty; aligned clips) is an honest BLOCKED outcome:
+{"stage":"preflight","verdict":"blocked",…} + exit 1, nothing spawned.
+Stage observations are daemon-receipt g5.ReadyEvents (stage="daemon",
+gen/utt/seq where the boundary provides them); stdout log lines carry
+counts and provenance ONLY — no transcript text ever reaches stdout.
 
 What it measures (PRD §4.2sexies R.7 G5): the wired bulk path (P1.M6.T2.S1)
 mic→reader→BulkController→TargetAdapter→field, with the SPEECH CLOCK =
@@ -194,6 +218,12 @@ class FieldLog:
         the positional floor for the NEXT replay's visibility matching."""
         return len(g5.normalize_tokens(self.events[-1].text)) if self.events else 0
 
+    def anchor_text(self) -> str:
+        """Full field text at the last event ("" when empty) — the seed for
+        the S3 changed-span diffs (ReplayRecord.anchor_text); reset edits are
+        excluded downstream by matching against this pre-replay state."""
+        return self.events[-1].text if self.events else ""
+
 
 # --- routes ---------------------------------------------------------------------
 
@@ -305,13 +335,17 @@ class GtkRoute(_Route):
     focused field — verified live). Per-lifetime activate counting (baseline
     read BEFORE the spawn) keeps re-arms honest.
 
-    NOTE (P1.M6.T2.S1 gap, lab-side bridge only): the daemon's DEFAULT factory
-    builds the bundle PURE ("spawn is lazy inside acquire") but ImeTarget
-    .acquire() on a not-RUNNING ImeProcess returns "ime no reply" — the real
-    child is never spawned. This factory therefore does the G3 start_adapter
-    recipe and returns the daemon's own _BulkTargetBundle shape, so
-    attach/teardown lifecycle wiring (TakeoverWatch on _on_event, stopper-
-    thread teardown) is EXACTLY the production default. Zero production change.
+    P1.M2.T1.S4: the lab-side bridge is GONE — bulk_target_factory()
+    inherits _Route's None (the DEFAULT route), so the route exercises the
+    PRODUCTION startup path (daemon._build_default_bulk_target +
+    _BulkTargetBundle.start(), landed in P1.M2.T1.S2): the daemon spawns its
+    own IM child and runs the 2 s read-only activation pump on the arm
+    worker. The lab's 3-attempt arm() retry compensates cold GTK-loop stalls
+    (exactly what it exists for); a persistent activation failure is an
+    HONEST route fail — no lab-side spawn/activation seam may be re-added.
+    The default ImeProcess carries no log_path, so the lab-side
+    ime_host.jsonl capture is lost on this route (daemon INFO +
+    set_delivery_state reasons remain).
     """
 
     name = "im-gtk"
@@ -319,7 +353,6 @@ class GtkRoute(_Route):
     def __init__(self, lab):
         super().__init__(lab)
         self.field_proc: sp.Popen | None = None
-        self.host_log = lab.root / "ime_host.jsonl"
 
     def boot(self) -> None:
         self._spawn_field()
@@ -359,43 +392,6 @@ class GtkRoute(_Route):
 
     def field_log(self) -> FieldLog:
         return FieldLog(self.lab.root / "field_timing.jsonl")
-
-    def bulk_target_factory(self):
-        from voice_typing.daemon import _BulkTargetBundle
-        from voice_typing.ime.manager import ImeProcess
-        from voice_typing.ime.target import ImeTarget
-
-        host_log = self.host_log
-
-        def factory(cfg):
-            proc = ImeProcess(log_path=str(host_log))
-            if not proc.spawn(timeout=20):
-                raise RuntimeError("ImeProcess spawn failed (bulk arm)")
-            if not until(
-                lambda: host_log.exists()
-                and "globals" in host_log.read_text(errors="replace"),
-                10,
-            ):
-                raise RuntimeError("ime_host never bound the seat")
-
-            def _ping_activated() -> bool:
-                # G3 wait_activated pattern: PING requests pump the host's event
-                # loop (the host only drains wayland events around request
-                # handling — a log-file-only wait deadlocks because activate is
-                # never processed until the acquire's first request arrives).
-                r = proc.request("ping", timeout=2.0) or {}
-                return bool(r.get("activated"))
-
-            # Pump pings until the IM activated on the already-focused field.
-            if not until(_ping_activated, 60):
-                raise RuntimeError(
-                    "ime_host never activated on the field (ping pump exhausted)"
-                )
-            # The daemon's own bundle: attach(ctrl) wires the TakeoverWatch to
-            # proc._on_event; teardown() proc.stop() — the production default.
-            return _BulkTargetBundle(target=ImeTarget(proc), proc=proc)
-
-        return factory
 
 
 class PiGhosttyRoute(_Route):
@@ -635,6 +631,62 @@ class PiGhosttyRoute(_Route):
 ROUTES = {"im-gtk": GtkRoute, "pi-ghostty": PiGhosttyRoute}
 
 
+def preflight(route_name: str) -> str | None:
+    """Blocked-outcome gate, run BEFORE any spawn (P1.M2.T1.S4): every missing
+    binary or fixture is an honest BLOCKED result — never a mid-run crash.
+    Returns the reason string, or None when the route may run."""
+    route_cls = ROUTES[route_name]
+    missing: list[str] = []
+    for binname in ("sway", "xvfb-run"):
+        if not shutil.which(binname):
+            missing.append(binname)
+    if not SYSTEM_PY:
+        missing.append("python3")
+    if route_cls.needs_pi:
+        if not shutil.which("ghostty"):
+            missing.append("ghostty")
+        if not (os.environ.get("PI_BIN") or shutil.which("pi")):
+            missing.append("pi (or set PI_BIN)")
+    wavs = sorted(VOICE_DIR.glob("*.wav")) if VOICE_DIR.is_dir() else []
+    if not wavs:
+        missing.append(f"replay clips ({VOICE_DIR} has no *.wav)")
+    else:
+        unaligned = [
+            p.name for p in wavs if not p.with_suffix(".words.json").exists()
+        ]
+        if unaligned:
+            missing.append(
+                "alignments for "
+                + ", ".join(unaligned[:3])
+                + (" …" if len(unaligned) > 3 else "")
+            )
+    if missing:
+        return "missing: " + "; ".join(missing)
+    return None
+
+
+def build_inner_argv(
+    folder: str, route_name: str, smoke: bool, partial_source: str | None
+) -> list[str]:
+    """The inner `run` invocation (extracted so the outer phase and its unit
+    tests build the EXACT same argv). partial_source is the LAB-ONLY R.8 arm
+    selector: the flag is present ONLY when set (omitted ⇒ the daemon seam
+    keeps the production source; argparse never defaults it to a source)."""
+    argv = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "run",
+        str(folder),
+        "--route",
+        route_name,
+    ]
+    if smoke:
+        argv.append("--smoke")
+    if partial_source:
+        argv += ["--partial-source", partial_source]
+    return argv
+
+
 # --- private-session daemon -----------------------------------------------------
 
 
@@ -716,8 +768,13 @@ def wait_listening(want: bool, timeout: float) -> bool:
     return until(ok, timeout, interval=0.2) is not None
 
 
-def start_daemon(smoke: bool, factory):
-    """Feedback → VoiceTypingDaemon (in-process) → ControlServer → run thread."""
+def start_daemon(smoke: bool, factory, partial_source: str | None = None):
+    """Feedback → VoiceTypingDaemon (in-process) → ControlServer → run thread.
+
+    partial_source is S1's spawn-boundary selector; None is materialized to
+    "stabilized" HERE (the daemon seam) — NEVER passed as None into the chain
+    (S1's selector chain ValueErrors on None deep inside the child, where the
+    failure would surface only after spawn)."""
     from voice_typing.daemon import ControlServer, LatencyLog, VoiceTypingDaemon
     from voice_typing.feedback import Feedback
 
@@ -730,6 +787,7 @@ def start_daemon(smoke: bool, factory):
         mic_prober=lambda: (True, None),  # hermetic: never probe live audio (R.7)
         bulk_target_factory=factory,
         feed_input=True,  # THE G5 seam (inert in production; lab-only here)
+        partial_source=partial_source or "stabilized",
     )
     srv = ControlServer(d, on_quit=d.shutdown)
     srv.start()
@@ -738,32 +796,151 @@ def start_daemon(smoke: bool, factory):
     return d, srv, th
 
 
+def _resolve_partial_source(host, requested: str | None) -> str:
+    """Fail-closed provenance (Gotcha #3): the ONLY ground truth for the
+    effective source is host.partial_callback (the child's ready payload).
+    Returns the selector name; raises BEFORE any measured replay when the
+    child never reported ready, installed an unknown key, or installed
+    anything other than what was requested — a mislabeled arm must never
+    produce numbers."""
+    from voice_typing.daemon import _PARTIAL_SOURCES
+
+    installed = getattr(host, "partial_callback", "")
+    if not installed:
+        raise RuntimeError("recorder host never reported partial_callback (not ready?)")
+    rev = {key: sel for sel, key in _PARTIAL_SOURCES.items()}
+    effective = rev.get(installed)
+    if effective is None:
+        raise RuntimeError(
+            f"unknown partial_callback {installed!r} installed in the spawn child"
+        )
+    if requested is not None and _PARTIAL_SOURCES.get(requested) != installed:
+        raise RuntimeError(
+            f"partial_source={requested!r} requested but {installed!r} installed — "
+            "refusing to measure a mislabeled arm"
+        )
+    return effective
+
+
 def wrap_ready(d, ready: collections.deque, lock: threading.Lock) -> None:
-    """Wrap on_final/_on_partial with monotonic captures (append-only
-    observers; a list append is ns-scale and cannot perturb 50-100 ms budgets).
-    MUST run BEFORE the first arm: _load_host reads self.on_final/_on_partial
-    at spawn time, so the wrapped attributes are what the child relays to."""
+    """Wrap on_final/_on_partial with monotonic g5.ReadyEvent captures (the S3
+    replay contract: stage="daemon" receipts; gen/utt via d._bulk_identity()
+    INSIDE the reader-thread window — the snapshot is valid only there; seq
+    read from d._bulk_seq AFTER the orig call, which assigns it on the bulk
+    path). Identity/seq degrade to None via getattr + try/except: a stamping
+    hiccup must NEVER crash the reader thread. Append-only observers (a list
+    append is ns-scale and cannot perturb 50-100 ms budgets). MUST run BEFORE
+    the first arm: _load_host reads self.on_final/_on_partial at spawn time,
+    so the wrapped attributes are what the child relays to."""
     orig_final = d.on_final
     orig_partial = d._on_partial
 
+    def _identity():
+        try:
+            ident = d._bulk_identity()
+        except Exception:  # noqa: BLE001 — never crash the reader thread
+            return None, None
+        return (
+            getattr(ident, "session_gen", None),
+            getattr(ident, "utterance_id", None),
+        )
+
+    def _seq_after(gen, utt):
+        try:
+            seq_map = getattr(d, "_bulk_seq", {})
+            return (
+                seq_map.get((gen, utt))
+                if gen is not None and utt is not None
+                else None
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
     def wrapped_final(text, *a, **kw):
-        with lock:
-            ready.append((time.monotonic(), text, "final"))
-        return orig_final(text, *a, **kw)
+        gen, utt = _identity()
+        try:
+            return orig_final(text, *a, **kw)
+        finally:
+            seq = _seq_after(gen, utt)
+            with lock:
+                ready.append(
+                    g5.ReadyEvent(
+                        t=time.monotonic(), text=text, kind="final", stage="daemon",
+                        gen=gen, utt=utt, seq=seq,
+                    )
+                )
 
     def wrapped_partial(text, *a, **kw):
-        with lock:
-            ready.append((time.monotonic(), text, "partial"))
-        return orig_partial(text, *a, **kw)
+        gen, utt = _identity()
+        try:
+            return orig_partial(text, *a, **kw)
+        finally:
+            seq = _seq_after(gen, utt)
+            with lock:
+                ready.append(
+                    g5.ReadyEvent(
+                        t=time.monotonic(), text=text, kind="partial", stage="daemon",
+                        gen=gen, utt=utt, seq=seq,
+                    )
+                )
 
     d.on_final = wrapped_final
     d._on_partial = wrapped_partial
 
 
+def _check_capture_bounds(ready: collections.deque, flog: "FieldLog") -> bool:
+    """Truncation is evidence, not noise (Gotcha #6). Checked AFTER each
+    replay window, BEFORE the record appends: a READY window at cap is
+    unattributable → raise (honest harness fail); a FIELD log at cap is
+    reportable → True (the record is flagged capped, never imputed)."""
+    if ready.maxlen is not None and len(ready) >= ready.maxlen:
+        raise RuntimeError(
+            f"update-ready capture hit its cap ({ready.maxlen}) — window unattributable"
+        )
+    return flog.events.maxlen is not None and len(flog.events) >= flog.events.maxlen
+
+
+def _build_record(
+    route_name: str,
+    clip_name: str,
+    feed_start: float,
+    words,
+    field_events,
+    win,
+    anchor: int,
+    *,
+    partial_source: str,
+    anchor_text: str,
+    capped: bool,
+    heartbeats,
+) -> g5.ReplayRecord:
+    """One measured replay (ReadyEvent attribute access; S3 provenance
+    fields — partial_source/anchor_text/capped/heartbeats)."""
+    return g5.ReplayRecord(
+        route=route_name,
+        clip=clip_name,
+        feed_start=feed_start,
+        words=words,
+        field_events=field_events,
+        update_ready=win,
+        finals_ts=[e.t for e in win if e.kind == "final"],
+        anchor=anchor,
+        partial_source=partial_source,
+        anchor_text=anchor_text,
+        capped=capped,
+        heartbeats=list(heartbeats),
+    )
+
+
 # --- the measured run -----------------------------------------------------------
 
 
-def run_inner(root: Path, route_name: str, smoke: bool) -> int:
+def run_inner(
+    root: Path, route_name: str, smoke: bool, partial_source: str | None = None
+) -> int:
+    """Inner phase (our own `run` invocation): disposable env, in-process
+    daemon, warmup + measured replays. partial_source is the R.8 arm selector
+    threaded from the CLI (None = the production source)."""
     if not (
         root == Path(os.environ["XDG_RUNTIME_DIR"])
         and root.name.startswith(PREFIX)
@@ -801,7 +978,7 @@ def run_inner(root: Path, route_name: str, smoke: bool) -> int:
         else:
             route = ROUTES[route_name](lab)
         d, srv, _th = start_daemon(
-            smoke, route.bulk_target_factory() if route else None
+            smoke, route.bulk_target_factory() if route else None, partial_source
         )
         ready: collections.deque = collections.deque(maxlen=20000)
         rlock = threading.Lock()
@@ -898,25 +1075,26 @@ def run_inner(root: Path, route_name: str, smoke: bool) -> int:
         hb.append((time.monotonic(), time.time()))
         wname, wpcm, _w = clips[0]
         paced_feed(feed_fn, wpcm)
-        until(lambda: any(k == "final" for _t, _x, k in list(ready)), WARM_WAIT_S)
+        until(lambda: any(e.kind == "final" for e in list(ready)), WARM_WAIT_S)
         with rlock:
             wkinds: dict = {}
-            first_partial = ""
-            for t, x, k in list(ready):
-                wkinds[k] = wkinds.get(k, 0) + 1
-                if k == "partial" and not first_partial:
-                    first_partial = x[:60]
+            for e in list(ready):
+                wkinds[e.kind] = wkinds.get(e.kind, 0) + 1
         flog.drain()  # discard warmup events entirely
         with rlock:
             ready.clear()
         hb.append((time.monotonic(), time.time()))
+        # Fail-closed provenance (Gotcha #3): the child's ready payload is the
+        # ONLY effective-source truth — refuse to measure a mislabeled arm.
+        resolved_source = _resolve_partial_source(host, partial_source)
         log(
             {
                 "stage": "warm",
                 "clip": wname,
                 "device": dict(getattr(host, "device", {})),
                 "ready_kinds": wkinds,
-                "first_partial": first_partial,
+                "partial_source_requested": partial_source or "default",
+                "partial_callback_effective": getattr(host, "partial_callback", ""),
             }
         )
 
@@ -945,40 +1123,44 @@ def run_inner(root: Path, route_name: str, smoke: bool) -> int:
             name, pcm, words = clips[rep % len(clips)]
             anchor = flog.anchor()
             flog.drain()  # events before feed_start are the anchor baseline
+            anchor_text = flog.anchor_text()  # pre-replay field state (S3 seed)
             fs = paced_feed(feed_fn, pcm)
 
             # wait: ≥1 final after fs, then quiescence (no ready events for SETTLE_S)
             def got_final():
                 with rlock:
-                    return any(k == "final" and t >= fs for t, _x, k in list(ready))
+                    return any(e.kind == "final" and e.t >= fs for e in list(ready))
 
             until(got_final, FINAL_TIMEOUT_S)
 
             def quiet():
                 with rlock:
-                    win_now = [t for (t, _x, _k) in list(ready) if t >= fs]
+                    win_now = [e.t for e in list(ready) if e.t >= fs]
                 return (not win_now) or (time.monotonic() - max(win_now)) >= SETTLE_S
 
             until(quiet, len(pcm) / SAMPLE_RATE + 30, interval=0.2)
             end_t = time.monotonic()
             evs = [e for e in flog.drain() if fs - 0.5 <= e.t <= end_t]
             with rlock:
-                win = [(t, x, k) for (t, x, k) in list(ready) if fs - 0.5 <= t <= end_t]
+                win = [e for e in list(ready) if fs - 0.5 <= e.t <= end_t]
             wk: dict = {}
-            fp = ""
-            for t, x, k in win:
-                wk[k] = wk.get(k, 0) + 1
-                if k == "partial" and not fp:
-                    fp = x[:50]
-            rec = g5.ReplayRecord(
-                route=route_name,
-                clip=name,
-                feed_start=fs,
-                words=words,
-                field_events=evs,
-                update_ready=win,
-                finals_ts=[t for t, _x, k in win if k == "final"],
-                anchor=anchor,
+            for e in win:
+                wk[e.kind] = wk.get(e.kind, 0) + 1
+            # Truncation is evidence (Gotcha #6): a ready-window at cap aborts
+            # (unattributable); a field log at cap flags the record capped.
+            capped = _check_capture_bounds(ready, flog)
+            rec = _build_record(
+                route_name,
+                name,
+                fs,
+                words,
+                evs,
+                win,
+                anchor,
+                partial_source=resolved_source,
+                anchor_text=anchor_text,
+                capped=capped,
+                heartbeats=hb,
             )
             records.append(rec)
             m = g5.aggregate(records, route=route_name)
@@ -994,7 +1176,6 @@ def run_inner(root: Path, route_name: str, smoke: bool) -> int:
                     "events": len(evs),
                     "updates": len(win),
                     "kinds": wk,
-                    "first_partial": fp,
                 }
             )
             if ins >= g5.MIN_COUNT and cor >= g5.MIN_COUNT:
@@ -1021,6 +1202,8 @@ def run_inner(root: Path, route_name: str, smoke: bool) -> int:
             "provenance": {
                 "kernel": platform.release(),
                 "python": sys.version.split()[0],
+                "partial_source_requested": partial_source or "default",
+                "partial_callback_effective": getattr(host, "partial_callback", ""),
                 "device": dict(getattr(host, "device", {})),
                 "warm": "resident (auto_unload_idle_seconds=0; one discarded warmup)",
                 "clips": sorted(p.name for p in VOICE_DIR.glob("*.wav")),
@@ -1033,7 +1216,15 @@ def run_inner(root: Path, route_name: str, smoke: bool) -> int:
         (root / f"artifact-{route_name}.json").write_text(
             json.dumps(artifact, indent=2)
         )
-        log(artifact["metrics"])
+        # The final metrics line carries the arm provenance too (counts only,
+        # never transcript text — Gotcha #5).
+        log(
+            {
+                **artifact["metrics"],
+                "partial_source_requested": partial_source or "default",
+                "partial_callback_effective": getattr(host, "partial_callback", ""),
+            }
+        )
         if not hb_ok:
             log(
                 {
@@ -1126,9 +1317,22 @@ def cuda_ld_library_path() -> str:
     return _d(a) + ":" + _d(b)
 
 
-def run_route(route_name: str, smoke: bool) -> int:
-    """Outer phase: xvfb-run -a + dbus-run-session → our own `run` invocation."""
+def run_route(route_name: str, smoke: bool, partial_source: str | None = None) -> int:
+    """Outer phase: preflight gate → xvfb-run -a + dbus-run-session → our own
+    `run` invocation. A preflight miss is a BLOCKED outcome: one JSON line,
+    exit 1, NOTHING spawned (the tmpdir context never even opens)."""
     needs_pi = ROUTES[route_name].needs_pi
+    reason = preflight(route_name)
+    if reason:
+        log(
+            {
+                "stage": "preflight",
+                "verdict": "blocked",
+                "route": route_name,
+                "reason": reason,
+            }
+        )
+        return 1
     with tempfile.TemporaryDirectory(
         prefix=PREFIX, ignore_cleanup_errors=True
     ) as folder:
@@ -1139,16 +1343,7 @@ def run_route(route_name: str, smoke: bool) -> int:
             '<policy context="default"><allow send_destination="*"/><allow own="*"/>'
             '<allow receive_sender="*"/></policy></busconfig>'
         )
-        argv = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "run",
-            folder,
-            "--route",
-            route_name,
-        ]
-        if smoke:
-            argv.append("--smoke")
+        argv = build_inner_argv(folder, route_name, smoke, partial_source)
         timeout_s = 240 if smoke else 1440
         try:
             if smoke:
@@ -1168,7 +1363,9 @@ def run_route(route_name: str, smoke: bool) -> int:
                 ).strip(":")
                 os.environ["XDG_RUNTIME_DIR"] = folder
                 Path(folder, "voice-typing").mkdir(parents=True, exist_ok=True)
-                rc = run_inner(root, route_name, smoke=True)  # type: ignore[arg-type]
+                rc = run_inner(
+                    root, route_name, smoke=True, partial_source=partial_source
+                )  # type: ignore[arg-type]
             else:
                 proc = sp.Popen(
                     [
@@ -1215,10 +1412,22 @@ def main() -> None:
         ap.add_argument("root")
         ap.add_argument("--route", required=True, choices=sorted(ROUTES))
         ap.add_argument("--smoke", action="store_true")
+        ap.add_argument(
+            "--partial-source",
+            choices=("plain", "stabilized"),
+            default=None,
+            help="lab-only R.8 arm selector; omit for the production source",
+        )
         ns = ap.parse_args(sys.argv[1:])
-        raise SystemExit(run_inner(Path(ns.root), ns.route, ns.smoke))
+        raise SystemExit(run_inner(Path(ns.root), ns.route, ns.smoke, ns.partial_source))
     ap = argparse.ArgumentParser()
     ap.add_argument("--route", required=True, choices=sorted(ROUTES) + ["all"])
+    ap.add_argument(
+        "--partial-source",
+        choices=("plain", "stabilized"),
+        default=None,
+        help="lab-only R.8 arm selector; omit for the production source",
+    )
     ns = ap.parse_args()
     if os.environ.get(GATE_ENV) != "1":
         log({"gate": GATE_ENV, "pass": None, "note": f"skipped (set {GATE_ENV}=1)"})
@@ -1229,7 +1438,7 @@ def main() -> None:
     for r in routes:
         if smoke:
             log({"stage": "smoke-start", "route": r})
-        results[r] = run_route(r, smoke)
+        results[r] = run_route(r, smoke, ns.partial_source)
     if any(rc not in (0,) for rc in results.values()):
         raise SystemExit(1)
 

@@ -47,6 +47,69 @@ timeout -k 2 1500 env G5_TIMING_LAB=1 PI_BIN=~/.local/bin/pi \
 # Exit 0 pass / 1 honest fail / 2 misuse. One JSON verdict line per route on stdout.
 ```
 
+### R.8 paired arms (P1.M2.T1.S4 — the runner; the recorded comparison is S6)
+
+Per route, ONE private CLI run per arm: `--partial-source plain` (the spawn
+child installs `on_realtime_transcription_update`) and the UNFLAGGED default
+arm (the production source — stabilized today; the daemon seam materializes
+it, argparse never does). The S6 paired runs + lag localization consume
+these commands as-is:
+
+```sh
+# im-gtk — plain arm, then the default arm:
+timeout -k 2 1500 env G5_TIMING_LAB=1 .venv/bin/python tests/g5_timing_lab.py \
+    --route im-gtk --partial-source plain
+timeout -k 2 1500 env G5_TIMING_LAB=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk
+
+# pi-ghostty — plain arm, then the default arm (PI_BIN for binary discovery only):
+timeout -k 2 1500 env G5_TIMING_LAB=1 PI_BIN=~/.local/bin/pi .venv/bin/python tests/g5_timing_lab.py \
+    --route pi-ghostty --partial-source plain
+timeout -k 2 1500 env G5_TIMING_LAB=1 PI_BIN=~/.local/bin/pi .venv/bin/python tests/g5_timing_lab.py \
+    --route pi-ghostty
+
+# misuse exits 2 (argparse validates the choice at BOTH parser levels):
+timeout 30 env G5_TIMING_LAB=1 .venv/bin/python tests/g5_timing_lab.py \
+    --route im-gtk --partial-source loud; echo "rc=$?"
+```
+
+Scaffold-smoke validation (NOT a measurement — wiring only; both arms, no
+compositor):
+
+```sh
+timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 \
+    .venv/bin/python tests/g5_timing_lab.py --route im-gtk
+timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 \
+    .venv/bin/python tests/g5_timing_lab.py --route im-gtk --partial-source plain
+```
+
+Blocked semantics: a missing preflight binary/fixture (sway, xvfb-run,
+python3; ghostty or PI_BIN for pi-ghostty; clips or alignments) prints one
+`{"stage":"preflight","verdict":"blocked","route":…,"reason":…}` line and
+exits 1 with NOTHING spawned. A requested-vs-installed source mismatch
+refuses to measure (honest harness-fail line, exit 1); a truncated
+update-ready capture aborts (unattributable); a field-log cap hit flags
+the record `capped` (never imputed).
+
+### S4 instrumentation notes (P1.M2.T1.S4)
+
+- Stage observations are daemon-receipt `g5.ReadyEvent`s (`stage="daemon"`;
+  gen/utt stamped inside the reader-thread window via `_bulk_identity()`,
+  seq read from `_bulk_seq` after the orig dispatch; degraded to None where
+  the boundary provides nothing). Producer-stage stamps remain a future
+  seam; ACK is not a frame (S3).
+- Provenance: every run records `partial_source_requested` vs
+  `partial_callback_effective` (the child's ready payload is the ONLY
+effective-source truth) on the warm line, in the artifact provenance, on
+  every replay record, and on the final metrics line.
+- No raw speech in any default stdout line: warm/replay/verdict lines carry
+  counts and provenance only (the `first_partial` snippets were removed in
+  S4); transcript text stays in the internal records and the scratch JSONL,
+  which is deleted with the tmpdir.
+- Pi route unchanged: injected adapter + `_CancelOnLeaveTarget` instrument
+  reset + 10 ms read-poll; the real-HOME delta stays binary-discovery-only;
+  reset edits are excluded from counts via `anchor_text` + S3's reset rules
+  (data-level — no new code on that route).
+
 ## Provenance (both runs)
 
 - GPU: NVIDIA GeForce RTX 3080 Ti (12 GiB) — device=cuda compute_type=float16
@@ -127,14 +190,21 @@ validation exercised the seam through fakes only.
 
 ## Lab-side bridges (zero production change beyond the feed seam)
 
-- The daemon's default bulk factory builds its bundle PURE and never spawns the
-  IM child ("spawn is lazy inside acquire" — but `ImeTarget.acquire` on a
-  not-RUNNING ImeProcess returns "ime no reply"). The im-gtk route's factory
-  performs the G3 start_adapter recipe (spawn → seat-bound globals → ping-pump
-  activation — pings pump the host's event loop; a log-only wait deadlocks
-  because activate is processed only around request handling) and returns the
-  daemon's own `_BulkTargetBundle`, so attach/teardown wiring is exactly the
-  production default.
+- im-gtk lab bridge REMOVED (P1.M2.T1.S4): the route now exercises the
+  PRODUCTION default factory — `daemon._build_default_bulk_target` +
+  `_BulkTargetBundle.start()` (landed in P1.M2.T1.S2): the daemon spawns its
+  own IM child and runs the 2 s read-only activation pump on the arm worker,
+  and the lab's 3-attempt arm() retry compensates cold GTK-loop stalls (a
+  persistent activation failure is an HONEST route fail — no lab-side
+  spawn/activation seam may be re-added). Consequence: the default
+  ImeProcess carries no log_path, so the ime_host.jsonl capture is lost on
+  this route (daemon INFO + set_delivery_state reasons remain).
+  Historical note (pre-S4): the route's factory used to perform the G3
+  start_adapter recipe itself — spawn → seat-bound globals → ping-pump
+  activation (pings pump the host's event loop; a log-only wait deadlocks
+  because activate is processed only around request handling) — and return
+  the daemon's own `_BulkTargetBundle`, so attach/teardown wiring was
+  exactly the production default.
 - pi-ghostty: the delivery lifetime ends with `target.leave()` (binding
   cleared) — the extension's owned range persists until an explicit cancel op
   (the trace_07 pin skips cancel when the span bookkeeping is empty). The lab's
