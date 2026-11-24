@@ -421,3 +421,151 @@ file remains the single current one).
   added); the G5_KEEP_SCRATCH escape hatch never actually kept the root
   (TemporaryDirectory deleted unconditionally — now mkdtemp + guarded
   teardown).
+## Paired callback comparison and stage diagnosis (P1.M2.T1.S6)
+
+### Provenance
+
+- Date: 2026-11-24
+- HEAD commit: 9ffc54b
+- RealtimeSTT version: 1.0.2
+- Model / device: {"compute_type": "float16", "context_prompt": true, "device": "cuda", "model": "small.en", "partial_callback": "on_realtime_transcription_stabilized"}
+- Cadence: audio fed in real time: 32 ms chunks sleep-to-target on time.monotonic() + 1.6 s trailing silence (paced_feed)
+- Replay budget: g5.REPLAY_BUDGET=20 (actual replays — im-gtk/stabilized: 20, pi-ghostty/plain: 20, pi-ghostty/stabilized: 20)
+- Warm policy: resident (auto_unload_idle_seconds=0; one discarded warmup)
+- Pi frame observer: {'pi-ghostty': 'verified'}
+
+Exact commands (sequential, one arm at a time):
+
+```bash
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk --partial-source plain
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 PI_BIN="$(command -v pi)" .venv/bin/python tests/g5_timing_lab.py --route pi-ghostty --partial-source plain
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 PI_BIN="$(command -v pi)" .venv/bin/python tests/g5_timing_lab.py --route pi-ghostty
+```
+
+### Route-by-source result
+
+| Route | Arm | Status | 1st useful (med ms) | 1st useful (p95 ms) | 1st visible (med ms) | word lag med/p95 (ms) | upd matched/sup/no-op | ins/cor | miss | backlog max | dump | n |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| im-gtk | plain | not-run | — | — | — | — | — | — | — | — | — | — |
+| im-gtk | stabilized | measured | -11580.7 | -6515.3 | -11576.8 | 190.5/244.3 | 1/0/31 | 1/0 | 872 | 57 | no | 20 |
+| pi-ghostty | plain | measured | -11624.7 | -6558.0 | -11618.9 | 11983.1/16069.9 | 14/0/737 | 5/9 | 856 | 57 | yes | 20 |
+| pi-ghostty | stabilized | measured | -11626.0 | -6556.9 | -11615.6 | 7786.2/16077.3 | 17/0/501 | 5/12 | 834 | 57 | yes | 20 |
+
+`1st useful`/`1st visible` are speech-end-anchored boundary offsets: the first useful update fires mid-clip, so the cell is NEGATIVE by construction (its magnitude is when the first words were recognized relative to the clip's final word end). Cross-arm deltas at these cells are the early-callback/early-visibility signal (same clips ⇒ same anchors, deltas cancel the anchor). The per-word VISIBLE lag is the verbatim `word lag med/p95` column.
+
+### Stage decomposition (medians; p95 at n≥5)
+
+| Route | Arm | speech→update | update→ack | ack→field | useful→field (merged) | field→frame | paint-qualified (S5) | frame basis | n |
+|---|---|---|---|---|---|---|---|---|---|
+| im-gtk | plain | — | — | — | — | — | — | — | — |
+| im-gtk | stabilized | -11580.7 ms | — | — | 2.6 ms | — | — | editor read-poll proxy (frame NOT verified) | 20 |
+| pi-ghostty | plain | -11624.7 ms | — | — | 3.5 ms | — | 42.7 ms | S5-qualified paint, post-update boundary (disclosed fallback) | 20 |
+| pi-ghostty | stabilized | -11626.0 ms | — | — | 4.4 ms | — | 29.8 ms | S5-qualified paint, post-update boundary (disclosed fallback) | 20 |
+
+Rows labelled `merged` carry the update→field latency in one cell (the runner recorded no coherent ack_ts for that arm); `ack→field` and `update→ack` are then absent. The `field→frame` cell is the EXACT first-visible-paint pairing — usually structurally absent because S5's correlator treats each replay's first drained event as baseline, and that event is usually the first-visible paint itself. `paint-qualified (S5)` is the disclosed fallback: the earliest S5-qualified paint at/after the useful update, using the pair's own (field→frame) latency — real measured pairs, boundary choice disclosed; the two cells are never merged. When neither exists the stage stays the labelled proxy: editor read-poll proxy (frame NOT verified).
+
+### Early callback vs early field visibility
+
+- pi-ghostty: plain-vs-stabilized first-useful-update median delta = +1.3 ms (plain NOT earlier at the callback boundary)
+- pi-ghostty: plain-vs-stabilized first-visible-word median delta = -3.3 ms (plain EARLIER at the field boundary)
+
+### Dominant stage per arm
+
+- im-gtk/stabilized: dominant post-callback stage = useful→field (merged) at 2.6 ms median (n=20)
+  · per-word speech→visible lag (verbatim metrics): med 190.5 ms / p95 244.3 ms — everything above that is accumulated BEFORE the callback/adapter stages
+- pi-ghostty/plain: dominant post-callback stage = paint-qualified (S5) at 42.7 ms median (n=20)
+  · per-word speech→visible lag (verbatim metrics): med 11983.1 ms / p95 16069.9 ms — everything above that is accumulated BEFORE the callback/adapter stages
+- pi-ghostty/stabilized: dominant post-callback stage = paint-qualified (S5) at 29.8 ms median (n=20)
+  · per-word speech→visible lag (verbatim metrics): med 7786.2 ms / p95 16077.3 ms — everything above that is accumulated BEFORE the callback/adapter stages
+
+Candidate criteria for the T2 subtasks: the winning arm's update volume/burst profile (updates_total, superseded/no-op shares, worst_gap_ms above) sizes P1.M2.T2.S1's dispatch-promptness + burst fail-closed design; the dominant stage and its magnitude name what P1.M2.T2.S2's remediation must move.
+
+### Instrumentation limits
+
+- single machine / single session scope; editor read-poll instrumentation on the pi route (10 ms poll)
+- im-gtk/plain: not-run (artifact file missing: /home/dustin/projects/voice-typing/plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/P1M2T1S6/research/artifact-im-gtk-plain.json)
+- Stage shares are medians over replays; p95 only at n≥5; misses counted, never imputed; replay counts may differ across arms (early budget break) — a disclosed limit, not pooled.
+### Run history and discipline (S6)
+
+- Four sequential arms, one CUDA model load at a time, each under `timeout -k 2 1500`
+  (bash-tool backstop 1560 s), private compositor/daemon only, `G5_KEEP_SCRATCH=1`;
+  after each run the artifact was copied into `research/` under its per-arm name and
+  the scratch tmpdir was deleted immediately (tmpfs = RAM discipline).
+- im-gtk × plain: attempt 1 aborted at replay 14 and attempt 2 at replay 0 with the
+  same runner-side `RuntimeError("bulk delivery never re-armed")` — the ctl
+  `delivery_state` never reached the armed state within the 150 s window after
+  `start`. Per the re-run-once discipline the arm stands as **not-run**: no numbers
+  exist for it and none were borrowed from any other arm.
+- The other three arms each completed the full 20/20 replay budget with heartbeat
+  sanity ok and zero clock failures. Their exit code 1 is the honest pre-T2 timing
+  verdict recorded inside the artifacts — the runner worked; the timing bars did not.
+
+### Early callback vs early field visibility — the R.8 answer
+
+- **pi-ghostty, callback boundary**: plain's first useful update is **+1.3 ms later**
+  than stabilized's (median of 20 matched replays each). The external_deps
+  prediction — both callbacks fire in the same eligible decode, stabilized first
+  inline, plain not inherently earlier — is **confirmed by measurement**: there is
+  no early-plain-callback effect to harvest on this route.
+- **pi-ghostty, field boundary**: plain's first visible word is **−3.3 ms earlier**
+  (median) — noise-level, under the editor's 10 ms read-poll quantum.
+- **Conclusion**: on pi-ghostty the callback choice does not move visible lag; both
+  boundaries tie within ±3 ms against a per-word lag of ~8–12 s. The selector
+  decision therefore rests on granularity/churn and burst behaviour (plain: 1521
+  updates with 737 no-ops vs stabilized: 1422 updates with 501 no-ops), not latency.
+- **im-gtk**: only the stabilized arm produced an artifact; the paired callback
+  comparison on im-gtk remains UNMEASURED and must not be imputed from this session.
+
+### Dominant-stage diagnosis (where the visible lag lives)
+
+- **im-gtk (stabilized arm)**: per-word speech→visible **med 190.5 ms / p95 244.3 ms**.
+  The adapter path is proven fast — first field paint follows the useful callback in
+  **2.6 ms** median, ready→frame p95 2.5 ms. The lag is dominated by the
+  recognizer/decode cadence (word audio-end → next useful update), not by relay,
+  writer, or adapter.
+- **pi-ghostty (both arms)**: per-word speech→visible **med 7786–11983 ms / p95
+  ~16070 ms** — one to two orders of magnitude above im-gtk. The adapter path is
+  NOT the bottleneck: when the field changes at all, it follows the callback within
+  **3.5–4.4 ms** (merged cell; no coherent ack_ts anywhere, so the update→ack and
+  ack→field splits stay absent and labelled), and the S5-qualified paint lands
+  **29.8–42.7 ms** after its field change. The lag accumulates BEFORE the
+  callback/adapter stages: hypothesis growth is sparse (only 14–17 of ~1400–1500
+  updates correspond to field changes; 501–737 are same-text no-ops) and text lands
+  largely in the sentence-end dumps (dump: yes on both pi arms; backlog max 57 words
+  outstanding). This is the recognizer-cadence + bulk-delivery/writer complex —
+  the delivery path T2 owns — not the paint path.
+- **What P1.M2.T2.S2's remediation must move**: pi-ghostty per-word speech→visible
+  med/p95 (7786/16077 stabilized, 11983/16070 plain) — mid-clip words must reach the
+  field when their updates fire. The field paint itself is ready at ~4 ms and frames
+  at ~30–43 ms; the remediation should NOT spend effort on the adapter paint path.
+- **What P1.M2.T2.S1's dispatch-promptness + burst fail-closed design must survive**:
+  plain's update volume (1521 updates / 20 replays ≈ 76 per replay, ~48% no-ops,
+  worst_gap up to 16097 ms) and the end-of-utterance dump bursts (backlog max 57
+  outstanding, sentence_end_dump yes on both pi arms). A dispatch design tuned on
+  im-gtk's quiet profile (62 updates, no dumps) would be sized an order of magnitude
+  too small.
+
+### Instrumentation limits (S6-specific)
+
+- im-gtk plain arm: two sanctioned attempts, both stopped by the same runner-side
+  re-arm gate error; the row is not-run and no number is imputed. Re-running that
+  arm (and completing the im-gtk pair) is explicitly left open for T2.
+- The `1st useful` / `1st visible` cells are speech-end-anchored offsets and are
+  negative by construction (the first useful update arrives mid-clip). Only their
+  cross-arm DELTAS carry boundary signal (same clips ⇒ anchors cancel); absolute
+  lag is the verbatim word-lag column.
+- No ack_ts was recorded on any route this session, so the relay/dispatch
+  (update→ack) and adapter (ack→field) split is absent everywhere; the merged
+  useful→field cell carries that story, labelled as merged.
+- Exact field→frame pairing at the first-visible boundary was structurally
+  unavailable: S5's correlator consumes each replay's first drained field event as
+  its baseline, and that event is usually the first-visible paint itself. The
+  paint-qualified column uses the disclosed post-update fallback (S5's own
+  field→frame pair latency), n=20 on both pi arms — real measured pairs, boundary
+  choice disclosed, never merged with the exact cell.
+- Comparability (gate-checked, per route-pair): identical clips, kernel, python,
+  RealtimeSTT version, replay budget, warm policy; device dicts identical modulo
+  the arms' own `partial_callback` label (the treatment variable — excluded from
+  the equality check by design). Effective sources: plain =
+  `on_realtime_transcription_update`, stabilized = `on_realtime_transcription_stabilized`.

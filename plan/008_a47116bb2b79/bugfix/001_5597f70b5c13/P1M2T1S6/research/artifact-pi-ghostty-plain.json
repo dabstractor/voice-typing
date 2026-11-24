@@ -1,0 +1,3127 @@
+{
+  "route": "pi-ghostty",
+  "metrics": {
+    "route": "pi-ghostty",
+    "verdict": "fail",
+    "insertions": 5,
+    "corrections": 9,
+    "misses": 856,
+    "speech_med_ms": 11983.1,
+    "speech_p95_ms": 16069.9,
+    "worst_gap_ms": 16097.3,
+    "ready_insert_p95_ms": 7328.1,
+    "ready_correct_p95_ms": 9135.8,
+    "max_words_outstanding": 57,
+    "backlog_sustained": true,
+    "sentence_end_dump": true,
+    "unchanged_zero_edit_ok": true,
+    "replays": 20,
+    "updates_total": 1521,
+    "updates_matched": 14,
+    "updates_missing": 770,
+    "updates_superseded": 0,
+    "updates_no_op": 737,
+    "updates_ambiguous": 0,
+    "frames_unpaired": 1019,
+    "words_ambiguous": 0,
+    "clock_failures": 0,
+    "cap_failures": 0,
+    "provenance_warnings": [],
+    "failures": [
+      "speech\u2192visible median 11983.090555997478 ms > 500.0 ms",
+      "speech\u2192visible p95 16069.886448000034 ms >= 1000.0 ms",
+      "ready\u2192frame insertion p95 7328.115572003298 ms > 100.0 ms",
+      "ready\u2192frame correction p95 9135.839563001355 ms > 50.0 ms",
+      "backlog \u22655 words sustained \u22652.0 s (max outstanding 57)",
+      "sentence-end dump (an utterance delivered as one final edit)",
+      "counts 5/9 < 100 after replay budget"
+    ]
+  },
+  "replays": [
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses",
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses",
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses",
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses",
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses"
+  ],
+  "heartbeat_ok": true,
+  "field_log_pair_count": 1139,
+  "provenance": {
+    "kernel": "7.3.5-arch1-1",
+    "python": "3.12.10",
+    "partial_source_requested": "plain",
+    "partial_callback_effective": "on_realtime_transcription_update",
+    "device": {
+      "device": "cuda",
+      "compute_type": "float16",
+      "model": "small.en",
+      "context_prompt": true,
+      "partial_callback": "on_realtime_transcription_update"
+    },
+    "warm": "resident (auto_unload_idle_seconds=0; one discarded warmup)",
+    "clips": [
+      "jargon.wav",
+      "natural.wav",
+      "noisy.wav",
+      "pauses.wav"
+    ],
+    "route_note": "10 ms editor read-poll (proxy; extension exposes no render callback) + grim frame observer @ ~50 ms (status per run)",
+    "field_instrument": "pi editor 10 ms read-poll",
+    "realtimestt_version": "1.0.2",
+    "replay_budget": 20,
+    "cadence_note": "audio fed in real time: 32 ms chunks sleep-to-target on time.monotonic() + 1.6 s trailing zero-silence (paced_feed)"
+  },
+  "frame_observer": {
+    "status": "verified",
+    "reason": "text-correlated frames detected",
+    "proxy": "editor 10 ms read-poll (proxy; extension exposes no render callback)",
+    "observer": {
+      "tool": "grim window-region digest (wlr-screencopy)",
+      "window_geo": "0,27 1024x741",
+      "cadence_s": 0.05
+    },
+    "cadence_ms_p50": 69.885,
+    "cadence_ms_p95": 87.136,
+    "capture_ms_p50": 19.721,
+    "capture_ms_p95": 36.994,
+    "resolution_ms_p50": 37.697,
+    "resolution_ms_p95": 74.41,
+    "calibration": {
+      "status": "ran",
+      "reason": "",
+      "probes": [
+        {
+          "kind": "text",
+          "keys": [
+            "x",
+            "y"
+          ],
+          "text_changed": true,
+          "poll_ms": 18.593,
+          "frame_ms": 93.003,
+          "delta_ms": 74.41
+        },
+        {
+          "kind": "revert",
+          "keys": [
+            "-k",
+            "BackSpace"
+          ],
+          "text_changed": true,
+          "poll_ms": 7.929,
+          "frame_ms": 40.167,
+          "delta_ms": 32.238
+        },
+        {
+          "kind": "revert",
+          "keys": [
+            "-k",
+            "BackSpace"
+          ],
+          "text_changed": true,
+          "poll_ms": 8.211,
+          "frame_ms": 45.908,
+          "delta_ms": 37.697
+        },
+        {
+          "kind": "redraw",
+          "keys": [
+            "-k",
+            "Left"
+          ],
+          "text_changed": false,
+          "poll_ms": null,
+          "frame_ms": 40.542,
+          "delta_ms": null
+        },
+        {
+          "kind": "redraw",
+          "keys": [
+            "-k",
+            "Right"
+          ],
+          "text_changed": false,
+          "poll_ms": null,
+          "frame_ms": 58.889,
+          "delta_ms": null
+        }
+      ],
+      "latency_ms_p50": 37.697,
+      "latency_ms_p95": 74.41,
+      "text_detections": 3,
+      "redraw_detections": 2
+    },
+    "samples": {
+      "n": 4000,
+      "changed": 774,
+      "capped": false,
+      "errors": 0
+    },
+    "classes": {
+      "visible_insert": 358,
+      "visible_correction": 539,
+      "ack_only": 0,
+      "unchanged": 116,
+      "cursor_redraw": 0,
+      "reset": 0,
+      "missed_below_resolution": 0,
+      "unpaired_frame": 24
+    },
+    "attrib_window_s": 0.15
+  },
+  "frame_qualified": [
+    {
+      "clip": "jargon",
+      "qualified": [
+        {
+          "field_t": 43605.383422,
+          "ack_ts": null,
+          "frame_t": 43605.432473,
+          "class": "visible_correction",
+          "latency_ms": 49.051
+        },
+        {
+          "field_t": 43605.538814,
+          "ack_ts": null,
+          "frame_t": 43605.588958,
+          "class": "visible_correction",
+          "latency_ms": 50.144
+        },
+        {
+          "field_t": 43605.702817,
+          "ack_ts": null,
+          "frame_t": 43605.722919,
+          "class": "visible_correction",
+          "latency_ms": 20.102
+        },
+        {
+          "field_t": 43605.856444,
+          "ack_ts": null,
+          "frame_t": 43605.873567,
+          "class": "visible_insert",
+          "latency_ms": 17.123
+        },
+        {
+          "field_t": 43606.000335,
+          "ack_ts": null,
+          "frame_t": 43606.023829,
+          "class": "visible_correction",
+          "latency_ms": 23.494
+        },
+        {
+          "field_t": 43606.297442,
+          "ack_ts": null,
+          "frame_t": 43606.311893,
+          "class": "visible_insert",
+          "latency_ms": 14.451
+        },
+        {
+          "field_t": 43606.631299,
+          "ack_ts": null,
+          "frame_t": 43606.651324,
+          "class": "visible_insert",
+          "latency_ms": 20.025
+        },
+        {
+          "field_t": 43606.920574,
+          "ack_ts": null,
+          "frame_t": 43606.923743,
+          "class": "visible_correction",
+          "latency_ms": 3.169
+        },
+        {
+          "field_t": 43607.04516,
+          "ack_ts": null,
+          "frame_t": 43607.080158,
+          "class": "visible_correction",
+          "latency_ms": 34.998
+        },
+        {
+          "field_t": 43607.201273,
+          "ack_ts": null,
+          "frame_t": 43607.223975,
+          "class": "visible_correction",
+          "latency_ms": 22.702
+        },
+        {
+          "field_t": 43607.356555,
+          "ack_ts": null,
+          "frame_t": 43607.372694,
+          "class": "visible_correction",
+          "latency_ms": 16.139
+        },
+        {
+          "field_t": 43607.512047,
+          "ack_ts": null,
+          "frame_t": 43607.522103,
+          "class": "visible_correction",
+          "latency_ms": 10.056
+        },
+        {
+          "field_t": 43607.976974,
+          "ack_ts": null,
+          "frame_t": 43608.034668,
+          "class": "visible_correction",
+          "latency_ms": 57.694
+        },
+        {
+          "field_t": 43608.121016,
+          "ack_ts": null,
+          "frame_t": 43608.171604,
+          "class": "visible_correction",
+          "latency_ms": 50.588
+        },
+        {
+          "field_t": 43608.265176,
+          "ack_ts": null,
+          "frame_t": 43608.309743,
+          "class": "visible_correction",
+          "latency_ms": 44.567
+        },
+        {
+          "field_t": 43608.421788,
+          "ack_ts": null,
+          "frame_t": 43608.44609,
+          "class": "visible_correction",
+          "latency_ms": 24.302
+        },
+        {
+          "field_t": 43608.865224,
+          "ack_ts": null,
+          "frame_t": 43608.932595,
+          "class": "visible_correction",
+          "latency_ms": 67.371
+        },
+        {
+          "field_t": 43609.033499,
+          "ack_ts": null,
+          "frame_t": 43609.075031,
+          "class": "visible_correction",
+          "latency_ms": 41.532
+        },
+        {
+          "field_t": 43609.188461,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43609.354013,
+          "ack_ts": null,
+          "frame_t": 43609.36693,
+          "class": "visible_correction",
+          "latency_ms": 12.917
+        }
+      ]
+    },
+    {
+      "clip": "natural",
+      "qualified": [
+        {
+          "field_t": 43629.458277,
+          "ack_ts": null,
+          "frame_t": 43629.479119,
+          "class": "visible_correction",
+          "latency_ms": 20.842
+        },
+        {
+          "field_t": 43629.551876,
+          "ack_ts": null,
+          "frame_t": 43629.479119,
+          "class": "visible_insert",
+          "latency_ms": -72.757
+        },
+        {
+          "field_t": 43629.725072,
+          "ack_ts": null,
+          "frame_t": 43629.792576,
+          "class": "visible_correction",
+          "latency_ms": 67.504
+        },
+        {
+          "field_t": 43629.875881,
+          "ack_ts": null,
+          "frame_t": 43629.950839,
+          "class": "visible_correction",
+          "latency_ms": 74.958
+        },
+        {
+          "field_t": 43630.043567,
+          "ack_ts": null,
+          "frame_t": 43630.106555,
+          "class": "visible_correction",
+          "latency_ms": 62.988
+        },
+        {
+          "field_t": 43630.339502,
+          "ack_ts": null,
+          "frame_t": 43630.425986,
+          "class": "visible_insert",
+          "latency_ms": 86.484
+        },
+        {
+          "field_t": 43630.633628,
+          "ack_ts": null,
+          "frame_t": 43630.664391,
+          "class": "visible_insert",
+          "latency_ms": 30.763
+        },
+        {
+          "field_t": 43630.791946,
+          "ack_ts": null,
+          "frame_t": 43630.827081,
+          "class": "visible_correction",
+          "latency_ms": 35.135
+        },
+        {
+          "field_t": 43630.943144,
+          "ack_ts": null,
+          "frame_t": 43630.998697,
+          "class": "visible_insert",
+          "latency_ms": 55.553
+        },
+        {
+          "field_t": 43631.10188,
+          "ack_ts": null,
+          "frame_t": 43631.154723,
+          "class": "visible_correction",
+          "latency_ms": 52.843
+        },
+        {
+          "field_t": 43631.242392,
+          "ack_ts": null,
+          "frame_t": 43631.311836,
+          "class": "visible_correction",
+          "latency_ms": 69.444
+        },
+        {
+          "field_t": 43631.400444,
+          "ack_ts": null,
+          "frame_t": 43631.464956,
+          "class": "visible_correction",
+          "latency_ms": 64.512
+        },
+        {
+          "field_t": 43631.604067,
+          "ack_ts": null,
+          "frame_t": 43631.623519,
+          "class": "visible_correction",
+          "latency_ms": 19.452
+        },
+        {
+          "field_t": 43631.711081,
+          "ack_ts": null,
+          "frame_t": 43631.791021,
+          "class": "visible_correction",
+          "latency_ms": 79.94
+        },
+        {
+          "field_t": 43631.892016,
+          "ack_ts": null,
+          "frame_t": 43631.950957,
+          "class": "visible_insert",
+          "latency_ms": 58.941
+        },
+        {
+          "field_t": 43632.682063,
+          "ack_ts": null,
+          "frame_t": 43632.756667,
+          "class": "visible_insert",
+          "latency_ms": 74.604
+        },
+        {
+          "field_t": 43633.082023,
+          "ack_ts": null,
+          "frame_t": 43633.146899,
+          "class": "visible_insert",
+          "latency_ms": 64.876
+        },
+        {
+          "field_t": 43633.27179,
+          "ack_ts": null,
+          "frame_t": 43633.301052,
+          "class": "visible_insert",
+          "latency_ms": 29.262
+        },
+        {
+          "field_t": 43633.603865,
+          "ack_ts": null,
+          "frame_t": 43633.620922,
+          "class": "visible_correction",
+          "latency_ms": 17.057
+        },
+        {
+          "field_t": 43633.750981,
+          "ack_ts": null,
+          "frame_t": 43633.789171,
+          "class": "visible_correction",
+          "latency_ms": 38.19
+        }
+      ]
+    },
+    {
+      "clip": "noisy",
+      "qualified": [
+        {
+          "field_t": 43648.508731,
+          "ack_ts": null,
+          "frame_t": 43648.551229,
+          "class": "visible_correction",
+          "latency_ms": 42.498
+        },
+        {
+          "field_t": 43648.663966,
+          "ack_ts": null,
+          "frame_t": 43648.688413,
+          "class": "visible_insert",
+          "latency_ms": 24.447
+        },
+        {
+          "field_t": 43648.809206,
+          "ack_ts": null,
+          "frame_t": 43648.83877,
+          "class": "visible_insert",
+          "latency_ms": 29.564
+        },
+        {
+          "field_t": 43648.955243,
+          "ack_ts": null,
+          "frame_t": 43648.990094,
+          "class": "visible_correction",
+          "latency_ms": 34.851
+        },
+        {
+          "field_t": 43649.110329,
+          "ack_ts": null,
+          "frame_t": 43649.139095,
+          "class": "visible_correction",
+          "latency_ms": 28.766
+        },
+        {
+          "field_t": 43649.264704,
+          "ack_ts": null,
+          "frame_t": 43649.289038,
+          "class": "visible_insert",
+          "latency_ms": 24.334
+        },
+        {
+          "field_t": 43649.409522,
+          "ack_ts": null,
+          "frame_t": 43649.444206,
+          "class": "visible_correction",
+          "latency_ms": 34.684
+        },
+        {
+          "field_t": 43649.564614,
+          "ack_ts": null,
+          "frame_t": 43649.590652,
+          "class": "visible_correction",
+          "latency_ms": 26.038
+        },
+        {
+          "field_t": 43649.720949,
+          "ack_ts": null,
+          "frame_t": 43649.740426,
+          "class": "visible_correction",
+          "latency_ms": 19.477
+        },
+        {
+          "field_t": 43651.085934,
+          "ack_ts": null,
+          "frame_t": 43651.097548,
+          "class": "visible_correction",
+          "latency_ms": 11.614
+        },
+        {
+          "field_t": 43651.252302,
+          "ack_ts": null,
+          "frame_t": 43651.312303,
+          "class": "visible_correction",
+          "latency_ms": 60.001
+        },
+        {
+          "field_t": 43651.407337,
+          "ack_ts": null,
+          "frame_t": 43651.46602,
+          "class": "visible_correction",
+          "latency_ms": 58.683
+        },
+        {
+          "field_t": 43651.562607,
+          "ack_ts": null,
+          "frame_t": 43651.60584,
+          "class": "visible_insert",
+          "latency_ms": 43.233
+        },
+        {
+          "field_t": 43651.707977,
+          "ack_ts": null,
+          "frame_t": 43651.745972,
+          "class": "visible_correction",
+          "latency_ms": 37.995
+        },
+        {
+          "field_t": 43652.018847,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43652.173969,
+          "ack_ts": null,
+          "frame_t": 43652.241623,
+          "class": "visible_insert",
+          "latency_ms": 67.654
+        },
+        {
+          "field_t": 43652.317697,
+          "ack_ts": null,
+          "frame_t": 43652.381678,
+          "class": "visible_correction",
+          "latency_ms": 63.981
+        },
+        {
+          "field_t": 43653.96421,
+          "ack_ts": null,
+          "frame_t": 43653.978742,
+          "class": "visible_insert",
+          "latency_ms": 14.532
+        },
+        {
+          "field_t": 43654.109252,
+          "ack_ts": null,
+          "frame_t": 43654.125163,
+          "class": "visible_insert",
+          "latency_ms": 15.911
+        },
+        {
+          "field_t": 43654.262975,
+          "ack_ts": null,
+          "frame_t": 43654.273844,
+          "class": "visible_correction",
+          "latency_ms": 10.869
+        }
+      ]
+    },
+    {
+      "clip": "pauses",
+      "qualified": [
+        {
+          "field_t": 43662.872667,
+          "ack_ts": null,
+          "frame_t": 43662.915648,
+          "class": "visible_correction",
+          "latency_ms": 42.981
+        },
+        {
+          "field_t": 43662.93436,
+          "ack_ts": null,
+          "frame_t": 43662.915648,
+          "class": "visible_correction",
+          "latency_ms": -18.712
+        },
+        {
+          "field_t": 43663.090293,
+          "ack_ts": null,
+          "frame_t": 43663.135028,
+          "class": "visible_insert",
+          "latency_ms": 44.735
+        },
+        {
+          "field_t": 43663.224496,
+          "ack_ts": null,
+          "frame_t": 43663.271283,
+          "class": "visible_correction",
+          "latency_ms": 46.787
+        },
+        {
+          "field_t": 43663.390365,
+          "ack_ts": null,
+          "frame_t": 43663.4081,
+          "class": "visible_correction",
+          "latency_ms": 17.735
+        },
+        {
+          "field_t": 43663.535081,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43663.690478,
+          "ack_ts": null,
+          "frame_t": 43663.704226,
+          "class": "visible_correction",
+          "latency_ms": 13.748
+        },
+        {
+          "field_t": 43663.835083,
+          "ack_ts": null,
+          "frame_t": 43663.856472,
+          "class": "visible_correction",
+          "latency_ms": 21.389
+        },
+        {
+          "field_t": 43664.000444,
+          "ack_ts": null,
+          "frame_t": 43664.005787,
+          "class": "visible_insert",
+          "latency_ms": 5.343
+        },
+        {
+          "field_t": 43664.15592,
+          "ack_ts": null,
+          "frame_t": 43664.178684,
+          "class": "visible_correction",
+          "latency_ms": 22.764
+        },
+        {
+          "field_t": 43664.300734,
+          "ack_ts": null,
+          "frame_t": 43664.320107,
+          "class": "visible_correction",
+          "latency_ms": 19.373
+        },
+        {
+          "field_t": 43664.444694,
+          "ack_ts": null,
+          "frame_t": 43664.471214,
+          "class": "visible_correction",
+          "latency_ms": 26.52
+        },
+        {
+          "field_t": 43664.600294,
+          "ack_ts": null,
+          "frame_t": 43664.62492,
+          "class": "visible_correction",
+          "latency_ms": 24.626
+        },
+        {
+          "field_t": 43666.123698,
+          "ack_ts": null,
+          "frame_t": 43666.176502,
+          "class": "visible_correction",
+          "latency_ms": 52.804
+        },
+        {
+          "field_t": 43666.258512,
+          "ack_ts": null,
+          "frame_t": 43666.322315,
+          "class": "visible_correction",
+          "latency_ms": 63.803
+        },
+        {
+          "field_t": 43666.414032,
+          "ack_ts": null,
+          "frame_t": 43666.466821,
+          "class": "visible_correction",
+          "latency_ms": 52.789
+        },
+        {
+          "field_t": 43666.744734,
+          "ack_ts": null,
+          "frame_t": 43666.750329,
+          "class": "visible_insert",
+          "latency_ms": 5.595
+        },
+        {
+          "field_t": 43666.877987,
+          "ack_ts": null,
+          "frame_t": 43666.903796,
+          "class": "visible_correction",
+          "latency_ms": 25.809
+        },
+        {
+          "field_t": 43667.083431,
+          "ack_ts": null,
+          "frame_t": 43667.122014,
+          "class": "visible_correction",
+          "latency_ms": 38.583
+        },
+        {
+          "field_t": 43667.185919,
+          "ack_ts": null,
+          "frame_t": 43667.189772,
+          "class": "visible_correction",
+          "latency_ms": 3.853
+        }
+      ]
+    },
+    {
+      "clip": "jargon",
+      "qualified": [
+        {
+          "field_t": 43681.908333,
+          "ack_ts": null,
+          "frame_t": 43681.934547,
+          "class": "visible_correction",
+          "latency_ms": 26.214
+        },
+        {
+          "field_t": 43682.22031,
+          "ack_ts": null,
+          "frame_t": 43682.28275,
+          "class": "visible_correction",
+          "latency_ms": 62.44
+        },
+        {
+          "field_t": 43682.364806,
+          "ack_ts": null,
+          "frame_t": 43682.422264,
+          "class": "visible_correction",
+          "latency_ms": 57.458
+        },
+        {
+          "field_t": 43682.509609,
+          "ack_ts": null,
+          "frame_t": 43682.559357,
+          "class": "visible_correction",
+          "latency_ms": 49.748
+        },
+        {
+          "field_t": 43682.653859,
+          "ack_ts": null,
+          "frame_t": 43682.697847,
+          "class": "visible_correction",
+          "latency_ms": 43.988
+        },
+        {
+          "field_t": 43682.820271,
+          "ack_ts": null,
+          "frame_t": 43682.837171,
+          "class": "visible_insert",
+          "latency_ms": 16.9
+        },
+        {
+          "field_t": 43682.964966,
+          "ack_ts": null,
+          "frame_t": 43682.985586,
+          "class": "visible_correction",
+          "latency_ms": 20.62
+        },
+        {
+          "field_t": 43683.120377,
+          "ack_ts": null,
+          "frame_t": 43683.136892,
+          "class": "visible_insert",
+          "latency_ms": 16.515
+        },
+        {
+          "field_t": 43683.276819,
+          "ack_ts": null,
+          "frame_t": 43683.291685,
+          "class": "visible_correction",
+          "latency_ms": 14.866
+        },
+        {
+          "field_t": 43683.421238,
+          "ack_ts": null,
+          "frame_t": 43683.438055,
+          "class": "visible_correction",
+          "latency_ms": 16.817
+        },
+        {
+          "field_t": 43683.567066,
+          "ack_ts": null,
+          "frame_t": 43683.594038,
+          "class": "visible_correction",
+          "latency_ms": 26.972
+        },
+        {
+          "field_t": 43683.722418,
+          "ack_ts": null,
+          "frame_t": 43683.740931,
+          "class": "visible_correction",
+          "latency_ms": 18.513
+        },
+        {
+          "field_t": 43683.866518,
+          "ack_ts": null,
+          "frame_t": 43683.890438,
+          "class": "visible_correction",
+          "latency_ms": 23.92
+        },
+        {
+          "field_t": 43684.021382,
+          "ack_ts": null,
+          "frame_t": 43684.047576,
+          "class": "visible_correction",
+          "latency_ms": 26.194
+        },
+        {
+          "field_t": 43684.177137,
+          "ack_ts": null,
+          "frame_t": 43684.196759,
+          "class": "visible_correction",
+          "latency_ms": 19.622
+        },
+        {
+          "field_t": 43684.478703,
+          "ack_ts": null,
+          "frame_t": 43684.482225,
+          "class": "visible_correction",
+          "latency_ms": 3.522
+        },
+        {
+          "field_t": 43684.645589,
+          "ack_ts": null,
+          "frame_t": 43684.710311,
+          "class": "visible_insert",
+          "latency_ms": 64.722
+        },
+        {
+          "field_t": 43684.779436,
+          "ack_ts": null,
+          "frame_t": 43684.710311,
+          "class": "visible_correction",
+          "latency_ms": -69.125
+        },
+        {
+          "field_t": 43684.934933,
+          "ack_ts": null,
+          "frame_t": 43684.991049,
+          "class": "visible_correction",
+          "latency_ms": 56.116
+        },
+        {
+          "field_t": 43685.534564,
+          "ack_ts": null,
+          "frame_t": 43685.557268,
+          "class": "visible_correction",
+          "latency_ms": 22.704
+        }
+      ]
+    },
+    {
+      "clip": "natural",
+      "qualified": [
+        {
+          "field_t": 43705.92562,
+          "ack_ts": null,
+          "frame_t": 43705.994047,
+          "class": "visible_correction",
+          "latency_ms": 68.427
+        },
+        {
+          "field_t": 43706.080814,
+          "ack_ts": null,
+          "frame_t": 43706.138994,
+          "class": "visible_insert",
+          "latency_ms": 58.18
+        },
+        {
+          "field_t": 43706.215875,
+          "ack_ts": null,
+          "frame_t": 43706.279129,
+          "class": "visible_correction",
+          "latency_ms": 63.254
+        },
+        {
+          "field_t": 43706.370116,
+          "ack_ts": null,
+          "frame_t": 43706.415495,
+          "class": "visible_correction",
+          "latency_ms": 45.379
+        },
+        {
+          "field_t": 43706.525609,
+          "ack_ts": null,
+          "frame_t": 43706.556146,
+          "class": "visible_correction",
+          "latency_ms": 30.537
+        },
+        {
+          "field_t": 43706.826846,
+          "ack_ts": null,
+          "frame_t": 43706.843268,
+          "class": "visible_insert",
+          "latency_ms": 16.422
+        },
+        {
+          "field_t": 43707.137614,
+          "ack_ts": null,
+          "frame_t": 43707.204422,
+          "class": "visible_insert",
+          "latency_ms": 66.808
+        },
+        {
+          "field_t": 43707.294311,
+          "ack_ts": null,
+          "frame_t": 43707.354123,
+          "class": "visible_correction",
+          "latency_ms": 59.812
+        },
+        {
+          "field_t": 43707.449941,
+          "ack_ts": null,
+          "frame_t": 43707.505958,
+          "class": "visible_insert",
+          "latency_ms": 56.017
+        },
+        {
+          "field_t": 43707.595106,
+          "ack_ts": null,
+          "frame_t": 43707.652007,
+          "class": "visible_correction",
+          "latency_ms": 56.901
+        },
+        {
+          "field_t": 43707.751429,
+          "ack_ts": null,
+          "frame_t": 43707.795258,
+          "class": "visible_insert",
+          "latency_ms": 43.829
+        },
+        {
+          "field_t": 43707.907277,
+          "ack_ts": null,
+          "frame_t": 43707.943138,
+          "class": "visible_correction",
+          "latency_ms": 35.861
+        },
+        {
+          "field_t": 43708.052101,
+          "ack_ts": null,
+          "frame_t": 43708.086506,
+          "class": "visible_correction",
+          "latency_ms": 34.405
+        },
+        {
+          "field_t": 43708.217284,
+          "ack_ts": null,
+          "frame_t": 43708.235295,
+          "class": "visible_correction",
+          "latency_ms": 18.011
+        },
+        {
+          "field_t": 43708.362333,
+          "ack_ts": null,
+          "frame_t": 43708.375237,
+          "class": "visible_insert",
+          "latency_ms": 12.904
+        },
+        {
+          "field_t": 43708.970257,
+          "ack_ts": null,
+          "frame_t": 43709.011898,
+          "class": "visible_insert",
+          "latency_ms": 41.641
+        },
+        {
+          "field_t": 43709.12753,
+          "ack_ts": null,
+          "frame_t": 43709.153717,
+          "class": "visible_insert",
+          "latency_ms": 26.187
+        },
+        {
+          "field_t": 43709.272342,
+          "ack_ts": null,
+          "frame_t": 43709.294225,
+          "class": "visible_correction",
+          "latency_ms": 21.883
+        },
+        {
+          "field_t": 43709.582676,
+          "ack_ts": null,
+          "frame_t": 43709.587328,
+          "class": "visible_insert",
+          "latency_ms": 4.652
+        },
+        {
+          "field_t": 43709.727634,
+          "ack_ts": null,
+          "frame_t": 43709.736216,
+          "class": "visible_insert",
+          "latency_ms": 8.582
+        }
+      ]
+    },
+    {
+      "clip": "noisy",
+      "qualified": [
+        {
+          "field_t": 43725.020764,
+          "ack_ts": null,
+          "frame_t": 43725.033952,
+          "class": "visible_correction",
+          "latency_ms": 13.188
+        },
+        {
+          "field_t": 43725.186361,
+          "ack_ts": null,
+          "frame_t": 43725.187808,
+          "class": "visible_correction",
+          "latency_ms": 1.447
+        },
+        {
+          "field_t": 43725.341733,
+          "ack_ts": null,
+          "frame_t": 43725.338879,
+          "class": "visible_insert",
+          "latency_ms": -2.854
+        },
+        {
+          "field_t": 43725.486595,
+          "ack_ts": null,
+          "frame_t": 43725.48591,
+          "class": "visible_correction",
+          "latency_ms": -0.685
+        },
+        {
+          "field_t": 43725.63176,
+          "ack_ts": null,
+          "frame_t": 43725.635812,
+          "class": "visible_correction",
+          "latency_ms": 4.052
+        },
+        {
+          "field_t": 43725.940632,
+          "ack_ts": null,
+          "frame_t": 43725.994985,
+          "class": "visible_insert",
+          "latency_ms": 54.353
+        },
+        {
+          "field_t": 43726.239372,
+          "ack_ts": null,
+          "frame_t": 43726.279255,
+          "class": "visible_correction",
+          "latency_ms": 39.883
+        },
+        {
+          "field_t": 43727.59974,
+          "ack_ts": null,
+          "frame_t": 43727.606027,
+          "class": "visible_correction",
+          "latency_ms": 6.287
+        },
+        {
+          "field_t": 43727.774542,
+          "ack_ts": null,
+          "frame_t": 43727.821242,
+          "class": "visible_correction",
+          "latency_ms": 46.7
+        },
+        {
+          "field_t": 43727.91892,
+          "ack_ts": null,
+          "frame_t": 43727.957558,
+          "class": "visible_correction",
+          "latency_ms": 38.638
+        },
+        {
+          "field_t": 43728.073832,
+          "ack_ts": null,
+          "frame_t": 43728.105411,
+          "class": "visible_insert",
+          "latency_ms": 31.579
+        },
+        {
+          "field_t": 43728.217941,
+          "ack_ts": null,
+          "frame_t": 43728.248775,
+          "class": "visible_correction",
+          "latency_ms": 30.834
+        },
+        {
+          "field_t": 43728.372167,
+          "ack_ts": null,
+          "frame_t": 43728.399885,
+          "class": "visible_correction",
+          "latency_ms": 27.718
+        },
+        {
+          "field_t": 43728.51558,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43728.690933,
+          "ack_ts": null,
+          "frame_t": 43728.692111,
+          "class": "visible_insert",
+          "latency_ms": 1.178
+        },
+        {
+          "field_t": 43728.845503,
+          "ack_ts": null,
+          "frame_t": 43728.909331,
+          "class": "visible_correction",
+          "latency_ms": 63.828
+        },
+        {
+          "field_t": 43728.990483,
+          "ack_ts": null,
+          "frame_t": 43729.05266,
+          "class": "visible_correction",
+          "latency_ms": 62.177
+        },
+        {
+          "field_t": 43730.495176,
+          "ack_ts": null,
+          "frame_t": 43730.543152,
+          "class": "visible_insert",
+          "latency_ms": 47.976
+        },
+        {
+          "field_t": 43730.6408,
+          "ack_ts": null,
+          "frame_t": 43730.683925,
+          "class": "visible_insert",
+          "latency_ms": 43.125
+        },
+        {
+          "field_t": 43730.806671,
+          "ack_ts": null,
+          "frame_t": 43730.833756,
+          "class": "visible_correction",
+          "latency_ms": 27.085
+        }
+      ]
+    },
+    {
+      "clip": "pauses",
+      "qualified": [
+        {
+          "field_t": 43739.044059,
+          "ack_ts": null,
+          "frame_t": 43739.098313,
+          "class": "visible_insert",
+          "latency_ms": 54.254
+        },
+        {
+          "field_t": 43739.188283,
+          "ack_ts": null,
+          "frame_t": 43739.234735,
+          "class": "visible_correction",
+          "latency_ms": 46.452
+        },
+        {
+          "field_t": 43739.343148,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43739.490822,
+          "ack_ts": null,
+          "frame_t": 43739.518118,
+          "class": "visible_insert",
+          "latency_ms": 27.296
+        },
+        {
+          "field_t": 43739.648063,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43739.8027,
+          "ack_ts": null,
+          "frame_t": 43739.825254,
+          "class": "visible_correction",
+          "latency_ms": 22.554
+        },
+        {
+          "field_t": 43739.94922,
+          "ack_ts": null,
+          "frame_t": 43739.967768,
+          "class": "visible_correction",
+          "latency_ms": 18.548
+        },
+        {
+          "field_t": 43740.092936,
+          "ack_ts": null,
+          "frame_t": 43740.117204,
+          "class": "visible_correction",
+          "latency_ms": 24.268
+        },
+        {
+          "field_t": 43740.248222,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43740.391689,
+          "ack_ts": null,
+          "frame_t": 43740.418262,
+          "class": "visible_insert",
+          "latency_ms": 26.573
+        },
+        {
+          "field_t": 43740.556128,
+          "ack_ts": null,
+          "frame_t": 43740.567555,
+          "class": "visible_correction",
+          "latency_ms": 11.427
+        },
+        {
+          "field_t": 43740.700198,
+          "ack_ts": null,
+          "frame_t": 43740.726446,
+          "class": "visible_correction",
+          "latency_ms": 26.248
+        },
+        {
+          "field_t": 43740.865666,
+          "ack_ts": null,
+          "frame_t": 43740.876642,
+          "class": "visible_correction",
+          "latency_ms": 10.976
+        },
+        {
+          "field_t": 43742.513336,
+          "ack_ts": null,
+          "frame_t": 43742.520385,
+          "class": "visible_correction",
+          "latency_ms": 7.049
+        },
+        {
+          "field_t": 43742.670079,
+          "ack_ts": null,
+          "frame_t": 43742.677703,
+          "class": "visible_correction",
+          "latency_ms": 7.624
+        },
+        {
+          "field_t": 43742.814232,
+          "ack_ts": null,
+          "frame_t": 43742.831355,
+          "class": "visible_correction",
+          "latency_ms": 17.123
+        },
+        {
+          "field_t": 43743.126198,
+          "ack_ts": null,
+          "frame_t": 43743.13511,
+          "class": "visible_correction",
+          "latency_ms": 8.912
+        },
+        {
+          "field_t": 43743.282904,
+          "ack_ts": null,
+          "frame_t": 43743.307059,
+          "class": "visible_insert",
+          "latency_ms": 24.155
+        },
+        {
+          "field_t": 43743.428074,
+          "ack_ts": null,
+          "frame_t": 43743.456461,
+          "class": "visible_correction",
+          "latency_ms": 28.387
+        },
+        {
+          "field_t": 43743.583201,
+          "ack_ts": null,
+          "frame_t": 43743.614111,
+          "class": "visible_correction",
+          "latency_ms": 30.91
+        }
+      ]
+    },
+    {
+      "clip": "jargon",
+      "qualified": [
+        {
+          "field_t": 43758.355227,
+          "ack_ts": null,
+          "frame_t": 43758.429035,
+          "class": "visible_correction",
+          "latency_ms": 73.808
+        },
+        {
+          "field_t": 43758.509294,
+          "ack_ts": null,
+          "frame_t": 43758.568727,
+          "class": "visible_correction",
+          "latency_ms": 59.433
+        },
+        {
+          "field_t": 43758.642992,
+          "ack_ts": null,
+          "frame_t": 43758.708055,
+          "class": "visible_correction",
+          "latency_ms": 65.063
+        },
+        {
+          "field_t": 43758.807168,
+          "ack_ts": null,
+          "frame_t": 43758.843287,
+          "class": "visible_correction",
+          "latency_ms": 36.119
+        },
+        {
+          "field_t": 43759.105491,
+          "ack_ts": null,
+          "frame_t": 43759.119707,
+          "class": "visible_insert",
+          "latency_ms": 14.216
+        },
+        {
+          "field_t": 43759.405678,
+          "ack_ts": null,
+          "frame_t": 43759.41004,
+          "class": "visible_correction",
+          "latency_ms": 4.362
+        },
+        {
+          "field_t": 43759.560017,
+          "ack_ts": null,
+          "frame_t": 43759.569023,
+          "class": "visible_correction",
+          "latency_ms": 9.006
+        },
+        {
+          "field_t": 43759.714113,
+          "ack_ts": null,
+          "frame_t": 43759.721857,
+          "class": "visible_correction",
+          "latency_ms": 7.744
+        },
+        {
+          "field_t": 43759.86905,
+          "ack_ts": null,
+          "frame_t": 43759.873012,
+          "class": "visible_correction",
+          "latency_ms": 3.962
+        },
+        {
+          "field_t": 43760.024911,
+          "ack_ts": null,
+          "frame_t": 43760.017838,
+          "class": "visible_correction",
+          "latency_ms": -7.073
+        },
+        {
+          "field_t": 43760.178772,
+          "ack_ts": null,
+          "frame_t": 43760.237037,
+          "class": "visible_correction",
+          "latency_ms": 58.265
+        },
+        {
+          "field_t": 43760.323826,
+          "ack_ts": null,
+          "frame_t": 43760.379955,
+          "class": "visible_correction",
+          "latency_ms": 56.129
+        },
+        {
+          "field_t": 43760.480098,
+          "ack_ts": null,
+          "frame_t": 43760.522658,
+          "class": "visible_correction",
+          "latency_ms": 42.56
+        },
+        {
+          "field_t": 43760.635752,
+          "ack_ts": null,
+          "frame_t": 43760.67926,
+          "class": "visible_correction",
+          "latency_ms": 43.508
+        },
+        {
+          "field_t": 43760.779429,
+          "ack_ts": null,
+          "frame_t": 43760.814864,
+          "class": "visible_correction",
+          "latency_ms": 35.435
+        },
+        {
+          "field_t": 43760.943166,
+          "ack_ts": null,
+          "frame_t": 43760.952752,
+          "class": "visible_correction",
+          "latency_ms": 9.586
+        },
+        {
+          "field_t": 43761.078297,
+          "ack_ts": null,
+          "frame_t": 43761.098948,
+          "class": "visible_correction",
+          "latency_ms": 20.651
+        },
+        {
+          "field_t": 43761.232643,
+          "ack_ts": null,
+          "frame_t": 43761.257195,
+          "class": "visible_correction",
+          "latency_ms": 24.552
+        },
+        {
+          "field_t": 43761.982088,
+          "ack_ts": null,
+          "frame_t": 43762.012154,
+          "class": "visible_correction",
+          "latency_ms": 30.066
+        },
+        {
+          "field_t": 43762.155453,
+          "ack_ts": null,
+          "frame_t": 43762.222409,
+          "class": "visible_correction",
+          "latency_ms": 66.956
+        }
+      ]
+    },
+    {
+      "clip": "natural",
+      "qualified": [
+        {
+          "field_t": 43782.444857,
+          "ack_ts": null,
+          "frame_t": 43782.448425,
+          "class": "visible_correction",
+          "latency_ms": 3.568
+        },
+        {
+          "field_t": 43782.590247,
+          "ack_ts": null,
+          "frame_t": 43782.614955,
+          "class": "visible_insert",
+          "latency_ms": 24.708
+        },
+        {
+          "field_t": 43782.878751,
+          "ack_ts": null,
+          "frame_t": 43782.916118,
+          "class": "visible_insert",
+          "latency_ms": 37.367
+        },
+        {
+          "field_t": 43783.177626,
+          "ack_ts": null,
+          "frame_t": 43783.195995,
+          "class": "visible_insert",
+          "latency_ms": 18.369
+        },
+        {
+          "field_t": 43783.488478,
+          "ack_ts": null,
+          "frame_t": 43783.548098,
+          "class": "visible_insert",
+          "latency_ms": 59.62
+        },
+        {
+          "field_t": 43783.666852,
+          "ack_ts": null,
+          "frame_t": 43783.682095,
+          "class": "visible_correction",
+          "latency_ms": 15.243
+        },
+        {
+          "field_t": 43783.790283,
+          "ack_ts": null,
+          "frame_t": 43783.831485,
+          "class": "visible_insert",
+          "latency_ms": 41.202
+        },
+        {
+          "field_t": 43783.935421,
+          "ack_ts": null,
+          "frame_t": 43783.968518,
+          "class": "visible_correction",
+          "latency_ms": 33.097
+        },
+        {
+          "field_t": 43784.101429,
+          "ack_ts": null,
+          "frame_t": 43784.108026,
+          "class": "visible_insert",
+          "latency_ms": 6.597
+        },
+        {
+          "field_t": 43784.246154,
+          "ack_ts": null,
+          "frame_t": 43784.258093,
+          "class": "visible_correction",
+          "latency_ms": 11.939
+        },
+        {
+          "field_t": 43784.412324,
+          "ack_ts": null,
+          "frame_t": 43784.474392,
+          "class": "visible_insert",
+          "latency_ms": 62.068
+        },
+        {
+          "field_t": 43784.55658,
+          "ack_ts": null,
+          "frame_t": 43784.622534,
+          "class": "visible_correction",
+          "latency_ms": 65.954
+        },
+        {
+          "field_t": 43784.71248,
+          "ack_ts": null,
+          "frame_t": 43784.762692,
+          "class": "visible_insert",
+          "latency_ms": 50.212
+        },
+        {
+          "field_t": 43785.322398,
+          "ack_ts": null,
+          "frame_t": 43785.314023,
+          "class": "visible_insert",
+          "latency_ms": -8.375
+        },
+        {
+          "field_t": 43785.466603,
+          "ack_ts": null,
+          "frame_t": 43785.539375,
+          "class": "visible_correction",
+          "latency_ms": 72.772
+        },
+        {
+          "field_t": 43785.622823,
+          "ack_ts": null,
+          "frame_t": 43785.680944,
+          "class": "visible_correction",
+          "latency_ms": 58.121
+        },
+        {
+          "field_t": 43785.924556,
+          "ack_ts": null,
+          "frame_t": 43785.965864,
+          "class": "visible_insert",
+          "latency_ms": 41.308
+        },
+        {
+          "field_t": 43786.079215,
+          "ack_ts": null,
+          "frame_t": 43786.115269,
+          "class": "visible_insert",
+          "latency_ms": 36.054
+        },
+        {
+          "field_t": 43786.369392,
+          "ack_ts": null,
+          "frame_t": 43786.409814,
+          "class": "visible_correction",
+          "latency_ms": 40.422
+        },
+        {
+          "field_t": 43786.523581,
+          "ack_ts": null,
+          "frame_t": 43786.555661,
+          "class": "visible_correction",
+          "latency_ms": 32.08
+        }
+      ]
+    },
+    {
+      "clip": "noisy",
+      "qualified": [
+        {
+          "field_t": 43801.402464,
+          "ack_ts": null,
+          "frame_t": 43801.415558,
+          "class": "visible_correction",
+          "latency_ms": 13.094
+        },
+        {
+          "field_t": 43801.557934,
+          "ack_ts": null,
+          "frame_t": 43801.568661,
+          "class": "visible_insert",
+          "latency_ms": 10.727
+        },
+        {
+          "field_t": 43801.711664,
+          "ack_ts": null,
+          "frame_t": 43801.784997,
+          "class": "visible_insert",
+          "latency_ms": 73.333
+        },
+        {
+          "field_t": 43801.867684,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43802.001672,
+          "ack_ts": null,
+          "frame_t": 43801.931388,
+          "class": "visible_correction",
+          "latency_ms": -70.284
+        },
+        {
+          "field_t": 43802.156793,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43802.466645,
+          "ack_ts": null,
+          "frame_t": 43802.49007,
+          "class": "visible_insert",
+          "latency_ms": 23.425
+        },
+        {
+          "field_t": 43802.631996,
+          "ack_ts": null,
+          "frame_t": 43802.642424,
+          "class": "visible_correction",
+          "latency_ms": 10.428
+        },
+        {
+          "field_t": 43802.756028,
+          "ack_ts": null,
+          "frame_t": 43802.788284,
+          "class": "visible_correction",
+          "latency_ms": 32.256
+        },
+        {
+          "field_t": 43803.842375,
+          "ack_ts": null,
+          "frame_t": 43803.896198,
+          "class": "visible_correction",
+          "latency_ms": 53.823
+        },
+        {
+          "field_t": 43803.976526,
+          "ack_ts": null,
+          "frame_t": 43804.041993,
+          "class": "visible_correction",
+          "latency_ms": 65.467
+        },
+        {
+          "field_t": 43804.152097,
+          "ack_ts": null,
+          "frame_t": 43804.177079,
+          "class": "visible_correction",
+          "latency_ms": 24.982
+        },
+        {
+          "field_t": 43804.286038,
+          "ack_ts": null,
+          "frame_t": 43804.31569,
+          "class": "visible_correction",
+          "latency_ms": 29.652
+        },
+        {
+          "field_t": 43804.461644,
+          "ack_ts": null,
+          "frame_t": 43804.46256,
+          "class": "visible_insert",
+          "latency_ms": 0.916
+        },
+        {
+          "field_t": 43804.59646,
+          "ack_ts": null,
+          "frame_t": 43804.605844,
+          "class": "visible_correction",
+          "latency_ms": 9.384
+        },
+        {
+          "field_t": 43804.751754,
+          "ack_ts": null,
+          "frame_t": 43804.762325,
+          "class": "visible_correction",
+          "latency_ms": 10.571
+        },
+        {
+          "field_t": 43804.897104,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43805.062139,
+          "ack_ts": null,
+          "frame_t": 43805.122845,
+          "class": "visible_insert",
+          "latency_ms": 60.706
+        },
+        {
+          "field_t": 43805.206976,
+          "ack_ts": null,
+          "frame_t": 43805.261985,
+          "class": "visible_correction",
+          "latency_ms": 55.009
+        },
+        {
+          "field_t": 43805.362037,
+          "ack_ts": null,
+          "frame_t": 43805.397809,
+          "class": "visible_correction",
+          "latency_ms": 35.772
+        }
+      ]
+    },
+    {
+      "clip": "pauses",
+      "qualified": [
+        {
+          "field_t": 43815.960772,
+          "ack_ts": null,
+          "frame_t": 43816.024768,
+          "class": "visible_insert",
+          "latency_ms": 63.996
+        },
+        {
+          "field_t": 43816.107291,
+          "ack_ts": null,
+          "frame_t": 43816.162513,
+          "class": "visible_correction",
+          "latency_ms": 55.222
+        },
+        {
+          "field_t": 43816.262485,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43816.438463,
+          "ack_ts": null,
+          "frame_t": 43816.446771,
+          "class": "visible_correction",
+          "latency_ms": 8.308
+        },
+        {
+          "field_t": 43816.562368,
+          "ack_ts": null,
+          "frame_t": 43816.602807,
+          "class": "visible_correction",
+          "latency_ms": 40.439
+        },
+        {
+          "field_t": 43816.717341,
+          "ack_ts": null,
+          "frame_t": 43816.744014,
+          "class": "visible_correction",
+          "latency_ms": 26.673
+        },
+        {
+          "field_t": 43816.86188,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43817.01659,
+          "ack_ts": null,
+          "frame_t": 43817.034997,
+          "class": "visible_insert",
+          "latency_ms": 18.407
+        },
+        {
+          "field_t": 43817.162475,
+          "ack_ts": null,
+          "frame_t": 43817.197492,
+          "class": "visible_insert",
+          "latency_ms": 35.017
+        },
+        {
+          "field_t": 43817.327724,
+          "ack_ts": null,
+          "frame_t": 43817.339127,
+          "class": "visible_insert",
+          "latency_ms": 11.403
+        },
+        {
+          "field_t": 43817.473087,
+          "ack_ts": null,
+          "frame_t": 43817.492946,
+          "class": "visible_correction",
+          "latency_ms": 19.859
+        },
+        {
+          "field_t": 43819.301686,
+          "ack_ts": null,
+          "frame_t": 43819.3282,
+          "class": "visible_insert",
+          "latency_ms": 26.514
+        },
+        {
+          "field_t": 43819.435489,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43819.733423,
+          "ack_ts": null,
+          "frame_t": 43819.759797,
+          "class": "visible_insert",
+          "latency_ms": 26.374
+        },
+        {
+          "field_t": 43819.898781,
+          "ack_ts": null,
+          "frame_t": 43819.90737,
+          "class": "visible_insert",
+          "latency_ms": 8.589
+        },
+        {
+          "field_t": 43820.063618,
+          "ack_ts": null,
+          "frame_t": 43820.129647,
+          "class": "visible_correction",
+          "latency_ms": 66.029
+        },
+        {
+          "field_t": 43820.196925,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43820.35115,
+          "ack_ts": null,
+          "frame_t": 43820.35438,
+          "class": "visible_insert",
+          "latency_ms": 3.23
+        },
+        {
+          "field_t": 43820.649083,
+          "ack_ts": null,
+          "frame_t": 43820.712026,
+          "class": "visible_insert",
+          "latency_ms": 62.943
+        },
+        {
+          "field_t": 43820.803169,
+          "ack_ts": null,
+          "frame_t": 43820.86172,
+          "class": "visible_insert",
+          "latency_ms": 58.551
+        }
+      ]
+    },
+    {
+      "clip": "jargon",
+      "qualified": [
+        {
+          "field_t": 43834.993198,
+          "ack_ts": null,
+          "frame_t": 43835.003899,
+          "class": "visible_correction",
+          "latency_ms": 10.701
+        },
+        {
+          "field_t": 43835.138182,
+          "ack_ts": null,
+          "frame_t": 43835.151751,
+          "class": "visible_correction",
+          "latency_ms": 13.569
+        },
+        {
+          "field_t": 43835.302942,
+          "ack_ts": null,
+          "frame_t": 43835.296634,
+          "class": "visible_correction",
+          "latency_ms": -6.308
+        },
+        {
+          "field_t": 43835.447647,
+          "ack_ts": null,
+          "frame_t": 43835.447978,
+          "class": "visible_correction",
+          "latency_ms": 0.331
+        },
+        {
+          "field_t": 43835.746014,
+          "ack_ts": null,
+          "frame_t": 43835.8005,
+          "class": "visible_insert",
+          "latency_ms": 54.486
+        },
+        {
+          "field_t": 43835.90311,
+          "ack_ts": null,
+          "frame_t": 43835.934758,
+          "class": "visible_correction",
+          "latency_ms": 31.648
+        },
+        {
+          "field_t": 43836.048573,
+          "ack_ts": null,
+          "frame_t": 43836.070461,
+          "class": "visible_insert",
+          "latency_ms": 21.888
+        },
+        {
+          "field_t": 43836.202309,
+          "ack_ts": null,
+          "frame_t": 43836.213268,
+          "class": "visible_correction",
+          "latency_ms": 10.959
+        },
+        {
+          "field_t": 43836.400641,
+          "ack_ts": null,
+          "frame_t": 43836.429762,
+          "class": "visible_correction",
+          "latency_ms": 29.121
+        },
+        {
+          "field_t": 43836.503696,
+          "ack_ts": null,
+          "frame_t": 43836.512023,
+          "class": "visible_correction",
+          "latency_ms": 8.327
+        },
+        {
+          "field_t": 43836.678443,
+          "ack_ts": null,
+          "frame_t": 43836.743172,
+          "class": "visible_correction",
+          "latency_ms": 64.729
+        },
+        {
+          "field_t": 43836.821995,
+          "ack_ts": null,
+          "frame_t": 43836.884235,
+          "class": "visible_correction",
+          "latency_ms": 62.24
+        },
+        {
+          "field_t": 43836.955733,
+          "ack_ts": null,
+          "frame_t": 43837.022411,
+          "class": "visible_correction",
+          "latency_ms": 66.678
+        },
+        {
+          "field_t": 43837.110033,
+          "ack_ts": null,
+          "frame_t": 43837.166087,
+          "class": "visible_correction",
+          "latency_ms": 56.054
+        },
+        {
+          "field_t": 43837.407826,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43837.572855,
+          "ack_ts": null,
+          "frame_t": 43837.647427,
+          "class": "visible_correction",
+          "latency_ms": 74.572
+        },
+        {
+          "field_t": 43837.717581,
+          "ack_ts": null,
+          "frame_t": 43837.647427,
+          "class": "visible_correction",
+          "latency_ms": -70.154
+        },
+        {
+          "field_t": 43837.874163,
+          "ack_ts": null,
+          "frame_t": 43837.929318,
+          "class": "visible_correction",
+          "latency_ms": 55.155
+        },
+        {
+          "field_t": 43838.480427,
+          "ack_ts": null,
+          "frame_t": 43838.505738,
+          "class": "visible_correction",
+          "latency_ms": 25.311
+        },
+        {
+          "field_t": 43838.624114,
+          "ack_ts": null,
+          "frame_t": 43838.648839,
+          "class": "visible_correction",
+          "latency_ms": 24.725
+        }
+      ]
+    },
+    {
+      "clip": "natural",
+      "qualified": [
+        {
+          "field_t": 43859.040975,
+          "ack_ts": null,
+          "frame_t": 43859.079736,
+          "class": "visible_correction",
+          "latency_ms": 38.761
+        },
+        {
+          "field_t": 43859.195941,
+          "ack_ts": null,
+          "frame_t": 43859.214827,
+          "class": "visible_insert",
+          "latency_ms": 18.886
+        },
+        {
+          "field_t": 43859.495814,
+          "ack_ts": null,
+          "frame_t": 43859.504555,
+          "class": "visible_insert",
+          "latency_ms": 8.741
+        },
+        {
+          "field_t": 43859.806776,
+          "ack_ts": null,
+          "frame_t": 43859.847942,
+          "class": "visible_insert",
+          "latency_ms": 41.166
+        },
+        {
+          "field_t": 43860.105773,
+          "ack_ts": null,
+          "frame_t": 43860.122233,
+          "class": "visible_insert",
+          "latency_ms": 16.46
+        },
+        {
+          "field_t": 43860.259882,
+          "ack_ts": null,
+          "frame_t": 43860.262921,
+          "class": "visible_correction",
+          "latency_ms": 3.039
+        },
+        {
+          "field_t": 43860.414003,
+          "ack_ts": null,
+          "frame_t": 43860.481143,
+          "class": "visible_insert",
+          "latency_ms": 67.14
+        },
+        {
+          "field_t": 43860.56842,
+          "ack_ts": null,
+          "frame_t": 43860.620454,
+          "class": "visible_correction",
+          "latency_ms": 52.034
+        },
+        {
+          "field_t": 43860.725221,
+          "ack_ts": null,
+          "frame_t": 43860.761809,
+          "class": "visible_correction",
+          "latency_ms": 36.588
+        },
+        {
+          "field_t": 43860.879095,
+          "ack_ts": null,
+          "frame_t": 43860.898031,
+          "class": "visible_correction",
+          "latency_ms": 18.936
+        },
+        {
+          "field_t": 43861.033947,
+          "ack_ts": null,
+          "frame_t": 43861.053731,
+          "class": "visible_insert",
+          "latency_ms": 19.784
+        },
+        {
+          "field_t": 43861.178943,
+          "ack_ts": null,
+          "frame_t": 43861.201774,
+          "class": "visible_insert",
+          "latency_ms": 22.831
+        },
+        {
+          "field_t": 43861.333219,
+          "ack_ts": null,
+          "frame_t": 43861.349251,
+          "class": "visible_correction",
+          "latency_ms": 16.032
+        },
+        {
+          "field_t": 43861.477281,
+          "ack_ts": null,
+          "frame_t": 43861.49775,
+          "class": "visible_correction",
+          "latency_ms": 20.469
+        },
+        {
+          "field_t": 43861.939554,
+          "ack_ts": null,
+          "frame_t": 43861.998052,
+          "class": "visible_correction",
+          "latency_ms": 58.498
+        },
+        {
+          "field_t": 43862.095064,
+          "ack_ts": null,
+          "frame_t": 43862.142163,
+          "class": "visible_correction",
+          "latency_ms": 47.099
+        },
+        {
+          "field_t": 43862.249673,
+          "ack_ts": null,
+          "frame_t": 43862.289081,
+          "class": "visible_correction",
+          "latency_ms": 39.408
+        },
+        {
+          "field_t": 43862.548743,
+          "ack_ts": null,
+          "frame_t": 43862.591847,
+          "class": "visible_insert",
+          "latency_ms": 43.104
+        },
+        {
+          "field_t": 43862.704169,
+          "ack_ts": null,
+          "frame_t": 43862.73847,
+          "class": "visible_insert",
+          "latency_ms": 34.301
+        },
+        {
+          "field_t": 43863.025419,
+          "ack_ts": null,
+          "frame_t": 43863.046274,
+          "class": "visible_correction",
+          "latency_ms": 20.855
+        }
+      ]
+    },
+    {
+      "clip": "noisy",
+      "qualified": [
+        {
+          "field_t": 43878.035298,
+          "ack_ts": null,
+          "frame_t": 43878.098975,
+          "class": "visible_correction",
+          "latency_ms": 63.677
+        },
+        {
+          "field_t": 43878.190368,
+          "ack_ts": null,
+          "frame_t": 43878.255132,
+          "class": "visible_correction",
+          "latency_ms": 64.764
+        },
+        {
+          "field_t": 43878.334941,
+          "ack_ts": null,
+          "frame_t": 43878.393713,
+          "class": "visible_correction",
+          "latency_ms": 58.772
+        },
+        {
+          "field_t": 43878.491451,
+          "ack_ts": null,
+          "frame_t": 43878.531057,
+          "class": "visible_correction",
+          "latency_ms": 39.606
+        },
+        {
+          "field_t": 43878.647458,
+          "ack_ts": null,
+          "frame_t": 43878.66599,
+          "class": "visible_correction",
+          "latency_ms": 18.532
+        },
+        {
+          "field_t": 43878.793103,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43878.948587,
+          "ack_ts": null,
+          "frame_t": 43878.960716,
+          "class": "visible_insert",
+          "latency_ms": 12.129
+        },
+        {
+          "field_t": 43879.267978,
+          "ack_ts": null,
+          "frame_t": 43879.325507,
+          "class": "visible_insert",
+          "latency_ms": 57.529
+        },
+        {
+          "field_t": 43879.435263,
+          "ack_ts": null,
+          "frame_t": 43879.476699,
+          "class": "visible_correction",
+          "latency_ms": 41.436
+        },
+        {
+          "field_t": 43880.45497,
+          "ack_ts": null,
+          "frame_t": 43880.467515,
+          "class": "visible_correction",
+          "latency_ms": 12.545
+        },
+        {
+          "field_t": 43880.608617,
+          "ack_ts": null,
+          "frame_t": 43880.617794,
+          "class": "visible_insert",
+          "latency_ms": 9.177
+        },
+        {
+          "field_t": 43880.783521,
+          "ack_ts": null,
+          "frame_t": 43880.841231,
+          "class": "visible_correction",
+          "latency_ms": 57.71
+        },
+        {
+          "field_t": 43880.940098,
+          "ack_ts": null,
+          "frame_t": 43881.003929,
+          "class": "visible_correction",
+          "latency_ms": 63.831
+        },
+        {
+          "field_t": 43881.083239,
+          "ack_ts": null,
+          "frame_t": 43881.150416,
+          "class": "visible_insert",
+          "latency_ms": 67.177
+        },
+        {
+          "field_t": 43881.226374,
+          "ack_ts": null,
+          "frame_t": 43881.291555,
+          "class": "visible_correction",
+          "latency_ms": 65.181
+        },
+        {
+          "field_t": 43881.53565,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43881.690273,
+          "ack_ts": null,
+          "frame_t": 43881.731461,
+          "class": "visible_insert",
+          "latency_ms": 41.188
+        },
+        {
+          "field_t": 43881.833952,
+          "ack_ts": null,
+          "frame_t": 43881.873283,
+          "class": "visible_correction",
+          "latency_ms": 39.331
+        },
+        {
+          "field_t": 43882.008431,
+          "ack_ts": null,
+          "frame_t": 43882.029535,
+          "class": "visible_correction",
+          "latency_ms": 21.104
+        },
+        {
+          "field_t": 43883.522071,
+          "ack_ts": null,
+          "frame_t": 43883.593636,
+          "class": "visible_insert",
+          "latency_ms": 71.565
+        }
+      ]
+    },
+    {
+      "clip": "pauses",
+      "qualified": [
+        {
+          "field_t": 43892.296691,
+          "ack_ts": null,
+          "frame_t": 43892.312788,
+          "class": "visible_correction",
+          "latency_ms": 16.097
+        },
+        {
+          "field_t": 43892.45084,
+          "ack_ts": null,
+          "frame_t": 43892.450369,
+          "class": "visible_insert",
+          "latency_ms": -0.471
+        },
+        {
+          "field_t": 43892.737644,
+          "ack_ts": null,
+          "frame_t": 43892.810261,
+          "class": "visible_insert",
+          "latency_ms": 72.617
+        },
+        {
+          "field_t": 43892.892582,
+          "ack_ts": null,
+          "frame_t": 43892.948982,
+          "class": "visible_correction",
+          "latency_ms": 56.4
+        },
+        {
+          "field_t": 43893.037687,
+          "ack_ts": null,
+          "frame_t": 43893.084312,
+          "class": "visible_insert",
+          "latency_ms": 46.625
+        },
+        {
+          "field_t": 43893.191655,
+          "ack_ts": null,
+          "frame_t": 43893.229893,
+          "class": "visible_correction",
+          "latency_ms": 38.238
+        },
+        {
+          "field_t": 43893.35679,
+          "ack_ts": null,
+          "frame_t": 43893.3721,
+          "class": "visible_correction",
+          "latency_ms": 15.31
+        },
+        {
+          "field_t": 43893.501146,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43893.655172,
+          "ack_ts": null,
+          "frame_t": 43893.660413,
+          "class": "visible_insert",
+          "latency_ms": 5.241
+        },
+        {
+          "field_t": 43893.800163,
+          "ack_ts": null,
+          "frame_t": 43893.810218,
+          "class": "visible_correction",
+          "latency_ms": 10.055
+        },
+        {
+          "field_t": 43893.965409,
+          "ack_ts": null,
+          "frame_t": 43893.966644,
+          "class": "visible_insert",
+          "latency_ms": 1.235
+        },
+        {
+          "field_t": 43894.109985,
+          "ack_ts": null,
+          "frame_t": 43894.117458,
+          "class": "visible_correction",
+          "latency_ms": 7.473
+        },
+        {
+          "field_t": 43894.265817,
+          "ack_ts": null,
+          "frame_t": 43894.336589,
+          "class": "visible_correction",
+          "latency_ms": 70.772
+        },
+        {
+          "field_t": 43895.1842,
+          "ack_ts": null,
+          "frame_t": 43895.183156,
+          "class": "visible_correction",
+          "latency_ms": -1.044
+        },
+        {
+          "field_t": 43895.327522,
+          "ack_ts": null,
+          "frame_t": 43895.330725,
+          "class": "visible_correction",
+          "latency_ms": 3.203
+        },
+        {
+          "field_t": 43895.780996,
+          "ack_ts": null,
+          "frame_t": 43895.847147,
+          "class": "visible_correction",
+          "latency_ms": 66.151
+        },
+        {
+          "field_t": 43895.924997,
+          "ack_ts": null,
+          "frame_t": 43895.985869,
+          "class": "visible_correction",
+          "latency_ms": 60.872
+        },
+        {
+          "field_t": 43896.080722,
+          "ack_ts": null,
+          "frame_t": 43896.139052,
+          "class": "visible_correction",
+          "latency_ms": 58.33
+        },
+        {
+          "field_t": 43896.37854,
+          "ack_ts": null,
+          "frame_t": 43896.43775,
+          "class": "visible_insert",
+          "latency_ms": 59.21
+        },
+        {
+          "field_t": 43896.595468,
+          "ack_ts": null,
+          "frame_t": 43896.656859,
+          "class": "visible_correction",
+          "latency_ms": 61.391
+        }
+      ]
+    },
+    {
+      "clip": "jargon",
+      "qualified": [
+        {
+          "field_t": 43911.839894,
+          "ack_ts": null,
+          "frame_t": 43911.908171,
+          "class": "visible_correction",
+          "latency_ms": 68.277
+        },
+        {
+          "field_t": 43912.018181,
+          "ack_ts": null,
+          "frame_t": 43912.018215,
+          "class": "visible_correction",
+          "latency_ms": 0.034
+        },
+        {
+          "field_t": 43912.15177,
+          "ack_ts": null,
+          "frame_t": 43912.176829,
+          "class": "visible_correction",
+          "latency_ms": 25.059
+        },
+        {
+          "field_t": 43912.307615,
+          "ack_ts": null,
+          "frame_t": 43912.317432,
+          "class": "visible_correction",
+          "latency_ms": 9.817
+        },
+        {
+          "field_t": 43912.451471,
+          "ack_ts": null,
+          "frame_t": 43912.45954,
+          "class": "visible_insert",
+          "latency_ms": 8.069
+        },
+        {
+          "field_t": 43912.760887,
+          "ack_ts": null,
+          "frame_t": 43912.817881,
+          "class": "visible_insert",
+          "latency_ms": 56.994
+        },
+        {
+          "field_t": 43912.915473,
+          "ack_ts": null,
+          "frame_t": 43912.957675,
+          "class": "visible_correction",
+          "latency_ms": 42.202
+        },
+        {
+          "field_t": 43913.069377,
+          "ack_ts": null,
+          "frame_t": 43913.101457,
+          "class": "visible_correction",
+          "latency_ms": 32.08
+        },
+        {
+          "field_t": 43913.212904,
+          "ack_ts": null,
+          "frame_t": 43913.250018,
+          "class": "visible_correction",
+          "latency_ms": 37.114
+        },
+        {
+          "field_t": 43913.356132,
+          "ack_ts": null,
+          "frame_t": 43913.385075,
+          "class": "visible_correction",
+          "latency_ms": 28.943
+        },
+        {
+          "field_t": 43913.533018,
+          "ack_ts": null,
+          "frame_t": 43913.532776,
+          "class": "visible_correction",
+          "latency_ms": -0.242
+        },
+        {
+          "field_t": 43913.666869,
+          "ack_ts": null,
+          "frame_t": 43913.676473,
+          "class": "visible_correction",
+          "latency_ms": 9.604
+        },
+        {
+          "field_t": 43914.287675,
+          "ack_ts": null,
+          "frame_t": 43914.343508,
+          "class": "visible_correction",
+          "latency_ms": 55.833
+        },
+        {
+          "field_t": 43914.420943,
+          "ack_ts": null,
+          "frame_t": 43914.486952,
+          "class": "visible_correction",
+          "latency_ms": 66.009
+        },
+        {
+          "field_t": 43914.585349,
+          "ack_ts": null,
+          "frame_t": 43914.623409,
+          "class": "visible_correction",
+          "latency_ms": 38.06
+        },
+        {
+          "field_t": 43914.872759,
+          "ack_ts": null,
+          "frame_t": 43914.909473,
+          "class": "visible_correction",
+          "latency_ms": 36.714
+        },
+        {
+          "field_t": 43915.026576,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43915.190777,
+          "ack_ts": null,
+          "frame_t": 43915.193756,
+          "class": "visible_correction",
+          "latency_ms": 2.979
+        },
+        {
+          "field_t": 43915.345474,
+          "ack_ts": null,
+          "frame_t": 43915.412206,
+          "class": "visible_correction",
+          "latency_ms": 66.732
+        },
+        {
+          "field_t": 43915.511034,
+          "ack_ts": null,
+          "frame_t": 43915.561177,
+          "class": "visible_correction",
+          "latency_ms": 50.143
+        }
+      ]
+    },
+    {
+      "clip": "natural",
+      "qualified": [
+        {
+          "field_t": 43935.757446,
+          "ack_ts": null,
+          "frame_t": 43935.774587,
+          "class": "visible_correction",
+          "latency_ms": 17.141
+        },
+        {
+          "field_t": 43935.911331,
+          "ack_ts": null,
+          "frame_t": 43935.928231,
+          "class": "visible_insert",
+          "latency_ms": 16.9
+        },
+        {
+          "field_t": 43936.055845,
+          "ack_ts": null,
+          "frame_t": 43936.078716,
+          "class": "visible_correction",
+          "latency_ms": 22.871
+        },
+        {
+          "field_t": 43936.200095,
+          "ack_ts": null,
+          "frame_t": 43936.229077,
+          "class": "visible_correction",
+          "latency_ms": 28.982
+        },
+        {
+          "field_t": 43936.507778,
+          "ack_ts": null,
+          "frame_t": 43936.509972,
+          "class": "visible_insert",
+          "latency_ms": 2.194
+        },
+        {
+          "field_t": 43936.804932,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43936.959503,
+          "ack_ts": null,
+          "frame_t": 43937.005106,
+          "class": "visible_insert",
+          "latency_ms": 45.603
+        },
+        {
+          "field_t": 43937.124091,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43937.278192,
+          "ack_ts": null,
+          "frame_t": 43937.295369,
+          "class": "visible_insert",
+          "latency_ms": 17.177
+        },
+        {
+          "field_t": 43937.433196,
+          "ack_ts": null,
+          "frame_t": 43937.446837,
+          "class": "visible_correction",
+          "latency_ms": 13.641
+        },
+        {
+          "field_t": 43937.578595,
+          "ack_ts": null,
+          "frame_t": 43937.596762,
+          "class": "visible_correction",
+          "latency_ms": 18.167
+        },
+        {
+          "field_t": 43937.734066,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43937.878031,
+          "ack_ts": null,
+          "frame_t": 43937.897932,
+          "class": "visible_insert",
+          "latency_ms": 19.901
+        },
+        {
+          "field_t": 43938.053259,
+          "ack_ts": null,
+          "frame_t": 43938.118629,
+          "class": "visible_correction",
+          "latency_ms": 65.37
+        },
+        {
+          "field_t": 43938.187667,
+          "ack_ts": null,
+          "frame_t": 43938.191561,
+          "class": "visible_correction",
+          "latency_ms": 3.894
+        },
+        {
+          "field_t": 43938.640235,
+          "ack_ts": null,
+          "frame_t": 43938.689239,
+          "class": "visible_correction",
+          "latency_ms": 49.004
+        },
+        {
+          "field_t": 43938.79467,
+          "ack_ts": null,
+          "frame_t": 43938.838589,
+          "class": "visible_correction",
+          "latency_ms": 43.919
+        },
+        {
+          "field_t": 43938.950863,
+          "ack_ts": null,
+          "frame_t": 43938.975526,
+          "class": "visible_correction",
+          "latency_ms": 24.663
+        },
+        {
+          "field_t": 43939.24871,
+          "ack_ts": null,
+          "frame_t": 43939.282734,
+          "class": "visible_insert",
+          "latency_ms": 34.024
+        },
+        {
+          "field_t": 43939.40279,
+          "ack_ts": null,
+          "frame_t": 43939.425772,
+          "class": "visible_insert",
+          "latency_ms": 22.982
+        }
+      ]
+    },
+    {
+      "clip": "noisy",
+      "qualified": [
+        {
+          "field_t": 43954.734233,
+          "ack_ts": null,
+          "frame_t": 43954.79262,
+          "class": "visible_insert",
+          "latency_ms": 58.387
+        },
+        {
+          "field_t": 43955.04363,
+          "ack_ts": null,
+          "frame_t": 43955.073578,
+          "class": "visible_insert",
+          "latency_ms": 29.948
+        },
+        {
+          "field_t": 43955.198872,
+          "ack_ts": null,
+          "frame_t": 43955.225969,
+          "class": "visible_correction",
+          "latency_ms": 27.097
+        },
+        {
+          "field_t": 43955.343096,
+          "ack_ts": null,
+          "frame_t": 43955.374952,
+          "class": "visible_correction",
+          "latency_ms": 31.856
+        },
+        {
+          "field_t": 43955.661313,
+          "ack_ts": null,
+          "frame_t": 43955.66203,
+          "class": "visible_insert",
+          "latency_ms": 0.717
+        },
+        {
+          "field_t": 43955.837528,
+          "ack_ts": null,
+          "frame_t": 43955.896731,
+          "class": "visible_correction",
+          "latency_ms": 59.203
+        },
+        {
+          "field_t": 43956.000522,
+          "ack_ts": null,
+          "frame_t": 43956.055324,
+          "class": "visible_correction",
+          "latency_ms": 54.802
+        },
+        {
+          "field_t": 43957.186463,
+          "ack_ts": null,
+          "frame_t": 43957.24304,
+          "class": "visible_insert",
+          "latency_ms": 56.577
+        },
+        {
+          "field_t": 43957.356826,
+          "ack_ts": null,
+          "frame_t": 43957.404478,
+          "class": "visible_correction",
+          "latency_ms": 47.652
+        },
+        {
+          "field_t": 43957.527815,
+          "ack_ts": null,
+          "frame_t": 43957.563128,
+          "class": "visible_correction",
+          "latency_ms": 35.313
+        },
+        {
+          "field_t": 43957.690725,
+          "ack_ts": null,
+          "frame_t": 43957.728708,
+          "class": "visible_correction",
+          "latency_ms": 37.983
+        },
+        {
+          "field_t": 43957.832591,
+          "ack_ts": null,
+          "frame_t": 43957.887562,
+          "class": "visible_insert",
+          "latency_ms": 54.971
+        },
+        {
+          "field_t": 43957.958756,
+          "ack_ts": null,
+          "frame_t": 43958.024426,
+          "class": "visible_insert",
+          "latency_ms": 65.67
+        },
+        {
+          "field_t": 43958.238934,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43958.435844,
+          "ack_ts": null,
+          "frame_t": 43958.505343,
+          "class": "visible_insert",
+          "latency_ms": 69.499
+        },
+        {
+          "field_t": 43958.742789,
+          "ack_ts": null,
+          "frame_t": 43958.84111,
+          "class": "visible_correction",
+          "latency_ms": 98.321
+        },
+        {
+          "field_t": 43959.086328,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43959.226376,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43959.807254,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43960.143773,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        }
+      ]
+    },
+    {
+      "clip": "pauses",
+      "qualified": [
+        {
+          "field_t": 43968.940046,
+          "ack_ts": null,
+          "frame_t": 43968.985008,
+          "class": "visible_correction",
+          "latency_ms": 44.962
+        },
+        {
+          "field_t": 43969.12629,
+          "ack_ts": null,
+          "frame_t": 43969.145855,
+          "class": "visible_insert",
+          "latency_ms": 19.565
+        },
+        {
+          "field_t": 43969.431172,
+          "ack_ts": null,
+          "frame_t": 43969.465355,
+          "class": "visible_insert",
+          "latency_ms": 34.183
+        },
+        {
+          "field_t": 43969.602731,
+          "ack_ts": null,
+          "frame_t": 43969.630322,
+          "class": "visible_correction",
+          "latency_ms": 27.591
+        },
+        {
+          "field_t": 43969.733682,
+          "ack_ts": null,
+          "frame_t": 43969.806324,
+          "class": "visible_correction",
+          "latency_ms": 72.642
+        },
+        {
+          "field_t": 43969.856363,
+          "ack_ts": null,
+          "frame_t": 43969.893635,
+          "class": "visible_correction",
+          "latency_ms": 37.272
+        },
+        {
+          "field_t": 43970.020421,
+          "ack_ts": null,
+          "frame_t": 43970.073676,
+          "class": "visible_correction",
+          "latency_ms": 53.255
+        },
+        {
+          "field_t": 43970.171282,
+          "ack_ts": null,
+          "frame_t": 43970.234011,
+          "class": "visible_correction",
+          "latency_ms": 62.729
+        },
+        {
+          "field_t": 43970.308365,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43970.449791,
+          "ack_ts": null,
+          "frame_t": 43970.50205,
+          "class": "visible_insert",
+          "latency_ms": 52.259
+        },
+        {
+          "field_t": 43970.615559,
+          "ack_ts": null,
+          "frame_t": 43970.669442,
+          "class": "visible_correction",
+          "latency_ms": 53.883
+        },
+        {
+          "field_t": 43970.785493,
+          "ack_ts": null,
+          "frame_t": 43970.815393,
+          "class": "visible_insert",
+          "latency_ms": 29.9
+        },
+        {
+          "field_t": 43970.922053,
+          "ack_ts": null,
+          "frame_t": 43970.964864,
+          "class": "visible_correction",
+          "latency_ms": 42.811
+        },
+        {
+          "field_t": 43971.077613,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43971.358731,
+          "ack_ts": null,
+          "frame_t": 43971.399902,
+          "class": "visible_correction",
+          "latency_ms": 41.171
+        },
+        {
+          "field_t": 43971.950211,
+          "ack_ts": null,
+          "frame_t": 43971.993834,
+          "class": "visible_correction",
+          "latency_ms": 43.623
+        },
+        {
+          "field_t": 43972.70524,
+          "ack_ts": null,
+          "frame_t": 43972.78142,
+          "class": "visible_insert",
+          "latency_ms": 76.18
+        },
+        {
+          "field_t": 43972.87101,
+          "ack_ts": null,
+          "frame_t": null,
+          "class": "unchanged",
+          "latency_ms": null
+        },
+        {
+          "field_t": 43973.171314,
+          "ack_ts": null,
+          "frame_t": 43973.218118,
+          "class": "visible_insert",
+          "latency_ms": 46.804
+        },
+        {
+          "field_t": 43973.337141,
+          "ack_ts": null,
+          "frame_t": 43973.355564,
+          "class": "visible_correction",
+          "latency_ms": 18.423
+        }
+      ]
+    }
+  ],
+  "stage_summary": {
+    "route": "pi-ghostty",
+    "arm": "plain",
+    "speech_to_useful_ms": {
+      "med": -11624.7,
+      "p95": -6558.0,
+      "n": 20
+    },
+    "speech_to_visible_ms": {
+      "med": -11618.9,
+      "p95": -6552.0,
+      "n": 20
+    },
+    "useful_to_ack_ms": null,
+    "ack_to_field_ms": null,
+    "useful_to_field_ms": {
+      "med": 3.5,
+      "p95": 8.4,
+      "n": 20
+    },
+    "ack_split": false,
+    "field_to_frame_ms": null,
+    "paint_qualified_ms": {
+      "med": 42.7,
+      "p95": 68.4,
+      "n": 20
+    },
+    "frame_match": "post-update-qualified",
+    "n_frame_exact": 0,
+    "n_frame_fallback": 20,
+    "frame_verified": true,
+    "frame_basis": "editor read-poll proxy (frame NOT verified)",
+    "n_replays": 20,
+    "n_updates": 1501,
+    "n_acks": 0,
+    "provenance_warnings": [],
+    "capped_replays": 0
+  }
+}

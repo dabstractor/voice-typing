@@ -105,6 +105,7 @@ sys.path.insert(0, str(REPO / "tests"))
 
 import g5_frame_observer as fo  # noqa: E402  (S5: pi route frame observer)
 import g5_timing_support as g5  # noqa: E402
+import g5_ab_compare as ab  # noqa: E402  (S6: paired-arm stage decomposition)
 
 GATE_ENV = "G5_TIMING_LAB"
 NO_DESKTOP_ENV = "G5_NO_DESKTOP"
@@ -190,6 +191,18 @@ def paced_feed(
         feed_fn(zeros, SAMPLE_RATE)
         k += 1
     return feed_start
+
+
+def _realtimestt_version() -> str:
+    """Installed RealtimeSTT dist version for the S6 comparability gate
+    (the paired A/B is only valid within one engine version); the literal
+    string 'unavailable' when metadata is missing — honest, never guessed."""
+    try:
+        import importlib.metadata
+
+        return importlib.metadata.version("RealtimeSTT")
+    except Exception:
+        return "unavailable"
 
 
 # --- field-log drain (bounded incremental read) --------------------------------
@@ -1445,6 +1458,15 @@ def run_inner(
                 "field_instrument": "GTK field G5_FIELD_TIMING change log"
                 if route_name == "im-gtk"
                 else "pi editor 10 ms read-poll",
+                # S6 paired-arm provenance (additive; the A/B comparability
+                # gate in g5_ab_compare.check_comparable reads these)
+                "realtimestt_version": _realtimestt_version(),
+                "replay_budget": g5.REPLAY_BUDGET,
+                "cadence_note": (
+                    "audio fed in real time: 32 ms chunks sleep-to-target "
+                    "on time.monotonic() + 1.6 s trailing zero-silence "
+                    "(paced_feed)"
+                ),
             },
         }
         frame_block = None
@@ -1464,6 +1486,24 @@ def run_inner(
                 {"clip": r.clip, "qualified": q}
                 for r, q in zip(records, per_record_qualified)
             ]
+        # S6 paired-arm stage decomposition (additive): speech→useful→ack→
+        # field→frame medians over this run's replays, computed HERE where
+        # records + S5's frame block live. frame_block is None on im-gtk;
+        # the field→frame stage then stays a labelled proxy (never a frame).
+        # S6 paired-arm stage decomposition (additive): speech→useful→ack→
+        # field→frame medians over this run's replays, computed HERE where
+        # records + S5's frame block live. frame_block is None on im-gtk;
+        # the field→frame stage then stays a labelled proxy (never a frame).
+        # frame_qualified stays in the record-ALIGNED list form so the
+        # fallback matcher never pools entries across same-clip replays.
+        artifact["stage_summary"] = ab.stage_summary(
+            records,
+            frame_observer=frame_block,
+            frame_qualified=[
+                {"clip": r.clip, "qualified": q}
+                for r, q in zip(records, per_record_qualified)
+            ],
+        )
         (root / f"artifact-{route_name}.json").write_text(
             json.dumps(artifact, indent=2)
         )

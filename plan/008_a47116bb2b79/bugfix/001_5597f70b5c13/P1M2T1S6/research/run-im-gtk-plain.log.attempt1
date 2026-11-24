@@ -1,0 +1,365 @@
+2026-11-24 05:24:10,715 INFO voice_typing.daemon: voice-typing daemon ready (not listening); models lazy (not yet loaded)
+2026-11-24 05:24:12,164 INFO httpx: HTTP Request: GET https://huggingface.co/api/agent-harnesses "HTTP/1.1 200 OK"
+2026-11-24 05:24:12,211 INFO httpx: HTTP Request: GET https://huggingface.co/api/models/Systran/faster-whisper-small.en/revision/main "HTTP/1.1 200 OK"
+2026-11-24 05:24:12,261 INFO httpx: HTTP Request: GET https://huggingface.co/api/models/Systran/faster-whisper-small.en/tree/d1d751a5f8271d482d14ca55d9e2deeebbae577f?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-11-24 05:24:12,306 INFO httpx: HTTP Request: HEAD https://huggingface.co/Systran/faster-whisper-small.en/resolve/d1d751a5f8271d482d14ca55d9e2deeebbae577f/config.json "HTTP/1.1 307 Temporary Redirect"
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-11-24 05:24:12,307 WARNING huggingface_hub.utils._http: Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-11-24 05:24:12,331 INFO httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Systran/faster-whisper-small.en/d1d751a5f8271d482d14ca55d9e2deeebbae577f/config.json "HTTP/1.1 200 OK"
+2026-11-24 05:24:12,351 INFO httpx: HTTP Request: HEAD https://huggingface.co/Systran/faster-whisper-small.en/resolve/d1d751a5f8271d482d14ca55d9e2deeebbae577f/vocabulary.txt "HTTP/1.1 307 Temporary Redirect"
+2026-11-24 05:24:12,352 INFO httpx: HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Systran/faster-whisper-small.en/d1d751a5f8271d482d14ca55d9e2deeebbae577f/config.json "HTTP/1.1 200 OK"
+2026-11-24 05:24:12,354 INFO httpx: HTTP Request: HEAD https://huggingface.co/Systran/faster-whisper-small.en/resolve/d1d751a5f8271d482d14ca55d9e2deeebbae577f/tokenizer.json "HTTP/1.1 307 Temporary Redirect"
+2026-11-24 05:24:12,374 INFO httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Systran/faster-whisper-small.en/d1d751a5f8271d482d14ca55d9e2deeebbae577f/vocabulary.txt "HTTP/1.1 200 OK"
+2026-11-24 05:24:12,374 INFO httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Systran/faster-whisper-small.en/d1d751a5f8271d482d14ca55d9e2deeebbae577f/tokenizer.json "HTTP/1.1 200 OK"
+2026-11-24 05:24:12,395 INFO httpx: HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Systran/faster-whisper-small.en/d1d751a5f8271d482d14ca55d9e2deeebbae577f/tokenizer.json "HTTP/1.1 200 OK"
+2026-11-24 05:24:12,403 INFO httpx: HTTP Request: GET https://huggingface.co/api/resolve-cache/models/Systran/faster-whisper-small.en/d1d751a5f8271d482d14ca55d9e2deeebbae577f/vocabulary.txt "HTTP/1.1 200 OK"
+2026-11-24 05:24:18,391 INFO faster_whisper: Processing audio with duration 00:01.000
+2026-11-24 05:24:18,412 INFO faster_whisper: VAD filter removed 00:01.000 of audio
+2026-11-24 05:24:18,413 INFO voice_typing.recorder_host: voice-typing context-prompt: dynamic executor armed (model=small.en device=cuda compute_type=float16)
+2026-11-24 05:24:18,883 INFO voice_typing.recorder_host: recorder host: child ready (pid=1454846, device=cuda)
+2026-11-24 05:24:18,884 INFO voice_typing.daemon: voice-typing device resolved: device=cuda compute_type=float16 model=small.en
+2026-11-24 05:24:18,884 INFO voice_typing.daemon: voice-typing models loaded (recorder-host child ready); resident
+2026-11-24 05:24:18,884 WARNING voice_typing.daemon: voice-typing cancel-listener: no readable keyboard devices; Backspace-cancel unavailable (voicectl cancel keybind still works)
+2026-11-24 05:24:18,906 INFO voice_typing.daemon: bulk delivery armed: gen=1 target=ImeTarget
+2026-11-24 05:24:19,676 INFO faster_whisper: Processing audio with duration 00:00.544
+2026-11-24 05:24:19,677 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:19,872 INFO faster_whisper: Processing audio with duration 00:00.736
+2026-11-24 05:24:19,873 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:19,884 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=5 total_bytes=5 t_ms=10.434
+2026-11-24 05:24:20,147 INFO faster_whisper: Processing audio with duration 00:00.992
+2026-11-24 05:24:20,148 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:20,158 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=15 total_bytes=20 t_ms=10.456
+2026-11-24 05:24:20,210 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=21 total_bytes=41 t_ms=10.268
+2026-11-24 05:24:20,297 INFO faster_whisper: Processing audio with duration 00:01.152
+2026-11-24 05:24:20,300 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:20,370 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=26 total_bytes=67 t_ms=10.481
+2026-11-24 05:24:20,448 INFO faster_whisper: Processing audio with duration 00:01.312
+2026-11-24 05:24:20,450 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:20,705 INFO faster_whisper: Processing audio with duration 00:01.568
+2026-11-24 05:24:20,707 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:20,716 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=18 total_bytes=85 t_ms=10.529
+2026-11-24 05:24:20,774 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=25 total_bytes=110 t_ms=10.469
+2026-11-24 05:24:20,856 INFO faster_whisper: Processing audio with duration 00:01.696
+2026-11-24 05:24:20,863 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:20,933 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=22 total_bytes=132 t_ms=10.302
+2026-11-24 05:24:21,007 INFO faster_whisper: Processing audio with duration 00:01.856
+2026-11-24 05:24:21,021 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:21,088 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=29 total_bytes=161 t_ms=10.28
+2026-11-24 05:24:21,157 INFO faster_whisper: Processing audio with duration 00:02.016
+2026-11-24 05:24:21,171 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:21,243 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=29 total_bytes=190 t_ms=10.203
+2026-11-24 05:24:21,307 INFO faster_whisper: Processing audio with duration 00:02.176
+2026-11-24 05:24:21,316 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:21,386 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=34 total_bytes=224 t_ms=10.458
+2026-11-24 05:24:21,457 INFO faster_whisper: Processing audio with duration 00:02.304
+2026-11-24 05:24:21,469 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:21,546 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=32 total_bytes=256 t_ms=10.262
+2026-11-24 05:24:21,608 INFO faster_whisper: Processing audio with duration 00:02.464
+2026-11-24 05:24:21,611 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:21,682 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=31 total_bytes=287 t_ms=10.369
+2026-11-24 05:24:21,759 INFO faster_whisper: Processing audio with duration 00:02.624
+2026-11-24 05:24:21,774 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:21,846 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=36 total_bytes=323 t_ms=10.265
+2026-11-24 05:24:21,909 INFO faster_whisper: Processing audio with duration 00:02.752
+2026-11-24 05:24:21,917 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:21,987 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=42 total_bytes=365 t_ms=10.288
+2026-11-24 05:24:22,059 INFO faster_whisper: Processing audio with duration 00:02.912
+2026-11-24 05:24:22,067 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:22,151 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=44 total_bytes=409 t_ms=10.243
+2026-11-24 05:24:22,210 INFO faster_whisper: Processing audio with duration 00:03.072
+2026-11-24 05:24:22,230 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:22,304 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=45 total_bytes=454 t_ms=10.273
+2026-11-24 05:24:22,360 INFO faster_whisper: Processing audio with duration 00:03.200
+2026-11-24 05:24:22,371 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:22,445 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=45 total_bytes=499 t_ms=10.238
+2026-11-24 05:24:22,510 INFO faster_whisper: Processing audio with duration 00:03.360
+2026-11-24 05:24:22,515 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:22,589 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=45 total_bytes=544 t_ms=10.253
+2026-11-24 05:24:22,662 INFO faster_whisper: Processing audio with duration 00:03.520
+2026-11-24 05:24:22,679 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:22,757 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=45 total_bytes=589 t_ms=10.232
+2026-11-24 05:24:22,812 INFO faster_whisper: Processing audio with duration 00:03.680
+2026-11-24 05:24:22,831 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:22,917 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=57 total_bytes=646 t_ms=10.235
+2026-11-24 05:24:22,962 INFO faster_whisper: Processing audio with duration 00:03.808
+2026-11-24 05:24:22,974 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:23,059 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=56 total_bytes=702 t_ms=10.269
+2026-11-24 05:24:23,113 INFO faster_whisper: Processing audio with duration 00:03.968
+2026-11-24 05:24:23,127 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:23,211 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=60 total_bytes=762 t_ms=10.253
+2026-11-24 05:24:23,263 INFO faster_whisper: Processing audio with duration 00:04.128
+2026-11-24 05:24:23,278 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:23,363 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=60 total_bytes=822 t_ms=10.209
+2026-11-24 05:24:23,414 INFO faster_whisper: Processing audio with duration 00:04.256
+2026-11-24 05:24:23,437 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:23,524 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=60 total_bytes=882 t_ms=10.242
+2026-11-24 05:24:23,564 INFO faster_whisper: Processing audio with duration 00:04.416
+2026-11-24 05:24:23,578 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:23,661 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=60 total_bytes=942 t_ms=10.375
+2026-11-24 05:24:23,715 INFO faster_whisper: Processing audio with duration 00:04.576
+2026-11-24 05:24:23,721 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:23,801 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=60 total_bytes=1002 t_ms=10.243
+2026-11-24 05:24:23,865 INFO faster_whisper: Processing audio with duration 00:04.704
+2026-11-24 05:24:23,871 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:23,954 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=60 total_bytes=1062 t_ms=10.425
+2026-11-24 05:24:24,016 INFO faster_whisper: Processing audio with duration 00:04.864
+2026-11-24 05:24:24,022 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:24,121 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=82 total_bytes=1144 t_ms=10.364
+2026-11-24 05:24:24,167 INFO faster_whisper: Processing audio with duration 00:05.024
+2026-11-24 05:24:24,176 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:24,278 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=83 total_bytes=1227 t_ms=10.438
+2026-11-24 05:24:24,318 INFO faster_whisper: Processing audio with duration 00:05.184
+2026-11-24 05:24:24,324 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:24,430 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=84 total_bytes=1311 t_ms=10.336
+2026-11-24 05:24:24,468 INFO faster_whisper: Processing audio with duration 00:05.312
+2026-11-24 05:24:24,474 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:24,580 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=89 total_bytes=1400 t_ms=10.439
+2026-11-24 05:24:24,619 INFO faster_whisper: Processing audio with duration 00:05.472
+2026-11-24 05:24:24,625 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:24,743 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=97 total_bytes=1497 t_ms=10.408
+2026-11-24 05:24:24,769 INFO faster_whisper: Processing audio with duration 00:05.632
+2026-11-24 05:24:24,776 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:24,881 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=98 total_bytes=1595 t_ms=10.416
+2026-11-24 05:24:24,920 INFO faster_whisper: Processing audio with duration 00:05.760
+2026-11-24 05:24:24,927 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:25,033 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=99 total_bytes=1694 t_ms=10.491
+2026-11-24 05:24:25,070 INFO faster_whisper: Processing audio with duration 00:05.920
+2026-11-24 05:24:25,079 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:25,192 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=98 total_bytes=1792 t_ms=10.376
+2026-11-24 05:24:25,221 INFO faster_whisper: Processing audio with duration 00:06.080
+2026-11-24 05:24:25,228 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:25,348 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=103 total_bytes=1895 t_ms=10.391
+2026-11-24 05:24:25,371 INFO faster_whisper: Processing audio with duration 00:06.240
+2026-11-24 05:24:25,380 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:25,553 INFO faster_whisper: Processing audio with duration 00:06.400
+2026-11-24 05:24:25,560 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:25,564 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=108 total_bytes=2003 t_ms=10.235
+2026-11-24 05:24:25,672 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=111 total_bytes=2114 t_ms=10.321
+2026-11-24 05:24:25,704 INFO faster_whisper: Processing audio with duration 00:06.560
+2026-11-24 05:24:25,711 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:25,827 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=114 total_bytes=2228 t_ms=10.194
+2026-11-24 05:24:25,855 INFO faster_whisper: Processing audio with duration 00:06.720
+2026-11-24 05:24:25,863 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:25,976 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=121 total_bytes=2349 t_ms=10.356
+2026-11-24 05:24:26,006 INFO faster_whisper: Processing audio with duration 00:06.848
+2026-11-24 05:24:26,013 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:26,127 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=121 total_bytes=2470 t_ms=10.27
+2026-11-24 05:24:26,156 INFO faster_whisper: Processing audio with duration 00:07.008
+2026-11-24 05:24:26,164 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:26,278 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=121 total_bytes=2591 t_ms=10.237
+2026-11-24 05:24:26,330 INFO faster_whisper: Processing audio with duration 00:07.200
+2026-11-24 05:24:26,339 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:26,452 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=121 total_bytes=2712 t_ms=10.198
+2026-11-24 05:24:26,480 INFO faster_whisper: Processing audio with duration 00:07.328
+2026-11-24 05:24:26,490 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:26,610 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=125 total_bytes=2837 t_ms=10.232
+2026-11-24 05:24:26,631 INFO faster_whisper: Processing audio with duration 00:07.488
+2026-11-24 05:24:26,657 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:26,781 INFO faster_whisper: Processing audio with duration 00:07.648
+2026-11-24 05:24:26,782 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=131 total_bytes=2968 t_ms=10.273
+2026-11-24 05:24:26,791 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:26,922 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=134 total_bytes=3102 t_ms=10.3
+2026-11-24 05:24:26,932 INFO faster_whisper: Processing audio with duration 00:07.776
+2026-11-24 05:24:26,941 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:27,080 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=132 total_bytes=3234 t_ms=10.35
+2026-11-24 05:24:27,082 INFO faster_whisper: Processing audio with duration 00:07.936
+2026-11-24 05:24:27,092 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:27,232 INFO faster_whisper: Processing audio with duration 00:08.096
+2026-11-24 05:24:27,241 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=139 total_bytes=3373 t_ms=10.43
+2026-11-24 05:24:27,242 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:27,370 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=138 total_bytes=3511 t_ms=10.378
+2026-11-24 05:24:27,382 INFO faster_whisper: Processing audio with duration 00:08.224
+2026-11-24 05:24:27,393 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:27,533 INFO faster_whisper: Processing audio with duration 00:08.384
+2026-11-24 05:24:27,538 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=141 total_bytes=3652 t_ms=10.429
+2026-11-24 05:24:27,542 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:27,684 INFO faster_whisper: Processing audio with duration 00:08.544
+2026-11-24 05:24:27,687 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=146 total_bytes=3798 t_ms=10.398
+2026-11-24 05:24:27,694 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:27,834 INFO faster_whisper: Processing audio with duration 00:08.704
+2026-11-24 05:24:27,839 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=150 total_bytes=3948 t_ms=10.385
+2026-11-24 05:24:27,844 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:27,985 INFO faster_whisper: Processing audio with duration 00:08.832
+2026-11-24 05:24:27,986 INFO voice_typing.ime.target: ime show applied: session=1 seq=1 before=0 text_bytes=157 total_bytes=4105 t_ms=10.402
+2026-11-24 05:24:27,996 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:28,119 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=154 bytes=154 truncated=0 store=1
+2026-11-24 05:24:28,120 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+2026-11-24 05:24:28,136 INFO faster_whisper: Processing audio with duration 00:08.992
+2026-11-24 05:24:28,146 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:28,287 INFO faster_whisper: Processing audio with duration 00:09.152
+2026-11-24 05:24:28,297 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+{"stage": "warm", "clip": "jargon", "device": {"device": "cuda", "compute_type": "float16", "model": "small.en", "context_prompt": true, "partial_callback": "on_realtime_transcription_update"}, "ready_kinds": {"partial": 55, "final": 1}, "partial_source_requested": "plain", "partial_callback_effective": "on_realtime_transcription_update"}
+2026-11-24 05:24:38,477 INFO voice_typing.daemon: bulk delivery armed: gen=2 target=ImeTarget
+2026-11-24 05:24:39,177 INFO faster_whisper: Processing audio with duration 00:00.576
+2026-11-24 05:24:39,178 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:39,328 INFO faster_whisper: Processing audio with duration 00:00.736
+2026-11-24 05:24:39,329 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:39,495 INFO faster_whisper: Processing audio with duration 00:00.896
+2026-11-24 05:24:39,497 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:24:39,506 INFO voice_typing.ime.target: ime show applied: session=2 seq=1 before=0 text_bytes=14 total_bytes=14 t_ms=10.378
+2026-11-24 05:24:39,569 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=21 bytes=21 truncated=0 store=2
+2026-11-24 05:24:39,570 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+2026-11-24 05:24:39,645 INFO faster_whisper: Processing audio with duration 00:01.056
+2026-11-24 05:24:39,647 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+{"stage": "replay", "n": 1, "clip": "jargon", "insertions": 0, "corrections": 0, "misses": 57, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:24:57,911 INFO voice_typing.daemon: bulk delivery armed: gen=3 target=ImeTarget
+2026-11-24 05:24:59,081 INFO faster_whisper: Processing audio with duration 00:01.024
+2026-11-24 05:24:59,085 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:24:59,234 INFO faster_whisper: Processing audio with duration 00:01.152
+2026-11-24 05:24:59,243 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:24:59,375 INFO voice_typing.ime.target: ime show applied: session=3 seq=1 before=0 text_bytes=12 total_bytes=12 t_ms=17.42
+2026-11-24 05:24:59,384 INFO faster_whisper: Processing audio with duration 00:01.312
+2026-11-24 05:24:59,394 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:24:59,552 INFO faster_whisper: Processing audio with duration 00:01.472
+2026-11-24 05:24:59,556 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=18 bytes=18 truncated=0 store=2
+2026-11-24 05:24:59,559 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:24:59,560 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 2, "clip": "natural", "insertions": 0, "corrections": 0, "misses": 105, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:25:12,946 INFO voice_typing.daemon: bulk delivery armed: gen=4 target=ImeTarget
+2026-11-24 05:25:13,812 INFO faster_whisper: Processing audio with duration 00:00.704
+2026-11-24 05:25:13,814 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:25:13,962 INFO faster_whisper: Processing audio with duration 00:00.864
+2026-11-24 05:25:13,965 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:25:14,093 INFO voice_typing.ime.target: ime show applied: session=4 seq=1 before=0 text_bytes=7 total_bytes=7 t_ms=10.433
+2026-11-24 05:25:14,113 INFO faster_whisper: Processing audio with duration 00:00.992
+2026-11-24 05:25:14,116 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:25:14,218 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=10 bytes=10 truncated=0 store=2
+2026-11-24 05:25:14,219 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 3, "clip": "noisy", "insertions": 0, "corrections": 0, "misses": 137, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:25:22,699 INFO voice_typing.daemon: bulk delivery armed: gen=5 target=ImeTarget
+2026-11-24 05:25:23,849 INFO faster_whisper: Processing audio with duration 00:01.056
+2026-11-24 05:25:23,852 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:25:24,000 INFO faster_whisper: Processing audio with duration 00:01.216
+2026-11-24 05:25:24,005 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:25:24,089 INFO voice_typing.ime.target: ime show applied: session=5 seq=1 before=0 text_bytes=4 total_bytes=4 t_ms=10.97
+2026-11-24 05:25:24,151 INFO faster_whisper: Processing audio with duration 00:01.344
+2026-11-24 05:25:24,157 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:25:24,224 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=13 bytes=13 truncated=0 store=2
+2026-11-24 05:25:24,228 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 4, "clip": "pauses", "insertions": 0, "corrections": 0, "misses": 174, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:25:37,986 INFO voice_typing.daemon: bulk delivery armed: gen=6 target=ImeTarget
+2026-11-24 05:25:38,749 INFO faster_whisper: Processing audio with duration 00:00.576
+2026-11-24 05:25:38,752 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:25:38,900 INFO faster_whisper: Processing audio with duration 00:00.736
+2026-11-24 05:25:38,902 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:25:39,200 INFO faster_whisper: Processing audio with duration 00:01.024
+2026-11-24 05:25:39,203 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:25:39,300 INFO voice_typing.ime.target: ime show applied: session=6 seq=1 before=0 text_bytes=20 total_bytes=20 t_ms=11.189
+2026-11-24 05:25:39,351 INFO faster_whisper: Processing audio with duration 00:01.184
+2026-11-24 05:25:39,354 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:25:39,412 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=20 bytes=20 truncated=0 store=2
+2026-11-24 05:25:39,413 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 5, "clip": "jargon", "insertions": 0, "corrections": 0, "misses": 230, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:25:57,473 INFO voice_typing.daemon: bulk delivery armed: gen=7 target=ImeTarget
+2026-11-24 05:25:58,678 INFO faster_whisper: Processing audio with duration 00:01.024
+2026-11-24 05:25:58,688 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:25:58,829 INFO faster_whisper: Processing audio with duration 00:01.152
+2026-11-24 05:25:58,832 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:25:58,954 INFO voice_typing.ime.target: ime show applied: session=7 seq=1 before=0 text_bytes=12 total_bytes=12 t_ms=10.658
+2026-11-24 05:25:58,979 INFO faster_whisper: Processing audio with duration 00:01.312
+2026-11-24 05:25:58,985 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:25:59,124 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=18 bytes=18 truncated=0 store=2
+2026-11-24 05:25:59,125 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+2026-11-24 05:25:59,130 INFO faster_whisper: Processing audio with duration 00:01.472
+2026-11-24 05:25:59,135 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+{"stage": "replay", "n": 6, "clip": "natural", "insertions": 0, "corrections": 0, "misses": 278, "events": 1, "updates": 4, "kinds": {"partial": 3, "final": 1}}
+2026-11-24 05:26:12,543 INFO voice_typing.daemon: bulk delivery armed: gen=8 target=ImeTarget
+2026-11-24 05:26:13,463 INFO faster_whisper: Processing audio with duration 00:00.736
+2026-11-24 05:26:13,470 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:26:13,614 INFO faster_whisper: Processing audio with duration 00:00.864
+2026-11-24 05:26:13,616 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:26:13,728 INFO voice_typing.ime.target: ime show applied: session=8 seq=1 before=0 text_bytes=7 total_bytes=7 t_ms=10.451
+2026-11-24 05:26:13,766 INFO faster_whisper: Processing audio with duration 00:01.024
+2026-11-24 05:26:13,768 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:26:13,831 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=10 bytes=10 truncated=0 store=2
+2026-11-24 05:26:13,834 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 7, "clip": "noisy", "insertions": 0, "corrections": 0, "misses": 310, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:26:22,352 INFO voice_typing.daemon: bulk delivery armed: gen=9 target=ImeTarget
+2026-11-24 05:26:23,631 INFO faster_whisper: Processing audio with duration 00:01.120
+2026-11-24 05:26:23,634 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:26:23,781 INFO faster_whisper: Processing audio with duration 00:01.248
+2026-11-24 05:26:23,784 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:26:24,556 INFO faster_whisper: Processing audio with duration 00:02.016
+2026-11-24 05:26:24,559 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:26:24,567 INFO voice_typing.ime.target: ime show applied: session=9 seq=1 before=0 text_bytes=14 total_bytes=14 t_ms=10.42
+2026-11-24 05:26:24,663 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=28 bytes=28 truncated=0 store=2
+2026-11-24 05:26:24,663 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 8, "clip": "pauses", "insertions": 0, "corrections": 0, "misses": 347, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:26:37,697 INFO voice_typing.daemon: bulk delivery armed: gen=10 target=ImeTarget
+2026-11-24 05:26:38,472 INFO faster_whisper: Processing audio with duration 00:00.576
+2026-11-24 05:26:38,473 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:26:38,622 INFO faster_whisper: Processing audio with duration 00:00.736
+2026-11-24 05:26:38,623 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:26:38,772 INFO faster_whisper: Processing audio with duration 00:00.864
+2026-11-24 05:26:38,774 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:26:38,835 INFO voice_typing.ime.target: ime show applied: session=10 seq=1 before=0 text_bytes=19 total_bytes=19 t_ms=10.285
+2026-11-24 05:26:38,922 INFO faster_whisper: Processing audio with duration 00:01.024
+2026-11-24 05:26:38,924 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:26:38,973 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=20 bytes=20 truncated=0 store=2
+2026-11-24 05:26:38,974 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 9, "clip": "jargon", "insertions": 0, "corrections": 0, "misses": 404, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:26:57,174 INFO voice_typing.daemon: bulk delivery armed: gen=11 target=ImeTarget
+2026-11-24 05:26:58,401 INFO faster_whisper: Processing audio with duration 00:01.024
+2026-11-24 05:26:58,402 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:26:58,551 INFO faster_whisper: Processing audio with duration 00:01.184
+2026-11-24 05:26:58,553 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:26:58,699 INFO voice_typing.ime.target: ime show applied: session=11 seq=1 before=0 text_bytes=15 total_bytes=15 t_ms=10.319
+2026-11-24 05:26:58,701 INFO faster_whisper: Processing audio with duration 00:01.312
+2026-11-24 05:26:58,703 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:26:58,828 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=18 bytes=18 truncated=0 store=2
+2026-11-24 05:26:58,828 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 10, "clip": "natural", "insertions": 0, "corrections": 0, "misses": 452, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:27:12,267 INFO voice_typing.daemon: bulk delivery armed: gen=12 target=ImeTarget
+2026-11-24 05:27:13,168 INFO faster_whisper: Processing audio with duration 00:00.736
+2026-11-24 05:27:13,170 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:27:13,318 INFO faster_whisper: Processing audio with duration 00:00.896
+2026-11-24 05:27:13,320 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:27:13,375 INFO voice_typing.ime.target: ime show applied: session=12 seq=1 before=0 text_bytes=10 total_bytes=10 t_ms=10.281
+2026-11-24 05:27:13,469 INFO faster_whisper: Processing audio with duration 00:01.056
+2026-11-24 05:27:13,472 INFO faster_whisper: VAD filter removed 00:00.112 of audio
+2026-11-24 05:27:13,538 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=10 bytes=10 truncated=0 store=2
+2026-11-24 05:27:13,539 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 11, "clip": "noisy", "insertions": 0, "corrections": 0, "misses": 484, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:27:22,010 INFO voice_typing.daemon: bulk delivery armed: gen=13 target=ImeTarget
+2026-11-24 05:27:23,252 INFO faster_whisper: Processing audio with duration 00:01.088
+2026-11-24 05:27:23,254 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:27:24,159 INFO faster_whisper: Processing audio with duration 00:01.984
+2026-11-24 05:27:24,164 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:27:24,293 INFO voice_typing.ime.target: ime show applied: session=13 seq=1 before=0 text_bytes=28 total_bytes=28 t_ms=10.711
+2026-11-24 05:27:24,309 INFO faster_whisper: Processing audio with duration 00:02.144
+2026-11-24 05:27:24,318 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+2026-11-24 05:27:24,450 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=30 bytes=30 truncated=0 store=2
+2026-11-24 05:27:24,451 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+2026-11-24 05:27:24,460 INFO faster_whisper: Processing audio with duration 00:02.272
+2026-11-24 05:27:24,463 INFO faster_whisper: VAD filter removed 00:00.400 of audio
+{"stage": "replay", "n": 12, "clip": "pauses", "insertions": 0, "corrections": 0, "misses": 518, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:27:37,429 INFO voice_typing.daemon: bulk delivery armed: gen=14 target=ImeTarget
+2026-11-24 05:27:38,190 INFO faster_whisper: Processing audio with duration 00:00.576
+2026-11-24 05:27:38,192 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:27:38,341 INFO faster_whisper: Processing audio with duration 00:00.736
+2026-11-24 05:27:38,343 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:27:38,491 INFO faster_whisper: Processing audio with duration 00:00.864
+2026-11-24 05:27:38,493 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-11-24 05:27:38,498 INFO voice_typing.ime.target: ime show applied: session=14 seq=1 before=0 text_bytes=8 total_bytes=8 t_ms=10.522
+2026-11-24 05:27:38,588 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=14 bytes=14 truncated=0 store=2
+2026-11-24 05:27:38,589 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+2026-11-24 05:27:38,641 INFO faster_whisper: Processing audio with duration 00:01.024
+2026-11-24 05:27:38,643 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+{"stage": "replay", "n": 13, "clip": "jargon", "insertions": 1, "corrections": 0, "misses": 575, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:27:57,152 INFO voice_typing.daemon: bulk delivery armed: gen=15 target=ImeTarget
+2026-11-24 05:27:58,232 INFO faster_whisper: Processing audio with duration 00:01.024
+2026-11-24 05:27:58,234 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:27:58,382 INFO faster_whisper: Processing audio with duration 00:01.184
+2026-11-24 05:27:58,389 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:27:58,605 INFO faster_whisper: Processing audio with duration 00:01.408
+2026-11-24 05:27:58,609 INFO faster_whisper: VAD filter removed 00:00.432 of audio
+2026-11-24 05:27:58,616 INFO voice_typing.ime.target: ime show applied: session=15 seq=1 before=0 text_bytes=15 total_bytes=15 t_ms=10.456
+2026-11-24 05:27:58,728 INFO voice_typing.daemon: session recovery: session completed finals=0 tail_chars=18 bytes=18 truncated=0 store=2
+2026-11-24 05:27:58,731 INFO voice_typing.daemon: bulk delivery fault: reason=refused (recording disarmed)
+{"stage": "replay", "n": 14, "clip": "natural", "insertions": 1, "corrections": 0, "misses": 623, "events": 1, "updates": 3, "kinds": {"partial": 2, "final": 1}}
+2026-11-24 05:28:14,206 INFO voice_typing.daemon: bulk delivery start failed: gen=16 reason=ime not activated
+{"stage": "harness", "pass": false, "route": "im-gtk", "error": "RuntimeError('bulk delivery never re-armed')"}
+RealtimeSTT shutting down
+2026-11-24 05:30:42,333 INFO voice_typing.daemon: shutdown requested; run() loop exiting
+{"stage": "scratch-kept", "root": "/tmp/g5-timing-lab-3qeorztg"}
+EXIT_CODE=1
