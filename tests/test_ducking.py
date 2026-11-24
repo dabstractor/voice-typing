@@ -263,6 +263,7 @@ def test_from_config_reads_audio_section():
 # MUST-NOT-RELEASE control. A _FakeDucker rides in through the new ducker=
 # ctor seam (same injection pattern as backend=/mic_prober=/key_listener=).
 
+import subprocess  # noqa: E402 (S3: the wiring test's media-transport tripwire)
 import threading  # noqa: E402 (lifecycle section imports; module top owns the core tests)
 import time as _time  # noqa: E402
 
@@ -481,6 +482,53 @@ def test_ducking_default_factory_builds_by_mode():
     assert isinstance(dv, AsyncDucker)
     assert isinstance(dv._ducker._backend, WpctlVolumeBackend)
     assert dv._ducker._volume_pct == 25.0
+
+
+def test_ducking_default_wiring_actuates_engage_release_fake_only(monkeypatch):
+    """P1.M1.T1.S3 (BUG-001): the DEFAULT config (duck_mode='mpris', unmutated) wires a ducker
+    through the REAL factory lookup — patched to return a _FakeDucker — and arm/stop actuate
+    engage/release with ZERO media-transport attempts.
+
+    Distinct from _make_ducking_daemon (the ducker= ctor seam SKIPS _build_default_ducker) and
+    from test_ducking_default_factory_builds_by_mode (real stacks, construction-pure, never
+    dispatched): this is the one default-config constructor-to-_FakeDucker ACTUATION regression.
+    The subprocess tripwire proves the negative (no busctl/wpctl can run; it records BEFORE
+    raising, so a raise swallowed in a leaked worker still leaves ledger evidence); the thread
+    check proves no 'vt-ducking'/'vt-duck-heal' worker exists. Bounded: the fake records at the
+    seams synchronously, so the whole cycle completes before the mocks unwind.
+    """
+    fake = _FakeDucker()
+    media_attempts: list[tuple[str, ...]] = []
+
+    def _tripwire_run(argv, *args, **kwargs):
+        media_attempts.append(tuple(str(a) for a in argv))
+        raise AssertionError(
+            f"media transport invoked under fake-only wiring: {tuple(argv)[:4]}"
+        )
+
+    monkeypatch.setattr(subprocess, "run", _tripwire_run)
+    monkeypatch.setattr(
+        daemon, "_build_default_ducker", lambda cfg: fake, raising=True
+    )
+    cfg = VoiceTypingConfig()  # DEFAULT — duck_mode='mpris' (the shipped pin; never mutated)
+    fb = _DuckingFakeFeedback()
+    d = daemon.VoiceTypingDaemon(
+        cfg,
+        fb,
+        recorder=_StubRecorder(),
+        backend=_CtlFakeBackend(),
+        mic_prober=_ok_probe,
+        # NO ducker= — the factory lookup is the path under test
+    )
+    assert d._ducker is fake  # the ctor wired the (faked) factory result
+    d.start()
+    d.stop()
+    assert fake.calls == ["engage", "release"]
+    assert fb.ducked_states == [True, False]
+    assert media_attempts == []  # zero busctl/wpctl — the tripwire never fired
+    assert not any(
+        t.name in ("vt-ducking", "vt-duck-heal") for t in threading.enumerate()
+    )
 
 
 # ===========================================================================

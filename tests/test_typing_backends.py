@@ -41,6 +41,13 @@ from voice_typing.typing_backends import (
 # ---------------------------------------------------------------------------
 
 
+# P1.M1.T1.S3 (BUG-001): any argv[0] in _MEDIA_TRANSPORTS reaching this file's recorder is BY
+# DEFINITION a leaked media call (BUG-001's order-dependent busctl pollution). The recorder
+# trips loudly on it; the wtype victim tests below additionally scan the ledger (a leaked
+# worker swallows in-thread raises, so the tripwire alone is not the guard — two layers).
+_MEDIA_TRANSPORTS = ("busctl", "wpctl")
+
+
 class _Recorder:
     """Records subprocess.run(argv, **kwargs) calls and never touches the OS.
 
@@ -60,6 +67,13 @@ class _Recorder:
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def fake_run(argv, **kwargs):
             self.calls.append((tuple(argv), dict(kwargs)))
+            if argv and argv[0] in _MEDIA_TRANSPORTS:
+                # Recorded FIRST (above), then raised: a raise swallowed inside a leaked
+                # worker thread still leaves ledger evidence for the victims' ledger scan.
+                raise AssertionError(
+                    f"media transport {argv[0]!r} invoked in a typing-backend test "
+                    "(BUG-001 leak — the fix is isolation, never filtering)"
+                )
             exc = self._raises.get(argv[0])
             if exc is not None:
                 raise exc
@@ -89,12 +103,14 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
 def test_wtype_invokes_exact_argv(recorder):
     WtypeBackend().type_text("hello world")
     assert recorder.argvs == [("wtype", "-d", "12", "--", "hello world")]
+    assert not any(a[0] in ("busctl", "wpctl") for a in recorder.argvs)  # zero media leaks (S3/BUG-001)
 
 
 def test_wtype_passes_check_true(recorder):
     # check=True turns nonzero exit into CalledProcessError -> the fallback can catch it.
     WtypeBackend().type_text("hi")
     assert recorder.calls[0][1].get("check") is True
+    assert not any(a[0] in ("busctl", "wpctl") for a in recorder.argvs)  # zero media leaks (S3/BUG-001)
 
 
 def test_wtype_text_starting_with_dash_stays_literal(recorder):
