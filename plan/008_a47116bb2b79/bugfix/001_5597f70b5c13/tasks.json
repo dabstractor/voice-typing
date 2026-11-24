@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Hermetic tests and complete baseline classification",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Close BUG-001, BUG-003 and BUG-004; establish safe pre-bulk CPU evidence for the subsequent daemon changes.",
           "tasks": [
             {
@@ -102,14 +102,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Classify the daemon CPU suite in G1",
-              "status": "Researching",
+              "status": "Complete",
               "description": "BUG-004: add the previously omitted named daemon failure inventory and an accurate future rerun protocol.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Record the named 20-case daemon baseline and correct test guidance",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2",
@@ -146,7 +146,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Select exactly one callback across the recorder spawn boundary",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S1"

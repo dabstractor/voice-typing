@@ -4,9 +4,12 @@ Code-state **`2335a9e`** at HEAD **`d78ff95`** (plan-docs-only on top; `git diff
 -- voice_typing/ tests/ config.toml` EMPTY before the runs). Recorded **2026-11-23**.
 Methodology (parity with the research record): `timeout 300 /home/dustin/.local/bin/uv run
 pytest <file> -q --tb=line`, **one file per call**, bash-tool timeout ≥ 360. No daemon, no
-voicectl, no E2E scripts, no CUDA suites. The 5 non-G1 files (`test_feed_audio`,
-`test_daemon`, `test_recorder_host`, `test_cuda_check` — contract-forbidden hang vectors —
-and `test_systemd_unit`, not in the G1 set) were NOT run.
+voicectl, no E2E scripts, no CUDA suites. The 4 contract-forbidden hang vectors (`test_feed_audio`,
+`test_recorder_host`, `test_cuda_check` — real CUDA/model suites — and `test_systemd_unit`, not in
+the G1 set; reclassified/pinned by P1.M1.T2.S1) were NOT run. `test_daemon` was ALSO not run here:
+misclassified at record time as a CUDA hang vector, it is actually **CPU-only** (~16 s, hermetic
+post-T1) — its named 20-case baseline + set-diff rule live in the **G1 CPU addendum** at the end of
+this file (BUG-004).
 
 ## Results (15 suites)
 
@@ -265,3 +268,80 @@ is now record F, S1 P, S2 F/F/F, S2-spot P → **4F / 2P over 6 observations**. 
 classification is unchanged; single observations of g must never be read as a fix or a break.
 `test_a_delta_cadence` / `test_b_commit_rewind_exact` / `test_f_user_key_freeze` are now
 red across 4 consecutive observations each — stable-red conclusion strengthened.
+
+---
+
+## G1 CPU addendum — tests/test_daemon.py (recorded 2026-11-23, code state `6ca9fee`)
+
+Reclassification (BUG-004): `tests/test_daemon.py` was misclassified as a CUDA hang vector and
+excluded from the G1 baseline, leaving its legacy reds classified nowhere. It is CPU-only (file
+header: "NO real RealtimeSTT / NO model load / NO CUDA"), hermetic post-T1 (fake ASR/mic/IM/
+typing/media wiring — no live busctl against the desktop), 5,409 lines, **~16 s** under the
+two-timeout discipline (`timeout 500` inner + bash-tool timeout ≥ 560). This addendum records its
+named failure inventory.
+
+### Provenance — supplied comparison vs fresh capture (counts are NEVER identity evidence)
+
+| source | code state | result | note |
+|---|---|---|---|
+| SUPPLIED (audit, PRD h3.3) | base `2335a9e` | 211P / 21F | historical; the unisolated base worktree is contract-forbidden and was NOT re-run |
+| SUPPLIED (audit, PRD h3.3) | HEAD `573d78f` | 217P / 20F | HEAD failure set = strict subset of base (fixed `test_status_snapshot_keys_and_cuda_values`; zero introduced) |
+| FRESH (this addendum, 2026-11-23) | `6ca9fee` (post-T1.S1/S2/S3 + T2.S1) | 218P / 20F | 16.88 s CPU-only; failure-NAME set IDENTICAL to the research capture (zero new, zero gone); pass growth vs `573d78f` = landed tests, not identity change |
+
+### The named 20-case inventory (fresh capture 2026-11-23 at `6ca9fee`; one-liners from live `--tb=line`)
+
+1. `tests/test_daemon.py::test_cfg_to_kwargs_cuda_path` (:178) — `assert 'float16' == 'float32'`: compute_type
+    expectation — **NOT separator-shaped**.
+2. `tests/test_daemon.py::test_cfg_to_kwargs_calls_resolve_with_cfg_defaults` (:326) — `assert 'float16' ==
+    'float32'`: same compute-type facet.
+3. `tests/test_daemon.py::test_on_final_happy_path_appends_space` (:748) — `['hello world '] == ['hello world',
+    ' ']`: separator-class — one glued `text + ' '` call vs final-then-space as two ops.
+4. `tests/test_daemon.py::test_on_final_typing_raises_is_caught_and_record_still_happens` (:774) — `['boom '] ==
+    []`: separator-class — a failing final must record nothing; the glued space rides in the
+    typed payload.
+5. `tests/test_daemon.py::test_on_final_clears_final_pending` (:860) — `['hello world '] == ['hello world', ' ']` —
+    separator-class.
+6. `tests/test_daemon.py::test_stop_within_session_stray_partial_after_final_disarms_immediately` (:935) —
+    `['hello world '] == ['hello world', ' ']` — separator-class.
+7. `tests/test_daemon.py::test_on_final_lock_held_across_type_text` (:1093) — `['hello world '] == ['hello world',
+    ' ']` — separator-class.
+8. `tests/test_daemon.py::test_on_final_serializes_two_concurrent_callbacks` (:1139) — `['alpha ', 'bravo '] ==
+    [' ', ' ', 'alpha', 'bravo']` — separator-class (separator expected as its own op per
+    final).
+9. `tests/test_daemon.py::test_on_final_emits_structured_latency_line` (:1877) — `(['hello world '] == ['hello
+    world', ' ']` — separator-class.
+10. `tests/test_daemon.py::test_resolved_device_unaffected_by_cuda_check_failure` (:2183) — `assert 'float16' ==
+    'float32'`: compute-type facet — **NOT separator-shaped**.
+11. `tests/test_daemon.py::test_status_device_reseeded_not_stale_after_child_death` (:4296) — `assert ('cuda' ==
+    'cuda' …`: multi-field status/reseed tuple — **NOT separator-shaped**.
+12. `tests/test_daemon.py::test_status_device_reseeded_not_stale_after_idle_unload` (:4341) — `assert ('cuda' ==
+    'cuda' …`: same multi-field reseed facet.
+13. `tests/test_daemon.py::test_cancel_suppression_drops_racing_final_and_clears_on_sentinel` (:4613) — `['fresh
+    sentence '] == ['fresh sentence', ' ']` — separator-class.
+14. `tests/test_daemon.py::test_on_final_streaming_commit_types_via_engine` (:4799) — `['hello wor', 'ld '] ==
+    ['hello wor', 'ld', ' ']` — separator-class.
+15. `tests/test_daemon.py::test_on_final_streaming_revise_minimal_diff` (:4812) — `[…, 'there '] == […, 'there',
+    ' ']` — separator-class.
+16. `tests/test_daemon.py::test_on_final_streaming_pushes_context_prompt_to_host` (:4999) — `['First one. sec',
+    'ond '] == ['First one. sec', 'ond', ' ']` — separator-class.
+17. `tests/test_daemon.py::test_refresh_context_prompt_missing_host_seam_is_silent_noop` (:5013) — `['hello world
+    '] == ['hello world', ' ']` — separator-class.
+18. `tests/test_daemon.py::test_on_final_user_keypress_frozen_commit_absorbs_then_unfreezes` (:5086) — `['hello
+    wor'] == ['hello wor', ' ']` — separator-class (frozen commit's separator).
+19. `tests/test_daemon.py::test_lost_sentinel_self_heals_after_timeout` (:5226) — `['fresh sentence '] == ['fresh
+    sentence', ' ']` — separator-class.
+20. `tests/test_daemon.py::test_sentinel_consume_clears_suppress_since` (:5242) — `['next sentence '] == ['next
+    sentence', ' ']` — separator-class.
+
+Facet summary: **15/20** are the legacy lazy-separator class (the suite encodes the EAGER
+contract — separator as its own type op / final and space as two calls — while the daemon glues
+`text + ' '` into one call); **3** are compute-type expectation drift (`'float16' == 'float32'`);
+**2** are multi-field status/reseed tuple asserts. Classification verdicts remain the owning
+tasks' — this addendum records reasons, not verdicts.
+
+### Future set-diff rule (operative)
+
+Any sweep touching daemon code runs the file bounded and diffs the FAILED-name set against this
+inventory: **a NEW name is a new failure — investigate before trusting the change; a GONE name is
+a fix — update this addendum (dated).** Pass counts are never identity evidence (passers grow as
+tests land). Consumers: P1.M2.T1.S1, P1.M2.T2.S3, P1.M2.T3.S2.
