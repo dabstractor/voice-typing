@@ -173,3 +173,89 @@ control socket + state file; the recorder child runs `use_microphone=False`
 live sessions; scratch confined to ONE bounded TemporaryDirectory with killpg
 teardown of OWN session groups; field logs capped (2000 lines); only the
 alignment fixtures (`*.words.json`) and this report enter version control.
+
+## Measurement method — changed-span attribution (P1.M2.T1.S3)
+
+Appended after the historical content above; every number above predates
+this method and is NOT recomputed. This section is prose and bullets only —
+deliberately no verdict-shaped table — because
+tests/g6_assessment.py:parse_route_verdicts scans pipe tables and overwrites
+duplicate route keys; the verdict table at the top of this file must remain
+the single parser-compatible current one.
+
+- Truth and units. Field change events (FieldEvent) remain the ONLY
+  visibility truth; update-ready stamps are checkpoints. A target ACK
+  (ReadyEvent.ack_ts) is recorded for cross-checks and is never a frame: no
+  sample may be credited merely because the target ACKs (R.5 value 3).
+- Changed frames. A frame is a field snapshot that differs from the previous
+  one; its added content is the changed span between two independent
+  snapshots (changed_spans over the shared normalized token space). The
+  rolling previous snapshot is seeded with the replay's anchor text, so the
+  pre-replay field state is never lost (defect fix: the old window matcher
+  started from an empty string and could lose the prior snapshot).
+- Observation labels (one per ReadyEvent, from attribute_updates):
+  - matched — a changed frame charged to this update by content (the frame's
+    added spans equal the update's expected added content); one FrameSample
+    (ready-to-frame delta) per matched update.
+  - missing — dispatched but never painted before end of record; counted,
+    never a latency sample, never a 0 ms credit (Gotcha 7 lineage).
+  - superseded — its span was never required to paint: explicit controller
+    disposition (coalesced, dropped, replaced) or, when (gen, utterance)
+    identity is present, a later same-identity update whose text subsumes
+    the older's expected added content as a proper normalized prefix. A
+    coalesced-away update is superseded, NOT missing.
+  - no_op — the update announced nothing new over the observed field state
+    (an identical callback); a raw-changed, content-identical frame in its
+    watch is a zero-diff violation. The delayed-frame carve-out: a frame
+    matching an OLDER pending update's span charges the older update, so the
+    newer identical callback generates no false zero-diff violation (defect
+    fix: the old next-callback windowing billed a late frame to the newer
+    identical callback).
+  - ambiguous — the same normalized token added in multiple distinct spans
+    of one frame while several pending updates match: genuinely
+    indeterminate; counted (updates_ambiguous, words_ambiguous) and excluded
+    from latency samples — never guessed.
+  - unpaired frames — a changed frame no pending update claims (before the
+    first update or after all settled): counted in frames_unpaired, never a
+    fast sample. An unobserved edit does not become a fast event.
+- Attribution rule. Frames charge to the OLDEST PENDING update whose expected
+  added content matches (content matching over normalized tokens, bounded
+  look-back) — never by window ownership. A burst's single frame may satisfy
+  several pending updates whose combined span it paints (all matched, one
+  frame ts). Expected added content = the update's normalized tokens minus
+  the multiset already observed at its dispatch, so append-only and rewrite
+  routes reduce to the same comparison space.
+- Visibility. resolve_visibility is now exactly the .ts projection of
+  resolve_visibility_detailed: changed-span alignment against independent
+  field snapshots with write-once first appearance (a rewrite or re-add
+  never un-sees a word and never overstates its delay), the anchor
+  token-position floor (a previous replay's copy can never match), the
+  bounded window_fwd=12 / window_back=24 scan, reset handling (a revert
+  to/below the anchor baseline adds nothing: no phantom misses, no
+  un-seeing; re-added copies resolve ordered-or-ambiguous), and ambiguity as
+  the bounded honest answer on dense repeat/rewrite interleavings.
+- Producer vs daemon. Producer-ready (before IPC) and daemon-receipt are
+  separate checkpoints (R.7): only daemon-stage events pair frames; a
+  producer event is paired to its daemon twin by (gen, utterance, seq) and
+  its observation carries the producer-to-daemon relay delta in its detail;
+  an unpaired producer event is a relay loss (missing) — which is how late
+  upstream partials are distinguished from loss during coalescing and from
+  late field visibility.
+- Clock and coverage. A record whose heartbeat pairs fail heartbeat_ok, or
+  that hit the field-log cap, increments clock_failures / cap_failures and
+  appends a provenance warning: unverifiable metrics are reported, never
+  imputed as a pass and never averaged away; the flag alone does not flip
+  the verdict — the miss/count floors already fail honestly when samples
+  are lost.
+- Counters (additive on RouteMetrics and the JSON verdict row; one trailing
+  markdown column, with route and verdict kept as the first two columns):
+  updates_total, updates_matched, updates_missing, updates_superseded,
+  updates_no_op, updates_ambiguous, frames_unpaired, words_ambiguous,
+  clock_failures, cap_failures, provenance_warnings.
+- Limits. The engine is pure stdlib and deterministic (no wall clock). The
+  pi-ghostty field read is polled (about 10 ms) and is NOT actual Ghostty
+  rendering, so frame-specific numbers remain instrument-scoped. Relay
+  identity and disposition are used only where the plumbing records them:
+  legacy tuple streams behave exactly as before this method (the 14
+  pre-existing tests in tests/test_g5_timing_support.py are unchanged and
+  green — the historical-comparability contract).

@@ -411,3 +411,340 @@ def test_resolve_visibility_survives_shrinking_correction():
     # epsilon WAS visible at +1.0 before the correction retracted it — the
     # first-visibility law keeps that time (a retraction is not un-seeing).
     assert vis[4] == FEED + 1.0
+
+
+# =============================================================================
+# P1.M2.T1.S3 — ADDITIVE SECTION: changed-span attribution (synthetic only).
+# Everything below is new-contract coverage; the 14 tests above are the
+# historical-comparability contract and were NOT edited.
+# =============================================================================
+
+import json
+
+
+def _labels(attr):
+    """Observation labels in ReadyEvent order (the calibrated taxonomy)."""
+    return [o.label for o in attr.observations]
+
+
+def mk_ready(rows, gen=None, utt=None, stage="daemon", seq_start=None):
+    """ReadyEvent stream from (offset, text, kind) rows + optional identity.
+
+    seq (when seq_start is given) is stamped per row, mirroring the daemon's
+    per-(gen, utterance) counter (_bulk_next_seq)."""
+    return [
+        g5.ReadyEvent(
+            t=FEED + off,
+            text=text,
+            kind=kind,
+            stage=stage,
+            gen=gen,
+            utt=utt,
+            seq=(seq_start + i) if seq_start is not None else None,
+        )
+        for i, (off, text, kind) in enumerate(rows)
+    ]
+
+
+# S3-1. a dispatched update the field never paints is MISSING, never a sample --
+
+
+def test_attribution_lost_frame_is_missing():
+    u = mk_ready([(1.0, "alpha beta", "partial")])
+    attr = g5.attribute_updates(u, [])  # dispatched; no field change at all
+    assert _labels(attr) == ["missing"]
+    assert attr.samples == [] and attr.violations == 0
+    assert attr.frames_unpaired == 0
+    m = g5.aggregate([mk_record(update_ready=u)], route="synthetic")
+    assert m.updates_total == 1 and m.updates_missing == 1
+    assert m.updates_matched == 0
+
+
+# S3-2. a rewrite keeps FIRST visibility; retraction/re-add paints honestly ----
+
+
+def test_span_visibility_revision_keeps_first_appearance():
+    words = mk_words(["alpha", "beta"])
+    events = mk_events([1.5, 2.5, 3.5], ["alpha beta", "alpha", "alpha beta"])
+    vis = g5.resolve_visibility(words, events)
+    assert vis == [FEED + 1.5, FEED + 1.5]  # first paint, NOT the late re-add
+    det = g5.resolve_visibility_detailed(words, events)
+    assert det.ts == vis and det.ambiguous == []
+    u = mk_ready(
+        [
+            (1.0, "alpha beta", "partial"),
+            (2.0, "alpha", "partial"),  # retraction
+            (3.0, "alpha beta", "final"),  # re-add
+        ]
+    )
+    attr = g5.attribute_updates(u, events)
+    assert _labels(attr) == ["matched", "matched", "matched"]
+    assert [round(s.delta_ms) for s in attr.samples] == [500, 500, 500]
+    assert [s.cls for s in attr.samples] == ["insert", "correct", "insert"]
+
+
+# S3-3. one token added in multiple AddedSpans => word ambiguity, no guess -----
+
+
+def test_span_visibility_repeat_token_multi_span_ambiguous():
+    words = mk_words(["dup", "dup"])
+    events = mk_events([1.0, 2.0], ["x y", "x dup y dup"])
+    det = g5.resolve_visibility_detailed(words, events)
+    assert det.ts == [None, None]  # no guessed ts
+    assert det.ambiguous == [0, 1]
+    m = g5.aggregate([mk_record(words=words, field_events=events)])
+    assert m.words_ambiguous == 2
+
+
+def test_attribution_repeat_paint_multi_span_is_ambiguous():
+    u = [
+        g5.ReadyEvent(t=FEED + 1.0, text="dup", kind="partial", gen=7, utt=7, seq=1),
+        g5.ReadyEvent(t=FEED + 1.05, text="dup", kind="partial", gen=7, utt=7, seq=2),
+    ]
+    events = mk_events([0.5, 1.5], ["x y", "x dup y dup"])
+    attr = g5.attribute_updates(u, events)
+    assert _labels(attr) == ["ambiguous", "ambiguous"]
+    assert attr.samples == [] and attr.violations == 0
+    assert attr.frames_unpaired == 1  # the pre-update "x y" frame
+    m = g5.aggregate([mk_record(update_ready=u, field_events=events)])
+    assert m.updates_ambiguous == 2 and m.updates_matched == 0
+    assert m.frames_unpaired == 1
+
+
+# S3-4a. burst + one late frame: charged to the OLDEST pending update; the
+# newer identical callback gets NO false zero-diff violation (carve-out) ------
+
+
+def test_attribution_burst_late_frame_charged_to_oldest():
+    u = [
+        g5.ReadyEvent(t=FEED + 1.0, text="alpha", kind="partial", gen=1, utt=1, seq=1),
+        g5.ReadyEvent(t=FEED + 1.05, text="alpha", kind="partial", gen=1, utt=1, seq=2),
+        g5.ReadyEvent(t=FEED + 1.1, text="alpha beta", kind="final", gen=1, utt=1, seq=3),
+    ]
+    events = mk_events([1.5], ["alpha beta"])  # ONE late frame paints everything
+    attr = g5.attribute_updates(u, events)
+    assert _labels(attr) == ["matched", "superseded", "no_op"]
+    assert len(attr.samples) == 1
+    assert round(attr.samples[0].delta_ms) == 500  # the OLDEST update's latency
+    assert attr.violations == 0
+    m = g5.aggregate([mk_record(update_ready=u, field_events=events)])
+    assert m.updates_matched == 1
+    assert m.updates_superseded == 1 and m.updates_no_op == 1
+    assert m.unchanged_zero_edit_ok is True
+
+
+# S3-4b. a burst frame may paint several pending updates' combined span -------
+
+
+def test_attribution_burst_combined_span_all_matched():
+    u = mk_ready([(1.0, "a b", "partial"), (1.02, "c d", "partial")])
+    events = mk_events([1.5], ["a b c d"])
+    attr = g5.attribute_updates(u, events)
+    assert _labels(attr) == ["matched", "matched"]
+    assert len(attr.samples) == 2
+    assert [round(s.delta_ms) for s in attr.samples] == [500, 480]  # one frame ts
+
+
+# S3-5. superseded: explicit (controller disposition) and inferred (identity) --
+
+
+def test_attribution_superseded_explicit_and_inferred():
+    # explicit: the controller recorded the coalesce
+    u0 = g5.ReadyEvent(t=FEED + 1.0, text="alpha", kind="partial", disposition="coalesced")
+    u1 = g5.ReadyEvent(t=FEED + 1.2, text="alpha beta", kind="partial")
+    attr = g5.attribute_updates([u0, u1], mk_events([1.5], ["alpha beta"]))
+    assert _labels(attr) == ["superseded", "matched"]
+    assert len(attr.samples) == 1
+
+    # inferred: same (gen,utt); the later text subsumes the older's new content
+    # as a normalized prefix => coalesced-away, counted, NOT missing
+    ua = g5.ReadyEvent(t=FEED + 1.0, text="alpha", kind="partial", gen=1, utt=1, seq=1)
+    ub = g5.ReadyEvent(t=FEED + 1.2, text="alpha beta", kind="partial", gen=1, utt=1, seq=2)
+    attr2 = g5.attribute_updates([ua, ub], [])
+    assert _labels(attr2) == ["superseded", "missing"]
+    assert attr2.samples == []
+
+    # identity differs => the inference must NOT fire (honest default: missing)
+    uc = g5.ReadyEvent(t=FEED + 1.0, text="alpha", kind="partial", gen=1, utt=1)
+    ud = g5.ReadyEvent(t=FEED + 1.2, text="alpha beta", kind="partial", gen=2, utt=1)
+    attr3 = g5.attribute_updates([uc, ud], [])
+    assert _labels(attr3) == ["missing", "missing"]
+
+
+# S3-6. unpaired frames (before the first update / after all settled) ----------
+
+
+def test_attribution_unpaired_frames_never_samples():
+    u = mk_ready([(1.0, "alpha", "partial")])
+    events = mk_events([0.5, 1.5, 2.5], ["zzz", "alpha", "alpha beta"])
+    attr = g5.attribute_updates(u, events)
+    assert attr.frames_unpaired == 2
+    assert _labels(attr) == ["matched"]
+    assert len(attr.samples) == 1 and round(attr.samples[0].delta_ms) == 500
+    m = g5.aggregate([mk_record(update_ready=u, field_events=events)])
+    assert m.frames_unpaired == 2 and m.updates_matched == 1
+
+
+# S3-7. anchor text + resets: never un-see, no phantom misses, anchored text
+# never counts as first appearance ----------------------------------------------
+
+
+def test_span_anchor_reset_and_first_visibility():
+    anchor_text = "seed words"
+    words = mk_words(["alpha", "beta"])
+    events = [
+        g5.FieldEvent(t=FEED + 1.5, text="seed words alpha beta"),
+        g5.FieldEvent(t=FEED + 2.0, text="seed words"),  # reset to the baseline
+        g5.FieldEvent(t=FEED + 2.5, text="seed words alpha beta"),  # re-add
+    ]
+    det = g5.resolve_visibility_detailed(words, events, anchor=2, anchor_text=anchor_text)
+    assert det.ts == [FEED + 1.5, FEED + 1.5]  # reset never un-sees
+    assert det.ambiguous == []
+    words2 = mk_words(["seed", "words", "alpha"])
+    det2 = g5.resolve_visibility_detailed(words2, [events[0]], anchor=2, anchor_text=anchor_text)
+    assert det2.ts == [None, None, FEED + 1.5]  # anchor text is not an appearance
+
+    u = mk_ready([(1.0, "alpha beta", "partial")])
+    attr = g5.attribute_updates(u, events, anchor_text=anchor_text)
+    assert _labels(attr) == ["matched"]
+    assert len(attr.samples) == 1 and round(attr.samples[0].delta_ms) == 500
+    assert attr.violations == 0  # reset/retract frames are not zero-diff violations
+    assert attr.frames_unpaired == 2  # reset + re-add frames: counted, no sample
+
+
+# S3-8. zero-edit oracle + the delayed-frame carve-out -------------------------
+
+
+def test_attribution_zero_diff_carveout():
+    u = mk_ready([(1.0, "alpha", "partial"), (2.0, "alpha", "partial")])
+    # a delayed frame matching the OLDER pending span charges the older update;
+    # the newer identical callback is no_op and violates nothing (carve-out)
+    attr = g5.attribute_updates(u, mk_events([2.5], ["alpha"]))
+    assert _labels(attr) == ["matched", "no_op"]
+    assert attr.violations == 0
+    assert [round(s.delta_ms) for s in attr.samples] == [1500]
+    m = g5.aggregate([mk_record(update_ready=u, field_events=mk_events([2.5], ["alpha"]))])
+    assert m.unchanged_zero_edit_ok is True
+
+    # the oracle itself: a raw-changed, content-identical frame during the
+    # identical update's watch is still a zero-diff violation
+    bad = mk_events([1.05, 2.05], ["alpha", "alpha!"])
+    attr2 = g5.attribute_updates(u, bad)
+    assert _labels(attr2) == ["matched", "no_op"]
+    assert attr2.violations == 1
+    assert [round(s.delta_ms) for s in attr2.samples] == [50]
+    mm = g5.aggregate([mk_record(update_ready=u, field_events=bad)])
+    assert mm.unchanged_zero_edit_ok is False
+    assert any("zero-diff" in f for f in mm.failures)
+
+
+# S3-9. producer/daemon stages pair by (gen,utt,seq); stages never mix ---------
+
+
+def test_attribution_stage_identity_pairing():
+    prod = g5.ReadyEvent(t=FEED + 1.0, text="alpha", kind="partial", stage="producer", gen=1, utt=1, seq=1)
+    dmon = g5.ReadyEvent(t=FEED + 1.2, text="alpha", kind="partial", stage="daemon", gen=1, utt=1, seq=1)
+    events = mk_events([1.5], ["alpha"])
+    attr = g5.attribute_updates([prod, dmon], events)
+    assert _labels(attr) == ["matched", "matched"]
+    assert len(attr.samples) == 1  # only the daemon checkpoint pairs frames
+    assert round(attr.samples[0].delta_ms) == 300
+    assert attr.observations[0].frame_ts is None
+    assert "relay" in attr.observations[0].detail and "200" in attr.observations[0].detail
+    assert attr.observations[1].frame_ts == FEED + 1.5
+
+    lost = g5.ReadyEvent(t=FEED + 2.0, text="beta", kind="partial", stage="producer", gen=1, utt=2, seq=2)
+    attr2 = g5.attribute_updates([prod, dmon, lost], events)
+    assert _labels(attr2) == ["matched", "matched", "missing"]
+    assert "relay" in attr2.observations[2].detail
+
+
+# S3-10. clock/cap failures: counted + reported, never averaged away ----------
+
+
+def test_attribution_clock_and_cap_counters_reported():
+    words = mk_words(["alpha"])
+    events = growing_events(words, lag_s=0.1)
+    rec = mk_record(
+        words=words,
+        field_events=events,
+        heartbeats=[(0.0, 100.0), (1.0, 105.0)],  # wall jumped => heartbeat_ok False
+        capped=True,
+    )
+    m = g5.aggregate([rec], route="synthetic")
+    assert m.clock_failures == 1 and m.cap_failures == 1
+    # reported as evidence, but a clock/cap flag alone does not flip the verdict
+    assert not any("heartbeat" in f or "cap " in f for f in m.failures)
+    assert len(m.provenance_warnings) == 2
+    row = json.loads(g5.render_report_row(m))
+    assert row["clock_failures"] == 1 and row["cap_failures"] == 1
+    assert any("heartbeat" in w for w in row["provenance_warnings"])
+    assert any("cap" in w for w in row["provenance_warnings"])
+
+
+# S3-11. compat: legacy tuples drive everything; visibility is the .ts view ----
+
+
+def test_compat_legacy_tuples_and_visibility_equivalence():
+    updates = [(FEED + 1.0, "hello", "partial"), (FEED + 2.0, "hello wor", "partial")]
+    events = [
+        g5.FieldEvent(t=FEED + 1.03, text="hello"),
+        g5.FieldEvent(t=FEED + 2.02, text="hello wor"),
+    ]
+    attr = g5.attribute_updates(updates, events)
+    assert _labels(attr) == ["matched", "matched"]
+    assert [round(s.delta_ms) for s in attr.samples] == [30, 20]
+    assert g5.ready_to_frame(updates, events) == (attr.samples, attr.violations)
+    words = mk_words(["hello", "world"])
+    more = mk_events([1.0, 2.0, 3.0], ["hello", "hello world", "hello"])
+    assert g5.resolve_visibility(words, more) == g5.resolve_visibility_detailed(words, more).ts
+    assert g5.resolve_visibility(words, more) == [FEED + 1.0, FEED + 2.0]
+    r = mk_record(update_ready=updates)
+    assert r.partial_source == "" and r.anchor_text == ""
+    assert r.capped is False and r.heartbeats == []
+
+
+# S3-12. renderers: additive counters; route/verdict stay first -----------------
+
+
+def test_renderer_counter_keys_additive():
+    words = mk_words(["alpha", "beta"])
+    events = growing_events(words, lag_s=0.1)
+    u = mk_ready([(0.15, "alpha", "partial"), (0.45, "alpha beta", "partial")])
+    m = g5.aggregate(
+        [mk_record(words=words, field_events=events, update_ready=u)], route="synthetic"
+    )
+    row = json.loads(g5.render_report_row(m))
+    for key in (
+        "updates_total", "updates_matched", "updates_missing", "updates_superseded",
+        "updates_no_op", "updates_ambiguous", "frames_unpaired", "words_ambiguous",
+        "clock_failures", "cap_failures",
+    ):
+        assert key in row and isinstance(row[key], int)
+    assert row["updates_matched"] == 2
+    for key in ("route", "verdict", "insertions", "corrections", "misses", "replays", "failures"):
+        assert key in row
+    md = g5.render_markdown([m], {"date": "d", "head": "h", "command": "c", "provenance": {}})
+    data_rows = [ln for ln in md.splitlines() if ln.startswith("| synthetic")]
+    assert data_rows, "route row missing"
+    cells = [c.strip() for c in data_rows[0].strip("|").split("|")]
+    assert cells[0] == "synthetic" and cells[1] in ("pass", "fail")
+    assert len(md.splitlines()) <= g5.MAX_REPORT_LINES
+
+
+# S3-13. ReadyEvent coercion is total and lossless for the legacy tuple shape --
+
+
+def test_ready_event_coercion_lossless():
+    evs = g5._to_ready_events([(1.0, "a", "partial"), (2.5, "a b", "final")])
+    assert [(e.t, e.text, e.kind) for e in evs] == [(1.0, "a", "partial"), (2.5, "a b", "final")]
+    assert all(
+        e.stage == "daemon" and e.gen is None and e.utt is None and e.seq is None
+        and e.disposition == "" and e.ack_ts is None
+        for e in evs
+    )
+    ready = [
+        g5.ReadyEvent(t=3.0, text="x", kind="partial", stage="producer", gen=1,
+                      utt=2, seq=3, disposition="dispatched", ack_ts=3.01)
+    ]
+    assert g5._to_ready_events(ready) == ready

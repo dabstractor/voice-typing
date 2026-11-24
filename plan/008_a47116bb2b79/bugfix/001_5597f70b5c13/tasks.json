@@ -181,7 +181,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S3",
                   "title": "Align changed-span field observations and expose attribution gaps",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"
@@ -198,7 +198,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S4",
                   "title": "Wire the isolated route runner to compare real recorder builds",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1",
