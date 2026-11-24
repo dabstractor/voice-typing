@@ -1,0 +1,5 @@
+fixture parse: {'im-gtk': 'pass', 'pi-ghostty': 'fail'}
+fixture assess: C-g5-timing unmet — failing/blocked routes: ['im-gtk', 'pi-ghostty'] ('G5_fixture.md:im-gtk', 'G5_fixture.md:pi-ghostty')
+empty fixture assess: C-g5-timing not-run — cannot parse report format
+FIXTURE CHECK OK: blocked denies; duplicate keys overwrite (last wins); absent evidence not-run
+Real evidence files were NOT touched (fixtures are inline strings + tmpdir files).

@@ -1,0 +1,11 @@
+G6 GRADUATION ASSESSMENT (PRD §4.2sexies R.7)
+  A-g3-matrix: unmet — failed rows: ['edit-count-law']; unverified rows: ['pi-prompt-ghostty', 'class-browser-text-field', 'class:browser-text-field']
+    evidence: pi_row_verdicts.jsonl:24 rows
+    evidence: editor_browser_row_verdicts.jsonl:17 rows
+  B-integrity: unmet — failed register rows: ['edit-count-law']
+  C-g5-timing: unmet — failing/blocked routes: ['im-gtk', 'pi-ghostty']
+    evidence: G5_TIMING_EVIDENCE.md:im-gtk
+    evidence: G5_TIMING_EVIDENCE.md:pi-ghostty
+  D-sessions: unmet — 0 valid session(s) on record, need >= 3
+    evidence: G6_WRITING_SESSIONS.md: 0 valid
+G6 DECISION: STAY OPT-IN (unmet: A-g3-matrix, B-integrity, C-g5-timing, D-sessions)
