@@ -107,6 +107,12 @@ DeliveryTarget adapter (the field is edited via the IM child's one-edit protocol
   handler takes _lock — the deadlock hazard), then the SHARED under-lock recognition cancel
   (suppress latch + host.cancel() gated on _text_in_flight + partial-mirror clear) runs. Both
   entry points (control socket, evdev Backspace) funnel through cancel() — no entry-point edits.
+- CONTEXT PROMPT (P1.M6.T3.S1): the rolling-context-prompt SOURCE in bulk mode is the
+  controller's confirmed_visible() (its OWN mirror of target-CONFIRMED text; _stream is
+  read-only in every mode and never written by the bulk path). Pushes fire at accepted-final
+  enqueue (A — covers UNCHANGED finals) + finalize-APPLIED (B — post-correction); cancel
+  pushes a context-free clear (D4 — a removed fragment is never decode context). Partial
+  shows never push; bulk-but-unwired (no controller) pushes nothing.
 - LIFECYCLE: _arm() bumps gen/epoch and spawns the "vt-bulk-arm" thread (acquire→arm→start —
   subprocess round-trips NEVER on the reader thread nor under _lock; acquire failure ⇒
   delivery_state="unsupported"+reason, recording STAYS armed). _disarm() clears the active flag
@@ -1704,6 +1710,34 @@ class VoiceTypingDaemon:
         except Exception:
             logger.warning("ducking: release dispatch failed (ignored)")
 
+    def _clear_context_prompt(self) -> None:
+        """Queue the child's context-prompt CLEAR (set_prompt("")), best-effort (P1.M2.T5.S2).
+
+        P1.M6.T3.S1 extracted _arm's inline clear VERBATIM so _bulk_cancel's D4 reuses the
+        exact same gates + put — behavior-identical; do not 'improve'. From _arm it is
+        called BEFORE the arm/mic cmd: the child reads its cmd queue FIFO between
+        utterances, so a warm re-arm (the child stays resident across disarm/arm,
+        §4.2bis) never conditions the session's FIRST decode on the previous session's
+        text — the child blocks in text() right after arming. An idle-unload respawn
+        starts a fresh child (prompt already None), so the clear is a harmless no-op
+        there. From _bulk_cancel (D4) it guarantees a CANCELLED fragment can never
+        become decode context (the stream-edit divergence is documented there). Gated
+        like the commit-time push (config AND the child's ready flag); the put is
+        best-effort (S1 contract) — no retries; NEVER raises into the caller, takes no
+        daemon lock, and never calls a ctrl mutator.
+        """
+        if self._cfg.asr.context_prompt and self._context_prompt_active is True:
+            clearer = getattr(self._host, "set_prompt", None)
+            if callable(clearer):
+                try:
+                    clearer("")
+                except Exception:
+                    logger.debug("context-prompt clear failed (ignored)", exc_info=True)
+            else:
+                logger.debug(
+                    "context-prompt clear skipped: host has no set_prompt seam"
+                )
+
     def _arm(self) -> None:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle.
 
@@ -1739,18 +1773,11 @@ class VoiceTypingDaemon:
         # idle-unload respawn starts a fresh child (prompt already None), so the
         # clear is a harmless no-op there. Gated like the commit-time push (config
         # AND the child's ready flag); the put is best-effort (S1 contract) — no retries.
+        # P1.M6.T3.S1: the put itself moved verbatim into _clear_context_prompt() — the
+        # FIFO pin (set_prompt("") BEFORE set_microphone(True) below) is load-bearing for
+        # warm re-arm and is now shared with _bulk_cancel's D4 clear.
         self._rev1_committed = ""
-        if self._cfg.asr.context_prompt and self._context_prompt_active is True:
-            clearer = getattr(self._host, "set_prompt", None)
-            if callable(clearer):
-                try:
-                    clearer("")
-                except Exception:
-                    logger.debug("context-prompt clear failed (ignored)", exc_info=True)
-            else:
-                logger.debug(
-                    "context-prompt clear skipped: host has no set_prompt seam"
-                )
+        self._clear_context_prompt()
         self._armed_monotonic = (
             time.monotonic()
         )  # keypress-disarm grace window anchor (note_user_keypress)
@@ -1982,6 +2009,14 @@ class VoiceTypingDaemon:
         seq = self._bulk_next_seq(gen, uid)
         if ctrl is not None and ctrl.is_active():
             ctrl.on_final(cleaned, utterance=str(uid), seq=seq, gen=gen)
+            # P1.M6.T3.S1 trigger A — enqueue-time prompt push: covers UNCHANGED finals,
+            # which fire NO on_applied (that hook is APPLIED-only), so a finalize-only
+            # trigger would fall an utterance behind forever. At enqueue,
+            # confirmed_visible() = this utterance's last APPLIED show span, which
+            # renders equal to the final exactly when the finalize will be UNCHANGED.
+            # Non-blocking + never raises: the reader-thread enqueue-and-return law
+            # (R.5) is preserved.
+            self._refresh_context_prompt()
         self._feedback.record_final(cleaned)  # recognition meaning (feedback mirrors keep it)
         # P1.M6.T2.S2 (R.6): accepted final → recovery draft, keyed (gen, uid) RAW hashables
         # for exactly-once dedupe (G7 — the str(uid) form is the controller's, not the store's).
@@ -2001,9 +2036,12 @@ class VoiceTypingDaemon:
             depth,
             rec["partials"],
         )
-        # NO _stream.commit, NO backend.type_text, NO text-bearing latency line, NO prompt
-        # refresh (the _refresh_context_prompt source stays _stream.committed — empty in bulk
-        # mode; the decoupling is P1.M6.T3.S1, out of scope here).
+        # NO _stream.commit, NO backend.type_text, NO text-bearing latency line. The
+        # P1.M6.T3.S1 prompt refresh DOES fire (trigger A, above): in bulk mode the
+        # prompt source is the controller's confirmed_visible(), NEVER _stream
+        # (read-only everywhere — the bulk path never feeds nor writes it). Rejected
+        # finals returned earlier — zero pushes there, parity with the stream-edit
+        # deliberate no-op.
 
     def _bulk_handle_partial(self, text: str) -> None:
         """Bulk-path partial: enqueue-and-return on the reader thread (R.5). NO stream typing."""
@@ -2175,6 +2213,21 @@ class VoiceTypingDaemon:
             )
         except Exception:  # noqa: BLE001 — a feedback failure must never kill the writer
             logger.warning("bulk: record_confirmed_op failed", exc_info=True)
+        if kind == "finalize":
+            # P1.M6.T3.S1 trigger B — finalize-APPLIED prompt push: corrects the context
+            # after a REVISED finalize (this fires OUTSIDE _cond AFTER _confirmed_visible
+            # was set under it, so confirmed_visible() reads the finalize's exact span).
+            # kind == "show" deliberately does NOT push (mid-utterance
+            # self-conditioning — the executor runs condition_on_previous_text=False
+            # precisely because the daemon owns cross-utterance context); UNCHANGED
+            # finals never get here (on_applied is APPLIED-only) — trigger A covers
+            # them; the cancel clear is D4 in _bulk_cancel.
+            try:
+                self._refresh_context_prompt()
+            except Exception:  # noqa: BLE001 — never kill the writer thread
+                logger.debug(
+                    "bulk finalize prompt refresh failed (ignored)", exc_info=True
+                )
 
     def _bulk_cancel(self) -> dict:
         """Bulk-mode cancel (the intercept at the top of cancel()): ZERO physical-character
@@ -2195,6 +2248,15 @@ class VoiceTypingDaemon:
             # OUT of _lock (G1). Nothing pending ⇒ controller-side one-op no-op. A refused/
             # deadlined cancel stops delivery → on_stopped fires → the fault disarm runs.
             ctrl.cancel(gen=self._bulk_gen)
+        # P1.M6.T3.S1 D4 — post-cancel context-free clear: ctrl.cancel does NOT reset the
+        # controller's _confirmed_visible (it transiently holds the removed fragment), so
+        # without this a later accepted final with zero shows of its own could push that
+        # REMOVED text as decode context. Deliberate divergence from stream-edit (which
+        # KEEPS pre-cancel context — committed unchanged): bulk has no cumulative mirror,
+        # so context-free until the next finalize-APPLIED rebuilds it is the conservative
+        # degrade (PRD degrade philosophy). No ctrl mutator here; _clear_context_prompt
+        # never raises.
+        self._clear_context_prompt()
         with self._lock:
             if self._listening.is_set():  # re-check: a fault may have disarmed mid-cancel
                 if self._text_in_flight.is_set() and self._host is not None:
@@ -2412,9 +2474,30 @@ class VoiceTypingDaemon:
           - self._context_prompt_active is True — the loaded child's ready payload
             reported the executor armed. None (no child loaded) or False (probe
             degraded) -> zero pushes, status 'degraded'.
-        SOURCE: self._stream.committed under streaming; self._rev1_committed (the
-        daemon-side accumulator) in the Rev 1 rollback hatch — StreamingOutput is NOT
-        touched in that mode (T6.S2 pinned it keystroke-identical).
+        SOURCE (P1.M6.T3.S1 DECISION — risk #7, d2_bulk_delivery_map.md §9 row 7): in
+        bulk-text mode the committed checkpoint lives in the BULK CONTROLLER —
+        self._bulk_ctrl.confirmed_visible(), the controller's OWN mirror of
+        target-CONFIRMED text (R.5 three-value law #3), read read-only here. _stream is
+        READ-ONLY in every mode and NEVER written by the bulk path: the bulk path never
+        feeds it, so its .committed stays "" all session and reading it would silently
+        disable conditioning (the risk-#7 failure); there is deliberately NO daemon-side
+        cumulative accumulator (that would be a second source of truth — the contract
+        names the controller's mirror). Trigger sites: A = accepted-final enqueue in
+        _bulk_handle_final (covers UNCHANGED finals — on_applied fires on APPLIED only);
+        B = finalize-APPLIED in _on_bulk_applied (post-correction context); D4 = the
+        post-cancel ""-clear in _bulk_cancel (a removed fragment must never become
+        decode context — stream-edit keeps pre-cancel context; bulk, having no
+        cumulative mirror, degrades context-free until the next finalize-APPLIED).
+        Preserved NO-OPs: partial shows never push (mid-utterance self-conditioning),
+        rejected finals push nothing, bulk-but-unwired (pre-arm / acquire-failed
+        "unsupported" / torn down) early-returns — no source of truth exists there and
+        the arm-time clear already left the child context-free. Accepted divergence:
+        confirmed_visible() is the LAST confirmed utterance span (R.3 spans are
+        per-utterance), so a multi-utterance unpunctuated run conditions only on its
+        newest confirmed utterance where stream-edit's committed carries the whole run.
+        Under streaming: self._stream.committed; self._rev1_committed (the daemon-side
+        accumulator) in the Rev 1 rollback hatch — StreamingOutput is NOT touched in
+        that mode (T6.S2 pinned it keystroke-identical).
 
         Defensive getattr seam (unchanged from the T6.S2 thin version): a host without
         set_prompt (unit-test fakes, the legacy recorder adapter) is a silent DEBUG
@@ -2422,8 +2505,10 @@ class VoiceTypingDaemon:
         is never logged above DEBUG (it is user dictation).
 
         Deliberate NO-OPs (do not 'fix'): rejected finals (blocklist/min_chars —
-        committed is unchanged), cancel() (the fragment is never committed), and
-        unload teardown (a respawned child starts with no prompt).
+        nothing confirmed changed), stream-edit cancel() (the fragment is never
+        committed), and unload teardown (a respawned child starts with no prompt).
+        Bulk-mode cancel() is the D4 exception: it pushes the ""-clear (see SOURCE
+        above); partial shows never push (trigger B is finalize-only).
         """
         try:
             if (
@@ -2431,11 +2516,17 @@ class VoiceTypingDaemon:
                 or self._context_prompt_active is not True
             ):
                 return
-            source = (
-                self._stream.committed
-                if self._cfg.output.streaming
-                else self._rev1_committed
-            )
+            if self._bulk_mode():
+                # Bulk FIRST (P1.M6.T3.S1): bulk runs with streaming=true, so the
+                # streaming branch below would pick _stream.committed — "" all session
+                # in bulk mode, silently disabling conditioning (risk #7).
+                if not self._bulk_wired():
+                    return  # no controller: no source of truth; arm-clear left it context-free
+                source = self._bulk_ctrl.confirmed_visible()
+            elif self._cfg.output.streaming:
+                source = self._stream.committed
+            else:
+                source = self._rev1_committed
             text = prompt_engine.rolling_context_prompt(source)
             setter = getattr(self._host, "set_prompt", None)
             if callable(setter):
