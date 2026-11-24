@@ -486,13 +486,20 @@ typing entirely — finals still appear in the state file). Restart the daemon a
 
 ### Bulk delivery: the input-method seat is taken (fcitx5/ibus)
 
+On the first bulk arm the daemon spawns its OWN input-method child and waits — bounded,
+~2 s — for the compositor to activate it before acquiring the focused editable. Nothing
+spawns at construction or while idle; the child lives for one delivery lifetime and is
+torn down (bounded) on stop or failure.
+
 Wayland allows ONE input-method client per seat. If an input-method editor is already
-running (fcitx5, ibus), the bulk IM route cannot claim the seat: `voicectl status` shows
-`delivery: bulk-text (unsupported)` with the reason. The daemon never kills or
-respawn-fights your IME — `voice_typing/ime/manager.py` documents spawning against the
-user's fcitx5 as explicitly forbidden. Fix: stop the IME for the bulk session, or stay on
-`stream-edit` (which never touches the seat and is unaffected). The compositor must also
-advertise `zwp_input_method_manager_v2` — without it the adapter raises at start.
+running (fcitx5, ibus), the child cannot claim the seat: `voicectl status` shows
+`delivery: bulk-text (unsupported)` with a concise reason (`ime seat held (unsupported)`),
+and recording continues. The same surface reports an activation timeout
+(`ime not activated`). The daemon never kills or respawn-fights your IME —
+`voice_typing/ime/manager.py` documents spawning against the user's fcitx5 as explicitly
+forbidden. Fix: stop the IME for the bulk session, or stay on `stream-edit` (which never
+touches the seat and is unaffected). The compositor must also advertise
+`zwp_input_method_manager_v2` — without it the adapter raises at start.
 
 ### Bulk delivery: what my terminal supports
 

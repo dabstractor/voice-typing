@@ -5632,3 +5632,320 @@ def test_incident_replay_chained_cancel_respeak_terminates_at_drop_cap():
     assert fb.finals == ["sentence three", "sentence four"]
     assert "sentence four" in "".join(x for x in be.typed if isinstance(x, str))
     assert d.is_listening() is True
+
+
+# ===========================================================================
+# P1.M2.T1.S2 — _BulkTargetBundle.start() + the arm-worker IM startup wiring (ADDITIVE)
+# Hermetic: a fake ImeProcess (records spawn/ping/stop; scripted replies) + a fake
+# DeliveryTarget + the REAL _BulkTargetBundle; NO real Popen/CUDA/desktop (R.7).
+# The 10 research-§4 cases: pure factory, spawn→pump→ready, never-activated, held seat,
+# spawn fault, fake-bundle no-op, arm-worker unsupported+stays-armed, stale-epoch-before-
+# acquire, fresh-rearm-spawns-fresh-child, stop-during-startup.
+# ===========================================================================
+from voice_typing.bulk_delivery import AcquireResult, ShowResult  # noqa: E402 (mid-file: S2 section imports; the file's additive-section style)
+
+
+class _S2FakeImeProc:
+    """ImeProcess duck for the bundle.start()/arm-worker tests (NO real subprocess).
+
+    Records spawn/request/stop calls; scripted: spawn_ok, state (the state a FAILED spawn
+    leaves — 'unsupported' (seat held) / 'fault'), ping_replies (consumed in order, the
+    LAST entry repeats forever; a None entry = no reply). Optional `release` Event: the
+    FIRST ping blocks until it is set — the deterministic 'slow activation' drive for the
+    arm-worker race tests (bounded 5 s wait: a wedged test still unwinds).
+    """
+
+    def __init__(self, *, spawn_ok=True, state="idle", ping_replies=None, release=None):
+        self.spawn_ok = spawn_ok
+        self.state = state
+        self.ping_replies = (
+            list(ping_replies) if ping_replies is not None else [{"activated": True}]
+        )
+        self.release = release
+        self.spawn_calls = 0
+        self.request_cmds: list[str] = []
+        self.stop_calls = 0
+        self._on_event = None  # attach() late-binds the TakeoverWatch here (daemon.py)
+        self._running = False
+        self._reply_i = 0
+        self.first_ping_seen = threading.Event()
+
+    def spawn(self, timeout=None):
+        self.spawn_calls += 1
+        if self.spawn_ok:
+            self.state = "running"
+            self._running = True
+            return True
+        return False  # state stays as scripted ('unsupported' / 'fault')
+
+    def request(self, cmd, timeout=1.0, **fields):
+        self.request_cmds.append(cmd)
+        if cmd != "ping":
+            return None
+        self.first_ping_seen.set()
+        if self.release is not None and not self.release.is_set():
+            self.release.wait(timeout=5.0)  # blocked mid-pump; released by the test
+        elif not self._running:
+            return None  # stopped mid-pump: no reply (the real request's dead-child shape)
+        reply = self.ping_replies[min(self._reply_i, len(self.ping_replies) - 1)]
+        self._reply_i += 1
+        return None if reply is None else dict(reply)
+
+    def stop(self, timeout=None):
+        self.stop_calls += 1
+        self._running = False
+
+
+class _S2FakeTarget:
+    """DeliveryTarget duck (the dispatch tests' trimmed shape): scripted acquire, counted
+    leave — enough for BulkController.acquire/arm/start and the stopper's leave()."""
+
+    def __init__(self, *, acquire_ok=True, acquire_reason="ime no reply"):
+        self.acquire_ok = acquire_ok
+        self.acquire_reason = acquire_reason
+        self.acquire_calls = 0
+        self.leave_calls = 0
+
+    def acquire(self):
+        self.acquire_calls += 1
+        if self.acquire_ok:
+            return AcquireResult(ok=True, handle="fake", revision=0)
+        return AcquireResult(ok=False, reason=self.acquire_reason)
+
+    def show(self, session, utterance, seq, expected_revision, span):
+        return ShowResult.APPLIED
+
+    def finalize(self, session, utterance, seq, expected_revision, span):
+        return ShowResult.APPLIED
+
+    def cancel(self):
+        return ShowResult.APPLIED
+
+    def leave(self):
+        self.leave_calls += 1
+
+
+class _S2FakeClock:
+    """Deterministic monotonic clock: sleep() advances time — pump tests never really wait."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class _S2BulkFeedback(_DaemonFakeFeedback):
+    """_DaemonFakeFeedback + the delivery-state surface (the R.5 one-concise-reason sink)."""
+
+    def __init__(self):
+        super().__init__()
+        self.delivery_states: list[tuple] = []
+        self.delivery_modes: list[str] = []
+
+    def set_delivery_mode(self, mode):
+        self.delivery_modes.append(mode)
+
+    def set_delivery_state(self, state, reason=""):
+        self.delivery_states.append((state, reason))
+
+
+def _make_s2_bulk_daemon(factory):
+    """Bulk-mode hermetic daemon (P1.M2.T1.S2 arm-worker tests): bulk-text delivery via
+    the bulk_target_factory= ctor seam; _make_daemon's recorder/backend/mic-prober parts;
+    the delivery-state-recording feedback. No threads started (each test drives them)."""
+    cfg = hermetic_cfg(VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}}))
+    fb = _S2BulkFeedback()
+    d = daemon.VoiceTypingDaemon(
+        cfg,
+        fb,
+        recorder=_StubRecorder(),
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
+        bulk_target_factory=factory,
+    )
+    return d, fb
+
+
+def _join_vt_threads(names, timeout=5.0):
+    """Join every live thread named in `names` (vt-bulk-arm / vt-bulk-stop) — the
+    deterministic drive for the arm-worker tests (the PRP's join-the-thread option)."""
+    for t in threading.enumerate():
+        if t.name in names and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=timeout)
+
+
+def _pump_clock(monkeypatch):
+    """Swap time.monotonic/sleep for a fake clock in the DIRECT start() pump tests.
+    daemon.time IS the global time module — safe here: those tests spawn no threads."""
+    clock = _S2FakeClock()
+    monkeypatch.setattr(daemon.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(daemon.time, "sleep", clock.sleep)
+    return clock
+
+
+# --- 1. pure construction (CRITICAL #1): no subprocess at construction, ever ---
+
+
+def test_default_bulk_target_factory_stays_pure(monkeypatch):
+    """_build_default_bulk_target is PURE — a Popen that explodes must never be reached
+    during construction. The spawn/activation startup lives in bundle.start() on the
+    vt-bulk-arm thread, not in the factory."""
+    def _explode(*a, **k):
+        raise AssertionError("Popen during _build_default_bulk_target — purity violation")
+
+    monkeypatch.setattr("subprocess.Popen", _explode)
+    bundle = daemon._build_default_bulk_target(hermetic_cfg())
+    assert isinstance(bundle, daemon._BulkTargetBundle)
+    assert bundle._proc is not None and bundle.target is not None
+    assert bundle._watch is None, "no takeover watch until attach() on the arm thread"
+
+
+# --- 2-6. the bundle.start() unit contract ---
+
+
+def test_bundle_start_spawns_pumps_then_ready(monkeypatch):
+    """spawn → bounded READ-ONLY ping pump → None once activated; spawn exactly once."""
+    _pump_clock(monkeypatch)
+    proc = _S2FakeImeProc(ping_replies=[{"activated": False}, {"activated": True}])
+    bundle = daemon._BulkTargetBundle(target=_S2FakeTarget(), proc=proc)
+    assert bundle.start() is None  # ready — the caller proceeds to acquire
+    assert proc.spawn_calls == 1, "spawn once per lifetime"
+    assert proc.request_cmds.count("ping") >= 2, "pumped until activated"
+    assert proc.request_cmds[0] == "ping"
+
+
+def test_bundle_start_never_activated(monkeypatch):
+    """Pings never carry activated=true → the deadline maps to 'ime not activated'."""
+    _pump_clock(monkeypatch)
+    proc = _S2FakeImeProc(ping_replies=[{"activated": False}])
+    bundle = daemon._BulkTargetBundle(target=_S2FakeTarget(), proc=proc)
+    assert bundle.start(timeout=0.3) == "ime not activated"
+    assert proc.spawn_calls == 1 and proc.request_cmds.count("ping") > 1
+    # the no-reply shape (request → None, e.g. a dead child) is the same deadline path:
+    proc2 = _S2FakeImeProc(ping_replies=[None])
+    bundle2 = daemon._BulkTargetBundle(target=_S2FakeTarget(), proc=proc2)
+    assert bundle2.start(timeout=0.3) == "ime not activated"
+
+
+def test_bundle_start_held_seat():
+    """spawn() refused with state 'unsupported' (an IME holds the seat) → the concise
+    reason, NO ping issued, and start() itself does not stop — the caller tears down."""
+    proc = _S2FakeImeProc(spawn_ok=False, state="unsupported")
+    bundle = daemon._BulkTargetBundle(target=_S2FakeTarget(), proc=proc)
+    assert bundle.start() == "ime seat held (unsupported)"
+    assert proc.request_cmds == [], "no activation probe on a refused spawn"
+    assert proc.stop_calls == 0
+
+
+def test_bundle_start_spawn_fault():
+    """spawn() failed into 'fault' (readiness timeout / child death) → the fault-shaped
+    reason, NO ping issued."""
+    proc = _S2FakeImeProc(spawn_ok=False, state="fault")
+    bundle = daemon._BulkTargetBundle(target=_S2FakeTarget(), proc=proc)
+    assert bundle.start() == "ime spawn failed (fault)"
+    assert proc.request_cmds == []
+
+
+def test_fake_bundle_start_is_noop_success():
+    """_proc is None (every injected-fake bundle) → start() is a no-op SUCCESS — the
+    attach()/teardown() guard precedent the existing duck-typed bulk tests rely on."""
+    bundle = daemon._BulkTargetBundle(target=_S2FakeTarget())
+    assert bundle.start() is None
+
+
+# --- 7-10. the arm-worker wiring (vt-bulk-arm thread driven, joined by name) ---
+
+
+def test_arm_worker_writes_unsupported_and_stays_armed_on_start_failure():
+    """Start failure on the arm thread ⇒ ONE concise 'unsupported' reason, bounded
+    teardown, recording STAYS armed (R.5), and acquire is NEVER reached."""
+    target = _S2FakeTarget(acquire_ok=True)  # ok on purpose: it must never be called
+    proc = _S2FakeImeProc(spawn_ok=False, state="unsupported")
+    bundle = daemon._BulkTargetBundle(target=target, proc=proc)
+    d, fb = _make_s2_bulk_daemon(factory=lambda cfg: bundle)
+    d._arm()
+    _join_vt_threads({"vt-bulk-arm"})
+    assert fb.delivery_states == [("unsupported", "ime seat held (unsupported)")]
+    assert d.is_listening() is True, "recording stays armed on start failure (R.5)"
+    assert d._bulk_delivery_active is False
+    assert target.acquire_calls == 0, "no acquire after a failed start"
+    assert proc.stop_calls == 1, "bounded teardown ran on the failure path"
+
+
+def test_arm_worker_rejects_stale_epoch_before_acquire():
+    """A disarm racing the activation pump ⇒ the post-start epoch+listening re-check
+    tears the lifetime down: no acquire, no 'active' publish, never ghost-arm."""
+    release = threading.Event()
+    target = _S2FakeTarget()
+    proc = _S2FakeImeProc(ping_replies=[{"activated": True}], release=release)
+    bundle = daemon._BulkTargetBundle(target=target, proc=proc)
+    d, fb = _make_s2_bulk_daemon(factory=lambda cfg: bundle)
+    d._arm()
+    assert proc.first_ping_seen.wait(timeout=5.0), "the arm worker never reached the pump"
+    d._bulk_epoch += 1  # the _disarm-side bump, racing the subprocess round-trips
+    release.set()
+    _join_vt_threads({"vt-bulk-arm"})
+    assert target.acquire_calls == 0, "no acquire after staleness"
+    assert target.leave_calls == 1, "ctrl.stop(leave=True) ran on the stale path"
+    assert proc.stop_calls == 1, "bundle.teardown() ran on the stale path"
+    assert all(s[0] != "active" for s in fb.delivery_states), "never publish active"
+    assert d._bulk_delivery_active is False
+
+
+def test_fresh_rearm_spawns_fresh_child():
+    """Full happy path twice: each lifetime's bundle spawns its OWN child (never reuse
+    a stopped ImeProcess); the stopper tears the first lifetime down."""
+    procs: list = []
+    factory_calls: list = []
+
+    def factory(cfg):
+        proc = _S2FakeImeProc(ping_replies=[{"activated": True}])
+        procs.append(proc)
+        factory_calls.append(cfg)
+        return daemon._BulkTargetBundle(target=_S2FakeTarget(), proc=proc)
+
+    d, fb = _make_s2_bulk_daemon(factory=factory)
+    d._arm()
+    assert _wait_for(lambda: fb.delivery_states[-1:] == [("active", "")])
+    assert procs[0].spawn_calls == 1
+    assert procs[0].request_cmds.count("ping") >= 1, "read-only pump ran before acquire"
+    assert d._bulk_delivery_active is True
+    d._disarm()
+    assert d._bulk_stop_thread is not None
+    d._bulk_stop_thread.join(timeout=5.0)
+    assert fb.delivery_states[-1] == ("inactive", "")
+    assert procs[0].stop_calls == 1, "the stopper tore the first lifetime's child down"
+    d._arm()  # fresh lifetime
+    assert _wait_for(lambda: fb.delivery_states[-1:] == [("active", "")])
+    assert len(factory_calls) == 2, "a FRESH bundle per lifetime"
+    assert procs[1].spawn_calls == 1, "the SECOND lifetime spawns its OWN child"
+    assert d._bulk_gen == 2
+
+
+def test_stop_during_startup_tears_down():
+    """A stop (epoch bump + stopper) landing MID-PUMP: the stale arm worker's post-start
+    re-check tears down after the stopper — leave() exactly once, no double-teardown
+    crash, no 'active' publish, no acquire."""
+    release = threading.Event()
+    target = _S2FakeTarget()
+    proc = _S2FakeImeProc(
+        ping_replies=[{"activated": False}, {"activated": True}], release=release
+    )
+    bundle = daemon._BulkTargetBundle(target=target, proc=proc)
+    d, fb = _make_s2_bulk_daemon(factory=lambda cfg: bundle)
+    d._arm()
+    assert proc.first_ping_seen.wait(timeout=5.0), "the arm worker never reached the pump"
+    d._disarm()  # epoch bump + the vt-bulk-stop stopper, while the worker is mid-pump
+    assert d._bulk_stop_thread is not None
+    d._bulk_stop_thread.join(timeout=5.0)
+    release.set()
+    _join_vt_threads({"vt-bulk-arm"})
+    assert target.acquire_calls == 0, "no acquire after a mid-startup stop"
+    assert target.leave_calls == 1, "leave() exactly once across stopper + stale worker"
+    assert proc.stop_calls >= 1, "teardown ran (stopper and/or the stale worker)"
+    assert all(s[0] != "active" for s in fb.delivery_states), "never publish active"
+    assert d._bulk_delivery_active is False

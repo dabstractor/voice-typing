@@ -255,6 +255,14 @@ _COLD_LOAD_NOTIFY_LOADING = "Loading…"
 # transcription time (~0.5–1.5s); raise if you load a much larger model.
 _DRAIN_TIMEOUT_S: float = 5.0
 
+# Bulk IM startup bounds (P1.M2.T1.S2). bundle.start() on the vt-bulk-arm thread spawns
+# the production IM child, then pumps READ-ONLY activation pings until the compositor
+# activates the IM (ime_host replies carry activated=) — bounded so the arm thread can
+# never hang. POLL doubles as the per-ping request timeout; fake bundles (_proc is None)
+# no-op through start().
+_IME_ACTIVATE_TIMEOUT_S: float = 2.0
+_IME_ACTIVATE_POLL_S: float = 0.05
+
 # Cancel-suppression window bound (the Backspace stuck-suppression bug). cancel() latches
 # _cancel_suppress_final, and ONLY the child's MARKED sentinel final (or a fresh _arm()) was
 # allowed to clear it — if the sentinel was LOST (a cancel landing while the child sat BETWEEN
@@ -771,13 +779,20 @@ _BULK_FAULT_REASONS = frozenset(
 class _BulkTargetBundle:
     """One deliverable target + its per-lifetime takeover wiring + bounded teardown (P1.M6.T2.S1).
 
-    The DEFAULT route is the IM adapter (R.4 route assignment): ImeProcess (spawn is LAZY —
-    the arm thread's ctrl.acquire() drives it) + ImeTarget (the R.3 DeliveryTarget). The
-    pi-editor adapter (pi_editor.PiEditorTarget/PiEditorClient) is reachable via the daemon's
-    bulk_target_factory= seam — no config key in this item.
+    The DEFAULT route is the IM adapter (R.4 route assignment): ImeProcess + ImeTarget
+    (the R.3 DeliveryTarget). The pi-editor adapter (pi_editor.PiEditorTarget/PiEditorClient)
+    is reachable via the daemon's bulk_target_factory= seam — no config key in this item.
+
+    Construction (via _build_default_bulk_target) is PURE. The production IM child is
+    started LATER, on the vt-bulk-arm thread, by start() (P1.M2.T1.S2): ImeProcess.spawn
+    + a bounded READ-ONLY activation pump (request('ping') replies carry activated=) —
+    the pump mutates nothing and acquire stays exactly-once. Fake/test bundles (_proc is
+    None) no-op through attach/start/teardown.
 
     attach(controller) subscribes a FRESH TakeoverWatch for THIS delivery lifetime (G10: the
-    watch latches ONE revocation and never resets — a new lifetime needs a new object).
+    watch latches ONE revocation and never resets — a new lifetime needs a new object). It
+    MUST precede start(): the watch late-binds proc._on_event, so a child event during
+    activation (incl. a takeover) is never missed.
     teardown() is the bounded best-effort subprocess stop for the stopper thread; it NEVER
     raises (a dead target must not break teardown — the ctrl.stop(leave=True) best-effort
     precedent).
@@ -799,6 +814,40 @@ class _BulkTargetBundle:
         # exactly TakeoverWatch.attach()'s documented real-manager fallback.
         self._proc._on_event = self._watch.on_event
 
+    def start(self, timeout: "float | None" = None) -> "str | None":
+        """Start the production IM child on the ARM thread (P1.M2.T1.S2) — None = ready
+        to acquire; a concise reason = start failed (the caller tears down + writes the
+        ONE unsupported reason; recording stays armed, R.5).
+
+        Spawn once per lifetime (idempotent while RUNNING; a respawn after
+        unsupported/fault is the SANCTIONED NEXT-arm path — manager.py's spawn contract),
+        then pump READ-ONLY activation: request('ping') replies carry activated= (the
+        child may be RUNNING before the compositor activates the IM — ime_host._acquire
+        refuses until then), bounded by _IME_ACTIVATE_TIMEOUT_S with _IME_ACTIVATE_POLL_S
+        polls. Ping mutates nothing, so polling it is safe; acquire is still called
+        exactly-once by the caller — never here. Fake bundles (_proc is None) are a no-op
+        success (the attach() guard precedent). Call ONLY after attach(): the watch
+        late-binds proc._on_event, so no child event during activation is missed.
+        """
+        if self._proc is None:
+            return None  # fake/test bundle — nothing to start
+        if not self._proc.spawn():
+            st = self._proc.state  # 'unsupported' (seat held) | 'fault' | 'starting'/'idle'
+            return (
+                "ime seat held (unsupported)"
+                if st == "unsupported"
+                else f"ime spawn failed ({st})"
+            )
+        deadline = time.monotonic() + (
+            timeout if timeout is not None else _IME_ACTIVATE_TIMEOUT_S
+        )
+        while time.monotonic() < deadline:
+            r = self._proc.request("ping", timeout=_IME_ACTIVATE_POLL_S)  # read-only probe
+            if r is not None and r.get("activated"):
+                return None  # activated → the caller proceeds to its exactly-once acquire
+            time.sleep(_IME_ACTIVATE_POLL_S)
+        return "ime not activated"  # never activated within the bound
+
     def teardown(self) -> None:
         """Bounded best-effort subprocess stop (stopper thread ONLY — never under _lock)."""
         if self._proc is None:
@@ -815,9 +864,11 @@ def _build_default_bulk_target(
     """Build the production bulk bundle for the daemon's arm seam (P1.M6.T2.S1).
 
     IM route (R.4): ImeProcess + ImeTarget. CONSTRUCTION IS PURE (mirrors _build_default_ducker):
-    no subprocess runs and no thread starts here — ImeProcess.spawn happens lazily inside
-    acquire() on the vt-bulk-arm thread, and teardown runs on the vt-bulk-stop thread.
-    on_delivery_state is the M6 feedback seam (ImeProcess emits unsupported/fault ONLY, on its
+    no subprocess runs and no thread starts here. The child is started on the vt-bulk-arm
+    thread by _BulkTargetBundle.start() (P1.M2.T1.S2): ImeProcess.spawn + the bounded
+    read-only activation pump run there, outside _lock — never in this factory and never
+    "inside acquire()" (acquire is a request, not a spawn). teardown runs on the
+    vt-bulk-stop thread. on_delivery_state is the M6 feedback seam (ImeProcess emits unsupported/fault ONLY, on its
     reader thread — feedback.set_delivery_state is a plain state-file write, safe there; it
     never raises).
     """
@@ -2144,14 +2195,17 @@ class VoiceTypingDaemon:
         self._latency.note_partial(text)  # legacy latency counter (partials=N)
 
     def _bulk_begin_delivery(self) -> None:
-        """Spawn the vt-bulk-arm thread: fresh bundle + acquire→arm→start (called from _arm
-        under _lock — thread spawn is non-blocking, the _duck_engage precedent).
+        """Spawn the vt-bulk-arm thread: fresh bundle + start IM child + acquire→arm→start
+        (called from _arm under _lock — thread spawn is non-blocking, the _duck_engage
+        precedent).
 
-        The subprocess round-trips (ImeProcess.spawn inside acquire, ctrl.arm's queue ops are
-        instant) NEVER run on the reader thread nor under _lock (G1/G3). A FRESH bundle is
-        built per delivery lifetime: teardown() kills that lifetime's IM child and nothing
-        re-spawns a stopped ImeProcess, so reuse across lifetimes would dead-acquire.
-        Acquire failure ⇒ delivery_state="unsupported" + reason — recording STAYS armed (R.5).
+        The subprocess round-trips (P1.M2.T1.S2: ImeProcess.spawn + the bounded read-only
+        activation pump in bundle.start(), then ctrl.arm's queue ops are instant) NEVER run
+        on the reader thread nor under _lock (G1/G3). A FRESH bundle is built per delivery
+        lifetime: teardown() kills that lifetime's IM child and nothing re-spawns a stopped
+        ImeProcess, so reuse across lifetimes would dead-acquire. Start failure OR acquire
+        failure ⇒ delivery_state="unsupported" + one concise reason — recording STAYS armed
+        (R.5). Acquire stays exactly-once (no retry of possibly-applied mutations).
         """
         if not self._bulk_mode():
             return
@@ -2174,7 +2228,28 @@ class VoiceTypingDaemon:
                     on_applied=self._on_bulk_applied,
                 )
                 self._bulk_ctrl = ctrl
-                bundle.attach(ctrl)  # FRESH takeover watch per lifetime (G10)
+                bundle.attach(ctrl)  # FRESH takeover watch per lifetime (G10) — BEFORE
+                # start(): the watch late-binds proc._on_event, so a child event during
+                # activation (incl. a takeover) is never missed.
+                # P1.M2.T1.S2: start the production IM child HERE on the arm thread
+                # (construction stayed pure) — spawn + bounded READ-ONLY activation pump,
+                # all subprocess round-trips out of _lock (G1/G3). Duck-typed older test
+                # bundles without start() are a no-op success (the getattr stream seam).
+                _bundle_start = getattr(bundle, "start", None)
+                start_reason = _bundle_start() if _bundle_start is not None else None
+                if start_reason is not None:
+                    bundle.teardown()  # bounded cleanup of any leftover child (never raises)
+                    self._feedback.set_delivery_state("unsupported", start_reason)
+                    logger.info(
+                        "bulk delivery start failed: gen=%d reason=%s", gen, start_reason
+                    )
+                    return  # recording STAYS armed (R.5 — the acquire-failure shape)
+                if epoch != self._bulk_epoch or not self._listening.is_set():
+                    # A stop raced the subprocess round-trips: never ghost-arm — tear THIS
+                    # lifetime down immediately (the user's stop already bumped the epoch).
+                    ctrl.stop(leave=True)
+                    bundle.teardown()
+                    return
                 if not ctrl.acquire():
                     reason = ctrl.stats().get("stopped_reason") or "acquire-failed"
                     self._feedback.set_delivery_state("unsupported", reason)
