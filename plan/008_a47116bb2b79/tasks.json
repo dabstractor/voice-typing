@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Delta Rev 3/4 remainder — media ducking (D1), bulk text delivery (D2), legacy defect pipeline (D3)",
-      "status": "Researching",
+      "status": "Ready",
       "description": "Implement the three unimplemented work packages of PRD Rev 4 at HEAD 2335a9e: D1 media ducking (§4.2quinquies), D2 bulk text delivery over input-method-v2 (§4.2sexies R.1–R.8), D3 legacy defect closure (§8 triage). Everything in the delta PRD's LANDED rows (Rev 3 machinery, minimal-diff revision, compute_type) is DONE — do not re-implement. Research grounding lives in plan/008_a47116bb2b79/architecture/ (d1_ducking_seams.md, d2_bulk_delivery_map.md, d3_defects_g1_baseline.md, external_tech_notes.md). All work obeys AGENTS.md (two timeouts on every non-trivial command; never foreground the daemon; bounded scratch).",
       "milestones": [
         {
@@ -955,7 +955,7 @@
           "type": "Milestone",
           "id": "P1.M7",
           "title": "Graduation assessment + changeset-level documentation sync",
-          "status": "Researching",
+          "status": "Ready",
           "description": "G6 evidence-gated graduation (default flip only with writing-session evidence), then the Mode B changeset documentation sweep (README, ACCEPTANCE.md, install.sh) depending on every implementing subtask.",
           "tasks": [
             {
@@ -990,7 +990,7 @@
               "type": "Task",
               "id": "P1.M7.T2",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Ready",
               "description": "Mode B catch-all: README.md sections/config table/troubleshooting, tests/ACCEPTANCE.md rows with re-measured numbers, install.sh usage — every claim verified against the code as landed.",
               "subtasks": [
                 {
@@ -1058,7 +1058,7 @@
                   "type": "Subtask",
                   "id": "P1.M7.T2.S2",
                   "title": "tests/ACCEPTANCE.md rows + install.sh usage",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -1088,7 +1088,7 @@
                   "type": "Subtask",
                   "id": "P1.M7.T2.S3",
                   "title": "Final consistency sweep + commit discipline",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M7.T2.S1",
