@@ -195,3 +195,95 @@ Per-criterion PASS lines printed by the same run:
   `test_auto_stop_resets_phase_to_idle` (Issue 2); `test_run_loop_detects_dead_host_and_transitions_to_unloaded`,
   `test_load_host_respawns_after_dead_child`, and `test_status_reports_unloaded_after_child_death`
   (Issue 3).
+
+## Final sign-off (P1.M7.T2.S3) — delta changeset consistency sweep
+
+Recorded 2026-11-23/24 at HEAD `eb4cd58` (`git rev-parse --short HEAD`). Delta acceptance #4:
+AGENTS.md discipline held (two-layer timeouts on every command; daemon never foregrounded;
+bounded scratch, torn down); everything committed to `main` with sensible messages. Mode B:
+this section verifies the doc sweep itself — every check below was executed this session and
+is re-runnable as written.
+
+### Surfaces walked (verdict per surface)
+
+| Surface | Verdict | Checks performed (commands/files) |
+|---|---|---|
+| README.md | FIXED (3 claims) · rest CLEAN | config-table rows asserted against `config.py` dataclass defaults (duck_mode/duck_volume_pct/delivery/streaming — all match); ducking section vs `tests/D1_DUCK_EVIDENCE.md` (journal lines, 107 ms, sovereignty); bulk framing vs `G6_GRADUATION.md:27` verbatim; field-class matrix vs `g3_field_matrix.md:20-24` (versions intact, no row upgraded); CPU-only vs `daemon.py:279`/cuda_check; anchors re-validated; over-claim phrase grep clean. Fixes: `compute_type` "not a config key/float32-derived" prose corrected (IS `asr.compute_type`, default `"float16"` — `config.py:57`, consumed at `daemon.py:279`; stale story from the superseded 48a7eb9 era); honest `asr.compute_type` row added to the config table; status sample `cuda (float32)` → `cuda (float16)` (`ctl.py:173` format) |
+| tests/ACCEPTANCE.md (14 rows) | FIXED (4) · rest CLEAN | row-claims vs cited evidence; totals round-attribution; LIVE/STATIC/PAST-LIVE typing intact; G6 line verbatim; stale-number greps clean. Fixes: row-7 sign-off pointer (dead plan-006 id) → this section (3 sites incl. header blockquote); row-7 README line map refreshed; row-6 counts re-measured (socket 31, voicectl 54) with the systemd red NAMED (below); row-10 "5-command surface" historical wording → seven-today |
+| config.toml comments | CLEAN | key set + defaults lockstep vs `config.py` (pinned green by `test_config` 69 + `test_config_repo_default` 3 in the G1 re-run); no comment implies bulk-text is default or verified; `compute_type = "float16"` comment matches code; ZERO value edits |
+| voicectl --help + install.sh usage | CLEAN | `timeout 15 .venv/bin/voicectl --help` enumerated vs `_COMMANDS` (`ctl.py:49`) — all 7 commands named, none invented; epilog (:333) matches; install.sh usage line (:209) lists all 7 + `session [--copy]` hint matching ctl semantics; PRP's "lite commands missing from epilog" suspect CLEARED — lite names are deliberately alias-only (`ctl.py:56-62`), correctly absent from help surfaces; `bash -n install.sh` pass |
+
+### No-over-claiming audit
+
+G6 decision line verbatim-checked in the dossier (exactly 1 occurrence, byte-identical to
+`tests/G6_GRADUATION.md:27`); no G3-matrix register row upgraded anywhere (README matrix,
+row 13, and the register agree: GTK full, pi-prompt unverified, browser insert-only +
+correction REFUSED, foot/kitty insert-only, ghostty blocked→fallback, Hyprland relay
+unverified). Stale-number greps (the old 7-of-7 streaming claim, the 77-passed trio claim,
+bare 424 totals): zero live hits; the two 424 mentions are
+round-attributed to the plan-006 dossier ("superseded"). Bulk-text framing stays
+opt-in/unverified on every surface that mentions it ("Status: opt-in and unverified",
+"unverified until G6"); over-claim phrase grep ("works on Wayland", "production-ready",
+"fully verified") — zero hits.
+
+### G1 watch set — no unexplained new failures
+
+15-suite re-run at the sweep's code state (tree = `dbe7121`; identical code/test inputs at
+HEAD `eb4cd58` — the sweep's deltas on top are doc/plan prose only), baseline-parity methodology (`timeout 300 uv run pytest
+<file> -q --tb=line`, one file per call): **430 passed / 20 failed** (baseline 380/19).
+**16 fast (i) reds = the exact named set** (commit×10, core×2, freeze×4 — 20-row table match,
+byte-for-byte). Watch set (ii): `test_a_delta_cadence` + `test_b_commit_rewind_exact` red as
+recorded (stable-red). `test_f_user_key_freeze` red (i)/F1 as recorded.
+`test_g_stranded_tail` **FAILED this run — FLAKY class** (population now 5F/2P over 7
+observations; a single flip proves nothing in either direction). **NEW failures: none.**
+Drift explained: +51 passing tests = changeset-added tests (`git diff d78ff95..HEAD`: config
++15, voicectl +18, feedback +11, control_socket +4, key_listener +1, typing_backends +2);
+19→20 failed delta is solely the `test_g_stranded_tail` flake flip. No
+`tests/G1_BASELINE.md` addendum needed (addendum mechanism is for NEW failures) — file left
+untouched, classifications untouched. Outside the G1 set (run once for row-6 accuracy):
+`tests/test_systemd_unit.py` = 15 passed / 1 failed — see flagged list.
+
+### Repo state
+
+Branch `main`; `git status --porcelain` clean except the orchestrator's
+`plan/008_a47116bb2b79/tasks.json` (left uncommitted by this task, per scope — flagged).
+Commits this task: `eb4cd58` "Sync docs to landed behavior (P1.M7.T2.S3)" (+ the sign-off
+commit, this one). Sibling commits on `main`: `dbe7121` (S2 — landed by the orchestrator
+mid-sweep; it was staged-but-uncommitted at preflight, substantive sibling checks all
+passed, so the sweep proceeded per the commit-discipline mandate), `18015e4` (S1).
+`plan/008_a47116bb2b79/P1M7T2S{1,2,3}/` PRP+research dirs all committed. Not pushed
+(criterion is committed, not pushed). Full evidence table:
+`plan/008_a47116bb2b79/P1M7T2S3/research/sweep_matrix.md`.
+
+### Fixes applied by this sweep
+
+1. ACCEPTANCE row 7 + header blockquote: dead plan-006 sign-off pointer → this section
+   (the mandatory known fix).
+2. ACCEPTANCE row 6: stale plan-006 suite counts → this session's re-measured numbers;
+   the pre-existing systemd-suite red named in the row instead of a silent green claim.
+3. ACCEPTANCE row 10: "S3 trimmed ctl to the 5-command surface" → historically accurate
+   wording (Rev 2's five; seven today with `cancel` + `session`).
+4. README: `compute_type` prose corrected + `asr.compute_type` config-table row added +
+   status sample `cuda (float32)` → `(float16)` (the drift S1 flagged for this task).
+
+### Flagged, not fixed (code-side / orchestrator-side)
+
+1. `voice_typing/ctl.py:56-58` — comment says "the documented Rev 2 surface stays the six
+   commands above"; the tuple above it now holds seven (`session`, P1.M6.T2.S3). Stale
+   source comment, zero behavior impact. Recommendation: reword to "seven commands".
+   Owner: any future `ctl.py` touch (doc-level task must not edit source).
+2. `tests/test_systemd_unit.py::test_hypr_binds_use_portable_home_launcher` — **PRE-EXISTING
+   red at HEAD (15 passed / 1 failed)**, NOT a G1 failure (suite outside the G1 set) and NOT
+   a changeset regression: the Rev-3 halt bind `SUPER ALT, Escape → systemctl --user stop`
+   landed pre-baseline in `0e7dd05` and trips the pin's every-bind-launches-voicectl
+   assertion (both bind and test present at baseline `d78ff95` — red there too; never
+   surfaced because nothing outside the G1 protocol ran this suite). Recommendation: teach
+   the pin to assert only binds that invoke voicectl (or exempt systemctl binds) — a
+   one-line expectation-scoping change for a future CODE task; deliberately not done here
+   (docs task; editing test expectations is forbidden by the G1 contract posture).
+   Escalated here + named in ACCEPTANCE row 6.
+3. ACCEPTANCE evidence block (criteria 5/6/8/9/10) retains `device: cuda (float32)` inside
+   the verbatim 2026-10-03 run paste — historical record, left untouched; current claims
+   rest on the 2026-11-23 re-measurements.
+4. `plan/008_a47116bb2b79/tasks.json` — orchestrator-owned; carries an unstaged delta in
+   the worktree. Left exactly as found; not staged, not committed by this task.
