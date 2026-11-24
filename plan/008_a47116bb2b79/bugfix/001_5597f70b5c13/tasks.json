@@ -78,14 +78,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Reconcile VT-003 with the shipped panic bind",
-              "status": "Ready",
+              "status": "Complete",
               "description": "BUG-003: encode the intentional hard-stop exception in the static portability contract without weakening other bindings.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Pin the exact panic exception in the portability check",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-003: hypr-binds.conf intentionally stops the user unit when the control socket is wedged; the static test treats every bind as a voicectl call.\n2. INPUT: tests/test_systemd_unit.py::test_hypr_binds_use_portable_home_launcher, _hypr_binds_path(), and shipped hypr-binds.conf.\n3. LOGIC: Require exactly one SUPER ALT, Escape, exec, systemctl --user stop voice-typing line, allowing harmless field whitespace only. Exempt that exact tuple and command from the launcher requirement; keep /home/ forbidden and $HOME/.local/bin/voicectl required on ordinary bindings. Cover duplicate/missing panic, lookalikes/chained commands and arbitrary nonportable binds with string fixtures. Run static unit tests only; do not invoke systemctl or rewrite the bind.\n4. OUTPUT: VT-003 distinguishes the panic route from ordinary portable binds; documented command contract for P1.M2.T3.S2.\n5. DOCS: none — static check changes only; README Hotkey overview is Mode B in P1.M2.T3.S2.",
