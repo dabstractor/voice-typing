@@ -70,7 +70,10 @@ and stabilized text is typed into the focused window **as you speak** and revise
 place (see [Streaming dictation](#streaming-dictation)). A pause triggers the
 commit/correction pass on the typed tail (plus the trailing space) but does **not** end
 the session — the recognizer keeps listening; only `voicectl stop` (or toggle off)
-disarms the mic. **Backspace** while a fragment is in flight cancels it.
+disarms the mic. **Backspace** while a fragment is in flight cancels it. Arming also
+pauses any playing MPRIS media (music/video) and your stop resumes it — media ducking is on
+by default; see [Media ducking while listening](#media-ducking-while-listening) or set
+`duck_mode = "off"`.
 
 If the mic never arms or no text appears, the two knobs to reach for are the
 microphone default source (Troubleshooting) and `asr.lite_post_speech_silence_duration`
@@ -114,7 +117,9 @@ or rebind to a free combo in `hypr-binds.conf`.
 ## Upgrading from Rev 1 (two-mode builds)
 
 Rev 2 collapsed the two ASR modes into one streaming model, and the CLI shrank to six
-commands: `toggle`, `start`, `stop`, `status`, `cancel`, `quit`. If you are upgrading a
+commands: `toggle`, `start`, `stop`, `status`, `cancel`, `quit` (Rev 4 later added a
+seventh, `session` — prints the last completed dictation, in either delivery mode; see
+[Session recovery](#session-recovery-voicectl-session)). If you are upgrading a
 machine whose Hyprland config (e.g. `~/.config/hypr/custom/keybinds.lua` or
 `keybinds.conf`) predates the change:
 
@@ -196,6 +201,126 @@ as soon as you speak).
 - Fallback: the **Super+Alt+Backspace** bind (`voicectl cancel`) runs the identical
   cancel path regardless of evdev, and doubles as the automated-test seam.
 
+## Media ducking while listening
+
+Arming the mic pauses your playing media; your stop resumes it. This is ON by default
+(`audio.duck_mode = "mpris"`) — if your music "mysteriously" paused when you started
+dictating, this is the feature, not a bug. Set `duck_mode = "off"` to get the old,
+never-touch-media behavior back.
+
+At arm with `duck_mode = "mpris"`, every MPRIS player in the `Playing` state pauses. The
+pause lands ~107 ms after the arm command returns (the engage is async — arm latency is
+unchanged). At every disarm path — `voicectl stop` / toggle-off, the 30 s auto-stop, a
+keypress HALT disarm, `quit` — the paused players resume. Backspace-cancel is NOT a disarm
+(the mic stays hot), so ducking persists through it.
+
+**Sovereignty (the contract).** At release the daemon resumes only players (a) WE paused,
+(b) that were `Playing` before we paused, and (c) that are still `Paused` now. A player you
+resumed mid-dictation is never fought; a player you paused yourself stays paused; a volume
+you changed mid-dictation is never overwritten.
+
+| `duck_mode` | behavior at arm | behavior at stop |
+| --- | --- | --- |
+| `"mpris"` (default) | pause every MPRIS player in `Playing` state | resume exactly the ledger — what we paused, only if still paused |
+| `"volume"` | duck the default sink to `audio.duck_volume_pct` (15) | restore — but only if the volume is still what we set (compare-before-restore); your manual change wins |
+| `"off"` | nothing; no audio subprocess is ever spawned | nothing (byte-identical to pre-ducking builds) |
+
+The journal lines (verbatim from the evidence run; `vtdummy*` are the script's dummy
+players):
+
+```
+INFO voice_typing.audio_ducking: ducking: paused MPRIS player(s): org.mpris.MediaPlayer2.brave.instance2729297, org.mpris.MediaPlayer2.vtdummy1, org.mpris.MediaPlayer2.vtdummy2
+INFO voice_typing.audio_ducking: ducking: resumed MPRIS player(s): org.mpris.MediaPlayer2.brave.instance2729297, org.mpris.MediaPlayer2.vtdummy1
+INFO voice_typing.audio_ducking: ducking: sink volume 40% -> 15%
+INFO voice_typing.audio_ducking: ducking: volume was changed mid-dictation (60%); keeping user value
+INFO voice_typing.audio_ducking: ducking: restored sink volume 40%
+```
+
+(The resumed list is one player short: vtdummy2 was resumed by the user mid-dictation, so
+rule (a) keeps it out of the release ledger.)
+
+Crash safety: `state.json` carries a `ducked` flag. If the daemon dies mid-dictation, the
+next boot self-heals with a best-effort release, and the systemd unit runs
+`ExecStopPost=… .venv/bin/python -m voice_typing.ducking_heal` on every stop — it resumes
+paused MPRIS players and warns if the sink was left at duck volume (it never guesses a
+volume restore), and no-ops on every clean stop.
+
+Evidence: scripted 12/12 PASS — `tests/D1_DUCK_EVIDENCE.md` (re-runnable:
+`timeout 900 bash tests/d1_duck_evidence.sh`).
+
+## Bulk text delivery (opt-in, experimental)
+
+**Status: opt-in and unverified.** Set `output.delivery = "bulk-text"` to switch the output
+path; the default remains `"stream-edit"`. The G6 graduation gate — the assembled,
+re-derivable verdict in `tests/G6_GRADUATION.md` — currently reads
+`G6 DECISION: STAY OPT-IN (unmet: A-g3-matrix, B-integrity, C-g5-timing, D-sessions)`
+(2026-11-23 @ 69952ae). Until it flips, everything in this section is mechanism-level
+(scripted lab evidence only): nothing has been operator-accepted on a live desktop, and no
+speech-latency claim is made. The outstanding inputs, named by the gate: ≥ 3
+operator-authored writing sessions in `tests/G6_WRITING_SESSIONS.md` (the template ships
+EMPTY — automation must never author entries), remediation of the failed `edit-count-law`
+register row, honest verification of the pi prompt row (visibility instrumentation is
+absent), and passing G5 timing. Re-run `timeout 60 .venv/bin/python tests/g6_assessment.py`
+to re-derive the verdict.
+
+bulk-text is rejected at config load — a single `ValueError` naming ALL violations — unless
+all three hold: `output.streaming = true`, `asr.graceful_stop = false`,
+`cancel.keypress_action = "disarm"`.
+
+The model: words appear in the focused field as recognition updates arrive; a correction is
+ONE visible edit over the tool's owned range; an unchanged update emits zero edits. There is
+**no typing/backspace fallback ever** — a route that cannot deliver reports
+`unsupported`/`fault` instead of synthesizing keystrokes. The stream-edit path is unchanged
+and remains the default.
+
+`voicectl status` gains a `delivery: bulk-text (inactive|active|unsupported|fault)` line,
+plus `delivery reason:` / `delivery op:` lines when non-empty; the same fields live in
+`state.json` (`delivery_mode`/`delivery_state`/`delivery_reason`/`last_confirmed_op`).
+`unsupported` = the route cannot engage (e.g. the input-method seat is taken — see
+[Troubleshooting](#bulk-delivery-the-input-method-seat-is-taken-fcitx5ibus)); `fault` = the
+route died mid-session.
+
+Where words land — the field-class matrix (measured 2026-11-23; versions are part of the
+claim — `plan/008_a47116bb2b79/architecture/g3_field_matrix.md`):
+
+| field class | status |
+| --- | --- |
+| GTK-class editors/fields | full — insert + atomic correction (register-verified: `g3_gtk_rows.md`) |
+| pi chat prompt (extension seam) | full behavior in the register rows (pi bridge 1.0.2, isolated Ghostty 1.4.0-arch2 / sway 1.12) — but G6 counts the row **unverified** (visibility instrumentation absent) |
+| browser text field (chromium-class) | insert verified; correction **REFUSED** — the caret guard cannot confirm ownership, so the adapter keeps the committed text rather than risk an unverified edit |
+| foot 1.28.0-2 · kitty 0.51.0-1 | insert-only (`delete_surrounding_text` ignored, `surrounding_text` never sent) — corrections only via the cooperating-editor seam |
+| ghostty 1.4.0-2 | IM route blocked (text-input not activated) → clipboard insert fallback |
+| Hyprland relay 0.57.2 | untested on the live desktop (the isolated lab boot fails) — treat as **unverified** |
+
+Timing is measured and currently failing: `tests/G5_TIMING_EVIDENCE.md` records FAIL on
+both measured routes — an update backlog builds during speech and drains after it, and on
+the pi route the median speech-end→word-visible time in the recorded replay is 12.6 s
+(im-gtk meets the per-word gate in isolation but sustains the same backlog). No route
+streams words at speaking pace yet; this, not the routes, is the main reason G6 stays
+opt-in.
+
+ghostty-class terminals get a clipboard insert fallback: text is staged to the Wayland
+clipboard and pasted. The fallback refuses while a clipboard-history watcher is running,
+preserves every original clipboard format byte-exactly, and never touches the PRIMARY
+selection — the full contract is under
+[Troubleshooting](#bulk-delivery-the-clipboard-fallback-contract).
+
+### Session recovery (voicectl session)
+
+Works in BOTH delivery modes. `voicectl session` prints the most recent COMPLETED dictation
+session exactly as delivered; `voicectl session --copy` stages it to the Wayland clipboard
+with no added newline and prints `copied N chars`. Exit codes: `0` on success; `1` when no
+completed session exists (the clipboard is untouched); `64` when `--copy` is used with any
+other command (usage error). If the store was truncated, the warning goes to stderr —
+stdout is exactly the text. The recovery memory keeps the last nonempty arm→disarm session
+(≤ 2 sessions × 1 MiB) and is cleared at daemon exit.
+
+### Takeover semantics
+
+Any real keypress, click, or focus change stops delivery immediately — no retries, and the
+already-delivered tail stays on screen. `voicectl cancel` in bulk mode performs no physical
+backspace compensation (there is no owned typing stream to rewind).
+
 ## Feedback surfaces
 
 The daemon publishes its live state to a JSON file, written atomically on every change:
@@ -204,7 +329,11 @@ The daemon publishes its live state to a JSON file, written atomically on every 
   `feedback.state_file`). Fields: `listening`, `phase` (`unloaded`/`loading`/`idle`/
   `listening`/`speaking`), `models_loaded`, `mode` (always `"lite"` — a fixed constant;
   Rev 2 has a single dictation mode), `partial` (mirrors the live typed tail; overwritten
-  with the committed text when an utterance finalizes), `last_final`, and `ts`. Poll it
+  with the committed text when an utterance finalizes), `last_final`, `ts`, `ducked` (bool —
+  media ducking engaged; the boot crash self-heal reads it), `delivery_mode`
+  (`"stream-edit"`/`"bulk-text"`), `delivery_state` (`inactive`/`active`/`unsupported`/
+  `fault`), `delivery_reason` (one sanitized reason, when set), and `last_confirmed_op` (the
+  last applied bulk op as counts+times — never recognition text). Poll it
   with `jq` for your own UI (waybar, conky, …).
 - **`voicectl status`** — human-readable one-shot of the same state (adds the resolved
   device/compute type, mic health, and the context-prompt line).
@@ -235,8 +364,11 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"null"` (types nothing; used by the headless E2E tests). `wtype` auto-falls-back to `ydotool`. |
 | `output.append_space` | `true` | append one trailing space after each commit. |
 | `output.streaming` | `true` | type stabilized partials live + revise in place as the utterance grows. `false` = append-only finals (rollback hatch to the pre-Rev-2 typing behavior). |
+| `output.delivery` | `"stream-edit"` | `"bulk-text"` = opt-in bulk delivery (see [Bulk text delivery](#bulk-text-delivery-opt-in-experimental) — **unverified until G6**: `tests/G6_GRADUATION.md` says STAY OPT-IN). Requires `output.streaming=true`, `asr.graceful_stop=false`, `cancel.keypress_action="disarm"` — the loader rejects other combos with a single ValueError naming all violations. |
 | `cancel.on_backspace` | `true` | enable the physical-Backspace cancel gesture while a fragment is pending. Any other keypress freezes the fragment instead (never typed over). |
 | `cancel.devices` | `[]` | keyboard device node(s) to watch for the Backspace gesture, e.g. `["/dev/input/event3"]`. Empty list = auto-detect keyboards exposing KEY_BACKSPACE (uinput/ydotool virtual devices always excluded). Nothing readable → one journal warning at the first arm; the Super+Alt+Backspace bind still works. |
+| `audio.duck_mode` | `"mpris"` | `"mpris"` = pause playing MPRIS players at arm, resume-at-stop only what we paused and only if still paused; `"volume"` = duck the default sink to `duck_volume_pct`; `"off"` = pre-ducking behavior, no audio subprocess. See [Media ducking while listening](#media-ducking-while-listening). |
+| `audio.duck_volume_pct` | `15` | target sink volume % for the `"volume"` tier. Restore is compare-before-restore — a manual mid-dictation change wins. |
 | `feedback.notify_on_final` | `true` | also pop a hyprctl popup with each commit's text (`✔ <text>`). Set `false` to keep only the brief `Recording` / `Recording Stopped` toasts — the text is already typed into the focused window, so the popup is redundant. |
 | `feedback.notify_ms` | `2500` | how long hyprctl popups stay on screen (ms). Lower for a brief start/stop flash. |
 | `feedback.hypr_notify` | `true` | master on/off for ALL hyprctl popups. `false` suppresses the start/stop toasts too (`notify_on_final` only adds the per-final ✔ popup; this is the global kill switch). |
@@ -354,6 +486,49 @@ service.
 To force a single backend, set `[output] backend = "ydotool"` (or `"null"` to disable
 typing entirely — finals still appear in the state file). Restart the daemon after editing.
 
+### Bulk delivery: the input-method seat is taken (fcitx5/ibus)
+
+Wayland allows ONE input-method client per seat. If an input-method editor is already
+running (fcitx5, ibus), the bulk IM route cannot claim the seat: `voicectl status` shows
+`delivery: bulk-text (unsupported)` with the reason. The daemon never kills or
+respawn-fights your IME — `voice_typing/ime/manager.py` documents spawning against the
+user's fcitx5 as explicitly forbidden. Fix: stop the IME for the bulk session, or stay on
+`stream-edit` (which never touches the seat and is unaffected). The compositor must also
+advertise `zwp_input_method_manager_v2` — without it the adapter raises at start.
+
+### Bulk delivery: what my terminal supports
+
+The measured matrix lives in [Bulk text delivery](#bulk-text-delivery-opt-in-experimental)
+(versions are part of the claim). The register rows behind the statuses:
+
+- **foot / kitty — insert-only.** The terminals ignore `delete_surrounding_text` and never
+  send `surrounding_text`, so the one-edit correction cannot be placed. Corrections ride
+  the cooperating-editor seam (the pi extension) only.
+- **ghostty — clipboard fallback.** The IM route is blocked at 1.4.0-2 (text-input never
+  activates), so inserts go through the clipboard contract below.
+- **browser correction REFUSED — the guard working as designed.** Chromium's
+  `surrounding_text` snapshot lags the committed value, so the adapter cannot confirm it
+  still owns the range; it keeps the committed text rather than risk an unverified edit
+  (the register records `REFUSED (recheck: caret moved)`). Insert-only is the honest limit.
+- **Hyprland relay — unverified.** The isolated lab boot fails (nested compositor abort);
+  live-desktop behavior has never been exercised. Nothing here is a claim about your
+  Hyprland session.
+
+### Bulk delivery: the clipboard fallback contract
+
+The clipboard fallback engages ONLY for ghostty-class inserts (the IM route is blocked
+there). Its contract, from
+`plan/008_a47116bb2b79/architecture/g4_clipboard_verdicts.jsonl`:
+
+- **Refuses while a clipboard-history watcher is running.** Partial inserts would land in
+  your clipboard history, and keeping them out is unprovable — the adapter declines rather
+  than risk polluting the history. The register records this as the honest L1 outcome
+  (`status: unprovable` — watcher active, adapter refused, store holds ZERO voice
+  fragments).
+- **Preserves every original clipboard format byte-exactly.** The staged text is added on
+  top; nothing pre-existing is destroyed or rewritten.
+- **The PRIMARY selection is never touched.**
+
 ## Logs, status, stopping
 
 Follow the daemon log:
@@ -390,6 +565,7 @@ uptime: 42.3s
 device: cuda (float32)
 mic: ok
 context-prompt: on
+delivery: stream-edit (inactive)
 ```
 
 `mode:` is always `lite` — a fixed daemon constant; Rev 2 has exactly one dictation mode.
@@ -402,7 +578,10 @@ substituted model (`tiny.en`). `context-prompt:` is `on`, or one of:
 `off (degraded — context-free decoding)` (the rolling-context arm failed; decoding
 continues without it), or `unknown` (an older daemon without the field).
 If the mic is unavailable, the mic line reads `mic: unavailable (<reason>)`
-instead.
+instead. In bulk mode (`output.delivery = "bulk-text"`) the same line reads
+`delivery: bulk-text (active)` — or `(unsupported)`/`(fault)` — and `delivery reason:` /
+`delivery op:` lines appear when non-empty (see
+[Bulk text delivery](#bulk-text-delivery-opt-in-experimental)).
 
 ### Model lifecycle & VRAM
 
