@@ -146,7 +146,9 @@ class OutputConfig:
                                # false = append-only finals (rollback hatch)
     delivery: str = "stream-edit"  # Rev 4 §4.2sexies: "bulk-text" = paste-as-policy output path
                                # (one-edit corrections, NO typing/backspace fallback; opt-in
-                               # until G6 graduation); "stream-edit" = today's behavior.
+                               # until G6 graduation — verdict in tests/G6_GRADUATION.md:
+                               # STAY OPT-IN, 2026-11-23 @ 69952ae); "stream-edit" = today's
+                               # behavior.
                                # bulk-text additionally requires (enforced at the TOP level,
                                # because the other two members live in other sections):
                                # output.streaming=true, asr.graceful_stop=false,
