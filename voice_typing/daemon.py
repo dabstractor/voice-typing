@@ -122,6 +122,20 @@ DeliveryTarget adapter (the field is edited via the IM child's one-edit protocol
 - SEAM: bulk_target_factory= (ctor kwarg, test seam) replaces the default bundle factory
   (_build_default_bulk_target: IM route — ImeProcess+ImeTarget+per-lifetime TakeoverWatch; the
   pi-editor adapter is reachable through the same seam; no config key in this item).
+- RECOVERY — SESSION MEMORY (PRD §4.2sexies R.6, P1.M6.T2.S2): the daemon holds the last
+  nonempty arm→disarm session in a pure-memory leaf store (voice_typing/session_recovery.py —
+  own lock, no persistence, no crash recovery, cleared at exit via request_shutdown() →
+  clear()). Hooks are 1-3-line insertions AFTER the existing gates (the listening gate, the
+  cancel-suppression window, the rejected-final block) in BOTH delivery modes: stream-edit
+  (on_final accepted → note_final after record_final; rejected block top → note_rejected;
+  _on_partial → note_tail(self._stream.tail); legacy cancel → note_cancel) and bulk
+  (_bulk_handle_final/_bulk_handle_partial/_bulk_cancel one-liners INSIDE S1's bodies, keyed
+  by (gen, uid) for exactly-once). The exclusion rules are inherited from gate placement,
+  never duplicated. Cap: 2 sessions × 1 MiB UTF-8, code constants — on overflow the newest
+  complete text that fits is kept (whole oldest items dropped first; only a lone oversized
+  item is sliced at a codepoint boundary), with truncated=True + finals_dropped reported.
+  The close-time INFO line carries counts/times ONLY (never session text — R.5/R.6); the one
+  text exit point is session_snapshot(), pulled by T2.S3's `voicectl session [--copy]`.
 """
 
 from __future__ import annotations
@@ -140,6 +154,7 @@ import time
 from typing import TYPE_CHECKING, Any, Callable
 
 import voice_typing.prompt_engine as prompt_engine
+import voice_typing.session_recovery as session_recovery
 import voice_typing.streaming as streaming
 import voice_typing.textproc as textproc
 import voice_typing.typing_backends as typing_backends
@@ -1052,6 +1067,10 @@ class VoiceTypingDaemon:
         self._bulk_seq_gen: int = -1           #   NOT in the relay payload — daemon-synthesized,
         self._bulk_dropped_no_id: int = 0      #   lazily cleared when gen advances; G6 counter)
         self._bulk_stop_thread: Any = None     # joinable stopper (test seam; request_shutdown joins)
+        # P1.M6.T2.S2 (R.6): session recovery store — pure-memory leaf (own Lock, never calls
+        # back into the daemon). Fed by hooks placed AFTER the existing gates (G1); holds the
+        # last nonempty arm→disarm session, ≤2 sessions × 1 MiB UTF-8, cleared at exit (G10).
+        self._session_recovery = session_recovery.SessionRecovery()
         # Boot write (P1.M3.T3.S2: config validated the enum at construction — cannot raise).
         # getattr-guarded (the daemon's established defensive-seam shape, e.g.
         # consume_cancel_mark): minimal status doubles in the untouched suites lack the method;
@@ -1499,6 +1518,9 @@ class VoiceTypingDaemon:
                 #   guard; ctrl.cancel already closed the cancelled utterance controller-side).
                 return self._bulk_handle_final(cleaned, text, t_final_ready)
             if not cleaned:  # rejected: blocklist hallucination / below min_chars
+                # P1.M6.T2.S2 (R.6): rejected final — content no-op; the shown tail is
+                # retained (the gate above already dropped the racing/suppressed finals).
+                self._session_recovery.note_rejected()
                 # P1.M2.T6.S2: under streaming a rejected final FREEZES the tail as-is
                 # (PRD §4.2quater rule 2 — nothing authoritative was decoded, so nothing
                 # is rewound) and resets the boundary; the drain/idle flags still run so
@@ -1591,6 +1613,10 @@ class VoiceTypingDaemon:
             self._feedback.record_final(
                 cleaned
             )  # recognition is final regardless of typing success
+            self._session_recovery.note_final(
+                cleaned
+            )  # P1.M6.T2.S2 (R.6): accepted final → recovery draft (stream-edit: no key —
+            #   the single post-record_final funnel fires once per utterance, G7)
             record = self._latency.finalize_utterance(
                 text=cleaned, t_final_ready=t_final_ready, t_typed=t_typed
             )
@@ -1685,6 +1711,8 @@ class VoiceTypingDaemon:
         arm is preceded by a 'Loading…' toast from _load_host(); a warm arm fires only 'Recording'.
         """
         self._listening.set()
+        # P1.M6.T2.S2 (R.6): fresh recovery draft per arm (resets any stale draft state).
+        self._session_recovery.open_session()
         if self._bulk_mode():  # P1.M6.T2.S1 (G5): gen bump BEFORE the arm cmd put below (the
             self._bulk_gen += 1  #   host child stamps session_gen per arm cmd — 1:1 by
             self._bulk_epoch += 1  #   construction); the stopper-epoch guard rides the same bump
@@ -1772,6 +1800,20 @@ class VoiceTypingDaemon:
         self._disarmed_monotonic = (
             time.monotonic()
         )  # start the idle-UNLOAD clock (P1.M3.T1.S1)
+        # P1.M6.T2.S2 (R.6): close the recovery session BEFORE the engine reset (G4 —
+        # pending_tail is event-fed, never read from the engine here; the order documents
+        # the invariant). Counts-only log line (G6 — never session text).
+        _sr_completed = self._session_recovery.close_session()
+        if _sr_completed is not None:
+            logger.info(
+                "session recovery: session completed finals=%d tail_chars=%d bytes=%d "
+                "truncated=%d store=%d",
+                len(_sr_completed.finals),
+                len(_sr_completed.tail),
+                _sr_completed.byte_len(),
+                int(_sr_completed.truncated),
+                self._session_recovery.count(),
+            )
         stream_reset = getattr(
             self._stream, "reset_session", None
         )  # P1.M2.T6.S2: session over
@@ -1850,6 +1892,10 @@ class VoiceTypingDaemon:
         if self._bulk_mode():  # P1.M6.T2.S1: bulk path — enqueue-and-return, NO stream typing
             return self._bulk_handle_partial(text)
         self._stream.on_partial(text)
+        # P1.M6.T2.S2 (R.6): the engine tail is now current — newest visible fragment wins.
+        # Defensive getattr (the _pending_tail_len seam style): minimal stream doubles in the
+        # untouched suites lack .tail; the real StreamingOutput always has it (streaming.py).
+        self._session_recovery.note_tail(getattr(self._stream, "tail", ""))
         self._latency.note_partial(text)
 
     # ---------------------------------------------------------------------
@@ -1929,12 +1975,17 @@ class VoiceTypingDaemon:
             # shown span stays owned-but-settled — nothing auto-erased (R.5).
             if ctrl is not None and ctrl.is_active():
                 ctrl.on_final_dropped(utterance=str(uid), gen=gen)
+            # P1.M6.T2.S2 (R.6): rejected final — content no-op, the shown tail is retained.
+            self._session_recovery.note_rejected()
             self._feedback.notify("filtered hallucination — not typed; keep dictating")
             return
         seq = self._bulk_next_seq(gen, uid)
         if ctrl is not None and ctrl.is_active():
             ctrl.on_final(cleaned, utterance=str(uid), seq=seq, gen=gen)
         self._feedback.record_final(cleaned)  # recognition meaning (feedback mirrors keep it)
+        # P1.M6.T2.S2 (R.6): accepted final → recovery draft, keyed (gen, uid) RAW hashables
+        # for exactly-once dedupe (G7 — the str(uid) form is the controller's, not the store's).
+        self._session_recovery.note_final(cleaned, key=(gen, uid))
         rec = self._latency.finalize_utterance(
             text=cleaned, t_final_ready=t_final_ready, t_typed=time.monotonic()
         )
@@ -1971,6 +2022,9 @@ class VoiceTypingDaemon:
                 text, utterance=str(uid), seq=self._bulk_next_seq(gen, uid), gen=gen
             )
         self._feedback.update_partial(text)  # the partial mirror keeps recognition meaning
+        # P1.M6.T2.S2 (R.6): recognized tail (D2 — confirmed lags by design; the raw partial
+        # is the recognized fragment). One overwrite; no stream call.
+        self._session_recovery.note_tail(text)
         self._latency.note_partial(text)  # legacy latency counter (partials=N)
 
     def _bulk_begin_delivery(self) -> None:
@@ -2151,6 +2205,8 @@ class VoiceTypingDaemon:
                         self._cancel_suppress_since = time.monotonic()
                         host_cancel()
                 self._reset_stream_after_cancel()  # clears the Feedback partial mirror
+                # P1.M6.T2.S2 (R.6): the cancelled fragment is excluded — clear the tail.
+                self._session_recovery.note_cancel()
         return {
             "ok": True,
             "listening": self.is_listening(),
@@ -2442,6 +2498,9 @@ class VoiceTypingDaemon:
                     self._cancel_suppress_since = time.monotonic()
                     host_cancel()
             self._reset_stream_after_cancel()  # fresh tail at the cursor; committed unchanged
+            # P1.M6.T2.S2 (R.6): the cancelled fragment is excluded — clear the pending tail
+            # (the racing final is dropped by the suppression window ABOVE the recovery hook).
+            self._session_recovery.note_cancel()
         return {"ok": True, "listening": True, **self.status_snapshot()}
 
     def _begin_drain(self) -> None:
@@ -2828,6 +2887,9 @@ class VoiceTypingDaemon:
         """
         self._shutdown.set()
         self._duck_release()  # §4.2quinquies: quit/SIGTERM must never leave media ducked
+        # P1.M6.T2.S2 (R.6/G10): daemon exit clears the recovery store — memory only, no
+        # crash persistence. A quit while armed may skip _disarm; clear() covers that too.
+        self._session_recovery.clear()
         # Cancel any pending graceful-stop drain watchdog so it can't fire mid-teardown.
         timer, self._drain_timer = self._drain_timer, None
         if timer is not None:
@@ -2931,6 +2993,27 @@ class VoiceTypingDaemon:
         if self._context_prompt_active is False:
             return "off (degraded — context-free decoding)"
         return "on"
+
+    def session_snapshot(self) -> "dict | None":
+        """P1.M6.T2.S3 contract point (PRD §4.2sexies R.6): the last completed recovery
+        session as a plain dict — {text, truncated, finals, finals_dropped, tail_chars,
+        ended_monotonic} — or None when the store is empty (fresh boot, cleared at exit,
+        or only empty/failed arms so far). `text` is EXACTLY what `voicectl session`
+        prints/copies (no added newline). Lock-safe from the control thread: the store is
+        a leaf with its own lock (G2) — this never takes self._lock. Counts/times only in
+        the returned metadata; `text` is the single sanctioned exit point for session text.
+        """
+        s = self._session_recovery.latest_completed()
+        if s is None:
+            return None
+        return {
+            "text": s.text(),
+            "truncated": s.truncated,
+            "finals": len(s.finals),
+            "finals_dropped": s.finals_dropped,
+            "tail_chars": len(s.tail),
+            "ended_monotonic": s.ended_monotonic,
+        }
 
     def status_snapshot(self) -> dict:
         """The status payload for the control socket `status`/`toggle`/`start`/`stop` cmds.
