@@ -1,0 +1,13 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: Ducking default flip makes unit tests fire real busctl --user calls against the live desktop session (test pollution + operator media can be paused)
+  h3.1 Issue 2: bulk-text delivery fails its normative R.1 live-visibility requirement — words land at utterance granularity (up to 57-word backlog, sentence-end dumps) per the repo's own G5 gate
+ h2.3 Minor Issues (Nice to Fix)
+  h3.2 Issue 1: Permanently failing test: test_hypr_binds_use_portable_home_launcher rejects the documented SUPER+ALT+Escape panic bind
+  h3.3 Issue 2: test_daemon.py misclassified as a CUDA hang vector and excluded from the G1 baseline — its 20 legacy-red tests were never classified
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:17 list:2
