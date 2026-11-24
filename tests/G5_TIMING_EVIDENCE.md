@@ -15,15 +15,146 @@
 
 | route | verdict | ins | cor | miss | speech med/p95 ms | worst ms | ready ins/cor p95 ms | max out | flags |
 |---|---|---|---|---|---|---|---|---|---|
-| im-gtk | **fail** (backlog sustained; counts 20/0 < 100; correction p95 unexercised) | 20 | 0 | 870 | 195.1/318.6 ✓ | 318.6 ✓ | 4.4 / — | 57 | backlog-sustained |
-| pi-ghostty | **fail** (speech→visible 12.6 s median; backlog sustained; sentence-end dump) | 108 | 169 ✓ | 231 | 12616.2/13203.1 ✗ | 13203.1 ✗ | 11.5 / 11.7 ✓ | 57 | backlog-sustained, dump |
+| im-gtk | **fail** (counts 4/0 < 100; backlog sustained 57; correction p95 unexercised; frame bars unverified — field change-log proxy) | 4 | 0 | 871 | −1312.2/−802.4 (n=4, mid-speech inserts) | −802.4 | 3.4 / — | 57 | backlog-sustained, frame-unverified |
+| pi-ghostty | **fail** (speech→visible 6714.0 ms median; sentence-end dump; backlog sustained 57; counts 14/14 < 100; unchanged⇒zero-edits breached) | 14 | 14 | 815 | 6714.0/13444.0 ✗ | 15831.6 ✗ | 11266.2 / 13150.8 ✗ | 57 | backlog-sustained, dump, unchanged-edit |
 
-Both routes **FAIL G5**. The dominant finding is identical on both: with the
-shipped bulk path, words become visible only at **utterance granularity**
-(the controller's newest-partial-wins coalescing applies at most one live op
-per utterance, and each utterance's text lands as one visible edit at its end)
-— so the field accumulates a multi-second, multi-word backlog for the whole
-utterance duration. No route streams words live at speaking pace.
+Both routes **FAIL G5** — 2026-11-24 qualification round (P1.M2.T2.S3), production selection
+(stabilized + S1's prompt dispatch + S2's 0.05 s bulk cadence), 20 measured replays per route.
+The utterance-granularity visibility failure persists on both routes: the field still
+accumulates a multi-second, multi-word backlog (max 57 words outstanding) for the whole clip.
+pi-ghostty's speech→visible median improved 7786.2 → 6714.0 ms (S2's cadence fix, −14%) but
+remains ~13× the 500 ms bar, its sentence-end dump persists, its count floors collapsed to
+14/14 (the S6 run's 108/169 came from the utterance-rewrite pattern this round no longer
+produces), and — under the NEW paint-qualified frame basis (S5 observer) — its
+ready→first-changed-frame bars now measure real visible change and FAIL (11.3 s/13.2 s).
+im-gtk remains count/backlog-bound (4 insertions, 0 corrections, 57 outstanding) and its
+frame basis is still the field change-log proxy, so its frame bars stay UNVERIFIED. Full
+numbers, provenance and the A/B decision: "Qualification run (P1.M2.T2.S3)" below.
+BUG-002 and PRD acceptance #13 remain OPEN; opt-in delivery (`output.delivery="bulk-text"`)
+is retained; default delivery is unchanged; G6/README claims must not proceed on this
+evidence (P1.M2.T3 owns them).
+
+## Qualification run (P1.M2.T2.S3)
+
+- Date: 2026-11-24 | HEAD: 2909e03 (P1.M2.T2.S2's bulk decode-cadence change, committed;
+  S1's dispatch-promptness change landed at a14335c beneath it). The runs below executed at
+  exactly this content. RealtimeSTT 1.0.2; model small.en, device=cuda, compute_type=float16,
+  context_prompt=True; warm recorder resident across replays (ONE discarded warmup,
+  `auto_unload_idle_seconds=0`); replay budget 20 per arm; the (mono, wall) heartbeat check
+  passed on every run — 0 clock failures, 0 cap failures; kernel 7.3.5-arch1-1,
+  Python 3.12.10, RTX 3080 Ti (12 GiB).
+
+### S2 consumption and the A/B decision (item LOGIC sentence 1)
+
+- S2's "Candidate remediation (P1.M2.T2.S2)" section consumed verbatim (not edited): stage =
+  the recognizer/decode cadence; fix = module constant `_BULK_REALTIME_PROCESSING_PAUSE =
+  0.05` in daemon.py, overriding `kwargs["realtime_processing_pause"]` AFTER `cfg_to_kwargs`
+  and BEFORE the callback merge, ONLY when `cfg.output.delivery == "bulk-text"`; hermetic
+  proof 9 tests + 131 bulk/recovery rails + the full-sweep control re-run. S2's handoff:
+  qualify on BOTH real routes; re-open the selection default ONLY on an im-gtk/plain
+  visible-lag win with churn inside S1's absorbed profile.
+- A/B decision: **FIRED** — S2's change is recognizer-cadence scheduling (it alters update
+  volume, burst profile and which updates become useful), so the S6 A/B conclusion had to be
+  re-derived under the candidate scheduling. The paired arms ran per route (S6's exact
+  commands, sequential, same clips/kernel/budget). Result: on pi-ghostty stabilized is
+  visibly EARLIER than plain (6714.0 ms vs 11978.0 ms speech→visible median) with a better
+  ins/cor balance (14/14 vs 9/15); on im-gtk the plain arm is NOT-RUN — two sanctioned
+  attempts this round died on the same runner-side re-arm gate error S6 recorded twice
+  ("bulk delivery never re-armed", after replay 11 of 20 and replay 14 of 20; an arm that
+  fails twice stands not-run, no imputation). Plain therefore does not win on visible lag +
+  counts on ANY route → the selection default is NOT flipped: `_PARTIAL_CALLBACK_ATTR` stays
+  "stabilized" and daemon.py is untouched by this task. The unflagged (stabilized) arm IS
+  the production selection that was qualified.
+
+### A/B arms this round (S6 table shape; non-verdict vocabulary)
+
+| Route | Arm | Status | speech lag med/p95 (ms) | ins/cor | miss | backlog max | dump | n |
+|---|---|---|---|---|---|---|---|---|
+| im-gtk | plain | not-run (2 attempts: runner-side bulk-delivery re-arm gate, replays 11/14 of 20) | — | — | — | — | — | — |
+| im-gtk | stabilized | measured | −1312.2/−802.4 (live mid-speech inserts) | 4/0 | 871 | 57 | no | 20 |
+| pi-ghostty | plain | measured | 11978.0/16081.3 | 9/15 | 858 | 57 | yes | 20 |
+| pi-ghostty | stabilized | measured | 6714.0/13444.0 | 14/14 | 815 | 57 | yes | 20 |
+
+### The qualification runs (production selection, UNFLAGGED)
+
+- Effective source per run (the child's ready payload — the only effective-source truth):
+  requested "default" resolved to `partial_callback_effective =
+  on_realtime_transcription_stabilized` on both routes. `--partial-source` was used ONLY for
+  the two A/B plain arms, never on the qualification runs.
+- im-gtk production (rc=1, honest fail): 20/20 measured replays; ins 4 / cor 0 / miss 871;
+  speech→visible med −1312.2 ms / p95 −802.4 ms — NEGATIVE by construction: the four matched
+  words painted mid-clip, before their aligned speech-end (live insertions, not an
+  end-of-utterance commit); at n=4 the speech bars are unexercised, not met; ready→changed
+  ins p95 3.4 ms, correction path unexercised; max outstanding 57, backlog sustained; no
+  sentence-end dump; unchanged ⇒ zero edits held; 73 updates total / 30 no-ops (the
+  partial-streaming collapse persists: ~3.7 updates per replay). FRAME BASIS: the GTK field
+  change log (an editor read-poll proxy) — this route has NO paint observer, so the
+  ready→first-changed-FRAME bars are UNVERIFIED and are labeled, not passed.
+- pi-ghostty production (rc=1, honest fail): 20/20 measured replays; ins 14 / cor 14 /
+  miss 815; speech→visible med 6714.0 ms / p95 13444.0 ms, worst 15831.6 ms — far over the
+  500 ms / 1 s bars; ready→first-changed-frame ins p95 11266.2 ms / cor p95 13150.8 ms
+  (bars 100/50 ms). BASIS CHANGE vs the old 11.5/11.7 ms readings: those were FIELD-LOG
+  change events (a read-poll proxy for frames); this round the pi frame basis is the
+  S5-QUALIFIED paint observer (grim window-region digest, status "verified", disclosed
+  post-update fallback, 20 qualified pairs, paint-once-changed med 13.7 / p95 71.1 ms) —
+  the ready bars now measure PAINT-visible change, and they fail because visible field
+  changes themselves lag seconds behind the update stream (1223 frames unpaired: updates
+  arrive but the field does not visibly change). max outstanding 57, backlog sustained;
+  sentence-end dump YES; unchanged ⇒ zero edits BREACHED (first recorded breach of that
+  bar); 2128 updates / 893 no-ops.
+
+### Gate application (bar by bar, production arm)
+
+- im-gtk: count floors 4/0 vs ≥100/100 ✗; sustained backlog (57 ≥5 words ≥2.0 s) ✗;
+  correction p95 unexercised ✗; speech med/p95 unexercised at n=4 (negative readings
+  reported, not credited) *; unchanged⇒zero-edits ✓; dump ✓; clock/coverage ✓ (heartbeat
+  passed, 0 clock/cap failures); frame bars UNVERIFIED (proxy basis — labeled, never
+  passed). Verdict: fail.
+- pi-ghostty: speech med 6714.0 ms vs ≤500 ✗; speech p95 13444.0 ms vs <1 s ✗; ready ins
+  p95 11266.2 ms vs ≤100 ✗; ready cor p95 13150.8 ms vs ≤50 ✗ (paint-qualified basis);
+  count floors 14/14 vs ≥100/100 ✗; sustained backlog (57) ✗; sentence-end dump ✗;
+  unchanged⇒zero-edits ✗ (breached); clock/coverage ✓. Verdict: fail.
+
+### Exact commands this round (exit codes recorded)
+
+```sh
+# scaffold smokes (wiring only, NEVER a measurement) — rc=0, pass:true both arms:
+timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk
+timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk --partial-source plain
+# A/B plain arms (sequential; one CUDA model load at a time):
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk --partial-source plain   # rc=1 twice: harness error 'bulk delivery never re-armed' (stands not-run)
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 PI_BIN="$(command -v pi)" .venv/bin/python tests/g5_timing_lab.py --route pi-ghostty --partial-source plain   # rc=1 honest fail
+# production (UNFLAGGED) qualification — the verdict-table source:
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk   # rc=1 honest fail
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 PI_BIN="$(command -v pi)" .venv/bin/python tests/g5_timing_lab.py --route pi-ghostty   # rc=1 honest fail
+```
+
+Artifacts (artifact JSON + stdout logs incl. the JSON verdict lines) copied to
+`plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/P1M2T2S3/research/runs/` (files dated
+2026-11-24); scratch tmpdirs deleted immediately after copy. The im-gtk/plain arm's two
+harness-error lines (both attempts) are in the archived stdout logs — the arm's record is
+not-run, with no numbers imputed anywhere.
+
+### Post-run regression + watch checks (P1.M2.T2.S3)
+
+- CPU baseline (research §6): `timeout 500 .venv/bin/python -m pytest tests/test_daemon.py
+  -q --tb=no` run BEFORE and AFTER the runs/evidence edit — both 20 failed / 243 passed,
+  and the FAILED set diffed BY NAME against the canonical 20-name list
+  (P1M1T3S1/research/bug004_named_daemon_baseline.md §1) is EMPTY in both directions
+  (zero new names, zero fixed names). No CPU-suite regression from S1+S2's landed changes.
+- Fast sweep: `timeout 600 .venv/bin/python -m pytest tests/ --ignore=tests/test_feed_audio.py
+  -q` → 41 failed / 1628 passed — name-for-name the documented population (the 20 daemon
+  names above + the G1-classified streaming_commit 10 / core 2 / freeze 4 + the 4
+  real-model names below + the 1 documented systemd environmental). No new failures.
+- Real-model watch (research §7): RAN, bounded — `timeout 600 .venv/bin/python -m pytest
+  tests/test_streaming.py -q --tb=no` → 4 failed / 3 passed in ~115 s; failing names
+  exactly the documented baseline four (`test_a_delta_cadence`, `test_b_commit_rewind_exact`,
+  `test_f_user_key_freeze`, `test_g_stranded_tail`). Outcome: baseline-identical — the watch
+  neither clears nor indicts anything in this task; recorded, not claimed as a gate.
+- Parser proof (research §2): `parse_route_verdicts` BEFORE the edit → {'im-gtk': 'fail',
+  'pi-ghostty': 'fail'}; AFTER the edit → {'im-gtk': 'fail', 'pi-ghostty': 'fail'} —
+  exactly the two current routes with this round's verdicts; no historical/A-B row leaks as
+  current (both proofs saved beside the run artifacts).
 
 ## Run commands (drift re-run; P1.M4.T5.S2-style re-measurement)
 
@@ -40,9 +171,11 @@ timeout -k 2 900 env G5_ALIGN=1 .venv/bin/python tests/g5_make_alignments.py
 timeout -k 2 240 env G5_TIMING_LAB=1 G5_NO_DESKTOP=1 \
     .venv/bin/python tests/g5_timing_lab.py --route im-gtk
 
-# 2. the routes (private compositor; ~4-20 min each; NEVER interrupt mid-run):
-timeout -k 2 1500 env G5_TIMING_LAB=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk
-timeout -k 2 1500 env G5_TIMING_LAB=1 PI_BIN=~/.local/bin/pi \
+# 2. the routes (private compositor; ~4-20 min each; NEVER interrupt mid-run;
+#    G5_KEEP_SCRATCH=1 so the artifact JSON can be copied to this task's
+#    research/runs/ dir, then the scratch tmpdir is DELETED — tmpfs = RAM):
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 .venv/bin/python tests/g5_timing_lab.py --route im-gtk
+timeout -k 2 1500 env G5_TIMING_LAB=1 G5_KEEP_SCRATCH=1 PI_BIN="$(command -v pi)" \
     .venv/bin/python tests/g5_timing_lab.py --route pi-ghostty
 # Exit 0 pass / 1 honest fail / 2 misuse. One JSON verdict line per route on stdout.
 ```
@@ -110,7 +243,7 @@ effective-source truth) on the warm line, in the artifact provenance, on
   reset edits are excluded from counts via `anchor_text` + S3's reset rules
   (data-level — no new code on that route).
 
-## Provenance (both runs)
+## Provenance (2026-11-23 baseline runs — superseded by the qualification round above)
 
 - GPU: NVIDIA GeForce RTX 3080 Ti (12 GiB) — device=cuda compute_type=float16
   model=small.en (the configured final path; context_prompt on, prompt empty
@@ -145,23 +278,26 @@ effective-source truth) on the warm line, in the artifact provenance, on
 
 | metric | bar | im-gtk | pi-ghostty |
 |---|---|---|---|
-| speech-end→word-visible median | ≤ 500 ms | 195.1 ms ✓ | 12616.2 ms ✗ |
-| speech-end→word-visible p95 | < 1 s | 318.6 ms ✓ | 13203.1 ms ✗ |
-| update-ready→first-changed-frame p95 (insertion) | ≤ 100 ms | 4.4 ms ✓ | 11.5 ms ✓ |
-| update-ready→first-changed-frame p95 (correction) | ≤ 50 ms | not exercised ✗ | 11.7 ms ✓ |
-| unchanged ⇒ zero field events | must hold | ✓ | ✓ |
-| ≥ 100 insertions AND ≥ 100 corrections | floors | 20/0 ✗ | 108/169 ✓ |
+| speech-end→word-visible median | ≤ 500 ms | −1312.2 ms (n=4, live mid-speech inserts — unexercised, not met) * | 6714.0 ms ✗ |
+| speech-end→word-visible p95 | < 1 s | −802.4 ms (n=4) * | 13444.0 ms ✗ |
+| update-ready→first-changed-frame p95 (insertion) | ≤ 100 ms | 3.4 ms (field-log proxy — frame UNVERIFIED) | 11266.2 ms ✗ (paint-qualified) |
+| update-ready→first-changed-frame p95 (correction) | ≤ 50 ms | not exercised ✗ | 13150.8 ms ✗ (paint-qualified) |
+| unchanged ⇒ zero field events | must hold | ✓ | ✗ breached |
+| ≥ 100 insertions AND ≥ 100 corrections | floors | 4/0 ✗ | 14/14 ✗ |
 | sustained ≥5-word backlog (≥2.0 s) | must not | ✗ (max 57 words) | ✗ (max 57 words) |
 | sentence-end dump | must not | ✓ none | ✗ dump |
 
-Note on the two speech→visible readings: im-gtk's 195 ms median is measured
-over the words visible at each replay's single commit (the commit lands right
-after the utterance's silence gate, so its words read as "fast"), while the
-BACKLOG column shows the truth — 57 words outstanding for the whole clip.
-pi-ghostty streams more updates (counts pass; 76 field changes per replay on
-the revising prompt buffer), but its words' first-visibility clusters at
-utterance rewrites seconds after they were spoken. Read BOTH columns together;
-the backlog flag is the gate's verdict carrier on both routes.
+Numbers are the 2026-11-24 qualification round (production selection; see "Qualification run
+(P1.M2.T2.S3)"). Two honesty notes. (1) im-gtk's NEGATIVE speech readings: the four matched
+words painted mid-clip, before their aligned speech-end — live insertions, not an
+end-of-utterance commit; at n=4 the speech bars are unexercised rather than met, and the
+BACKLOG column (57 outstanding) is the route's true verdict carrier. (2) pi's ready→frame
+basis moved: the old 11.5/11.7 ms readings were FIELD-LOG change events (a read-poll proxy
+for frames); since S5 the route carries the paint-qualified observer (verified, disclosed
+post-update fallback), so this round's ready bars measure real paint-visible change — they
+fail because visible changes lag seconds behind the update stream (1223 unpaired frames;
+paint-once-changed is fast: med 13.7 / p95 71.1 ms, n=20). Read BOTH columns together; the
+backlog flag is the gate's verdict carrier on both routes.
 
 ## Failure register (every breach, spelled out)
 
@@ -177,6 +313,22 @@ the backlog flag is the gate's verdict carrier on both routes.
 - speech→visible p95 13203 ms ≥ 1000 ms
 - backlog ≥5 words sustained ≥2.0 s (max outstanding 57)
 - sentence-end dump (an utterance delivered as one final edit)
+
+### im-gtk (PRODUCTION arm, 2026-11-24 qualification — 20 measured replays)
+- counts 4/0 < 100 after the FULL replay budget (the partial-streaming collapse persists:
+  73 updates total, 30 no-ops, ~3.7 updates per replay despite S2's 0.05 s cadence)
+- backlog ≥5 words sustained ≥2.0 s (max outstanding 57)
+- ready→frame correction p95 unexercised (0 correction ops reached the field)
+- frame bars UNVERIFIED (no paint observer on this route; field change-log proxy only)
+
+### pi-ghostty (PRODUCTION arm, 2026-11-24 qualification — 20 measured replays)
+- speech→visible median 6714.0 ms > 500 ms (improved from S6's 7786.2 ms — still ~13× the bar)
+- speech→visible p95 13444.0 ms ≥ 1000 ms (worst 15831.6 ms)
+- ready→first-changed-frame ins p95 11266.2 ms > 100 ms; cor p95 13150.8 ms > 50 ms
+  (paint-qualified basis — visible changes lag seconds behind the update stream)
+- backlog ≥5 words sustained ≥2.0 s (max outstanding 57)
+- sentence-end dump (an utterance delivered as one final edit)
+- unchanged ⇒ zero field events BREACHED (first recorded breach of this bar)
 
 ## Defect found and fixed on the way (production, P1.M6.T2.S1 seam)
 
@@ -217,6 +369,19 @@ validation exercised the seam through fakes only.
 
 ## Open items
 
+- **BUG-002 / acceptance #13 (PRD R.1/R.7 G5): OPEN after the P1.M2.T2.S3 qualification
+  (2026-11-24, HEAD 2909e03).** Both routes FAIL G5 on the production selection (stabilized
+  + S1's prompt dispatch + S2's 0.05 s bulk cadence). Exact blockers: im-gtk — count floors
+  4/0 ≪ 100/100 with a sustained 57-word backlog (the partial stream still collapses to
+  ~4 updates per replay; the frame basis remains the read-poll proxy so the frame bars stay
+  unverified); pi-ghostty — speech→visible 6714.0 ms median vs the 500 ms bar, sentence-end
+  dump, sustained 57-word backlog, count floors 14/14, ready→frame 11.3 s/13.2 s on the
+  paint-qualified basis, and a first-ever breach of unchanged⇒zero-edits. Opt-in
+  (`output.delivery="bulk-text"`) retained; default delivery unchanged; G6/README claims
+  remain P1.M2.T3's and must NOT proceed on this evidence.
+- The im-gtk/plain A/B pair remains unrun after FOUR sanctioned attempts across two rounds
+  (S6 ×2, this round ×2 — all "bulk delivery never re-armed"), making this a route-harness defect worth its own look before any future selection
+  decision. Until then no plain-vs-stabilized conclusion exists on im-gtk.
 - The visibility matcher (`g5_timing_support.resolve_visibility`) matches
   reference words as contiguous blocks against the field's normalized text
   (positional, bounded windows, single-word substitution rescue). On the

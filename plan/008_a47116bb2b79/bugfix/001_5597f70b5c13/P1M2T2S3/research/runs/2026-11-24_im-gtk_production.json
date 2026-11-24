@@ -1,0 +1,119 @@
+{
+  "route": "im-gtk",
+  "metrics": {
+    "route": "im-gtk",
+    "verdict": "fail",
+    "insertions": 4,
+    "corrections": 0,
+    "misses": 871,
+    "speech_med_ms": -1312.2,
+    "speech_p95_ms": -802.4,
+    "worst_gap_ms": -802.4,
+    "ready_insert_p95_ms": 3.4,
+    "ready_correct_p95_ms": null,
+    "max_words_outstanding": 57,
+    "backlog_sustained": true,
+    "sentence_end_dump": false,
+    "unchanged_zero_edit_ok": true,
+    "replays": 20,
+    "updates_total": 73,
+    "updates_matched": 4,
+    "updates_missing": 39,
+    "updates_superseded": 0,
+    "updates_no_op": 30,
+    "updates_ambiguous": 0,
+    "frames_unpaired": 16,
+    "words_ambiguous": 0,
+    "clock_failures": 0,
+    "cap_failures": 0,
+    "provenance_warnings": [],
+    "failures": [
+      "ready\u2192frame correction p95 None ms > 50.0 ms",
+      "backlog \u22655 words sustained \u22652.0 s (max outstanding 57)",
+      "counts 4/0 < 100 after replay budget"
+    ]
+  },
+  "replays": [
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses",
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses",
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses",
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses",
+    "jargon",
+    "natural",
+    "noisy",
+    "pauses"
+  ],
+  "heartbeat_ok": true,
+  "field_log_pair_count": 72,
+  "provenance": {
+    "kernel": "7.3.5-arch1-1",
+    "python": "3.12.10",
+    "partial_source_requested": "default",
+    "partial_callback_effective": "on_realtime_transcription_stabilized",
+    "device": {
+      "device": "cuda",
+      "compute_type": "float16",
+      "model": "small.en",
+      "context_prompt": true,
+      "partial_callback": "on_realtime_transcription_stabilized"
+    },
+    "warm": "resident (auto_unload_idle_seconds=0; one discarded warmup)",
+    "clips": [
+      "jargon.wav",
+      "natural.wav",
+      "noisy.wav",
+      "pauses.wav"
+    ],
+    "route_note": "",
+    "field_instrument": "GTK field G5_FIELD_TIMING change log",
+    "realtimestt_version": "1.0.2",
+    "replay_budget": 20,
+    "cadence_note": "audio fed in real time: 32 ms chunks sleep-to-target on time.monotonic() + 1.6 s trailing zero-silence (paced_feed)"
+  },
+  "stage_summary": {
+    "route": "im-gtk",
+    "arm": "stabilized",
+    "speech_to_useful_ms": {
+      "med": -11957.2,
+      "p95": -6714.3,
+      "n": 19
+    },
+    "speech_to_visible_ms": {
+      "med": -11953.1,
+      "p95": -6711.8,
+      "n": 17
+    },
+    "useful_to_ack_ms": null,
+    "ack_to_field_ms": null,
+    "useful_to_field_ms": {
+      "med": 2.6,
+      "p95": 7.8,
+      "n": 17
+    },
+    "ack_split": false,
+    "field_to_frame_ms": null,
+    "paint_qualified_ms": null,
+    "frame_match": "none",
+    "n_frame_exact": 0,
+    "n_frame_fallback": 0,
+    "frame_verified": false,
+    "frame_basis": "editor read-poll proxy (frame NOT verified)",
+    "n_replays": 20,
+    "n_updates": 53,
+    "n_acks": 0,
+    "provenance_warnings": [],
+    "capped_replays": 0
+  }
+}

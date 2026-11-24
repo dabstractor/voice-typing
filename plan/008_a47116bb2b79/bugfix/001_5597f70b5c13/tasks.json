@@ -257,7 +257,7 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Ship and verify update-granular bulk delivery",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Address the measured delivery bottleneck while preserving R.5 and R.6; establish an honest release verdict for R.1/R.8 and acceptance #13.",
               "subtasks": [
                 {
@@ -299,7 +299,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T2.S3",
                   "title": "Qualify the selected production source on both routes",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S1",

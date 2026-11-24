@@ -1,0 +1,1 @@
+AFTER: {'im-gtk': 'fail', 'pi-ghostty': 'fail'}
