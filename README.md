@@ -95,19 +95,31 @@ Then reload:
 hyprctl reload
 ```
 
-The sourced file is `hypr-binds.conf` at the repo root. Its binds invoke voicectl via the
-`$HOME/.local/bin/voicectl` launcher that `install.sh` maintains (Hyprland runs every `bind exec`
-through `/bin/sh -c`, so `$HOME` expands), so they work regardless of user / repo location:
+The sourced file is `hypr-binds.conf` at the repo root. The first two binds invoke voicectl via
+the `$HOME/.local/bin/voicectl` launcher that `install.sh` maintains (Hyprland runs every `bind exec`
+through `/bin/sh -c`, so `$HOME` expands), so they work regardless of user / repo location; the
+third calls `systemctl` directly — no launcher, and deliberately no voicectl:
 
 ```
 bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle
 bind = SUPER ALT, Backspace, exec, $HOME/.local/bin/voicectl cancel
+bind = SUPER ALT, Escape, exec, systemctl --user stop voice-typing
 ```
 
 The first bind arms the mic; pressing it again disarms it (the graceful drain lets the
 in-flight commit land first). The second runs the same cancel path as the daemon's
 physical-Backspace listener — see
 [Backspace-cancel](#backspace-cancel-erase-the-in-flight-fragment).
+
+The third is the **panic bind** for a wedged control socket: an explicit
+`systemctl --user stop voice-typing` that bypasses voicectl and the control socket entirely,
+so it works even when the daemon has stopped answering. It is **not an instant SIGKILL** —
+systemd SIGTERMs the main process and the daemon's bounded single-flight teardown (see
+[Model lifecycle & VRAM](#model-lifecycle--vram)) completes in seconds; SIGKILL fires only at
+the unit's outer `TimeoutStopSec=15` net. A stop is intentional (`Restart=on-failure` does
+not restart it), so bring the daemon back with `systemctl --user start voice-typing` once
+the wedge is cleared. The unit's portability checker (`tests/test_systemd_unit.py`) exempts
+exactly this one documented bind from its voicectl-launcher rule.
 
 Hyprland uses the last matching bind for a given MODS+key. Source this file LAST
 (at the bottom of `hyprland.conf`) so its binds win. If a bind is inert, your config may
@@ -254,14 +266,16 @@ Evidence: scripted 12/12 PASS — `tests/D1_DUCK_EVIDENCE.md` (re-runnable:
 path; the default remains `"stream-edit"`. The G6 graduation gate — the assembled,
 re-derivable verdict in `tests/G6_GRADUATION.md` — currently reads
 `G6 DECISION: STAY OPT-IN (unmet: A-g3-matrix, B-integrity, C-g5-timing, D-sessions)`
-(2026-11-23 @ 69952ae). Until it flips, everything in this section is mechanism-level
+(2026-11-24 @ 2909e03). Until it flips, everything in this section is mechanism-level
 (scripted lab evidence only): nothing has been operator-accepted on a live desktop, and no
 speech-latency claim is made. The outstanding inputs, named by the gate: ≥ 3
 operator-authored writing sessions in `tests/G6_WRITING_SESSIONS.md` (the template ships
-EMPTY — automation must never author entries), remediation of the failed `edit-count-law`
-register row, honest verification of the pi prompt row (visibility instrumentation is
-absent), and passing G5 timing. Re-run `timeout 60 .venv/bin/python tests/g6_assessment.py`
-to re-derive the verdict.
+EMPTY — automation must never author entries), resolution of the failed `edit-count-law`
+register row plus honest verification of the pi prompt row (still "not verified" —
+visibility instrumentation absent) and closure of the browser correction REFUSED gap in the
+G3 registers (byte-identical to the 2026-11-23 assessment), and passing G5 timing (still
+failing on both routes — see below). Re-run `timeout 60 .venv/bin/python
+tests/g6_assessment.py` to re-derive the verdict.
 
 bulk-text is rejected at config load — a single `ValueError` naming ALL violations — unless
 all three hold: `output.streaming = true`, `asr.graceful_stop = false`,
@@ -292,12 +306,24 @@ claim — `plan/008_a47116bb2b79/architecture/g3_field_matrix.md`):
 | ghostty 1.4.0-2 | IM route blocked (text-input not activated) → clipboard insert fallback |
 | Hyprland relay 0.57.2 | untested on the live desktop (the isolated lab boot fails) — treat as **unverified** |
 
-Timing is measured and currently failing: `tests/G5_TIMING_EVIDENCE.md` records FAIL on
-both measured routes — an update backlog builds during speech and drains after it, and on
-the pi route the median speech-end→word-visible time in the recorded replay is 12.6 s
-(im-gtk meets the per-word gate in isolation but sustains the same backlog). No route
-streams words at speaking pace yet; this, not the routes, is the main reason G6 stays
-opt-in.
+Timing is measured and currently failing. The 2026-11-24 qualification round
+(`tests/G5_TIMING_EVIDENCE.md` @ `2909e03`; 20 measured replays per route on the production
+selection — stabilized partials + update-granular prompt dispatch + the 0.05 s bulk cadence)
+records FAIL on both routes. The remediation improved the pi route's speech→visible median
+from the superseded 2026-11-23 round's 12.6 s to 6714.0 ms (7786.2 → 6714.0 across the
+qualification set, −14%; ≈ 6.7 s) — still ~13× the 500 ms bar — with the sentence-end dump
+persisting and a first breach of the unchanged⇒zero-edits rule; its frame bars are now
+paint-qualified (real visible change, S5 observer) and fail at 11266.2 ms / 13150.8 ms p95
+(≈ 11.3 s / 13.2 s). im-gtk stays count/backlog-bound — 4 insertions / 0 corrections vs the
+≥100/≥100 floors with a sustained 57-word backlog — and its frame bars remain UNVERIFIED:
+its frame basis is the field change-log (an editor-state proxy), not paint.
+
+Those numbers come from the isolated G5 lab's instrumentation on exactly two routes (im-gtk,
+pi-ghostty): the pi frame numbers are paint-qualified, the im-gtk frame numbers are an
+editor-state proxy (unverified). They are not a claim about the field-class matrix above
+(G3), and none of this is operator acceptance — that is G6 condition D, with 0 writing
+sessions on record. No route streams words at speaking pace yet; BUG-002 / PRD acceptance
+#13 remain open, and this, not the routes, is the main reason G6 stays opt-in.
 
 ghostty-class terminals get a clipboard insert fallback: text is staged to the Wayland
 clipboard and pasted. The fallback refuses while a clipboard-history watcher is running,
@@ -636,3 +662,14 @@ no systemd `Failed with result 'timeout'` / SIGKILL. The teardown is single-flig
 under a lock, so the SIGTERM signal-handler thread and the main-thread `finally`
 block no longer race a second, parallel teardown (that double-teardown was what blew
 the 15 s budget on `systemctl stop` while armed).
+
+## Running the tests
+
+The pytest suite is hermetic: daemon-constructing tests build against a fake media ducker via
+`tests/conftest.py` (`hermetic_daemon_media` / `hermetic_cfg()`), so running pytest never
+touches your live session bus or pauses your playing media, and the subprocess-recorder tests
+stay order-independent. `tests/test_daemon.py` is CPU-only (~16 s — no CUDA, no model load);
+its 20 legacy lazy-separator reds are baselined by name in `tests/G1_BASELINE.md` (the G1 CPU
+addendum) — diff failures against that named set instead of expecting a clean run. Run one
+test file per call under GNU `timeout`, e.g. `timeout 300 .venv/bin/python -m pytest
+tests/test_daemon.py -q`; there is no ruff/mypy gate — pytest is the gate.

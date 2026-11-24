@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Rev-4 bug fixes and isolated acceptance",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Make validation safe and classifiable, then qualify update-granular bulk delivery without weakening ownership, changing stream-edit, or graduating bulk-text by default.",
       "milestones": [
         {
@@ -132,7 +132,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Deliver words during speech and qualify both bulk routes",
-          "status": "Researching",
+          "status": "Complete",
           "description": "BUG-002: compare the actual callback hypotheses against field visibility, remedy the measured live-delivery bottleneck, and enforce the per-route release gate.",
           "tasks": [
             {
@@ -326,7 +326,7 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Refresh the graduation evidence summary and public feature overview only after the work they describe is in place.",
               "subtasks": [
                 {
@@ -359,7 +359,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T3.S2",
                   "title": "Sync README.md overview to the landed fixes and limits",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M1.T1.S1",
