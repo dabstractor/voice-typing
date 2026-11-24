@@ -360,6 +360,7 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `asr.auto_stop_idle_seconds` | `30.0` | auto-disarm (stop listening) after this many seconds with no recognized speech — partials reset the clock while you talk, so it only fires when you truly go silent (a forgotten hot-mic guard, not a mid-thought cut). `0` disables. Fires the normal `Recording Stopped` toast + a journal line. |
 | `asr.auto_unload_idle_seconds` | `1800.0` | after this many seconds DISARMED (models loaded, not listening), tear down the recorder to free VRAM (~0). The clock starts on disarm (manual stop, toggle-off, or the 30s auto-stop) and resets on any arm; time listening doesn't count. `0` disables (models then stay resident until `quit`). The next arm reloads (~1-3s). See Model lifecycle. |
 | `asr.device` | `"cuda"` | `"cuda"` or `"cpu"`. Auto-falls-back to `cpu` if no CUDA device is visible. |
+| `asr.compute_type` | `"float16"` | ctranslate2 compute type on the CUDA path. `"float16"` = Ampere+ native (~2x faster decode than float32 on large models). `"float32"` = for cards without usable fp16 (e.g. Maxwell 940MX). Always `"int8"` on the CPU path (config value ignored there). |
 | `asr.language` | `"en"` | ISO-639-1 code. |
 | `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"null"` (types nothing; used by the headless E2E tests). `wtype` auto-falls-back to `ydotool`. |
 | `output.append_space` | `true` | append one trailing space after each commit. |
@@ -384,10 +385,7 @@ key changes nothing.
 
 `silero_sensitivity`, `webrtc_sensitivity`, `min_length_of_recording`,
 `min_gap_between_recordings`, and `silero_backend` are **not** config keys. They are
-constants in `voice_typing/daemon.py` (the `_FIXED_KWARGS` dict). `compute_type` is
-also not a config key; it is derived from `device` (`float32` on cuda, `int8` on
-cpu — float32 because the target GPU is a Maxwell-based 940MX, which has no
-usable fp16/int8 GEMM path).
+constants in `voice_typing/daemon.py` (the `_FIXED_KWARGS` dict).
 
 To change VAD sensitivity, edit `daemon.py` and restart the daemon. Do **not** add
 these names to `config.toml`. The config loader (`config.py`) rejects unknown keys —
@@ -562,7 +560,7 @@ phase: speaking
 partial: this is what i am say
 last: Previous sentence.
 uptime: 42.3s
-device: cuda (float32)
+device: cuda (float16)
 mic: ok
 context-prompt: on
 delivery: stream-edit (inactive)
