@@ -811,7 +811,7 @@
           "type": "Milestone",
           "id": "P1.M6",
           "title": "Recognition integration + delivery lifecycle (R.5/R.6 daemon-side) + G5 timing",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Utterance identities through the recorder relay; bulk wiring into the daemon (enqueue-and-return, cancel intercept before legacy compensation, disarm paths, session recovery memory, voicectl session); bulk committed-context decoupling; the G5 timing harness.",
           "tasks": [
             {
@@ -927,14 +927,14 @@
               "type": "Task",
               "id": "P1.M6.T4",
               "title": "G5 timing evidence (word-aligned real-voice replay)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Warm GPU, monotonic clocks, word-aligned replay of real voice: speech-end→word-visible median ≤500 ms / p95 <1 s; update-ready→first-changed-frame p95 ≤100 ms insert / ≤50 ms correct; ≥100 insertions and ≥100 corrections per claimed route.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T4.S1",
                   "title": "G5 harness + per-route timing evidence",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T2.S1",
@@ -962,14 +962,14 @@
               "type": "Task",
               "id": "P1.M7.T1",
               "title": "G6 graduation assessment (evidence-gated, no over-claiming)",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Verified G3 rows for pi prompt in Ghostty + a graphical editor + a browser field, zero integrity failures, and ≥3 writing sessions beating 110 wpm effective proofread throughput — else report unmet and stay opt-in.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T1.S1",
                   "title": "Assemble G6 assessment; conditionally flip the default",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T2.S1",
@@ -997,7 +997,7 @@
                   "type": "Subtask",
                   "id": "P1.M7.T2.S1",
                   "title": "README.md: ducking + bulk delivery sections, config table, troubleshooting",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S1",

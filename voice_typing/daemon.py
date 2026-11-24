@@ -798,6 +798,7 @@ class VoiceTypingDaemon:
         key_listener: KeyListener | None = None,
         ducker: Any = None,
         bulk_target_factory: "Callable[[VoiceTypingConfig], Any] | None" = None,
+        feed_input: bool = False,
     ) -> None:
         self._cfg = cfg
         # P1.M2.T3.S2 crash safety (PRD §4.2quinquies): read the persisted `ducked` flag FIRST —
@@ -833,6 +834,10 @@ class VoiceTypingDaemon:
         # The adapter forwards set_microphone/abort/text/stop to the legacy stub recorder, so the
         # existing assertions (rec.mic / rec.aborts / rec.shutdowns / rec.text_calls) still hold.
         self._host_factory = host_factory
+        # G5 feed seam pass-through (P1.M6.T4.S1): forwarded to the REAL RecorderHost ONLY
+        # (in _load_host, exactly like is_listening). False by default → the spawned child
+        # is byte-identical to today; the lab passes True to feed synthetic audio.
+        self._feed_input = feed_input
         self._lock = threading.Lock()
         # Serializes on_final callbacks (bugfix Issue 5 / P1.M2.T2.S1). RealtimeSTT fires each
         # on_final in a NEW thread without joining, so a second final can arrive while a slow
@@ -1122,7 +1127,9 @@ class VoiceTypingDaemon:
         # Issue 2 residual gate: the real RecorderHost gets an is_listening predicate so stray
         # ('vad', ...) events racing a disarm cannot flip phase while listening: off. We snapshot
         # is_listening (a bound method on _listening) here; it is queried on the host reader thread.
-        # Test fakes (self._host_factory) keep the old surface; only the real RecorderHost takes it.
+        # Test fakes (self._host_factory) keep the old surface; only the real RecorderHost takes it
+        # (and only the real RecorderHost takes feed_input — the G5 lab seam; never sent in
+        # production, so the default path stays byte-identical).
         if self._host_factory is None:
             host = factory(
                 self._cfg,
@@ -1132,6 +1139,7 @@ class VoiceTypingDaemon:
                 self._on_partial,
                 self._touch_speech,
                 is_listening=self.is_listening,
+                feed_input=self._feed_input,
             )
         else:
             host = factory(
@@ -1955,10 +1963,19 @@ class VoiceTypingDaemon:
         key on a final, so every later partial would dup-discard — silent death).
         """
         relay = getattr(self._host, "relay_identity", None)
-        try:
-            return relay() if callable(relay) else None
-        except Exception:  # noqa: BLE001 — a broken seam is a drop, never a crash
-            return None
+        if callable(relay):
+            # method-backed seam (test fakes) — call it
+            try:
+                return relay()
+            except Exception:  # noqa: BLE001 — a broken seam is a drop, never a crash
+                return None
+        # property-backed seam (the real RecorderHost): getattr ALREADY returned the
+        # snapshot value (a _RelayIdentity NamedTuple with session_gen/utterance_id).
+        # P1.M6.T4.S1 fix: the property shape used to fall through to None here (callable()
+        # is False for the snapshot), so the REAL bulk path dropped every event as id-less
+        # (the T2.S1 seam was only ever exercised through method-shaped fakes). Return the
+        # snapshot directly; a missing attribute still degrades to None (the legacy fake).
+        return relay
 
     def _bulk_next_seq(self, gen: int, uid: int) -> int:
         """Daemon-synthesized per-(gen, utterance) seq (G4: seq is NOT in the relay payload).

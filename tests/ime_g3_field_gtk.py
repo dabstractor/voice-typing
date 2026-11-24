@@ -53,6 +53,8 @@ MAX_DUMPS = 2000  # im-lab lineage: bounded scratch, then stop writing
 RING_MAX = 256  # per-frame samples kept (bounded)
 RLE_CAP = 64  # pairs in a dump's ring_rle (newest kept)
 WINDOW_TITLE = "imlab-g3-field-gtk"
+G5_FIELD_TIMING = "G5_FIELD_TIMING"  # env gate: + JSONL (t, text) change log (G5 lab)
+G5_TIMING_CAP = 2000  # bounded lines (AGENTS.md Rule 3: tmpfs scratch = RAM)
 
 
 def main() -> int:
@@ -67,6 +69,40 @@ def main() -> int:
     seq = {"all": 0, "changed": 0, "activated": 0, "keys": 0, "frames": 0}
     ring: collections.deque = collections.deque(maxlen=RING_MAX)
     state = {"dump_capped": False, "last_dumped_hash": None, "entry": None}
+
+    # G5 addition (P1.M6.T4.S1): when G5_FIELD_TIMING=1, every text change appends
+    # one bounded JSONL line {t_mono, t_wall, text, kind} — the FIELD's own change
+    # events, the G5 visibility truth (R.5 value #3). Default OFF: G3 runs never
+    # create the file and behave byte-identically. Hard-capped at G5_TIMING_CAP
+    # lines (tmpfs = RAM; AGENTS.md Rule 3).
+    timing_log_on = os.environ.get(G5_FIELD_TIMING) == "1"
+    timing_fh = (
+        open(root / f"field_timing{suffix}.jsonl", "a", encoding="utf-8")  # noqa: SIM115
+        if timing_log_on
+        else None
+    )
+    timing_writes = {"n": 0, "last_text": None}
+
+    def log_timing(text: str, kind: str) -> None:
+        if timing_fh is None or timing_writes["n"] >= G5_TIMING_CAP:
+            return
+        if text == timing_writes["last_text"] and kind != "changed":
+            return  # frame-tick re-samples of an unchanged text are not changes
+        timing_writes["n"] += 1
+        timing_writes["last_text"] = text
+        timing_fh.write(
+            json.dumps(
+                {
+                    "t_mono": round(time.monotonic(), 6),
+                    "t_wall": round(time.time(), 6),
+                    "text": text,
+                    "kind": kind,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        timing_fh.flush()
 
     gtk_version = (
         f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}"
@@ -99,6 +135,8 @@ def main() -> int:
         tmp = root / f"field{suffix}.tmp"
         tmp.write_text(json.dumps(state_, ensure_ascii=False))
         os.replace(tmp, root / f"field{suffix}.json")
+        if kind in ("changed", "frame"):
+            log_timing(text, kind)
 
     def _rle(samples) -> list:
         """Collapse the per-frame ring into [(hash, n), …], newest-LAST, cap 64."""
@@ -171,7 +209,10 @@ def main() -> int:
         (root / f"field{suffix}.ready").write_text(payload)
 
     app.connect("activate", activate)
-    return app.run([])
+    code = app.run([])
+    if timing_fh is not None:
+        timing_fh.close()
+    return code
 
 
 if __name__ == "__main__":

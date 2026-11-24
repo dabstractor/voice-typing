@@ -148,6 +148,7 @@ class RecorderHost:
         *,
         force_cpu: bool = False,
         is_listening: "Callable[[], bool] | None" = None,
+        feed_input: bool = False,
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
@@ -156,6 +157,14 @@ class RecorderHost:
         self._on_partial = on_partial
         self._on_speech = on_speech
         self._force_cpu = force_cpu
+        # G5 feed seam (P1.M6.T4.S1; PRD §4.4 sanctions use_microphone=False + feed_audio).
+        # Default False = the production path, byte-identical: no feed queue is created and
+        # the child builds the recorder with the microphone (as always). When True (lab-only),
+        # the child gets a DEDICATED feed queue + feeder thread instead: the command loop
+        # BLOCKS inside recorder.text() while listening, so ('feed', ...) commands on cmd_q
+        # could only be read BETWEEN utterances — pacing would die. feed_audio is safe to call
+        # from any thread while text() blocks (tests/test_feed_audio.py pattern).
+        self._feed_input = bool(feed_input)
         # Optional listening-gate predicate (bugfix Issue 2 residual / PRD §4.6). The child may emit
         # a stray ('vad', ...) event still in the IPC queue when the mic is disarmed (a late
         # on_vad_stop/on_vad_start that raced the disarm). Relaying it to feedback.set_phase() would
@@ -171,6 +180,8 @@ class RecorderHost:
         ctx = mp.get_context("spawn")
         self._cmd_q: Any = ctx.Queue()
         self._evt_q: Any = ctx.Queue()
+        # G5 feed queue — see the _feed_input comment above (lab-only; None in production).
+        self._feed_q: Any = ctx.Queue() if self._feed_input else None
         # Dedicated abort signal: the child's command loop BLOCKS in recorder.text() while listening,
         # so a ('abort', {}) command queued on cmd_q would NOT be read until text() returns. An mp.Event
         # is polled by a SEPARATE child thread that calls recorder.abort() the instant it is set — this
@@ -259,6 +270,7 @@ class RecorderHost:
                 self._abort_event,
                 self._cancel_event,
                 self._force_cpu,
+                self._feed_q,
             ),
             name="voice-typing-recorder-host",
             daemon=True,
@@ -312,6 +324,18 @@ class RecorderHost:
         """
         try:
             self._cmd_q.put(("prompt", {"text": text}))
+        except (BrokenPipeError, OSError, EOFError):
+            self._dead = True  # child gone; idempotent
+
+    def feed(self, pcm: Any, sr: int) -> None:
+        """Queue one PCM slice for the child's feeder thread (G5 lab; feed_input=True only).
+
+        Fire-and-forget put on the DEDICATED feed queue (NOT cmd_q — see ctor comment),
+        mirroring set_prompt's never-blocks/never-raises discipline. With feed_input=False
+        (production) there is no queue: the daemon never sends feed commands in production.
+        """
+        try:
+            self._feed_q.put(("feed", {"pcm": pcm, "sr": int(sr)}))
         except (BrokenPipeError, OSError, EOFError):
             self._dead = True  # child gone; idempotent
 
@@ -611,6 +635,7 @@ def _worker_main(
     abort_event: Any,
     cancel_event: Any,
     force_cpu: bool,
+    feed_q: Any = None,
 ) -> None:
     """Child-process entry point: construct the recorder + serve commands until shutdown.
 
@@ -704,6 +729,16 @@ def _worker_main(
         executor = augment_kwargs_with_executor(extra, cfg, resolved, logger)  # module-level, below
         return (extra if executor is not None else None), executor
 
+    def _build_kwargs(extra: "dict[str, Any] | None") -> "dict[str, Any] | None":
+        """Merge the G5 feed override into one build's extra kwargs (feed_q is not None only
+        under feed_input=True — PRD §4.4 sanctions use_microphone=False + feed_audio, the
+        tests/test_feed_audio.py:276 pattern). Production (feed_q None) is untouched."""
+        if feed_q is None:
+            return extra
+        merged: dict[str, Any] = dict(extra) if extra else {}
+        merged["use_microphone"] = False
+        return merged
+
     # Construct the recorder via the UNCHANGED production path. CPU fallback: retry once with
     # force_cpu=True if the cuda construction fails (mirrors the daemon's old in-process retry,
     # now in the child where the CUDA context lives — cleaner because only the child touches CUDA).
@@ -717,7 +752,7 @@ def _worker_main(
                 relay_fb,
                 relay_lat,
                 on_speech=_child_on_speech,
-                extra_kwargs=extra_kwargs,
+                extra_kwargs=_build_kwargs(extra_kwargs),
             )
         except Exception as exc:
             if force_cpu:
@@ -736,7 +771,7 @@ def _worker_main(
                     relay_lat,
                     force_cpu=True,
                     on_speech=_child_on_speech,
-                    extra_kwargs=extra_kwargs,
+                    extra_kwargs=_build_kwargs(extra_kwargs),
                 )
             except Exception as exc2:
                 _safe_put(
@@ -831,6 +866,34 @@ def _worker_main(
         target=_abort_supervisor, name="vt-child-abort", daemon=True
     )
     abort_thread.start()
+
+    if feed_q is not None:
+        # G5 feeder thread: drain the dedicated feed queue and call feed_audio DIRECTLY.
+        # The command loop below BLOCKS inside recorder.text() while listening, so feed
+        # commands can never ride cmd_q (they would only be read between utterances).
+        # feed_audio is non-blocking + re-slices to 32 ms internally (test_feed_audio.py);
+        # the PACER's wall-clock pacing, never this queue, controls timing. Daemon thread:
+        # dies with the process (the bounded killpg teardown owns shutdown).
+        def _feed_loop() -> None:
+            warned = False
+            while True:
+                try:
+                    _kind, payload = feed_q.get()
+                except (EOFError, OSError):
+                    return
+                if recorder is None:
+                    if not warned:
+                        logger.warning("child: feed command with no recorder (ignored)")
+                        warned = True
+                    continue
+                try:
+                    recorder.feed_audio(
+                        payload["pcm"], original_sample_rate=int(payload["sr"])
+                    )
+                except Exception:  # noqa: BLE001 — one bad slice must not kill the feeder
+                    logger.exception("child: feed_audio raised (ignored)")
+
+        threading.Thread(target=_feed_loop, name="vt-child-feed", daemon=True).start()
 
     running = True
     try:

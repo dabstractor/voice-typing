@@ -1,0 +1,287 @@
+[
+  {
+    "word": "Voice",
+    "start": 0.0,
+    "end": 0.48
+  },
+  {
+    "word": "typing",
+    "start": 0.48,
+    "end": 0.66
+  },
+  {
+    "word": "runs",
+    "start": 0.66,
+    "end": 1.26
+  },
+  {
+    "word": "as",
+    "start": 1.26,
+    "end": 1.52
+  },
+  {
+    "word": "a",
+    "start": 1.52,
+    "end": 1.72
+  },
+  {
+    "word": "system",
+    "start": 1.72,
+    "end": 1.92
+  },
+  {
+    "word": "-d",
+    "start": 1.92,
+    "end": 2.16
+  },
+  {
+    "word": "user",
+    "start": 2.16,
+    "end": 2.6
+  },
+  {
+    "word": "service",
+    "start": 2.6,
+    "end": 3.1
+  },
+  {
+    "word": "under",
+    "start": 3.1,
+    "end": 3.56
+  },
+  {
+    "word": "Hyperland.",
+    "start": 3.56,
+    "end": 4.04
+  },
+  {
+    "word": "Typing",
+    "start": 4.48,
+    "end": 4.68
+  },
+  {
+    "word": "through",
+    "start": 4.68,
+    "end": 4.82
+  },
+  {
+    "word": "the",
+    "start": 4.82,
+    "end": 4.94
+  },
+  {
+    "word": "LIDU",
+    "start": 4.94,
+    "end": 5.18
+  },
+  {
+    "word": "tool",
+    "start": 5.18,
+    "end": 5.32
+  },
+  {
+    "word": "with",
+    "start": 5.32,
+    "end": 5.58
+  },
+  {
+    "word": "a",
+    "start": 5.58,
+    "end": 5.74
+  },
+  {
+    "word": "pipewater",
+    "start": 5.74,
+    "end": 6.08
+  },
+  {
+    "word": "capture",
+    "start": 6.08,
+    "end": 6.38
+  },
+  {
+    "word": "path,",
+    "start": 6.38,
+    "end": 6.78
+  },
+  {
+    "word": "the",
+    "start": 7.22,
+    "end": 7.3
+  },
+  {
+    "word": "daemon",
+    "start": 7.3,
+    "end": 7.58
+  },
+  {
+    "word": "loads",
+    "start": 7.58,
+    "end": 7.94
+  },
+  {
+    "word": "faster",
+    "start": 7.94,
+    "end": 8.4
+  },
+  {
+    "word": "whispers",
+    "start": 8.4,
+    "end": 8.66
+  },
+  {
+    "word": "to",
+    "start": 8.66,
+    "end": 8.92
+  },
+  {
+    "word": "translate",
+    "start": 8.92,
+    "end": 9.18
+  },
+  {
+    "word": "to",
+    "start": 9.18,
+    "end": 9.52
+  },
+  {
+    "word": "at",
+    "start": 9.52,
+    "end": 9.86
+  },
+  {
+    "word": "float",
+    "start": 9.86,
+    "end": 10.22
+  },
+  {
+    "word": "16",
+    "start": 10.22,
+    "end": 10.64
+  },
+  {
+    "word": "on",
+    "start": 10.64,
+    "end": 11.16
+  },
+  {
+    "word": "the",
+    "start": 11.16,
+    "end": 11.58
+  },
+  {
+    "word": "CU",
+    "start": 11.58,
+    "end": 11.68
+  },
+  {
+    "word": "device,",
+    "start": 11.68,
+    "end": 11.9
+  },
+  {
+    "word": "and",
+    "start": 12.54,
+    "end": 12.86
+  },
+  {
+    "word": "voice",
+    "start": 12.86,
+    "end": 13.04
+  },
+  {
+    "word": "control",
+    "start": 13.04,
+    "end": 13.36
+  },
+  {
+    "word": "talks",
+    "start": 13.36,
+    "end": 13.88
+  },
+  {
+    "word": "to",
+    "start": 13.88,
+    "end": 14.08
+  },
+  {
+    "word": "it",
+    "start": 14.08,
+    "end": 14.16
+  },
+  {
+    "word": "over",
+    "start": 14.16,
+    "end": 14.34
+  },
+  {
+    "word": "local",
+    "start": 14.34,
+    "end": 14.52
+  },
+  {
+    "word": "socket.",
+    "start": 14.52,
+    "end": 14.82
+  },
+  {
+    "word": "I",
+    "start": 15.48,
+    "end": 15.58
+  },
+  {
+    "word": "keep",
+    "start": 15.58,
+    "end": 15.72
+  },
+  {
+    "word": "notes",
+    "start": 15.72,
+    "end": 15.92
+  },
+  {
+    "word": "and",
+    "start": 15.92,
+    "end": 16.1
+  },
+  {
+    "word": "drag",
+    "start": 16.1,
+    "end": 16.24
+  },
+  {
+    "word": "-and",
+    "start": 16.24,
+    "end": 16.34
+  },
+  {
+    "word": "-min",
+    "start": 16.34,
+    "end": 16.5
+  },
+  {
+    "word": "and",
+    "start": 16.5,
+    "end": 16.6
+  },
+  {
+    "word": "build",
+    "start": 16.6,
+    "end": 16.72
+  },
+  {
+    "word": "tools",
+    "start": 16.72,
+    "end": 17.0
+  },
+  {
+    "word": "with",
+    "start": 17.0,
+    "end": 17.2
+  },
+  {
+    "word": "PyVault.",
+    "start": 17.2,
+    "end": 17.52
+  }
+]
