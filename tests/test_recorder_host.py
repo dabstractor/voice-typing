@@ -773,3 +773,332 @@ def test_arm_purges_stale_audio_before_mic_on():
     assert rec.frames == [] and rec.last_frames == []
     assert rec.audio is None
     assert not abort_ev.is_set() and not cancel_ev.is_set()  # raced signal drained
+
+
+# ===========================================================================
+# P1.M6.T1.S1 — relay payload identity (PRD §4.2sexies R.5): utterance_id +
+# session_gen on the six final/partial sites, the daemon's _dispatch discard
+# rules, and the relay_identity seam. Three layers:
+#   A — _RelayIds/_with_identity units (the child-side stamper)
+#   B — direct _dispatch discard semantics (the choke point; stub callbacks)
+#   C — sentinel stamping via _run_text_and_emit_final + a queue round-trip
+# All hermetic: doubles only, no CUDA, no real child process.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Layer A — _RelayIds / _with_identity units
+# ---------------------------------------------------------------------------
+
+
+def test_relay_ids_stamp_adds_both_keys_and_returns_same_dict():
+    """stamp() ADDS utterance_id + session_gen (never renames/removes existing keys — the
+    'cancelled' additive-key precedent) and returns the SAME dict object (the put sites rely on
+    wrapping in place; the tuple kind must not change)."""
+    ids = recorder_host._RelayIds()
+    ids.rotate_utterance()
+    ids.new_session()
+    payload = {"text": "", "cancelled": True}
+    out = ids.stamp(payload)
+    assert out is payload, "stamp must return the same dict (in-place additive wrap)"
+    assert payload["text"] == "" and payload["cancelled"] is True  # existing keys survive
+    assert payload["utterance_id"] == 1 and payload["session_gen"] == 1  # + the identity keys
+
+
+def test_with_identity_none_ids_is_noop():
+    """ids=None (the legacy/test call sites — G7) must leave the payload byte-identical."""
+    payload = {"text": "hello"}
+    assert recorder_host._with_identity(payload, None) is payload
+    assert recorder_host._with_identity({"text": "x"}, None) == {"text": "x"}
+
+
+def test_relay_ids_rotate_and_new_session_are_monotonic():
+    """Rotation and session bumps are strictly monotonic counters; sentinels stamp whatever id
+    is current (they settle — never rotate, R.5)."""
+    ids = recorder_host._RelayIds()
+    assert ids.stamp({})["utterance_id"] == 0  # pre-speech: id 0 (no utterance opened yet)
+    assert ids.rotate_utterance() == 1
+    assert ids.rotate_utterance() == 2
+    assert ids.new_session() == 1
+    assert ids.new_session() == 2
+    assert ids.stamp({})["utterance_id"] == 2  # stamping did NOT rotate (settle, not rotate)
+    assert ids.stamp({})["session_gen"] == 2
+
+
+def test_relay_ids_rotate_concurrent_no_lost_updates():
+    """The stamper is lock-guarded (the realtime thread races the cmd loop): 2 threads × 50
+    rotations must yield 50 UNIQUE ids per thread, no lost updates (a lost update would show a
+    duplicate id in the collected set)."""
+    ids = recorder_host._RelayIds()
+    seen: list[int] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def _worker() -> None:
+        barrier.wait(timeout=2.0)
+        mine = [ids.rotate_utterance() for _ in range(50)]
+        with lock:
+            seen.extend(mine)
+
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start(); t2.start(); t1.join(timeout=5); t2.join(timeout=5)
+    assert len(seen) == 100
+    assert len(set(seen)) == 100, "duplicate rotation ids — the lock is not guarding"
+    assert max(seen) == 100
+
+
+def test_relay_feedback_partial_stamped_and_legacy_default():
+    """_RelayFeedback stamps update_partial payloads when given ids, and emits the id-LESS
+    payload with its G7 default (the existing test doubles construct it 1-arg)."""
+    import queue as _queue
+
+    ids = recorder_host._RelayIds()
+    ids.rotate_utterance()
+    ids.new_session()
+    q: Any = _queue.Queue()
+    recorder_host._RelayFeedback(q, ids).update_partial("hi")
+    assert _drain(q) == [("partial", {"text": "hi", "utterance_id": 1, "session_gen": 1})]
+    q2: Any = _queue.Queue()
+    recorder_host._RelayFeedback(q2).update_partial("hi")  # 1-arg: legacy id-less payload
+    assert _drain(q2) == [("partial", {"text": "hi"})]
+
+
+# ---------------------------------------------------------------------------
+# Layer B — _dispatch discard rules (the single choke point, stub callbacks)
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_identity_partial_then_final_relayed_and_relay_identity_tracks():
+    """Happy path: a partial and its final SHARE the id; both relay; relay_identity — read INSIDE
+    the callbacks (they run on the reader thread) — carries the identity of the event being
+    relayed (the P1.M6.T2.S1 seam)."""
+    seen_in_partial: list[tuple] = []
+    seen_in_final: list[tuple] = []
+
+    host = _make_host(
+        on_final=lambda t: seen_in_final.append((t, host.relay_identity)),
+        on_partial=lambda t: seen_in_partial.append((t, host.relay_identity)),
+    )
+    host._dispatch("partial", {"text": "he", "utterance_id": 7, "session_gen": 2})
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "hello", "utterance_id": 7, "session_gen": 2})
+
+    assert seen_in_partial == [("he", (2, 7))]
+    assert seen_in_final == [("hello", (2, 7))]
+    assert host._final_evt.is_set()
+    assert host.relay_identity == (2, 7)  # NamedTuple == plain tuple
+    assert list(host._ids_settled) == [7]       # the final settled its id
+    assert host._ids_open is None
+
+
+def test_dispatch_late_post_final_partial_dropped():
+    """R.5 discard rule 1: a partial whose id is already settled (realtime-thread straggler
+    arriving after its final) is dropped BEFORE on_partial — no stale-tail rewind."""
+    partials: list[str] = []
+    finals: list[str] = []
+    host = _make_host(on_final=finals.append, on_partial=partials.append)
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "done", "utterance_id": 3, "session_gen": 1})
+    host._dispatch("partial", {"text": "do", "utterance_id": 3, "session_gen": 1})  # LATE
+    assert finals == ["done"]
+    assert partials == [], "late post-final partial must be dropped, not relayed"
+
+
+def test_dispatch_duplicate_final_dropped_but_final_evt_set_and_mark_untouched():
+    """R.5 discard rule 2: a duplicate final (id settled) is NOT re-relayed to on_final, but
+    _final_evt is STILL set (host.text() must unblock — VT-007/G3) and _cancel_mark is NOT
+    disturbed (G5: a duplicate must not touch an already-consumed mark)."""
+    finals: list[str] = []
+    host = _make_host(on_final=finals.append)
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "once", "utterance_id": 4, "session_gen": 1})
+    host._cancel_mark = True  # an already-consumed mark from a previous cancelled sentinel
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "once", "utterance_id": 4, "session_gen": 1})  # DUPLICATE
+    assert finals == ["once"], "duplicate final must NOT re-fire on_final"
+    assert host._final_evt.is_set(), "discarded duplicate must STILL set _final_evt (VT-007)"
+    assert host._cancel_mark is True, "a discarded duplicate must not disturb _cancel_mark"
+
+
+def test_dispatch_cancel_sentinel_settles_and_drops_straggler():
+    """The cancel flow + the identity flow COMPOSE: the cancelled sentinel relays to on_final
+    with the mark set AND settles its id, so a same-id straggler partial is dropped."""
+    finals: list[str] = []
+    partials: list[str] = []
+    host = _make_host(on_final=finals.append, on_partial=partials.append)
+    host._final_evt.clear()
+    host._dispatch(
+        "final", {"text": "", "cancelled": True, "utterance_id": 5, "session_gen": 1}
+    )
+    host._dispatch("partial", {"text": "stale", "utterance_id": 5, "session_gen": 1})
+    assert finals == [""]                 # the sentinel still relays (host.text() unblocks)
+    assert host._cancel_mark is True      # the mark survived stamping (additive keys)
+    assert host._final_evt.is_set()
+    assert partials == []                 # the cancelled utterance's stragglers are dropped
+    assert list(host._ids_settled) == [5]
+
+
+def test_dispatch_filtered_final_still_closes_boundary():
+    """R.5/G4: the id settles BEFORE the on_final relay, so a FILTERED final (here: a raising
+    callback — the clean()-rejection/cancel-suppression class) still closes its utterance
+    boundary: the next same-id partial is dropped."""
+    partials: list[str] = []
+
+    def boom(_t: str) -> None:
+        raise RuntimeError("downstream filter rejected the final")
+
+    host = _make_host(on_final=boom, on_partial=partials.append)
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "x", "utterance_id": 6, "session_gen": 1})  # raises inside
+    assert host._final_evt.is_set()       # text() unblocks even though on_final raised
+    host._dispatch("partial", {"text": "x", "utterance_id": 6, "session_gen": 1})
+    assert partials == [], "a filtered final must still have settled its id (boundary closed)"
+
+
+def test_dispatch_session_advance_clears_settled_and_drops_older_session():
+    """R.5 session semantics: a newer session_gen advances the session and clears settled ids;
+    an event carrying an OLDER gen than the latest seen is dropped (cross-session straggler)."""
+    finals: list[str] = []
+    partials: list[str] = []
+    host = _make_host(on_final=finals.append, on_partial=partials.append)
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "a", "utterance_id": 1, "session_gen": 1})
+    assert list(host._ids_settled) == [1]
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "b", "utterance_id": 2, "session_gen": 2})  # advance
+    assert finals == ["a", "b"]
+    assert list(host._ids_settled) == [2], "session advance must clear the previous session's settled"
+    assert 1 not in host._ids_settled_set
+    host._dispatch("partial", {"text": "straggler", "utterance_id": 3, "session_gen": 1})
+    assert partials == [], "a gen=1 straggler after the gen=2 advance must be dropped"
+
+
+def test_dispatch_cross_session_final_dropped_but_evt_set():
+    """A final from an OLDER session than the latest seen is dropped (no commit), but STILL sets
+    _final_evt (G3/VT-007 — host.text() unblocks on every final-kind event)."""
+    finals: list[str] = []
+    host = _make_host(on_final=finals.append)
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "new", "utterance_id": 5, "session_gen": 2})  # latest=2
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "old", "utterance_id": 5, "session_gen": 1})  # late gen=1
+    assert finals == ["new"], "a cross-session final must NOT be relayed"
+    assert host._final_evt.is_set(), "the dropped final must still unblock host.text()"
+
+
+def test_dispatch_no_id_payloads_legacy_path():
+    """G7 pin: payloads WITHOUT the identity keys dispatch byte-identically to today — no
+    tracking, no discards (the same payload relayed twice is relayed twice), relay_identity
+    stays (None, None), and the tracker is untouched."""
+    finals: list[str] = []
+    partials: list[str] = []
+    host = _make_host(on_final=finals.append, on_partial=partials.append)
+    host._final_evt.clear()
+    host._dispatch("partial", {"text": "a"})
+    host._dispatch("partial", {"text": "a"})   # identical id-less payload: relayed AGAIN
+    host._dispatch("final", {"text": "done"})
+    host._final_evt.clear()
+    host._dispatch("final", {"text": "done"})  # identical id-less final: relayed AGAIN
+    assert partials == ["a", "a"]
+    assert finals == ["done", "done"]
+    assert host._final_evt.is_set()
+    assert host.relay_identity == (None, None)
+    assert list(host._ids_settled) == [] and host._ids_settled_set == set()
+    assert host._ids_latest_session == -1 and host._ids_open is None
+
+
+def test_dispatch_settled_tracker_is_bounded():
+    """G8 pin: settled ids are bounded (last 16) — the deque + its membership set stay exact
+    mirrors across eviction (a long daemon session must not grow the tracker unboundedly)."""
+    host = _make_host()
+    host._final_evt.clear()
+    for uid in range(1, 21):  # 20 finals in one session
+        host._dispatch("final", {"text": f"u{uid}", "utterance_id": uid, "session_gen": 1})
+        host._final_evt.clear()
+    assert len(host._ids_settled) == 16
+    assert set(host._ids_settled) == host._ids_settled_set  # exact mirror
+    assert list(host._ids_settled) == list(range(5, 21))          # the LAST 16
+
+
+# ---------------------------------------------------------------------------
+# Layer C — sentinel stamping + the queue round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_run_text_sentinels_stamped_with_identity():
+    """_run_text_and_emit_final with ids stamps BOTH sentinels with the CURRENT id (capture at
+    emission; sentinels settle — never rotate), and the cancel sentinel keeps cancelled:True
+    alongside the identity keys (additive, G1)."""
+    import queue as _queue
+
+    ids = recorder_host._RelayIds()
+    ids.new_session()
+    ids.rotate_utterance()  # an utterance was open when the abort/cancel landed
+
+    # CANCEL path: sentinel MARKED + stamped.
+    evt_q: Any = _queue.Queue()
+    rec = _CancelFakeRecorder()
+    aborted, cancelled = threading.Event(), threading.Event()
+    aborted.set(); cancelled.set()
+    recorder_host._run_text_and_emit_final(rec, evt_q, lambda _t: None, aborted, cancelled, None, ids)
+    events = _drain(evt_q)
+    assert events == [
+        ("final", {"text": "", "cancelled": True, "utterance_id": 1, "session_gen": 1})
+    ], f"cancel sentinel must carry the mark PLUS identity; got {events!r}"
+
+    # PLAIN ABORT path: sentinel UNMARKED + stamped (the mark must NOT leak in).
+    evt_q2: Any = _queue.Queue()
+    rec2 = _AbortFakeRecorder()
+    aborted2 = threading.Event(); aborted2.set()
+    recorder_host._run_text_and_emit_final(rec2, evt_q2, lambda _t: None, aborted2, None, None, ids)
+    events2 = _drain(evt_q2)
+    assert events2 == [
+        ("final", {"text": "", "utterance_id": 1, "session_gen": 1})
+    ], f"plain abort sentinel must carry identity WITHOUT the mark; got {events2!r}"
+    # ...and stamping did NOT rotate: the same id is still current (sentinels settle).
+    assert ids.stamp({})["utterance_id"] == 1
+
+
+def test_identity_round_trip_queue_to_read_loop_to_dispatch():
+    """Round-trip (hermetic — pytest+spawn is fragile, so the child is a thread, but the
+    transport is the host's REAL mp event queue and the relay is the REAL reader loop): the
+    child-side stamp chain (_RelayIds -> _with_identity -> _safe_put) travels queue ->
+    _read_loop -> _dispatch; on_final sees the text AND relay_identity carries the stamped
+    identity INSIDE the callback; the boundary closes (a same-id straggler is dropped)."""
+    finals: list[str] = []
+    partials: list[str] = []
+    identity_in_final_cb: list[tuple] = []
+    host = _make_host(
+        on_final=lambda t: (
+            finals.append(t), identity_in_final_cb.append(tuple(host.relay_identity))
+        ),
+        on_partial=partials.append,
+    )
+
+    def fake_child() -> None:
+        ids = recorder_host._RelayIds()
+        ids.new_session()       # the 'arm' bump
+        ids.rotate_utterance()  # the speech-start rotation
+        recorder_host._safe_put(
+            host._evt_q, ("partial", recorder_host._with_identity({"text": "he"}, ids))
+        )
+        recorder_host._safe_put(
+            host._evt_q, ("final", recorder_host._with_identity({"text": "hello"}, ids))
+        )
+        recorder_host._safe_put(host._evt_q, ("gone", {}))
+
+    reader = threading.Thread(target=host._read_loop, daemon=True)
+    child = threading.Thread(target=fake_child, daemon=True)
+    reader.start()
+    child.start()
+    child.join(timeout=5)
+    reader.join(timeout=5)
+    assert not reader.is_alive() and not child.is_alive()
+    assert partials == ["he"] and finals == ["hello"]
+    assert identity_in_final_cb == [(1, 1)], (
+        "relay_identity INSIDE on_final must be the identity of the relayed final "
+        f"(the T2.S1 seam); got {identity_in_final_cb!r}"
+    )
+    assert list(host._ids_settled) == [1]  # the boundary closed
+    assert host._dead is True        # 'gone' ended the reader cleanly

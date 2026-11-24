@@ -32,13 +32,34 @@ IPC PROTOCOL (two multiprocessing queues + one event):
                                                                             #   (P1.M2.T5.S1; additive key — daemon
                                                                             #   consumption is P1.M2.T5.S2)
                                  | ("error", {msg}) |
-                                 ("final", {text}) |          # or {text:"", "cancelled":True}
-                                                              #   (the CANCEL sentinel, T7.S1)
-                                 ("partial", {text}) |     # realtime stabilized partial
+                                 ("final", {text, utterance_id, session_gen}) |
+                                          # R.5 identity: the id SETTLES (closes) the utterance
+                                          #   boundary at _dispatch; or {text:"", cancelled:True,
+                                          #   utterance_id, session_gen} (the CANCEL sentinel,
+                                          #   T7.S1 — the mark PLUS identity)
+                                 ("partial", {text, utterance_id, session_gen}) |
+                                                           # realtime stabilized partial
                                  ("speech", {}) |          # on_speech -> _touch_speech (idle auto-stop reset)
                                  ("vad", {phase}) |        # "listening"|"speaking" (on_vad_detect_start/_start)
                                  ("speech_end", {}) |      # on_vad_stop -> latency.note_speech_end
                                  ("gone", {})              # child acked shutdown (clean exit)
+
+IDENTITY (P1.M6.T1.S1 — PRD §4.2sexies R.5): every final/partial payload carries the ADDITIVE keys
+  utterance_id + session_gen (the 'cancelled' precedent — never renamed/removed). Payloads WITHOUT
+  them dispatch byte-identically (the legacy path — old doubles/tests, pre-upgrade children). The
+  CHILD assigns identity at the decode source (_RelayIds): the utterance id rotates ONLY at
+  on_speech (the new-utterance boundary), so a LATE event keeps the id of the utterance it belonged
+  to — never relabeled as newer; session_gen bumps at every 'arm' command; sentinel finals settle
+  the CURRENT id (no rotation). The DAEMON enforces the discard rules at the single choke point
+  (_dispatch): (1) a partial whose id is already settled (post-final straggler) is dropped; (2) a
+  duplicate final (id settled) is dropped BUT still sets _final_evt (host.text() must unblock —
+  VT-007); (3) an event with an OLDER session_gen than the latest seen is dropped, while a newer
+  gen advances the session and clears settled ids. The id settles BEFORE the on_final relay, so a
+  dropped or filtered final (textproc.clean rejection, cancel suppression, a raising callback)
+  still closes its utterance boundary. Consumers read host.relay_identity — the (session_gen,
+  utterance_id) of the event being relayed, valid INSIDE the on_final/on_partial callbacks (they
+  run on the reader thread) — the P1.M6.T2.S1 seam. Tracker state is reader-thread-only; settled
+  ids are bounded (last 16) and cleared on session advance.
 
 CALLBACK RELAY (child): build_recorder wires _build_callbacks(feedback, latency, on_speech). In the
 child those callbacks fire on the recorder's threads and must RELAY events to the daemon (they
@@ -69,6 +90,7 @@ daemon process imports only the RecorderHost handle (multiprocessing + threading
 """
 from __future__ import annotations
 
+import collections
 import logging
 import multiprocessing as mp
 import os
@@ -78,7 +100,7 @@ import threading
 import time  # VT-008: _abort_handler's defer branch sleeps — the missing import killed the
 # thread with NameError on EVERY deferred cancel/abort, wedging all later stops into drain
 # timeouts and latching the cancel-suppression window (the mass-rewind regressions of Oct 2026)
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 if TYPE_CHECKING:
     from voice_typing.config import VoiceTypingConfig
@@ -179,6 +201,15 @@ class RecorderHost:
         self._device: dict[str, str] = {}
         self._error: str | None = None
         self._dead = False  # set when the child is known-gone (reader EOF / stop()); idempotent guards
+        # R.5 relay identity (P1.M6.T1.S1). Reader-thread-ONLY state (G6): mutated solely inside
+        # _dispatch on the reader thread; the daemon's on_final/_on_partial read relay_identity on
+        # that same thread -> no locking beyond the child-side _RelayIds lock. _ids_settled is
+        # bounded (G8): the last 16 settled ids, cleared on session advance.
+        self._ids_latest_session: int = -1
+        self._ids_settled = collections.deque(maxlen=16)
+        self._ids_settled_set: set[int] = set()
+        self._ids_open: int | None = None
+        self._relay_identity = _RelayIdentity(None, None)
 
     # --- public surface (the daemon calls these) ---
 
@@ -195,6 +226,17 @@ class RecorderHost:
     @property
     def pid(self) -> int | None:
         return self._proc.pid if self._proc is not None else None
+
+    @property
+    def relay_identity(self) -> _RelayIdentity:
+        """Identity of the event being relayed RIGHT NOW — (session_gen, utterance_id).
+
+        The P1.M6.T2.S1 seam: the daemon's on_final/_on_partial callbacks run ON the reader
+        thread inside _dispatch, so reading this inside them is race-free (G6) and yields the
+        identity of the event that triggered the callback. Both fields are None for id-less
+        (legacy) payloads. Snapshot semantics — copy the fields if you need them later.
+        """
+        return self._relay_identity
 
     def spawn(self, timeout: float = _SPAWN_READY_TIMEOUT_S) -> bool:
         """Start the child + wait for its 'ready'/'error'. True iff the recorder loaded.
@@ -423,6 +465,22 @@ class RecorderHost:
             self._final_evt.set()
             self._ready_evt.set()  # unblock spawn() if it is still waiting (error path)
 
+    def _ids_settle(self, uid: int) -> None:
+        """Record uid as SETTLED (its final has been seen) — closes the utterance boundary (R.5).
+
+        Bounded (G8): keep at most the last 16 per session. The deque + its membership set are
+        kept as exact mirrors (explicit popleft + discard rather than relying on maxlen eviction,
+        which would leave the set drifting).
+        """
+        if uid in self._ids_settled_set:
+            return
+        maxlen = self._ids_settled.maxlen
+        if maxlen is not None and len(self._ids_settled) >= maxlen:
+            self._ids_settled_set.discard(self._ids_settled[0])
+            self._ids_settled.popleft()
+        self._ids_settled.append(uid)
+        self._ids_settled_set.add(uid)
+
     def _dispatch(self, kind: str, payload: dict) -> None:
         """Dispatch one event to the daemon callbacks. Mirrors _build_callbacks (in-process today)."""
         if kind == "ready":
@@ -433,6 +491,34 @@ class RecorderHost:
             self._ready_evt.set()
         elif kind == "final":
             text = str(payload.get("text", ""))
+            # R.5 identity (P1.M6.T1.S1): the discard rules + the settle, at the single choke
+            # point. Order is load-bearing: identity handling runs BEFORE the _cancel_mark line
+            # (G5) and settles BEFORE the on_final relay (G4 — a dropped/filtered final still
+            # closes its boundary regardless of what on_final does downstream: clean() rejection,
+            # cancel suppression, a raising callback). A discarded duplicate sets _final_evt
+            # (G3/VT-007: host.text() must unblock) and returns WITHOUT touching _cancel_mark
+            # (a duplicate must not disturb an already-consumed mark). No id -> legacy path.
+            uid = payload.get("utterance_id")
+            gen = payload.get("session_gen")
+            if uid is not None:
+                if isinstance(gen, int) and gen < self._ids_latest_session:
+                    self._final_evt.set()
+                    logger.debug(
+                        "recorder host reader: late cross-session final dropped "
+                        "(uid=%s gen=%s latest=%s)", uid, gen, self._ids_latest_session,
+                    )
+                    return
+                if uid in self._ids_settled_set:
+                    self._final_evt.set()
+                    logger.debug("recorder host reader: duplicate final dropped (uid=%s)", uid)
+                    return
+                if isinstance(gen, int) and gen > self._ids_latest_session:
+                    self._ids_latest_session = gen
+                    self._ids_settled.clear()
+                    self._ids_settled_set.clear()
+                self._ids_settle(uid)
+                self._ids_open = None
+                self._relay_identity = _RelayIdentity(gen, uid)
             # P1.M2.T7.S1: record whether THIS final is the cancelled sentinel BEFORE relaying it —
             # the daemon's on_final suppression consumes the mark (consume_cancel_mark()) to close
             # the cancel window. A plain final resets the mark to False (per-event semantics).
@@ -446,6 +532,30 @@ class RecorderHost:
             self._final_evt.set()
         elif kind == "partial":
             text = str(payload.get("text", ""))
+            # R.5 identity: drop the pathological stragglers BEFORE they reach on_partial — a LATE
+            # post-final partial (its id already settled) that would rewind the committed tail
+            # (the stale-tail bug class), and an OLDER-session straggler. A NEWER gen advances
+            # the session (settled ids cleared) and opens its id. No id -> legacy path (G7).
+            uid = payload.get("utterance_id")
+            gen = payload.get("session_gen")
+            if uid is not None:
+                if isinstance(gen, int) and gen < self._ids_latest_session:
+                    logger.debug(
+                        "recorder host reader: late cross-session partial dropped "
+                        "(uid=%s gen=%s latest=%s)", uid, gen, self._ids_latest_session,
+                    )
+                    return
+                if uid in self._ids_settled_set:
+                    logger.debug(
+                        "recorder host reader: late post-final partial dropped (uid=%s)", uid
+                    )
+                    return
+                if isinstance(gen, int) and gen > self._ids_latest_session:
+                    self._ids_latest_session = gen
+                    self._ids_settled.clear()
+                    self._ids_settled_set.clear()
+                self._ids_open = uid
+                self._relay_identity = _RelayIdentity(gen, uid)
             self._on_partial(text)
         elif kind == "speech":
             self._on_speech()
@@ -565,10 +675,19 @@ def _worker_main(
     # daemon's Feedback/LatencyLog — those objects live in the daemon process). build_recorder wires
     # _build_callbacks(feedback, latency, on_speech); we pass relay stand-ins whose methods put
     # events on evt_q. See the module docstring's CALLBACK RELAY block for the exact mapping.
-    relay_fb: Any = _RelayFeedback(evt_q)
+    # R.5 identity (P1.M6.T1.S1): the child assigns utterance/session identity at the decode
+    # source; every final/partial payload carries it via _with_identity (additive keys).
+    ids: _RelayIds = _RelayIds()
+    relay_fb: Any = _RelayFeedback(evt_q, ids)
     relay_lat: Any = _RelayLatency(evt_q)
 
     def _child_on_speech() -> None:
+        # G2: rotate the utterance id HERE — the decode source's new-utterance boundary, BEFORE
+        # the speech put. A late realtime partial landing after final-N keeps id N (never
+        # relabeled as newer) so the daemon's settled-id rule drops it. Sentinels do NOT rotate.
+        # The speech payload itself stays UNSTAMPED (contract: only the six final/partial sites
+        # carry identity keys).
+        ids.rotate_utterance()
         _safe_put(evt_q, ("speech", {}))
 
     def _extra_kwargs_for_build(force: bool) -> "tuple[dict[str, Any] | None, Any]":
@@ -641,7 +760,7 @@ def _worker_main(
     # A SEPARATE abort-handler thread watches abort_event so stop()/toggle(off) can interrupt a
     # blocked text() (the main loop cannot read cmd_q while blocked in text()).
     def _child_on_final(text: str) -> None:
-        _safe_put(evt_q, ("final", {"text": text}))
+        _safe_put(evt_q, ("final", _with_identity({"text": text}, ids)))
 
     stop_abort_thread = threading.Event()
     # VT-007: a flag the abort handler sets when it processes an abort, so _run_text_and_emit_final
@@ -739,10 +858,13 @@ def _worker_main(
                     cancelled.clear()  # P1.M2.T7.S1: fresh per-utterance cancel marker
                     if stale == "cancel":
                         _clear_recorder_audio(recorder)
-                        _safe_put(evt_q, ("final", {"text": "", "cancelled": True}))
+                        _safe_put(
+                            evt_q,
+                            ("final", _with_identity({"text": "", "cancelled": True}, ids)),
+                        )
                         continue
                     if stale == "abort":
-                        _safe_put(evt_q, ("final", {"text": ""}))
+                        _safe_put(evt_q, ("final", _with_identity({"text": ""}, ids)))
                         continue
                     # blocks until a final (or an abort). _run_text_and_emit_final GUARANTEES a
                     # ('final', ...) event on BOTH paths (real final via on_final, OR abort via the
@@ -750,9 +872,13 @@ def _worker_main(
                     # (stop/toggle-off/auto-stop) leaves host.text() blocked forever (the child is
                     # still alive), wedging the run() loop so no further utterance transcribes.
                     _run_text_and_emit_final(
-                        recorder, evt_q, _child_on_final, aborted, cancelled, text_running
+                        recorder, evt_q, _child_on_final, aborted, cancelled, text_running, ids=ids
                     )
                 elif kind == "arm":
+                    # R.5: new session generation at EVERY arm (before _handle_arm; its signature
+                    # is untouched). Events decoded after this carry the new gen, so the daemon
+                    # drops pre-re-arm stragglers by generation.
+                    ids.new_session()
                     _handle_arm(recorder, cancel_event, abort_event)
                 elif kind == "disarm":
                     recorder.set_microphone(False)
@@ -796,6 +922,60 @@ def _safe_put(evt_q: Any, item: tuple) -> None:
         evt_q.put(item)
     except (BrokenPipeError, OSError, EOFError):
         pass
+
+
+class _RelayIdentity(NamedTuple):
+    """Identity of the event currently being relayed (R.5) — host.relay_identity's value.
+
+    The daemon's on_final/_on_partial callbacks run ON the reader thread inside _dispatch, so
+    reading this inside those callbacks yields the (session_gen, utterance_id) of the event that
+    triggered them — the P1.M6.T2.S1 consumption seam. Either field is None when the payload was
+    id-less (the legacy path).
+    """
+
+    session_gen: "int | None"
+    utterance_id: "int | None"
+
+
+class _RelayIds:
+    """Child-side utterance/session identity stamper (PRD §4.2sexies R.5).
+
+    utterance_id: rotated ONLY at on_speech (the decode source's new-utterance boundary) so a
+    LATE event keeps the settled id of the utterance it belonged to (never relabeled as newer —
+    R.5; see _child_on_speech). session_gen: bumped at every 'arm' command (new session
+    generation per arm — R.5). stamp() captures both under the lock at callback entry (the
+    realtime thread races the cmd loop). Sentinels stamp the CURRENT id — they settle, they
+    never rotate.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._utterance = 0
+        self._session = 0
+
+    def rotate_utterance(self) -> int:
+        with self._lock:
+            self._utterance += 1
+            return self._utterance
+
+    def new_session(self) -> int:
+        with self._lock:
+            self._session += 1
+            return self._session
+
+    def stamp(self, payload: dict) -> dict:
+        with self._lock:
+            payload["utterance_id"] = self._utterance
+            payload["session_gen"] = self._session
+        return payload
+
+
+def _with_identity(payload: dict, ids: "_RelayIds | None") -> dict:
+    """ONE payload helper for the six final/partial event sites — adds utterance_id + session_gen
+    (ADDITIVE keys; the 'cancelled' sentinel key and ready's 'context_prompt' are the precedents).
+    ids=None stamps nothing (the legacy/test call sites — payloads byte-identical to today).
+    """
+    return ids.stamp(payload) if ids is not None else payload
 
 
 def _default_prompt_executor_factory(model: str, device: str, compute_type: str) -> Any:
@@ -988,6 +1168,7 @@ def _run_text_and_emit_final(
     aborted: "threading.Event | None" = None,
     cancelled: "threading.Event | None" = None,
     text_running: "threading.Lock | None" = None,
+    ids: "_RelayIds | None" = None,
 ) -> None:
     """Child: run ONE recorder.text(on_final) call AND guarantee a ('final', ...) event when it ends.
 
@@ -1029,6 +1210,11 @@ def _run_text_and_emit_final(
     child's abort handler can tell "text() in flight (safe to recorder.abort())" from "between
     cycles (defer: leave the events for the next 'text' command's stale-signal check)". Default
     None keeps the existing unit-test call sites (4-arg) unchanged.
+
+    ids (P1.M6.T1.S1): when given, BOTH emitted sentinels carry utterance_id/session_gen via
+    _with_identity, stamped with the CURRENT id at emission (sentinels settle the current
+    utterance — they never rotate it, R.5). Default None keeps the payloads id-less (the legacy
+    path — the existing test doubles stay green untouched).
     """
     if text_running is not None:
         text_running.acquire()
@@ -1049,9 +1235,9 @@ def _run_text_and_emit_final(
             # still EMITTED (never skipped) or host.text() would wedge forever (the VT-007
             # regression) — cancel changes its PAYLOAD, never its existence.
             _clear_recorder_audio(recorder)
-            _safe_put(evt_q, ("final", {"text": "", "cancelled": True}))
+            _safe_put(evt_q, ("final", _with_identity({"text": "", "cancelled": True}, ids)))
         else:
-            _safe_put(evt_q, ("final", {"text": ""}))
+            _safe_put(evt_q, ("final", _with_identity({"text": ""}, ids)))
 
 
 def _child_resolved_device(cfg: "VoiceTypingConfig", force_cpu: bool) -> dict[str, str]:
@@ -1093,11 +1279,14 @@ class _RelayFeedback:
     (unloaded/loading/idle) are driven by the DAEMON's _load_host/_unload_host, not here.
     """
 
-    def __init__(self, evt_q: Any) -> None:
+    def __init__(self, evt_q: Any, ids: "_RelayIds | None" = None) -> None:
         self._evt_q = evt_q
+        # R.5 identity stamper (P1.M6.T1.S1). None -> id-less payloads (the legacy path the
+        # existing unit tests exercise; the G7 backward-compat default).
+        self._ids = ids
 
     def update_partial(self, text: str) -> None:
-        _safe_put(self._evt_q, ("partial", {"text": text}))
+        _safe_put(self._evt_q, ("partial", _with_identity({"text": text}, self._ids)))
 
     def set_phase(self, phase: str) -> None:
         if phase in ("listening", "speaking"):

@@ -818,14 +818,14 @@
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "Utterance identities + session generation through the recorder relay",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Extend the partial/final payloads with utterance_id + session_gen assigned at the decode source; late events keep their own identity; dropped/filtered finals still close the boundary.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Payload helper at the five final sites + partial site",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2"
