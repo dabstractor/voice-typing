@@ -47,6 +47,8 @@ from voice_typing.bulk_controller import BulkController
 from voice_typing.bulk_delivery import AcquireResult, ShowResult
 from voice_typing.daemon import VoiceTypingDaemon
 
+from conftest import hermetic_cfg  # P1.M1.T1.S2: hermetic cfg for BOTH ctor sites below
+
 # ---------------------------------------------------------------------------
 # fakes — mirrors of the test_bulk_dispatch.py doubles (kept local so the
 # existing suites stay untouched), extended with the prompt-spy host seam
@@ -408,7 +410,7 @@ def _make_bulk_daemon(
             return _FakeBundle(_FakeTarget())
 
     d = VoiceTypingDaemon(
-        cfg,
+        hermetic_cfg(cfg),  # P1.M1.T1.S2: duck off + private state (BUG-001)
         fb,
         recorder=None,
         host_factory=_host_factory,
@@ -690,6 +692,7 @@ def test_stream_edit_source_unchanged():
     from voice_typing.daemon import VoiceTypingDaemon as _D  # local: the ctor seam
 
     cfg = config_mod.VoiceTypingConfig()  # delivery="stream-edit" (default), streaming=True
+    cfg = hermetic_cfg(cfg)  # P1.M1.T1.S2: the _D ctor must be hermetic too (BUG-001)
     fb = _BulkFakeFeedback()
     be = _SpyBackend()
     host_holder: dict = {}

@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Keep daemon tests off the desktop media bus",
-              "status": "Planned",
+              "status": "Ready",
               "description": "BUG-001: isolate ordinary daemon arming and boot recovery while preserving real production defaults and dedicated fake lifecycle coverage.",
               "subtasks": [
                 {
@@ -40,7 +40,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Migrate ordinary daemon constructors and test consumers",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -57,7 +57,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "Pin default-to-fake duck wiring and ordered subprocess isolation",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

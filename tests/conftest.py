@@ -1,9 +1,14 @@
 """Shared pytest fixtures for voice-typing tests.
 
-Currently hosts ONE opt-in fixture: `hermetic_daemon_media` (BUG-001 seam fix,
-P1.M1.T1.S1). It is deliberately NOT auto-requested: suites migrate file-by-file (S2),
-and an auto-applied fixture would change semantics for not-yet-migrated daemon tests
-while masking the fail-closed factory raise as a collection error.
+Hosts the opt-in `hermetic_daemon_media` fixture (BUG-001 seam fix, P1.M1.T1.S1) and the
+shared `hermetic_cfg` builder (P1.M1.T1.S2). The fixture is deliberately NOT auto-requested
+and the daemon/ducking_heal modules are imported ONLY at fixture invocation (never at
+collection): importing voice_typing.daemon eagerly would drag the daemon import into every
+test session (import-purity suites such as test_ime_manager.py rely on it staying absent),
+while an auto-applied fixture would change semantics for not-yet-migrated daemon tests
+while masking the fail-closed factory raise as a collection error. Ordinary constructor
+helpers share ONE discipline through the plain `hermetic_cfg()` function (config-only
+imports — safe for any test module to import).
 """
 from __future__ import annotations
 
@@ -11,9 +16,43 @@ import dataclasses
 
 import pytest
 
-import voice_typing.daemon as daemon_mod
-import voice_typing.ducking_heal as ducking_heal_mod
 from voice_typing.config import VoiceTypingConfig
+
+
+def hermetic_cfg(cfg: VoiceTypingConfig | None = None, *, state_file: str | None = None) -> VoiceTypingConfig:
+    """Test-owned hermetic config for ORDINARY daemon construction (BUG-001 / P1.M1.T1.S2).
+
+    duck_mode is ALWAYS 'off' (the daemon builds a ducker only when duck_mode != 'off', and
+    _duck_engage no-ops when the ducker is None — so this one wrap covers _arm(),
+    start()/toggle(), the run-loop lazy first-arm and socket-driven arms).
+
+    feedback.state_file precedence: the `state_file` param wins; else a NON-EMPTY supplied
+    cfg.feedback.state_file is PRESERVED (real-Feedback tmp_path sites keep their writable
+    private state); else a nonexistent private default under the system temp dir (missing
+    file ⇒ the construction-time boot-heal read swallows to False; fake-feedback sites never
+    write state anyway).
+
+    Returns a NEW config (dataclasses.replace at top + audio + feedback; mirrors the
+    FilterConfig.blocklist not-shared discipline); it never mutates its argument or any
+    production default. Plain function (config-only imports) so constructor HELPERS without
+    fixture access share the fixture's discipline; the fixture's hermetic() delegates here.
+    """
+    import os
+    import tempfile
+
+    base = cfg if cfg is not None else VoiceTypingConfig()
+    if state_file is None:
+        supplied = base.feedback.state_file
+        state_file = (
+            supplied
+            if supplied
+            else os.path.join(tempfile.gettempdir(), f"vt-hermetic-{os.getpid()}-state.json")
+        )
+    return dataclasses.replace(
+        base,
+        audio=dataclasses.replace(base.audio, duck_mode="off"),
+        feedback=dataclasses.replace(base.feedback, state_file=state_file),
+    )
 
 
 @pytest.fixture
@@ -53,14 +92,12 @@ def hermetic_daemon_media(monkeypatch, tmp_path):
     argument or any production default.
     """
     state_path = tmp_path / "state.json"
+    import voice_typing.daemon as daemon_mod  # lazy: fixture invocation, never collection
+    import voice_typing.ducking_heal as ducking_heal_mod
 
     def hermetic(cfg: VoiceTypingConfig | None = None) -> VoiceTypingConfig:
-        base = cfg if cfg is not None else VoiceTypingConfig()
-        return dataclasses.replace(
-            base,
-            audio=dataclasses.replace(base.audio, duck_mode="off"),
-            feedback=dataclasses.replace(base.feedback, state_file=str(state_path)),
-        )
+        # Delegates to the shared builder; the fixture's private tmp state wins (S2).
+        return hermetic_cfg(cfg, state_file=str(state_path))
 
     calls: list = []
 

@@ -38,6 +38,8 @@ from voice_typing.bulk_controller import BulkController
 from voice_typing.bulk_delivery import AcquireResult, ShowResult
 from voice_typing.daemon import VoiceTypingDaemon
 
+from conftest import hermetic_cfg  # P1.M1.T1.S2: hermetic cfg for the helper's daemon ctor
+
 # ---------------------------------------------------------------------------
 # fakes — mirrors of the test_daemon / test_g2_bulk_gate doubles (kept local so
 # the existing suites stay untouched; the additive-hook gate requires that).
@@ -336,7 +338,7 @@ def _make_bulk_daemon(
             return _FakeBundle(_FakeTarget())
 
     d = VoiceTypingDaemon(
-        cfg,
+        hermetic_cfg(cfg),  # P1.M1.T1.S2: duck off + private state (BUG-001)
         fb,
         recorder=None,
         host_factory=_host_factory,

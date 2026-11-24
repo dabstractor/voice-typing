@@ -59,6 +59,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from conftest import hermetic_cfg  # P1.M1.T1.S2: config-only; no daemon import (edit-only suite)
+
 if TYPE_CHECKING:
     # Type hints ONLY — never imported at runtime, so collecting this module does NOT pollute
     # sys.modules with RealtimeSTT/torch (which would break tests/test_voicectl.py's import-purity
@@ -569,7 +571,7 @@ def test_daemon_path_emits_latency_line_and_types_nothing(
     sf = _DEPS["sf"]
     VoiceTypingConfig = _DEPS["VoiceTypingConfig"]  # type: ignore[assignment]
     rec, _col = recorder
-    cfg = VoiceTypingConfig()
+    cfg = hermetic_cfg(VoiceTypingConfig())  # P1.M1.T1.S2: duck off + private state
     fb = _StubFeedback()
     backend = _NoopBackend()
     lat = daemon.LatencyLog()

@@ -28,6 +28,8 @@ import logging
 from voice_typing import daemon
 from voice_typing.config import VoiceTypingConfig
 
+from conftest import hermetic_cfg  # P1.M1.T1.S2: hermetic cfg for the local ctor helper
+
 
 # ---------------------------------------------------------------------------
 # Test doubles (house convention: copied per tests/test_streaming_commit.py)
@@ -157,7 +159,7 @@ def _host_factory(**host_kwargs):
 
 
 def _make_daemon(*, cfg=None, host_factory=None, backend=None):
-    cfg = cfg or VoiceTypingConfig()
+    cfg = hermetic_cfg(cfg)  # P1.M1.T1.S2: duck off + private state for all 13 callers
     fb = _FakeFeedback()
     d = daemon.VoiceTypingDaemon(
         cfg,

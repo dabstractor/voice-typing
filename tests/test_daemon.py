@@ -24,6 +24,8 @@ import pytest
 from voice_typing import daemon
 from voice_typing.config import AsrConfig, VoiceTypingConfig
 
+from conftest import hermetic_cfg  # P1.M1.T1.S2: shared hermetic cfg builder (config-only)
+
 
 # ---------------------------------------------------------------------------
 # Stubs — duck-typed stand-ins so tests never import RealtimeSTT or feedback.py.
@@ -682,7 +684,7 @@ def _fake_host_factory(spawn_result=True, device=None):
 def _make_daemon(
     *, recorder=None, recorder_host=None, host_factory=None, backend=None, cfg=None
 ):
-    cfg = cfg or VoiceTypingConfig()
+    cfg = hermetic_cfg(cfg)  # P1.M1.T1.S2: duck off + private state for EVERY caller
     fb = _DaemonFakeFeedback()
     rec = recorder if recorder is not None else _StubRecorder()
     be = backend if backend is not None else _FakeBackend()
@@ -696,6 +698,26 @@ def _make_daemon(
         mic_prober=_ok_probe,
     )
     return d, fb, rec, be
+
+
+def test_make_daemon_helpers_are_media_hermetic():
+    """P1.M1.T1.S2: the ordinary constructor helpers build media-hermetic daemons —
+    _ducker None, duck off, state private; an arm/disarm cycle spawns no duck threads
+    (BUG-001: no default-config daemon may reach busctl --user or the operator's state)."""
+    import threading
+
+    d, _fb, _rec, _be = _make_daemon()
+    dl, _fbl = _make_lazy_daemon()
+    for d_ in (d, dl):
+        assert d_._ducker is None  # dispatch path no-ops; no busctl child is even possible
+        assert d_._cfg.audio.duck_mode == "off"
+        sf = d_._cfg.feedback.state_file
+        assert sf and "/run/user/" not in sf  # private, not the operator's runtime dir
+    d.start()  # behavioral: the arm/disarm cycle must not spawn a duck worker/heal thread
+    d.stop()
+    assert not any(
+        t.name.startswith(("vt-ducking", "vt-duck-heal")) for t in threading.enumerate()
+    )
 
 
 # --- boot: no hot-mic (PRD §4.9) ---
@@ -1282,7 +1304,7 @@ def test_quit_unloaded_reply_race_worker_not_stranded(monkeypatch):
     return at once — the reply window survives process exit. (Pre-fix the worker burned the
     full _TEARDOWN_WAIT_TIMEOUT and this assert fires at the 2s deadline.)"""
     monkeypatch.setattr(daemon, "_TEARDOWN_WAIT_TIMEOUT", 5.0)  # pre-fix this blocks 5s
-    cfg = VoiceTypingConfig()
+    cfg = hermetic_cfg(VoiceTypingConfig())
     fb = _DaemonFakeFeedback()
     d = daemon.VoiceTypingDaemon(
         cfg,
@@ -1940,9 +1962,9 @@ def _make_daemon_with_feedback(tmp_path, monkeypatch, *, cuda=True):
         monkeypatch,
         daemon.cuda_check.CUDA_DEFAULTS if cuda else daemon.cuda_check.CPU_FALLBACK,
     )
-    cfg = VoiceTypingConfig(
-        feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
-    )
+    cfg = hermetic_cfg(
+        VoiceTypingConfig(feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")))
+    )  # non-empty private tmp state PRESERVED (P1.M1.T1.S2 precedence)
     fb = Feedback(cfg.feedback)
     rec = _StubRecorder()
     be = _FakeBackend()
@@ -2065,6 +2087,7 @@ def test_status_snapshot_reports_configured_device_when_not_loaded(
         asr=AsrConfig(device="cpu"),
         feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")),
     )
+    cfg = hermetic_cfg(cfg)
     fb = Feedback(cfg.feedback)
     d = daemon.VoiceTypingDaemon(
         cfg,
@@ -2119,6 +2142,7 @@ def test_resolved_device_never_calls_cuda_check(tmp_path, monkeypatch):
     cfg = VoiceTypingConfig(
         feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
     )
+    cfg = hermetic_cfg(cfg)
     d = daemon.VoiceTypingDaemon(
         cfg,
         Feedback(cfg.feedback),
@@ -2144,6 +2168,7 @@ def test_resolved_device_unaffected_by_cuda_check_failure(tmp_path, monkeypatch)
     cfg = VoiceTypingConfig(
         feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
     )
+    cfg = hermetic_cfg(cfg)
     d = daemon.VoiceTypingDaemon(
         cfg,
         Feedback(cfg.feedback),
@@ -2183,6 +2208,7 @@ def test_status_snapshot_does_not_import_cuda_stack(tmp_path, monkeypatch):
     cfg = VoiceTypingConfig(
         feedback=FeedbackConfig(state_file=str(tmp_path / "state.json"))
     )
+    cfg = hermetic_cfg(cfg)
     d = daemon.VoiceTypingDaemon(
         cfg,
         Feedback(cfg.feedback),
@@ -2906,7 +2932,7 @@ def test_refresh_mic_status_stores_probe_result():
 
 def test_init_initializes_mic_status_and_calls_probe():
     calls = []
-    cfg = VoiceTypingConfig()
+    cfg = hermetic_cfg(VoiceTypingConfig())
     d = daemon.VoiceTypingDaemon(
         cfg,
         _DaemonFakeFeedback(),
@@ -2921,7 +2947,7 @@ def test_init_initializes_mic_status_and_calls_probe():
 def test_arm_refreshes_mic_status():
     calls = []
     d = daemon.VoiceTypingDaemon(
-        VoiceTypingConfig(),
+        hermetic_cfg(VoiceTypingConfig()),
         _DaemonFakeFeedback(),
         recorder=_StubRecorder(),
         backend=_FakeBackend(),
@@ -2952,7 +2978,7 @@ def test_mic_probe_cached_within_ttl(monkeypatch):
         monkeypatch, 1000.0
     )  # non-zero base: avoid the 0.0 'never' sentinel collision
     d = daemon.VoiceTypingDaemon(
-        VoiceTypingConfig(),
+        hermetic_cfg(VoiceTypingConfig()),
         _DaemonFakeFeedback(),
         recorder=_StubRecorder(),
         backend=_FakeBackend(),
@@ -3340,6 +3366,7 @@ def _make_lazy_daemon(cfg=None, host_factory=None):
     Mirrors production lazy boot. Tests that exercise _load_host inject a host_factory (so the spawn
     stays hermetic — no real child). P1.M3.T2.S2 re-plan: "loading" is now host.spawn()."""
     cfg = cfg or VoiceTypingConfig()
+    cfg = hermetic_cfg(cfg)  # P1.M1.T1.S2
     fb = _DaemonFakeFeedback()
     return daemon.VoiceTypingDaemon(
         cfg,
@@ -4102,7 +4129,7 @@ def test_run_loop_detects_dead_host_and_transitions_to_unloaded(monkeypatch):
     # _LegacyRecorderHostAdapter (is_alive always True -> undetectable death). Mirrors _make_lazy_daemon.
     fb = _DaemonFakeFeedback()
     d = daemon.VoiceTypingDaemon(
-        VoiceTypingConfig(),
+        hermetic_cfg(VoiceTypingConfig()),
         fb,
         recorder=None,
         host_factory=factory,
@@ -4144,7 +4171,7 @@ def test_load_host_respawns_after_dead_child(monkeypatch):
     # recorder=None => lazy boot so start()'s _load_host() spawns a _FakeHost (see test (a)).
     fb = _DaemonFakeFeedback()
     d = daemon.VoiceTypingDaemon(
-        VoiceTypingConfig(),
+        hermetic_cfg(VoiceTypingConfig()),
         fb,
         recorder=None,
         host_factory=factory,
@@ -4189,6 +4216,7 @@ def test_status_reports_unloaded_after_child_death(tmp_path, monkeypatch):
     )
     fb = Feedback(cfg.feedback)
     factory = _fake_host_factory(spawn_result=True)
+    cfg = hermetic_cfg(cfg)
     d = daemon.VoiceTypingDaemon(
         cfg,
         fb,
@@ -4235,6 +4263,7 @@ def test_status_device_reseeded_not_stale_after_child_death(tmp_path, monkeypatc
     fb = Feedback(cfg.feedback)
     cpu_device = {"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
     factory = _fake_host_factory(spawn_result=True, device=cpu_device)
+    cfg = hermetic_cfg(cfg)
     d = daemon.VoiceTypingDaemon(
         cfg,
         fb,
@@ -4283,6 +4312,7 @@ def test_status_device_reseeded_not_stale_after_idle_unload(tmp_path, monkeypatc
         asr=AsrConfig(auto_unload_idle_seconds=0.001),  # fire immediately once disarmed
         feedback=FeedbackConfig(state_file=str(tmp_path / "state.json")),
     )
+    cfg = hermetic_cfg(cfg)
     fb = Feedback(cfg.feedback)
     cpu_device = {"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
     factory = _fake_host_factory(spawn_result=True, device=cpu_device)
