@@ -789,3 +789,129 @@ def test_halt_for_takeover_records_one_reason_leaves_once_idempotent():
     ctrl.on_partial("y", utterance="u2", seq=1, gen=GEN)  # post-halt → rejected
     ctrl.drain()
     assert _spans(fake) == ["x"]                   # no post-halt target mutations
+
+
+# ---------------------------------------------------------------------------
+# BUG-002 S1 — prompt dispatch + fail-closed bursts (three controller defects)
+# ---------------------------------------------------------------------------
+
+
+def test_spaced_distinct_partials_show_before_final():
+    """BUG-002 promptness pin (drain): each SPACED distinct partial of one
+    utterance dispatches its own show IMMEDIATELY — all of them BEFORE the
+    utterance's finalize. No timer may defer the first useful partial (R.1)."""
+    ctrl, fake = _armed()
+    ctrl.on_partial("hello", utterance="u1", seq=1, gen=GEN)
+    assert ctrl.drain() == 2          # SessionBegin barrier + ONE show, dispatched NOW
+    ctrl.on_partial("hello world", utterance="u1", seq=2, gen=GEN)
+    assert ctrl.drain() == 1          # second show
+    ctrl.on_partial("hello world foo", utterance="u1", seq=3, gen=GEN)
+    assert ctrl.drain() == 1          # third show
+    ctrl.on_final("hello world foo", utterance="u1", seq=4, gen=GEN)
+    assert ctrl.drain() == 1          # the finalize lands AFTER all three shows
+    assert _methods(fake) == ["acquire", "show", "show", "show", "finalize"]
+    assert _spans(fake) == ["hello", "hello world", "hello world foo"]
+    assert _spans(fake, "finalize") == ["hello world foo"]
+    st = ctrl.stats()
+    assert st["applied"] == 4         # 3 shows + 1 finalize, all APPLIED
+    assert st["coalesced"] == 0       # distinct renders: nothing coalesced away
+
+
+def test_pre_submit_generation_race_discards_without_target_call():
+    """BUG-002 defect C (pre-submit): an arm() landing BETWEEN _process_next's
+    mutation-time re-checks and the pre-submit critical section must discard
+    the op with ZERO target calls. arm() does NOT bump the dispatch epoch —
+    the generation re-check is the ONLY guard for this race. The
+    deterministic injection point is the _ensure_runner hook, which sits
+    exactly between the two critical sections (no sleeps, no timing)."""
+
+    class _RaceCtrl(BulkController):
+        """Overrides _ensure_runner to fire self.arm(gen+1) at the hook —
+        gated on a flag set ONLY after the initial arm(1) settles (a bare
+        flag would fire during acquire(), invalidating the scenario)."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._race_armed = False
+            self._race_fired = 0
+
+        def _ensure_runner(self):
+            if self._race_armed:
+                self._race_fired += 1
+                self.arm(GEN + 1)     # the new session lands right here
+            return super()._ensure_runner()
+
+    fake = _FakeTarget()
+    ctrl = _RaceCtrl(fake, queue_size=4)
+    assert ctrl.acquire() is True
+    assert ctrl.arm(GEN) is True
+    assert ctrl.drain(max_items=1) == 1   # arm()'s SessionBegin barrier (hook inert)
+    ctrl._race_armed = True
+    ctrl.on_partial("doomed", utterance="u1", seq=1, gen=GEN)
+    assert ctrl._process_next(blocking=False) is True
+    assert ctrl._race_fired == 1          # the injection actually happened
+    # ZERO target calls: the op died between the re-checks and the submit.
+    assert [c.method for c in fake.calls if c.method != "acquire"] == []
+    st = ctrl.stats()
+    assert st["discarded_stale"] == 1
+    assert st["session_gen"] == GEN + 1
+    assert st["expected_revision"] == 0   # the stale op never advanced revision
+
+
+def test_stale_generation_inflight_result_never_mutates():
+    """BUG-002 defect C (result side): an op in flight while arm() starts a
+    new session has its APPLIED result DISCARDED — the session-global
+    expected_revision / confirmed_visible keep the NEW session's state.
+    (arm() does not bump the epoch, so without the gen re-check the stale
+    APPLIED would leak into the new session.)"""
+    ctl, fake = _gated_controller(op_deadline=0.5)   # long deadline: the GATE,
+    # not the deadline, is what holds the op in flight during the race
+    ctl.on_partial("stale-span", utterance="u1", seq=1, gen=GEN)
+    worker = threading.Thread(target=ctl._process_next, args=(False,), daemon=True)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while not any(c.method == "show" for c in fake.calls):
+            assert time.monotonic() < deadline, "op never reached the target"
+            time.sleep(0.001)
+        ctl.arm(GEN + 1)                  # new session WHILE the gen-1 op is in flight
+        fake.gate.set()                   # release: the APPLIED result settles
+        worker.join(5.0)
+        assert not worker.is_alive()
+        st = ctl.stats()
+        assert st["session_gen"] == GEN + 1
+        assert st["expected_revision"] == 0   # stale APPLIED never advanced it
+        assert ctl.confirmed_visible() == ""  # and never confirmed the gen-1 span
+        assert st["late_results_discarded"] == 0  # NOT a give-up discard — this
+        # is the generation discard: no stop happened, _note_late stays silent
+    finally:
+        fake.gate.set()                   # never wedge the op-runner worker
+        worker.join(5.0)
+
+
+def test_writer_thread_dispatches_each_distinct_partial_promptly():
+    """BUG-002 promptness pin (real writer thread): every spaced distinct
+    partial dispatches a show BEFORE the utterance's final is even ENQUEUED
+    — no wait-for-final / debounce semantics may creep back in."""
+    ctrl, fake = _controller()
+    ctrl.acquire()
+    ctrl.arm(GEN)
+    ctrl.start()
+    try:
+        ctrl.on_partial("hello", utterance="u1", seq=1, gen=GEN)
+        assert _wait_until(lambda: _spans(fake) == ["hello"], timeout=5.0)
+        ctrl.on_partial("hello world", utterance="u1", seq=2, gen=GEN)
+        assert _wait_until(lambda: _spans(fake) == ["hello", "hello world"],
+                           timeout=5.0)
+        assert _spans(fake, "finalize") == []   # shows LED — nothing final yet
+        ctrl.on_final("hello world", utterance="u1", seq=3, gen=GEN)
+        assert _wait_until(lambda: _spans(fake, "finalize") == ["hello world"],
+                           timeout=5.0)
+        # wait for the RESULT to be processed — not just the call recorded —
+        # or the stop() below races the finalize's result into the late path
+        assert _wait_until(lambda: ctrl.stats()["applied"] == 3, timeout=5.0)
+    finally:
+        ctrl.stop()
+    st = ctrl.stats()
+    assert st["applied"] == 3
+    assert ctrl.confirmed_visible() == "hello world"

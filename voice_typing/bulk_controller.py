@@ -43,8 +43,13 @@ discard late / duplicate events at enqueue time, AND the writer re-checks
 generation + closure at mutation time. expected_revision is seeded by
 acquire() and advances +1 ONLY on ShowResult.APPLIED (UNCHANGED = no edit
 landed = no advance). ShowResult.REFUSED / UNKNOWN stop delivery — no retry;
-ANY enqueue onto a full queue stops delivery with reason "queue-overflow" —
-nothing is ever dropped-and-continued.
+an enqueue onto a full queue with NO replaceable slot stops delivery with
+reason "queue-overflow" — nothing is ever dropped-and-continued. A same-key
+partial ALWAYS replaces its own queued slot first (capacity-neutral: a
+same-utterance burst at a FULL queue coalesces newest-wins instead of
+stopping); finals and boundaries are barriers — append-only, so their
+overflow still stops. Every stop fires on_stopped EXACTLY ONCE, OUTSIDE
+the lock (a user callback that takes the lock must never deadlock).
 
 FAILURE HANDLING (P1.M3.T2.S2, R.5): the writer's single target call per
 item runs through a single-worker op runner (concurrent.futures,
@@ -227,8 +232,10 @@ class BulkController:
     ) -> None:
         """Args:
         target: a DeliveryTarget (bulk_delivery contract; the R.3 adapter).
-        queue_size: bounded-queue capacity (R.5: default 32). ANY enqueue at
-            capacity stops delivery — it never blocks and never drops.
+        queue_size: bounded-queue capacity (R.5: default 32). An enqueue at
+            capacity with NO replaceable slot stops delivery — it never
+            blocks and never drops (a same-key partial replaces its own slot
+            first: capacity-neutral, never a stop).
         on_stopped: optional callback fired EXACTLY ONCE with the stop reason
             when delivery stops from a fault — the disarm seam the daemon
             consumes (P1.M6.T2.S1 wires it to the bulk AND recording
@@ -535,7 +542,12 @@ class BulkController:
         Never touches the target, never blocks (R.5 enqueue-and-return).
         Newest-partial-wins: a queued partial of the same (gen, utterance)
         is REPLACED IN PLACE so it keeps its position — always dispatched
-        before its own utterance's final.
+        before its own utterance's final. The replace scan runs BEFORE the
+        capacity check: replacing the queued partial's own slot is
+        capacity-neutral, so a same-utterance burst at a FULL queue
+        coalesces instead of spuriously stopping; only an enqueue with NO
+        replaceable slot at capacity stops ("queue-overflow"), and the
+        one-time on_stopped notification fires OUTSIDE _cond.
         """
         stopped = False
         with self._cond:
@@ -551,21 +563,25 @@ class BulkController:
                 return
             self._high_seq[key] = seq
             self._latest_recognized = span  # three-value law: newest RECEIVED, at ENQUEUE
-            if len(self._dq) >= self._queue_size:
-                # Overflow STOPS delivery — never drop-and-continue, never wait.
-                stopped = self._stop_locked("queue-overflow")
-                if stopped:
-                    self._stats["overflow"] += 1
-                return
+            # REPLACE-IN-PLACE FIRST — capacity-neutral: reuses the queued
+            # partial's own slot, so a same-utterance burst at a FULL queue
+            # coalesces instead of spuriously stopping (BUG-002 defect A).
             for i, item in enumerate(self._dq):
                 if isinstance(item, _Partial) and (item.gen, item.utterance) == key:
                     self._dq[i] = _Partial(gen=gen, utterance=utterance, seq=seq, span=span)
                     self._stats["coalesced"] += 1
                     self._cond.notify_all()
                     return
-            self._dq.append(_Partial(gen=gen, utterance=utterance, seq=seq, span=span))
-            self._cond.notify_all()
-        if stopped:
+            # REAL overflow only when NO replaceable slot exists:
+            if len(self._dq) >= self._queue_size:
+                # Overflow STOPS delivery — never drop-and-continue, never wait.
+                stopped = self._stop_locked("queue-overflow")
+                if stopped:
+                    self._stats["overflow"] += 1
+            else:
+                self._dq.append(_Partial(gen=gen, utterance=utterance, seq=seq, span=span))
+                self._cond.notify_all()
+        if stopped:  # OUTSIDE _cond — arm()'s shape (defect B: never notify under the lock)
             self._fire_on_stopped()
 
     def on_final(self, span: str, *, utterance: str, seq: int, gen: int) -> None:
@@ -590,13 +606,17 @@ class BulkController:
             self._high_seq[key] = seq
             self._latest_recognized = span  # a final is recognition text too (R.5)
             self._accepted_final = span  # on_final IS the filter-accepted final
+            # A final is a barrier: append-only, NEVER a replace (defect A's
+            # reorder is partials-only — never let a final erase a pending
+            # valid change), so its overflow is always real. Fall through the
+            # lock and notify OUTSIDE it (defect B).
             if len(self._dq) >= self._queue_size:
                 stopped = self._stop_locked("queue-overflow")
                 if stopped:
                     self._stats["overflow"] += 1
-                return
-            self._dq.append(_Final(gen=gen, utterance=utterance, seq=seq, span=span))
-            self._cond.notify_all()
+            else:
+                self._dq.append(_Final(gen=gen, utterance=utterance, seq=seq, span=span))
+                self._cond.notify_all()
         if stopped:
             self._fire_on_stopped()
 
@@ -616,13 +636,15 @@ class BulkController:
                 self._stats["discarded_dup"] += 1
                 return
             self._closed.add(key)
+            # Boundary barrier: append-only like a final (see on_final);
+            # fall through the lock and notify OUTSIDE it (defect B).
             if len(self._dq) >= self._queue_size:
                 stopped = self._stop_locked("queue-overflow")
                 if stopped:
                     self._stats["overflow"] += 1
-                return
-            self._dq.append(_Boundary(gen=gen, utterance=utterance))
-            self._cond.notify_all()
+            else:
+                self._dq.append(_Boundary(gen=gen, utterance=utterance))
+                self._cond.notify_all()
         if stopped:
             self._fire_on_stopped()
 
@@ -682,6 +704,13 @@ class BulkController:
         target call is submitted to the single-worker op runner and awaited
         under the 250 ms engineering deadline (op_deadline); a deadline miss
         or a target exception stops delivery here and never propagates.
+
+        The item's generation is re-checked THREE times: at pop (mutation
+        time), at pre-submit (an arm() racing the runner acquisition lands
+        between the two critical sections — the op is discarded with ZERO
+        target calls), and at result time (an op that outlived its
+        generation is discarded WITHOUT mutating expected_revision or
+        confirmed_visible — ack-only law intact; BUG-002 defect C).
         """
         with self._cond:
             while not self._dq:
@@ -728,9 +757,12 @@ class BulkController:
         runner = self._ensure_runner()
         stopped = False
         with self._cond:
-            if not self._active:
-                # A stop landed between the mutation-time re-checks and the
-                # submit: the op is dead on arrival — ZERO target calls.
+            if not self._active or item.gen != self._session_gen:
+                # A stop OR an arm() landed between the mutation-time
+                # re-checks and the submit: the op is dead on arrival —
+                # ZERO target calls. arm() does NOT bump the dispatch epoch,
+                # so the generation re-check is the ONLY guard for the arm
+                # race (BUG-002 defect C, pre-submit side).
                 self._stats["discarded_stale"] += 1
                 return True
             epoch = self._dispatch_epoch  # give-up guard: captured BEFORE submit
@@ -765,9 +797,13 @@ class BulkController:
             return True
 
         with self._cond:
-            if epoch != self._dispatch_epoch or not self._active:
-                return True  # LATE: a stop raced (or beat) this result — NEVER
-                             # mutate after give-up; _note_late owns the count
+            if (epoch != self._dispatch_epoch or not self._active
+                    or item.gen != self._session_gen):
+                return True  # LATE: a stop raced (or beat) this result — or the
+                             # op's generation was superseded by an arm() while
+                             # it was in flight (BUG-002 defect C, result side;
+                             # arm() does not bump the epoch) — NEVER mutate;
+                             # _note_late owns the stop-race count
             if result is ShowResult.APPLIED:
                 self._expected_revision = revision + 1  # +1 ONLY on applied
                 self._shown_span[key] = item.span

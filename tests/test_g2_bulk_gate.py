@@ -632,3 +632,68 @@ def test_g2_gate_summary():
         f"matrix drift — missing: {sorted(set(_TRACE_NAMES) - present)}, "
         f"extra: {sorted(present - set(_TRACE_NAMES))}"
     )
+
+
+# ---------------------------------------------------------------------------
+# BUG-002 S1 — fail-closed bursts: capacity-neutral coalesce + outside-lock stop
+# ---------------------------------------------------------------------------
+
+
+def test_same_key_burst_at_capacity_coalesces_no_stop():
+    """BUG-002 defect A: at a FULL queue, a same-utterance partial coalesces
+    into its own queued slot (capacity-neutral, newest-wins) instead of
+    spuriously stopping delivery — R.5's fail-closed fires only on a REAL
+    overflow (full queue AND no replaceable slot)."""
+    stopped: list[str] = []
+    fake = G2FakeTarget()
+    ctrl = _controller(fake, queue_size=4, on_stopped=stopped.append)
+    ctrl.drain()                                          # dispatch arm()'s barrier: queue empty
+    ctrl.on_partial("u1 v1", utterance="u1", seq=1, gen=1)   # the replaceable slot
+    for u in ("u2", "u3", "u4"):                           # fill to capacity (4)
+        ctrl.on_partial("x", utterance=u, seq=1, gen=1)
+    st = ctrl.stats()
+    assert st["queue_depth"] == 4 and st["active"] is True
+    for seq in range(2, 6):                               # the burst: FOUR more u1 partials
+        ctrl.on_partial(f"u1 v{seq}", utterance="u1", seq=seq, gen=1)
+        assert ctrl.is_active() is True                   # every one coalesces — no spurious stop
+    st = ctrl.stats()
+    assert st["coalesced"] == 4                           # newest-wins, into u1's own slot
+    assert st["queue_depth"] == 4                         # capacity-neutral
+    assert st["stopped_reason"] is None
+    assert stopped == []                                  # on_stopped never fired
+    ctrl.drain()
+    assert len(_spans(fake, "show")) == 4                 # u1's slot + u2/u3/u4: NOTHING dropped
+    assert _spans(fake, "show")[0] == "u1 v5"             # the NEWEST text dispatched first
+
+
+def test_real_overflow_stops_once_and_notifies_outside_lock():
+    """BUG-002 defect B: a REAL overflow (full queue, no replaceable slot)
+    stops delivery EXACTLY ONCE and fires on_stopped OUTSIDE _cond. The
+    callback proves the outside-lock shape by taking the controller's own
+    lock (ctrl.stats) — under the old in-lock-notify shape this deadlocks;
+    the enqueue therefore runs on a helper thread with a bounded join."""
+    stopped: list[str] = []
+    lock_reentered = threading.Event()
+
+    def on_stopped(reason: str) -> None:
+        stopped.append(reason)
+        ctrl.stats()              # takes _cond — deadlocks if fired UNDER the lock
+        lock_reentered.set()
+
+    fake = G2FakeTarget()
+    ctrl = _controller(fake, queue_size=4, on_stopped=on_stopped)
+    ctrl.drain()
+    for i in range(4):            # distinct utterances: NO replaceable slot anywhere
+        ctrl.on_partial(f"t{i}", utterance=f"u{i}", seq=1, gen=1)
+    assert ctrl.stats()["queue_depth"] == 4
+    t = threading.Thread(
+        target=ctrl.on_final, args=("barrier",),
+        kwargs={"utterance": "u9", "seq": 1, "gen": 1}, daemon=True)
+    t.start()
+    t.join(5.0)                   # bounded: the pre-fix shape wedges right here
+    assert not t.is_alive(), "on_stopped fired under _cond — defect B deadlock"
+    assert lock_reentered.is_set()
+    assert stopped == ["queue-overflow"]                  # fired EXACTLY once
+    st = ctrl.stats()
+    assert st["stopped_reason"] == "queue-overflow" and st["overflow"] == 1
+    assert ctrl.is_active() is False
