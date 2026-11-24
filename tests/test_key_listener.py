@@ -23,7 +23,9 @@ Run:
 from __future__ import annotations
 
 import logging
+import threading
 
+import pytest
 from evdev import ecodes
 
 from voice_typing import daemon as daemon_mod
@@ -456,8 +458,10 @@ def test_listener_inert_when_daemon_disarmed(monkeypatch):
     assert cancels == []
 
 
-def test_zero_keyboard_warning_fires_once_at_first_arm(monkeypatch, caplog):
-    d, _fb = _wire_daemon()
+def test_zero_keyboard_warning_fires_once_at_first_arm(
+    monkeypatch, caplog, hermetic_daemon_media
+):
+    d, _fb = _wire_daemon(hermetic_daemon_media())
     monkeypatch.setattr(key_listener.evdev, "list_devices", lambda: [])
     d._key_listener.start()  # real start() path, zero devices (no threads spawned)
     with caplog.at_level(logging.WARNING, logger="voice_typing.daemon"):
@@ -474,10 +478,10 @@ def test_zero_keyboard_warning_fires_once_at_first_arm(monkeypatch, caplog):
     assert d._cancel_listener_warned is True
 
 
-def test_no_warning_when_keyboards_watched(monkeypatch, caplog):
+def test_no_warning_when_keyboards_watched(monkeypatch, caplog, hermetic_daemon_media):
     devices = {"/dev/input/event0": {"name": "AT keyboard", "keys": _KB_KEYS}}
     _install_fake_evdev(monkeypatch, devices, ["/dev/input/event0"])
-    d, _fb = _wire_daemon()
+    d, _fb = _wire_daemon(hermetic_daemon_media())
     with caplog.at_level(logging.WARNING, logger="voice_typing.daemon"):
         d._key_listener.start()
         d._arm()
@@ -489,22 +493,48 @@ def test_no_warning_when_keyboards_watched(monkeypatch, caplog):
     d._key_listener.stop()
 
 
-def test_no_warning_before_listener_started(caplog):
+def test_no_warning_before_listener_started(caplog, hermetic_daemon_media):
     """Pure-construction daemon (tests never call run()): _arm() must NOT warn and must NOT
     start the listener — hermeticity is the whole point of the run()-time start.
 
-    Explicit duck_mode="off": P1.M2.T4 flipped the default to "mpris", so a default-cfg daemon
-    now builds a ducker whose engage dispatch (busctl absent in unit tests) logs its own
-    failure-discipline WARNING — noise unrelated to THIS test's listener-hermeticity assertion.
+    Built on the hermetic_daemon_media fixture (BUG-001, P1.M1.T1.S1): duck_mode="off" comes
+    from the fixture's helper, so no ducker (and no ducking failure-discipline WARNING) can
+    exist — the no-WARNING assertion now covers the ducking path too, without the old manual
+    cfg mutation (which also left the boot duck-flag read free to consult operator state).
     """
-    cfg = VoiceTypingConfig()
-    cfg.audio.duck_mode = "off"
-    d, _fb = _wire_daemon(cfg)
+    d, _fb = _wire_daemon(hermetic_daemon_media())
     with caplog.at_level(logging.WARNING, logger="voice_typing.daemon"):
         d._arm()
     assert d._key_listener.started is False
     assert d._cancel_listener_warned is False
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_hermetic_media_fixture_blocks_unguarded_factory(
+    hermetic_daemon_media,
+):
+    """Structural pin for the BUG-001 seam fixture (P1.M1.T1.S1):
+
+    (a) an unguarded construction (default duck_mode='mpris', no ducker=) fails
+    SYNCHRONOUSLY at the patched _build_default_ducker lookup — before any
+    thread/subprocess can exist; (b) the helper's config constructs and arms
+    cleanly: no ducker object, no vt-ducking worker, no vt-duck-heal thread, and
+    the duck-flag read went through the isolated recording fake (never the real
+    resolved state path).
+    """
+    hermetic = hermetic_daemon_media
+    # (a) unguarded default-mpris construction fails closed at the factory lookup
+    with pytest.raises(AssertionError, match="_build_default_ducker"):
+        _wire_daemon(VoiceTypingConfig())
+    # (b) the helper's config arms clean: no ducker, no heal thread
+    d, _fb = _wire_daemon(hermetic())
+    d._arm()
+    d._disarm()
+    assert d._ducker is None
+    assert not any(
+        t.name in ("vt-duck-heal", "vt-ducking") for t in threading.enumerate()
+    )
+    assert hermetic.read_calls, "the duck-flag read must have gone through the fake"
 
 
 def test_no_listener_warns_nothing_when_disabled():

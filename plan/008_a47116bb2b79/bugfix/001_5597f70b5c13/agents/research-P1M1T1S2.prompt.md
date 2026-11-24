@@ -1,0 +1,1 @@
+Create a PRP for Subtask P1.M1.T1.S2 of the PRD (background research). PRP file: plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/P1M1T1S2/PRP.md. Research files: plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/P1M1T1S2/research/. Item title, description and PRD selectors: see P1.M1.T1.S2 in plan/008_a47116bb2b79/bugfix/001_5597f70b5c13/tasks.json.

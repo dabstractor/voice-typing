@@ -25,33 +25,33 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S1",
                   "title": "Establish a hermetic media fixture at the first-arm seam",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-001: _build_default_ducker is inert until _arm; the earlier ducking_heal.read_ducked_flag can independently start a live heal. There is no existing tests/conftest.py.\n2. INPUT: voice_typing/daemon.py:VoiceTypingDaemon(..., ducker=), _build_default_ducker, and tests/test_key_listener.py:_wire_daemon with fake recorder/backend/mic.\n3. LOGIC: Add an opt-in, function-scoped tests/conftest.py fixture hermetic_daemon_media. Give it a helper callable (cfg) -> cfg that makes a test-owned config with duck_mode='off' and private test state; preserve unrelated fields and never mutate a production default or a shared supplied config. Provide a fail-closed check at the daemon's factory lookup and isolate persisted duck-flag reads on fixture invocation, not at collection. Apply it at _wire_daemon/arming callers. Mock real media, recorder, mic and backend; never globally patch subprocess.run or allow a real media command to prove failure.\n4. OUTPUT: hermetic_daemon_media fixture and migrated key-listener arms consumed by P1.M1.T1.S2 and P1.M1.T1.S3. Ordinary arm/stop starts neither vt-ducking nor vt-duck-heal, even if operator state would say ducked; unguarded factory use under the fixture fails synchronously.\n5. DOCS: none — test-only contract; document fixture use and intentional fake-heal exceptions in its docstring.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.0",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-001: _build_default_ducker is inert until _arm; the earlier ducking_heal.read_ducked_flag can independently start a live heal. There is no existing tests/conftest.py.\n2. INPUT: voice_typing/daemon.py:VoiceTypingDaemon(..., ducker=), _build_default_ducker, and tests/test_key_listener.py:_wire_daemon with fake recorder/backend/mic.\n3. LOGIC: Add an opt-in, function-scoped tests/conftest.py fixture hermetic_daemon_media. Give it a helper callable (cfg) -> cfg that makes a test-owned config with duck_mode='off' and private test state; preserve unrelated fields and never mutate a production default or a shared supplied config. Provide a fail-closed check at the daemon's factory lookup and isolate persisted duck-flag reads on fixture invocation, not at collection. Apply it at _wire_daemon/arming callers. Mock real media, recorder, mic and backend; never globally patch subprocess.run or allow a real media command to prove failure.\n4. OUTPUT: hermetic_daemon_media fixture and migrated key-listener arms consumed by P1.M1.T1.S2 and P1.M1.T1.S3. Ordinary arm/stop starts neither vt-ducking nor vt-duck-heal, even if operator state would say ducked; unguarded factory use under the fixture fails synchronously.\n5. DOCS: none — test-only contract; document fixture use and intentional fake-heal exceptions in its docstring."
+                  ]
                 },
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Migrate ordinary daemon constructors and test consumers",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md lists literal, aliased and imported constructors; test_voicectl.py uses a fake server and test_ime_manager.py checks import purity, so do not add daemon imports there. G5 already sets duck off with a private runtime.\n2. INPUT: P1.M1.T1.S1 hermetic_daemon_media fixture; existing fake recorders, hosts, feedback and targets.\n3. LOGIC: Apply the fixture/its isolation contract to tests/test_daemon.py (_make_daemon, _make_daemon_with_feedback, _make_lazy_daemon and direct constructors), tests/test_bulk_dispatch.py, tests/test_bulk_context_prompt.py (including _D), tests/test_context_prompt_refresh.py, and importing tests/test_session_recovery.py and tests/test_voicectl_session.py. Audit all direct and indirect arm paths, not just _arm calls. Isolate media/state in the model-backed constructor in tests/test_feed_audio.py too without treating that suite as a CPU test. Preserve dedicated intentional ducking tests and shipped defaults. Mock mic/host/typing/IM and keep sockets and real Feedback state private; do not eagerly import daemon in conftest.\n4. OUTPUT: All ordinary daemon constructors use isolated media and clean state; safe bounded CPU slices available to P1.M1.T1.S3 and P1.M1.T3.S1.\n5. DOCS: none — test-only behavior; keep local fixture comments and usage accurate.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.0",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md lists literal, aliased and imported constructors; test_voicectl.py uses a fake server and test_ime_manager.py checks import purity, so do not add daemon imports there. G5 already sets duck off with a private runtime.\n2. INPUT: P1.M1.T1.S1 hermetic_daemon_media fixture; existing fake recorders, hosts, feedback and targets.\n3. LOGIC: Apply the fixture/its isolation contract to tests/test_daemon.py (_make_daemon, _make_daemon_with_feedback, _make_lazy_daemon and direct constructors), tests/test_bulk_dispatch.py, tests/test_bulk_context_prompt.py (including _D), tests/test_context_prompt_refresh.py, and importing tests/test_session_recovery.py and tests/test_voicectl_session.py. Audit all direct and indirect arm paths, not just _arm calls. Isolate media/state in the model-backed constructor in tests/test_feed_audio.py too without treating that suite as a CPU test. Preserve dedicated intentional ducking tests and shipped defaults. Mock mic/host/typing/IM and keep sockets and real Feedback state private; do not eagerly import daemon in conftest.\n4. OUTPUT: All ordinary daemon constructors use isolated media and clean state; safe bounded CPU slices available to P1.M1.T1.S3 and P1.M1.T3.S1.\n5. DOCS: none — test-only behavior; keep local fixture comments and usage accurate."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -63,14 +63,14 @@
                     "P1.M1.T1.S1",
                     "P1.M1.T1.S2"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-001: tests/test_ducking.py already supplies _FakeDucker, tmp-path fake crash healing and shutdown fakes; tests/test_config.py pins mpris as the production default.\n2. INPUT: P1.M1.T1.S1 and P1.M1.T1.S2 fixture-protected ordinary tests; tests/test_ducking.py:_FakeDucker and existing lifecycle cases.\n3. LOGIC: Keep one dedicated default-config constructor-to-_FakeDucker actuation regression (patch only its factory lookup and verify engage/release); retain existing fake lifecycle, backend and crash-heal coverage, with bounded completion before mocks unwind. Pin the reported order: test_key_listener.py::test_zero_keyboard_warning_fires_once_at_first_arm before tests/test_typing_backends.py in one bounded invocation; media transport tripwires must never invoke busctl/wpctl. Check zero media attempts/real workers and real wtype-recorder assertions rather than filtering leaked calls. Exercise default pins and the touched pure suites with two timeouts.\n4. OUTPUT: Bounded fake-only regressions and clean ordering evidence for P1.M1.T3.S1 and P1.M2.T3.S2.\n5. DOCS: none — production media behavior/defaults unchanged.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.0",
                     "h2.4",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-001: tests/test_ducking.py already supplies _FakeDucker, tmp-path fake crash healing and shutdown fakes; tests/test_config.py pins mpris as the production default.\n2. INPUT: P1.M1.T1.S1 and P1.M1.T1.S2 fixture-protected ordinary tests; tests/test_ducking.py:_FakeDucker and existing lifecycle cases.\n3. LOGIC: Keep one dedicated default-config constructor-to-_FakeDucker actuation regression (patch only its factory lookup and verify engage/release); retain existing fake lifecycle, backend and crash-heal coverage, with bounded completion before mocks unwind. Pin the reported order: test_key_listener.py::test_zero_keyboard_warning_fires_once_at_first_arm before tests/test_typing_backends.py in one bounded invocation; media transport tripwires must never invoke busctl/wpctl. Check zero media attempts/real workers and real wtype-recorder assertions rather than filtering leaked calls. Exercise default pins and the touched pure suites with two timeouts.\n4. OUTPUT: Bounded fake-only regressions and clean ordering evidence for P1.M1.T3.S1 and P1.M2.T3.S2.\n5. DOCS: none — production media behavior/defaults unchanged."
+                  ]
                 }
               ]
             },
@@ -88,13 +88,13 @@
                   "status": "Planned",
                   "story_points": 1,
                   "dependencies": [],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-003: hypr-binds.conf intentionally stops the user unit when the control socket is wedged; the static test treats every bind as a voicectl call.\n2. INPUT: tests/test_systemd_unit.py::test_hypr_binds_use_portable_home_launcher, _hypr_binds_path(), and shipped hypr-binds.conf.\n3. LOGIC: Require exactly one SUPER ALT, Escape, exec, systemctl --user stop voice-typing line, allowing harmless field whitespace only. Exempt that exact tuple and command from the launcher requirement; keep /home/ forbidden and $HOME/.local/bin/voicectl required on ordinary bindings. Cover duplicate/missing panic, lookalikes/chained commands and arbitrary nonportable binds with string fixtures. Run static unit tests only; do not invoke systemctl or rewrite the bind.\n4. OUTPUT: VT-003 distinguishes the panic route from ordinary portable binds; documented command contract for P1.M2.T3.S2.\n5. DOCS: none — static check changes only; README Hotkey overview is Mode B in P1.M2.T3.S2.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.3",
                     "h3.2",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-003: hypr-binds.conf intentionally stops the user unit when the control socket is wedged; the static test treats every bind as a voicectl call.\n2. INPUT: tests/test_systemd_unit.py::test_hypr_binds_use_portable_home_launcher, _hypr_binds_path(), and shipped hypr-binds.conf.\n3. LOGIC: Require exactly one SUPER ALT, Escape, exec, systemctl --user stop voice-typing line, allowing harmless field whitespace only. Exempt that exact tuple and command from the launcher requirement; keep /home/ forbidden and $HOME/.local/bin/voicectl required on ordinary bindings. Cover duplicate/missing panic, lookalikes/chained commands and arbitrary nonportable binds with string fixtures. Run static unit tests only; do not invoke systemctl or rewrite the bind.\n4. OUTPUT: VT-003 distinguishes the panic route from ordinary portable binds; documented command contract for P1.M2.T3.S2.\n5. DOCS: none — static check changes only; README Hotkey overview is Mode B in P1.M2.T3.S2."
+                  ]
                 }
               ]
             },
@@ -115,14 +115,14 @@
                     "P1.M1.T1.S2",
                     "P1.M1.T1.S3"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-004: test_daemon.py is CPU-only; historical G1 excluded it, and no complete named 20-case list was found.\n2. INPUT: P1.M1.T1.S2 and P1.M1.T1.S3 hermetic daemon tests; supplied 573d78f 217P/20F, base 2335a9e 211P/21F, one fixed test_status_snapshot_keys_and_cuda_values and zero introduced failures; tests/G1_BASELINE.md existing 15-suite record/watch set.\n3. LOGIC: Use saved exact output if available or a bounded hermetic test_daemon.py run before bulk changes. Record exact failed node IDs and a one-line lazy-separator reason/facet per case; distinguish supplied comparison from freshly captured run and report any drift, never infer identities from counts. Preserve historic totals, the original 16 fast reds and separate real-model watch rules. Do not run the unisolated base or add skips/xfails. Fake ASR, mic, IM, typing and all desktop media; no E2E or live service.\n4. OUTPUT: Dated G1 CPU addendum with named failures and future set-diff rule, consumed by P1.M2.T1.S1, P1.M2.T2.S3 and P1.M2.T3.S2.\n5. DOCS: [Mode A] Update tests/G1_BASELINE.md exclusion/classification and AGENTS.md hang-vector table with bounded CPU guidance, retaining the two-timeout and actual model-suite rules.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.3",
                     "h3.3",
                     "h2.4",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md § BUG-004: test_daemon.py is CPU-only; historical G1 excluded it, and no complete named 20-case list was found.\n2. INPUT: P1.M1.T1.S2 and P1.M1.T1.S3 hermetic daemon tests; supplied 573d78f 217P/20F, base 2335a9e 211P/21F, one fixed test_status_snapshot_keys_and_cuda_values and zero introduced failures; tests/G1_BASELINE.md existing 15-suite record/watch set.\n3. LOGIC: Use saved exact output if available or a bounded hermetic test_daemon.py run before bulk changes. Record exact failed node IDs and a one-line lazy-separator reason/facet per case; distinguish supplied comparison from freshly captured run and report any drift, never infer identities from counts. Preserve historic totals, the original 16 fast reds and separate real-model watch rules. Do not run the unisolated base or add skips/xfails. Fake ASR, mic, IM, typing and all desktop media; no E2E or live service.\n4. OUTPUT: Dated G1 CPU addendum with named failures and future set-diff rule, consumed by P1.M2.T1.S1, P1.M2.T2.S3 and P1.M2.T3.S2.\n5. DOCS: [Mode A] Update tests/G1_BASELINE.md exclusion/classification and AGENTS.md hang-vector table with bounded CPU guidance, retaining the two-timeout and actual model-suite rules."
+                  ]
                 }
               ]
             }
@@ -151,13 +151,13 @@
                   "dependencies": [
                     "P1.M1.T3.S1"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/external_deps.md verifies RealtimeSTT 1.0.2 attempts both choices in the same eligible decode. A parent monkeypatch will not survive multiprocessing spawn.\n2. INPUT: P1.M1.T3.S1 safe CPU baseline; daemon.py:_build_callbacks/_construct/build_recorder/_load_host, recorder_host.py:RecorderHost.spawn/_worker_main/_RelayFeedback/_ready_payload and existing feed_input guard.\n3. LOGIC: Introduce a private feed-only selector partial_source with validated 'plain'/'stabilized' values, carried as picklable data into both normal and CPU-fallback recorder builds. Map to exactly one upstream callback key, report the actual installed key in lab-ready provenance, and reject an unavailable or ineffective lab selection. Without an override leave both modes stabilized for the experiment; stream-edit stays unchanged after release. Preserve callback feedback/speech/latency and R.5 relay identity. Mock recorder_cls, spawn context, host and CUDA/device resolution; no production TOML/env/CLI knob and no two callbacks delivering to one consumer.\n4. OUTPUT: Feed-only constructor handoff and effective callback metadata for P1.M2.T1.S4, P1.M2.T1.S6 and final selection at P1.M2.T2.S3.\n5. DOCS: [Mode A] Update the relevant build_recorder, RecorderHost and feed-input/ready metadata docstrings for the contract; no public config changes.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/external_deps.md verifies RealtimeSTT 1.0.2 attempts both choices in the same eligible decode. A parent monkeypatch will not survive multiprocessing spawn.\n2. INPUT: P1.M1.T3.S1 safe CPU baseline; daemon.py:_build_callbacks/_construct/build_recorder/_load_host, recorder_host.py:RecorderHost.spawn/_worker_main/_RelayFeedback/_ready_payload and existing feed_input guard.\n3. LOGIC: Introduce a private feed-only selector partial_source with validated 'plain'/'stabilized' values, carried as picklable data into both normal and CPU-fallback recorder builds. Map to exactly one upstream callback key, report the actual installed key in lab-ready provenance, and reject an unavailable or ineffective lab selection. Without an override leave both modes stabilized for the experiment; stream-edit stays unchanged after release. Preserve callback feedback/speech/latency and R.5 relay identity. Mock recorder_cls, spawn context, host and CUDA/device resolution; no production TOML/env/CLI knob and no two callbacks delivering to one consumer.\n4. OUTPUT: Feed-only constructor handoff and effective callback metadata for P1.M2.T1.S4, P1.M2.T1.S6 and final selection at P1.M2.T2.S3.\n5. DOCS: [Mode A] Update the relevant build_recorder, RecorderHost and feed-input/ready metadata docstrings for the contract; no public config changes."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -169,13 +169,13 @@
                     "P1.M1.T1.S2",
                     "P1.M1.T3.S1"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § feasibility: _build_default_bulk_target never starts ImeProcess; ImeTarget.acquire requests only a running process. G5 GtkRoute masks the gap with a lab-side spawn/ping bridge.\n2. INPUT: P1.M1.T1.S2 hermetic daemon tests and P1.M1.T3.S1 baseline; daemon.py:_BulkTargetBundle/_bulk_begin_delivery, ime/manager.py:ImeProcess.spawn/request/stop, ime/target.py:ImeTarget.acquire, ime/ime_host.py ping/activated behavior.\n3. LOGIC: Keep construction pure. On vt-bulk-arm outside the daemon lock, attach the fresh takeover watcher, start the production IM child, boundedly pump read-only activation and then acquire; reject stale epochs or disarm races without publishing active. Preserve unsupported/held-seat semantics, concise reason, bounded cleanup on failure, and no retry of possibly applied edits. Mock ImeProcess/request and time, fake target and recorder; cover never-activated, held seat, fresh rearm and stop during startup.\n4. OUTPUT: Production GTK can acquire through the default daemon factory without the lab bridge; P1.M2.T1.S4 consumes that exact route in the disposable compositor.\n5. DOCS: [Mode A] Update _BulkTargetBundle/_build_default_bulk_target JSDoc-equivalent docstrings and README.md Troubleshooting § Bulk delivery: the input-method seat is taken as needed for actual acquire/failure behavior; overview remains for P1.M2.T3.S2.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § feasibility: _build_default_bulk_target never starts ImeProcess; ImeTarget.acquire requests only a running process. G5 GtkRoute masks the gap with a lab-side spawn/ping bridge.\n2. INPUT: P1.M1.T1.S2 hermetic daemon tests and P1.M1.T3.S1 baseline; daemon.py:_BulkTargetBundle/_bulk_begin_delivery, ime/manager.py:ImeProcess.spawn/request/stop, ime/target.py:ImeTarget.acquire, ime/ime_host.py ping/activated behavior.\n3. LOGIC: Keep construction pure. On vt-bulk-arm outside the daemon lock, attach the fresh takeover watcher, start the production IM child, boundedly pump read-only activation and then acquire; reject stale epochs or disarm races without publishing active. Preserve unsupported/held-seat semantics, concise reason, bounded cleanup on failure, and no retry of possibly applied edits. Mock ImeProcess/request and time, fake target and recorder; cover never-activated, held seat, fresh rearm and stop during startup.\n4. OUTPUT: Production GTK can acquire through the default daemon factory without the lab bridge; P1.M2.T1.S4 consumes that exact route in the disposable compositor.\n5. DOCS: [Mode A] Update _BulkTargetBundle/_build_default_bulk_target JSDoc-equivalent docstrings and README.md Troubleshooting § Bulk delivery: the input-method seat is taken as needed for actual acquire/failure behavior; overview remains for P1.M2.T3.S2."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -186,13 +186,13 @@
                   "dependencies": [
                     "P1.M2.T1.S1"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § G5: next-callback windows can misattribute rapid/repeated frames and positional matching overstates lag on rewrites. Target APPLIED is not a frame.\n2. INPUT: P1.M2.T1.S1 effective source; tests/g5_timing_support.py:ReplayRecord, WordAlign, FieldEvent, resolve_visibility, ready_to_frame, aggregate and tests/test_g5_timing_support.py.\n3. LOGIC: Define a bounded replay attribution contract (producer/daemon readiness, gen/utterance/seq where available, dispatch/coalescing disposition, ACK and independent field event). Match changed spans and retain first real aligned appearance across revisions and repeats; exclude pre-existing anchor text and resets. Distinguish missing, ambiguous and superseded observations and preserve the zero-edit oracle for rendered-identical updates; do not charge a delayed frame to a newer identical callback. Preserve floors, latency caps, backlog and dump rules. Mock clocks and use synthetic field traces incl. lost frames, revisions, burst inputs and unpaired events, not live GUI.\n4. OUTPUT: ReplayRecord/aggregate contract, calibrated observation labels and coverage/miss counters for P1.M2.T1.S4, P1.M2.T1.S6 and P1.M2.T2.S3.\n5. DOCS: [Mode A] Update docstrings for the changed support types/functions and tests/G5_TIMING_EVIDENCE.md measurement method (append, don't rewrite historical numbers).",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § G5: next-callback windows can misattribute rapid/repeated frames and positional matching overstates lag on rewrites. Target APPLIED is not a frame.\n2. INPUT: P1.M2.T1.S1 effective source; tests/g5_timing_support.py:ReplayRecord, WordAlign, FieldEvent, resolve_visibility, ready_to_frame, aggregate and tests/test_g5_timing_support.py.\n3. LOGIC: Define a bounded replay attribution contract (producer/daemon readiness, gen/utterance/seq where available, dispatch/coalescing disposition, ACK and independent field event). Match changed spans and retain first real aligned appearance across revisions and repeats; exclude pre-existing anchor text and resets. Distinguish missing, ambiguous and superseded observations and preserve the zero-edit oracle for rendered-identical updates; do not charge a delayed frame to a newer identical callback. Preserve floors, latency caps, backlog and dump rules. Mock clocks and use synthetic field traces incl. lost frames, revisions, burst inputs and unpaired events, not live GUI.\n4. OUTPUT: ReplayRecord/aggregate contract, calibrated observation labels and coverage/miss counters for P1.M2.T1.S4, P1.M2.T1.S6 and P1.M2.T2.S3.\n5. DOCS: [Mode A] Update docstrings for the changed support types/functions and tests/G5_TIMING_EVIDENCE.md measurement method (append, don't rewrite historical numbers)."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -205,13 +205,13 @@
                     "P1.M2.T1.S2",
                     "P1.M2.T1.S3"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § G5: GtkRoute has real frame-tick events but a startup bridge; PiGhosttyRoute polls editor state and keeps real HOME for binary discovery. R.7 requires a private route, not an operator session.\n2. INPUT: P1.M2.T1.S1 private selector/effective metadata, P1.M2.T1.S2 default production GTK startup, P1.M2.T1.S3 ReplayRecord/visibility contract; tests/g5_timing_lab.py:main/run_route/desktop_env/start_daemon/wrap_ready/paced_feed and routes.\n3. LOGIC: Add lab-only --partial-source plain|stabilized (omit for production source) and record selected/effective source after spawn. Wire bounded stage observations to the replay contract (no default logging or raw speech in committed diagnostics). Use default IM factory for GTK; for Pi expose the existing injected-adapter/reset and independent observation seam for P1.M2.T1.S5; do not count reset edits. Preserve no mic, duck off, null typing, fake keys, private XDG/DBus/Xvfb/sway, bounded logs and guaranteed own-process cleanup; fail closed on unsafe env, missing preflight or truncated evidence. Mock daemon/control, process runner and field trace for unit coverage; never exercise the live systemd unit.\n4. OUTPUT: One reproducible private CLI run per route/source with paired fixture settings, evidence provenance and fail/blocked reason, used by P1.M2.T1.S5, P1.M2.T1.S6 and P1.M2.T2.S3.\n5. DOCS: [Mode A] Update tests/G5_TIMING_EVIDENCE.md run instructions, instrumentation and isolation notes for the lab flag and limits; keep historical commands/provenance attributed.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § G5: GtkRoute has real frame-tick events but a startup bridge; PiGhosttyRoute polls editor state and keeps real HOME for binary discovery. R.7 requires a private route, not an operator session.\n2. INPUT: P1.M2.T1.S1 private selector/effective metadata, P1.M2.T1.S2 default production GTK startup, P1.M2.T1.S3 ReplayRecord/visibility contract; tests/g5_timing_lab.py:main/run_route/desktop_env/start_daemon/wrap_ready/paced_feed and routes.\n3. LOGIC: Add lab-only --partial-source plain|stabilized (omit for production source) and record selected/effective source after spawn. Wire bounded stage observations to the replay contract (no default logging or raw speech in committed diagnostics). Use default IM factory for GTK; for Pi expose the existing injected-adapter/reset and independent observation seam for P1.M2.T1.S5; do not count reset edits. Preserve no mic, duck off, null typing, fake keys, private XDG/DBus/Xvfb/sway, bounded logs and guaranteed own-process cleanup; fail closed on unsafe env, missing preflight or truncated evidence. Mock daemon/control, process runner and field trace for unit coverage; never exercise the live systemd unit.\n4. OUTPUT: One reproducible private CLI run per route/source with paired fixture settings, evidence provenance and fail/blocked reason, used by P1.M2.T1.S5, P1.M2.T1.S6 and P1.M2.T2.S3.\n5. DOCS: [Mode A] Update tests/G5_TIMING_EVIDENCE.md run instructions, instrumentation and isolation notes for the lab flag and limits; keep historical commands/provenance attributed."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -223,13 +223,13 @@
                     "P1.M2.T1.S3",
                     "P1.M2.T1.S4"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § G5: PiGhosttyRoute._poll_loop samples editor text, not terminal paint; the route currently keeps real HOME for binary discovery, and .pi/extensions/voice-editor.ts schedules render but does not certify when Ghostty displayed a frame.\n2. INPUT: P1.M2.T1.S3 FieldEvent/coverage contract and P1.M2.T1.S4 private runner; tests/g5_timing_lab.py:PiGhosttyRoute, voice_typing/pi_editor.py:PiEditorClient and the harness-owned copy of .pi/extensions/voice-editor.ts.\n3. LOGIC: Isolate Pi agent/config/state and allow only the harness extension (real HOME may locate a binary, never expose operator extensions/sessions). Add a bounded route-local frame observation using the disposable Ghostty window where available; correlate with independently sampled editor changes, calibrating clock and observer resolution. Prove the observer distinguishes visible prompt insert/correction from an ACK, unchanged text, cursor redraw and replay reset. Mock window/process and event feeds for unit checks. If a display observation cannot be verified, keep editor polling labelled a proxy and mark frame metrics unverified/blocked, never generate synthetic passing timing. Never touch the live window/session.\n4. OUTPUT: Timestamped qualified field changes or an explicit Pi coverage block for P1.M2.T1.S6 and P1.M2.T2.S3.\n5. DOCS: [Mode A] Record Pi preflight, private inputs, observer resolution and proxy limits in tests/G5_TIMING_EVIDENCE.md; no production extension or config claims.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § G5: PiGhosttyRoute._poll_loop samples editor text, not terminal paint; the route currently keeps real HOME for binary discovery, and .pi/extensions/voice-editor.ts schedules render but does not certify when Ghostty displayed a frame.\n2. INPUT: P1.M2.T1.S3 FieldEvent/coverage contract and P1.M2.T1.S4 private runner; tests/g5_timing_lab.py:PiGhosttyRoute, voice_typing/pi_editor.py:PiEditorClient and the harness-owned copy of .pi/extensions/voice-editor.ts.\n3. LOGIC: Isolate Pi agent/config/state and allow only the harness extension (real HOME may locate a binary, never expose operator extensions/sessions). Add a bounded route-local frame observation using the disposable Ghostty window where available; correlate with independently sampled editor changes, calibrating clock and observer resolution. Prove the observer distinguishes visible prompt insert/correction from an ACK, unchanged text, cursor redraw and replay reset. Mock window/process and event feeds for unit checks. If a display observation cannot be verified, keep editor polling labelled a proxy and mark frame metrics unverified/blocked, never generate synthetic passing timing. Never touch the live window/session.\n4. OUTPUT: Timestamped qualified field changes or an explicit Pi coverage block for P1.M2.T1.S6 and P1.M2.T2.S3.\n5. DOCS: [Mode A] Record Pi preflight, private inputs, observer resolution and proxy limits in tests/G5_TIMING_EVIDENCE.md; no production extension or config claims."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -242,14 +242,14 @@
                     "P1.M2.T1.S4",
                     "P1.M2.T1.S5"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/external_deps.md: plain may not arrive first; architecture/bulk_delivery_gate.md § Gate: the supplied failed baseline has different route instrumentation and does not prove where delivery stalls.\n2. INPUT: P1.M2.T1.S3 metrics and P1.M2.T1.S4 private runner and P1.M2.T1.S5 Pi observer qualification; tools/asr-lab/voice/*.words.json and tests/G5_TIMING_EVIDENCE.md historical failed runs.\n3. LOGIC: Run both sources separately for im-gtk and pi-ghostty with matched paced clips, ASR version/model/device/cadence/context, comparable replay budget and one discarded warmup per run. Use per-route GNU timeout -k 2 1500 plus a larger bash-tool timeout and guaranteed private teardown. Compare first useful and first visible words, misses, edit churn, queue/relay/dispatch delay versus adapter/field delay, sustained backlog and dumps. Report unavailable prerequisites or inconclusive clocks as blocked/unverified, never pass. A harness prerequisite check uses mocked subprocess/clock; measured samples use the real private route, never live desktop or fakes.\n4. OUTPUT: Dated route-by-source result and stage diagnosis with candidate selection/repair criteria for P1.M2.T2.S1 and P1.M2.T2.S2; distinguish an early callback from early field visibility.\n5. DOCS: [Mode A] Append A/B provenance and comparable measurements/limits to tests/G5_TIMING_EVIDENCE.md. Keep exploratory rows distinct from the authoritative two-route verdict parsed by tests/g6_assessment.py.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.4",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/external_deps.md: plain may not arrive first; architecture/bulk_delivery_gate.md § Gate: the supplied failed baseline has different route instrumentation and does not prove where delivery stalls.\n2. INPUT: P1.M2.T1.S3 metrics and P1.M2.T1.S4 private runner and P1.M2.T1.S5 Pi observer qualification; tools/asr-lab/voice/*.words.json and tests/G5_TIMING_EVIDENCE.md historical failed runs.\n3. LOGIC: Run both sources separately for im-gtk and pi-ghostty with matched paced clips, ASR version/model/device/cadence/context, comparable replay budget and one discarded warmup per run. Use per-route GNU timeout -k 2 1500 plus a larger bash-tool timeout and guaranteed private teardown. Compare first useful and first visible words, misses, edit churn, queue/relay/dispatch delay versus adapter/field delay, sustained backlog and dumps. Report unavailable prerequisites or inconclusive clocks as blocked/unverified, never pass. A harness prerequisite check uses mocked subprocess/clock; measured samples use the real private route, never live desktop or fakes.\n4. OUTPUT: Dated route-by-source result and stage diagnosis with candidate selection/repair criteria for P1.M2.T2.S1 and P1.M2.T2.S2; distinguish an early callback from early field visibility.\n5. DOCS: [Mode A] Append A/B provenance and comparable measurements/limits to tests/G5_TIMING_EVIDENCE.md. Keep exploratory rows distinct from the authoritative two-route verdict parsed by tests/g6_assessment.py."
+                  ]
                 }
               ]
             },
@@ -269,13 +269,13 @@
                   "dependencies": [
                     "P1.M2.T1.S6"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § feasibility: current writer already wakes on enqueue, same-key replacement is checked after capacity, and overflow can bypass the stop hook. Confirm stage attribution before calling coalescing the cause.\n2. INPUT: P1.M2.T1.S6 stage diagnosis; voice_typing/bulk_controller.py on_partial/on_final/on_final_dropped/arm/_process_next and voice_typing/bulk_delivery.py DeliveryTarget/ShowResult/rendered_equal.\n3. LOGIC: Make the first useful pending partial dispatch promptly without waiting on a final; coalesce only already queued same-key partials in place, retaining FIFO barriers. Allow legal replacement at capacity, stop once on real overflow and notify outside locks. Preserve mutation-time generation/closure/cancel/epoch checks, one writer/one op, zero-diff suppression, the 250 ms deadline, and ack-only revision/confirmation. Assert a stream of spaced distinct partials sends show before final, and burst/stall cases retain newest-partial and fail-closed semantics; inject fake DeliveryTarget/events/manual clock via tests/test_bulk_controller.py drain and tests/test_g2_bulk_gate.py. Do not slow the reader, increase queue/deadline to mask lag, or add typing fallback.\n4. OUTPUT: Existing BulkController entry/target interfaces with verified pre-final progress and backpressure behavior; usable by P1.M2.T2.S2 and P1.M2.T2.S3.\n5. DOCS: [Mode A] Update BulkController module and changed method docstrings for exact dispatch/overflow invariants; keep user overview for P1.M2.T3.S2.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § feasibility: current writer already wakes on enqueue, same-key replacement is checked after capacity, and overflow can bypass the stop hook. Confirm stage attribution before calling coalescing the cause.\n2. INPUT: P1.M2.T1.S6 stage diagnosis; voice_typing/bulk_controller.py on_partial/on_final/on_final_dropped/arm/_process_next and voice_typing/bulk_delivery.py DeliveryTarget/ShowResult/rendered_equal.\n3. LOGIC: Make the first useful pending partial dispatch promptly without waiting on a final; coalesce only already queued same-key partials in place, retaining FIFO barriers. Allow legal replacement at capacity, stop once on real overflow and notify outside locks. Preserve mutation-time generation/closure/cancel/epoch checks, one writer/one op, zero-diff suppression, the 250 ms deadline, and ack-only revision/confirmation. Assert a stream of spaced distinct partials sends show before final, and burst/stall cases retain newest-partial and fail-closed semantics; inject fake DeliveryTarget/events/manual clock via tests/test_bulk_controller.py drain and tests/test_g2_bulk_gate.py. Do not slow the reader, increase queue/deadline to mask lag, or add typing fallback.\n4. OUTPUT: Existing BulkController entry/target interfaces with verified pre-final progress and backpressure behavior; usable by P1.M2.T2.S2 and P1.M2.T2.S3.\n5. DOCS: [Mode A] Update BulkController module and changed method docstrings for exact dispatch/overflow invariants; keep user overview for P1.M2.T3.S2."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -287,13 +287,13 @@
                     "P1.M2.T1.S6",
                     "P1.M2.T2.S1"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md separates recognition, relay, writer and target time; both upstream callbacks share a decode gate in 1.0.2.\n2. INPUT: P1.M2.T1.S6 paired visibility/diagnosis and P1.M2.T2.S1 controller progress contract. Candidate seams are daemon.py:_build_callbacks/_bulk_handle_partial, recorder_host.py:_RelayFeedback.update_partial/_dispatch, and ImeTarget/PiEditorTarget show paths as measured.\n3. LOGIC: Use the earliest useful callback by visible lag, not name. If source selection and the controller fix alone do not address the measured gap, change the dominant measured stage only: e.g. bulk-only evaluation cadence for late eligible decodes, prompt routing of usable updates for relay lag, or eliminate measured redundant adapter waits only if ownership/caret and one-edit proofs remain intact. Preserve stream-edit ASR/control behavior, final filtering, R.6 recovery, takeover and no-retry safety. Do not invent text between callbacks or remove guards. Mock recorder/relay clock and target transports for the stage-specific regression; exercise tests/test_bulk_dispatch.py, tests/test_bulk_context_prompt.py and tests/test_session_recovery.py where affected. If evidence is unavailable or a safe fix requires a separate design, publish the exact blocker instead of guessing or dropping safeguards.\n4. OUTPUT: Bounded candidate diff/settings and regression proof or explicit remaining blocker for P1.M2.T2.S3.\n5. DOCS: [Mode A] Record changed callback/cadence or adapter contracts in touched symbol docstrings and candidate settings/reason in tests/G5_TIMING_EVIDENCE.md; no new end-user knob.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md separates recognition, relay, writer and target time; both upstream callbacks share a decode gate in 1.0.2.\n2. INPUT: P1.M2.T1.S6 paired visibility/diagnosis and P1.M2.T2.S1 controller progress contract. Candidate seams are daemon.py:_build_callbacks/_bulk_handle_partial, recorder_host.py:_RelayFeedback.update_partial/_dispatch, and ImeTarget/PiEditorTarget show paths as measured.\n3. LOGIC: Use the earliest useful callback by visible lag, not name. If source selection and the controller fix alone do not address the measured gap, change the dominant measured stage only: e.g. bulk-only evaluation cadence for late eligible decodes, prompt routing of usable updates for relay lag, or eliminate measured redundant adapter waits only if ownership/caret and one-edit proofs remain intact. Preserve stream-edit ASR/control behavior, final filtering, R.6 recovery, takeover and no-retry safety. Do not invent text between callbacks or remove guards. Mock recorder/relay clock and target transports for the stage-specific regression; exercise tests/test_bulk_dispatch.py, tests/test_bulk_context_prompt.py and tests/test_session_recovery.py where affected. If evidence is unavailable or a safe fix requires a separate design, publish the exact blocker instead of guessing or dropping safeguards.\n4. OUTPUT: Bounded candidate diff/settings and regression proof or explicit remaining blocker for P1.M2.T2.S3.\n5. DOCS: [Mode A] Record changed callback/cadence or adapter contracts in touched symbol docstrings and candidate settings/reason in tests/G5_TIMING_EVIDENCE.md; no new end-user knob."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -309,6 +309,7 @@
                     "P1.M2.T2.S1",
                     "P1.M2.T2.S2"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § Gate: G5 is per route and G6 is separate. Target ack, editor-poll state and no-desktop smoke are not display frames.\n2. INPUT: P1.M2.T1.S4 runner, P1.M2.T1.S5 Pi observation, P1.M2.T1.S6 paired report, P1.M2.T2.S1/P1.M2.T2.S2 candidate, and P1.M1.T3.S1 exact legacy set.\n3. LOGIC: Compare both callbacks again under candidate scheduling if behavior materially changed. Select the better qualifying mode internally for bulk only and re-run the production selection (no experimental override) independently on both isolated routes. Require speech-end-to-word-visible median <=500 ms/p95 <1000 ms, ready-to-first-changed-frame insertion/correction p95 <=100/50 ms, >=100 real insertions and >=100 corrections per route, zero unchanged edits, no sustained >=5-word backlog for >=2 s, no sentence-end dump, and honest coverage/clock sanity. Use GNU timeout -k 2 1500 per route with larger harness backstop; only fake transports for pure tests and no live desktop. Compare bounded CPU failures by node ID to P1.M1.T3.S1; honor existing real-model watch policy separately and don't claim it ran if unavailable. If a route fails, cannot certify frames, or is unrun, retain opt-in, don't promote an unproven source as the fix, and leave BUG-002/acceptance #13 open with exact blocker.\n4. OUTPUT: tests/G5_TIMING_EVIDENCE.md authoritative current two-route verdict (pass/fail/blocked even when unverified) plus separate historical and exploratory evidence, effective source, exact commands, provenance and safety limits for P1.M2.T3.S1/P1.M2.T3.S2. A verified bulk source does not change default delivery.\n5. DOCS: [Mode A] Update G5 verdict table/methodology and selected callback rationale in daemon.py. Preserve parsing format for the authoritative table; historical/A-B tables must not be parsed as current route verdicts.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
@@ -317,8 +318,7 @@
                     "h3.3",
                     "h2.4",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § Gate: G5 is per route and G6 is separate. Target ack, editor-poll state and no-desktop smoke are not display frames.\n2. INPUT: P1.M2.T1.S4 runner, P1.M2.T1.S5 Pi observation, P1.M2.T1.S6 paired report, P1.M2.T2.S1/P1.M2.T2.S2 candidate, and P1.M1.T3.S1 exact legacy set.\n3. LOGIC: Compare both callbacks again under candidate scheduling if behavior materially changed. Select the better qualifying mode internally for bulk only and re-run the production selection (no experimental override) independently on both isolated routes. Require speech-end-to-word-visible median <=500 ms/p95 <1000 ms, ready-to-first-changed-frame insertion/correction p95 <=100/50 ms, >=100 real insertions and >=100 corrections per route, zero unchanged edits, no sustained >=5-word backlog for >=2 s, no sentence-end dump, and honest coverage/clock sanity. Use GNU timeout -k 2 1500 per route with larger harness backstop; only fake transports for pure tests and no live desktop. Compare bounded CPU failures by node ID to P1.M1.T3.S1; honor existing real-model watch policy separately and don't claim it ran if unavailable. If a route fails, cannot certify frames, or is unrun, retain opt-in, don't promote an unproven source as the fix, and leave BUG-002/acceptance #13 open with exact blocker.\n4. OUTPUT: tests/G5_TIMING_EVIDENCE.md authoritative current two-route verdict (pass/fail/blocked even when unverified) plus separate historical and exploratory evidence, effective source, exact commands, provenance and safety limits for P1.M2.T3.S1/P1.M2.T3.S2. A verified bulk source does not change default delivery.\n5. DOCS: [Mode A] Update G5 verdict table/methodology and selected callback rationale in daemon.py. Preserve parsing format for the authoritative table; historical/A-B tables must not be parsed as current route verdicts."
+                  ]
                 }
               ]
             },
@@ -346,14 +346,14 @@
                     "P1.M2.T2.S2",
                     "P1.M2.T2.S3"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § Gate; tests/g6_assessment.py:parse_route_verdicts/assess_g5_timing consumes G5's report, but A (G3), B (integrity) and D (operator sessions) are independent.\n2. INPUT: P1.M2.T2.S3 authoritative two-route verdict and P1.M2.T1.S6 A/B history.\n3. LOGIC: Re-derive G6 from evidence with a short bounded assessment; mock services by using only file inputs (pure fixture reports when checking parser behavior). Verify both real route entries were consumed, and rejected or blocked evidence cannot silently disappear. Do not supply fake operator sessions, touch any desktop service, flip delivery defaults or elevate G3/integrity claims.\n4. OUTPUT: Current G6 decision and reason for README consumption by P1.M2.T3.S2, preserving the dated historical assessment.\n5. DOCS: [Mode B] Update tests/G6_GRADUATION.md verdict/condition C and outstanding work, leaving unrelated conditions honest and bulk delivery opt-in.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
                     "h3.1",
                     "h2.4",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/bulk_delivery_gate.md § Gate; tests/g6_assessment.py:parse_route_verdicts/assess_g5_timing consumes G5's report, but A (G3), B (integrity) and D (operator sessions) are independent.\n2. INPUT: P1.M2.T2.S3 authoritative two-route verdict and P1.M2.T1.S6 A/B history.\n3. LOGIC: Re-derive G6 from evidence with a short bounded assessment; mock services by using only file inputs (pure fixture reports when checking parser behavior). Verify both real route entries were consumed, and rejected or blocked evidence cannot silently disappear. Do not supply fake operator sessions, touch any desktop service, flip delivery defaults or elevate G3/integrity claims.\n4. OUTPUT: Current G6 decision and reason for README consumption by P1.M2.T3.S2, preserving the dated historical assessment.\n5. DOCS: [Mode B] Update tests/G6_GRADUATION.md verdict/condition C and outstanding work, leaving unrelated conditions honest and bulk delivery opt-in."
+                  ]
                 },
                 {
                   "type": "Subtask",
@@ -378,6 +378,7 @@
                     "P1.M2.T2.S3",
                     "P1.M2.T3.S1"
                   ],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md and architecture/bulk_delivery_gate.md map README Hotkey, Media ducking and Bulk text delivery to actual config and evidence.\n2. INPUT: P1.M1.T1.S3 hermetic validation, P1.M1.T2.S1 panic pin, P1.M1.T3.S1 CPU guidance, P1.M2.T2.S3 measured G5 verdict and P1.M2.T3.S1 re-derived G6 outcome.\n3. LOGIC: Document SUPER+ALT+Escape as an explicit systemd stop bypassing the socket, not an instant SIGKILL. Keep mpris as the production media default and clarify changed test isolation/CPU pointers only where useful. Align the bulk overview and any headline timings with the actual verified evidence; distinguish editor-state proxy, G5 route coverage and operator acceptance, don't generalize to the G3 matrix. Check links/config/default wording by static inspection; mock/no live services or CLI.\n4. OUTPUT: README.md reads consistently with the actual fixes and G1/G5/G6 artifacts without promoting the experimental mode.\n5. DOCS: [Mode B] Update README.md Hotkey and Bulk text delivery overview; audit Media ducking and any validation overview for contradictory wording. No PRD or companion spec edits.",
                   "prd_selectors": [
                     "h2.0",
                     "h2.2",
@@ -388,8 +389,7 @@
                     "h3.3",
                     "h2.4",
                     "h2.5"
-                  ],
-                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: architecture/system_context.md and architecture/bulk_delivery_gate.md map README Hotkey, Media ducking and Bulk text delivery to actual config and evidence.\n2. INPUT: P1.M1.T1.S3 hermetic validation, P1.M1.T2.S1 panic pin, P1.M1.T3.S1 CPU guidance, P1.M2.T2.S3 measured G5 verdict and P1.M2.T3.S1 re-derived G6 outcome.\n3. LOGIC: Document SUPER+ALT+Escape as an explicit systemd stop bypassing the socket, not an instant SIGKILL. Keep mpris as the production media default and clarify changed test isolation/CPU pointers only where useful. Align the bulk overview and any headline timings with the actual verified evidence; distinguish editor-state proxy, G5 route coverage and operator acceptance, don't generalize to the G3 matrix. Check links/config/default wording by static inspection; mock/no live services or CLI.\n4. OUTPUT: README.md reads consistently with the actual fixes and G1/G5/G6 artifacts without promoting the experimental mode.\n5. DOCS: [Mode B] Update README.md Hotkey and Bulk text delivery overview; audit Media ducking and any validation overview for contradictory wording. No PRD or companion spec edits."
+                  ]
                 }
               ]
             }
