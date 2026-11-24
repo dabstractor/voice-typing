@@ -54,7 +54,7 @@ class _FakeLatency:
 
 
 def _make_host(
-    *, on_final=None, on_partial=None, on_speech=None, force_cpu=False
+    *, on_final=None, on_partial=None, on_speech=None, force_cpu=False, partial_source="stabilized"
 ) -> recorder_host.RecorderHost:
     """Build a RecorderHost with fake callbacks + a dummy cfg (the host does not spawn in tests)."""
     cfg = object()  # the host stores but never inspects cfg in the dispatch path
@@ -66,6 +66,7 @@ def _make_host(
         on_partial or (lambda _t: None),
         on_speech or (lambda: None),
         force_cpu=force_cpu,
+        partial_source=partial_source,
     )
 
 
@@ -1102,3 +1103,195 @@ def test_identity_round_trip_queue_to_read_loop_to_dispatch():
     )
     assert list(host._ids_settled) == [1]  # the boundary closed
     assert host._dead is True        # 'gone' ended the reader cleanly
+
+
+# ===========================================================================
+# P1.M2.T1.S1 (BUG-002 remediation / PRD §4.2sexies R.8) — the partial_source
+# selector crosses the spawn boundary HERE: the picklable str rides the
+# ctx.Process args into _worker_main and is threaded into EVERY build_recorder
+# call (the normal build AND the force_cpu CPU-fallback retry), and the
+# child's ('ready', ...) payload reports the installed key ("partial_callback")
+# as the G5 provenance. Hermetic: the spawn-context Process is faked;
+# _worker_main runs IN-PROCESS with daemon.build_recorder monkeypatched and
+# os.setsid stubbed — never a real child, never CUDA.
+# ===========================================================================
+
+
+def test_host_stores_partial_source_default_stabilized():
+    """__init__ stores partial_source (keyword-only tail; default 'stabilized' = the
+    production path, byte-identical — the lab seam mirrors feed_input)."""
+    host = _make_host()
+    assert host._partial_source == "stabilized"
+    host2 = _make_host(partial_source="plain")
+    assert host2._partial_source == "plain"
+
+
+def test_spawn_args_carry_partial_source(monkeypatch):
+    """The spawn args tuple carries the selector as its LAST element (a picklable str — the
+    constructor-data path spawn isolation mandates; a parent monkeypatch dies in the child)."""
+    real_ctx = recorder_host.mp.get_context("spawn")
+    procs: list[Any] = []
+
+    class _FakeProc:
+        pid = 4242
+
+        def __init__(self, target=None, args=None, name=None, daemon=None):
+            self.target = target
+            self.args = args
+            procs.append(self)
+
+        def start(self) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
+    class _FakeCtx:
+        """Only Process is faked; Queue/Event delegate to the REAL spawn context (the host's
+        __init__ builds its queues/events there — only spawn()'s Process creation is intercepted)."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def Queue(self):
+            return self._real.Queue()
+
+        def Event(self):
+            return self._real.Event()
+
+        def Process(self, **kw):
+            return _FakeProc(**kw)
+
+    monkeypatch.setattr(recorder_host.mp, "get_context", lambda _name: _FakeCtx(real_ctx))
+
+    host = _make_host()
+    host._ready_evt.set()  # no child will signal; spawn() must return immediately
+    assert host.spawn() is True
+    assert procs and isinstance(procs[0].args[-1], str)
+    assert procs[0].args[-1] == "stabilized"  # the default rides too (no special-casing)
+
+    host_plain = _make_host(partial_source="plain")
+    host_plain._ready_evt.set()
+    assert host_plain.spawn() is True
+    assert procs[-1].args[-1] == "plain"
+
+    # Clean up both spawn()-started reader threads (they drain the real mp event queues).
+    for host_ in (host, host_plain):
+        host_._evt_q.put(("gone", {}))
+        assert host_._reader is not None
+        host_._reader.join(timeout=2.0)
+        assert not host_._reader.is_alive()
+
+
+def _run_worker_and_drain(monkeypatch, *, partial_source, first_build_raises):
+    """Shared in-process harness for _worker_main: daemon.build_recorder is captured (the
+    first CUDA build raising when requested, to exercise the force_cpu fallback) and the
+    command queue is pre-loaded with ('shutdown', {}) so the loop exits cleanly. os.setsid is
+    stubbed — the child entry point runs on the pytest main thread, never a real process.
+    Returns (build-calls, drained events)."""
+    import queue as _queue
+
+    import voice_typing.daemon as daemon_mod
+    from voice_typing.config import VoiceTypingConfig
+
+    calls: list[dict] = []
+
+    class _Rec:
+        def shutdown(self) -> None:
+            pass
+
+        def set_microphone(self, on: bool) -> None:
+            pass
+
+    rec = _Rec()
+
+    def _fake_build(cfg2, feedback, latency=None, force_cpu=False, on_speech=None,
+                    extra_kwargs=None, partial_source="stabilized"):
+        calls.append({"force_cpu": bool(force_cpu), "partial_source": partial_source})
+        if first_build_raises and not force_cpu:
+            raise RuntimeError("cuda boom")
+        return rec
+
+    monkeypatch.setattr(daemon_mod, "build_recorder", _fake_build)
+    monkeypatch.setattr(recorder_host.os, "setsid", lambda: None)
+
+    cmd_q: Any = _queue.Queue()
+    cmd_q.put(("shutdown", {}))
+    evt_q: Any = _queue.Queue()
+    recorder_host._worker_main(
+        VoiceTypingConfig(),
+        cmd_q,
+        evt_q,
+        threading.Event(),
+        threading.Event(),
+        False,               # force_cpu (the child retries on failure, as in production)
+        None,                # feed_q (production: None)
+        partial_source,
+    )
+    return calls, _drain(evt_q)
+
+
+def test_worker_main_threads_partial_source_to_both_build_paths(monkeypatch):
+    """partial_source reaches EVERY build_recorder call in the child — the normal CUDA build
+    AND the force_cpu retry — and the 'ready' payload reports the installed key (the G5
+    provenance: build success ⟹ the key survived the signature filter)."""
+    calls, events = _run_worker_and_drain(
+        monkeypatch, partial_source="plain", first_build_raises=True
+    )
+    assert calls == [
+        {"force_cpu": False, "partial_source": "plain"},
+        {"force_cpu": True, "partial_source": "plain"},
+    ]
+    ready = [p for kind, p in events if kind == "ready"]
+    assert ready and ready[0]["partial_callback"] == "on_realtime_transcription_update"
+    assert ("gone", {}) in events
+
+
+def test_worker_main_default_partial_source_is_stabilized(monkeypatch):
+    """Omitting nothing (the default arg) keeps the production path byte-identical: the build
+    gets 'stabilized' and the ready payload reports the stabilized key."""
+    calls, events = _run_worker_and_drain(
+        monkeypatch, partial_source="stabilized", first_build_raises=False
+    )
+    assert calls == [{"force_cpu": False, "partial_source": "stabilized"}]
+    ready = [p for kind, p in events if kind == "ready"]
+    assert ready and ready[0]["partial_callback"] == "on_realtime_transcription_stabilized"
+
+
+def test_ready_payload_reports_partial_callback():
+    """_ready_payload carries the INSTALLED key verbatim (the _worker_main call site maps the
+    selector via daemon._PARTIAL_SOURCES — post-rejection, effective == requested) alongside
+    the existing device/context_prompt keys (additive); unknown degrades to ""."""
+    payload = recorder_host._ready_payload(
+        {"device": "cpu", "compute_type": "int8", "model": "tiny.en"},
+        False,
+        "on_realtime_transcription_update",
+    )
+    assert payload["partial_callback"] == "on_realtime_transcription_update"
+    assert payload["context_prompt"] is False
+    assert payload["device"] == "cpu"
+    assert (
+        recorder_host._ready_payload({"device": "cpu"}, True)["partial_callback"] == ""
+    )  # legacy/no-provenance default
+
+
+def test_dispatch_ready_exposes_partial_callback_on_the_host():
+    """The reader's 'ready' dispatch exposes the provenance on the host alongside .device;
+    a legacy payload WITHOUT the key (test fakes predating it) degrades to '' (the
+    context_prompt precedent)."""
+    host = _make_host()
+    host._dispatch(
+        "ready",
+        {
+            "device": "cuda",
+            "compute_type": "float16",
+            "model": "small.en",
+            "partial_callback": "on_realtime_transcription_update",
+        },
+    )
+    assert host.partial_callback == "on_realtime_transcription_update"
+    assert host.device["model"] == "small.en"
+
+    host2 = _make_host()
+    host2._dispatch("ready", {"device": "cuda"})
+    assert host2.partial_callback == ""

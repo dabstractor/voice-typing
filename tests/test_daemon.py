@@ -79,6 +79,36 @@ class _StrictFakeRecorder:
         self.kwargs = {"model": model, "language": language, "device": device}
 
 
+class _PlainPartialFakeRecorder:
+    """Explicit signature INCLUDING the plain partial key (no **kwargs): the filter KEEPS it
+    (the partial_source='plain' build-success case — build ⟹ the key survived)."""
+
+    def __init__(
+        self,
+        model: str = "",
+        on_realtime_transcription_update: "Callable[[str], None] | None" = None,
+    ) -> None:
+        self.kwargs = {
+            "model": model,
+            "on_realtime_transcription_update": on_realtime_transcription_update,
+        }
+
+
+class _StabilizedOnlyFakeRecorder:
+    """Explicit signature WITHOUT the plain key (no **kwargs): the filter DROPS
+    on_realtime_transcription_update — the ineffective-selection rejection case."""
+
+    def __init__(
+        self,
+        model: str = "",
+        on_realtime_transcription_stabilized: "Callable[[str], None] | None" = None,
+    ) -> None:
+        self.kwargs = {
+            "model": model,
+            "on_realtime_transcription_stabilized": on_realtime_transcription_stabilized,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -427,12 +457,15 @@ def test_construct_callbacks_are_live(cfg, monkeypatch):
 
 
 def test_construct_drops_kwargs_not_in_strict_recorder(cfg, monkeypatch, caplog):
-    """A strict recorder (no **kwargs) forces the defensive drop of most of our kwargs."""
+    """A strict recorder (no **kwargs) forces the defensive drop of most of our kwargs — and
+    since P1.M2.T1.S1 (PRD §4.2sexies R.8) the PARTIAL key is FATAL to lose: the default
+    'stabilized' selection whose key the filter dropped REJECTS the build (a no-partial recorder
+    is broken, not drift — never a silent no-partial construction). The log-and-drop WARNING
+    for the OTHER kwargs still fires before the rejection."""
     _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
     with caplog.at_level(logging.WARNING, logger="voice_typing.daemon"):
-        rec = daemon._construct(cfg, _FakeFeedback(), _StrictFakeRecorder)
-    # _StrictFakeRecorder accepts only model/language/device -> only those survive filtering.
-    assert set(rec.kwargs) == {"model", "language", "device"}
+        with pytest.raises(ValueError, match="on_realtime_transcription_stabilized"):
+            daemon._construct(cfg, _FakeFeedback(), _StrictFakeRecorder)
     assert any("dropping" in r.getMessage() for r in caplog.records)
 
 
@@ -459,6 +492,192 @@ def test_build_recorder_is_callable_and_documented():
     # and that is P1.M7.T2.S1's job via feed_audio). We only assert the contract surface exists.
     assert callable(daemon.build_recorder)
     assert daemon.build_recorder.__doc__, "build_recorder must have a docstring"
+
+
+# ===========================================================================
+# P1.M2.T1.S1 (BUG-002 remediation / PRD §4.2sexies R.8) — the partial_source
+# SELECTOR: exactly ONE upstream partial callback per build, chosen at
+# construction and carried as PICKLABLE DATA across the recorder-spawn
+# boundary. RealtimeSTT 1.0.2 fires BOTH legacy callbacks in the same eligible
+# decode, and multiprocessing spawn gives the child a fresh interpreter — so a
+# parent-side monkeypatch of _PARTIAL_CALLBACK_ATTR is not an experiment. The
+# selector travels VoiceTypingDaemon -> RecorderHost -> spawn args ->
+# _worker_main -> build_recorder/_construct/_build_callbacks (both the normal
+# AND the force_cpu CPU-fallback builds). Default "stabilized" is byte-
+# identical to the pre-selector dict (the hardcoded-key pins above stay
+# green); invalid/ineffective selections REJECT — never a silent no-partial
+# build. Additive — everything above is unchanged.
+# ===========================================================================
+
+
+def test_partial_sources_map_pins_exactly_one_key_per_source():
+    """_PARTIAL_SOURCES maps each selector to ONE upstream key; the retained constant IS the
+    default resolved key (the 8+ hardcoded stabilized-key pins above depend on it)."""
+    assert daemon._PARTIAL_SOURCES == {
+        "plain": "on_realtime_transcription_update",
+        "stabilized": "on_realtime_transcription_stabilized",
+    }
+    assert daemon._PARTIAL_CALLBACK_ATTR == "on_realtime_transcription_stabilized"
+    assert daemon._PARTIAL_SOURCES["stabilized"] == daemon._PARTIAL_CALLBACK_ATTR
+
+
+def test_build_callbacks_default_is_todays_stabilized_keyset():
+    """The DEFAULT (and an explicit 'stabilized') returns today's dict key-set byte-identically."""
+    fb = _FakeFeedback()
+    default = daemon._build_callbacks(fb)
+    explicit = daemon._build_callbacks(fb, partial_source="stabilized")
+    expected = {
+        daemon._PARTIAL_CALLBACK_ATTR,
+        "on_vad_detect_start",
+        "on_vad_start",
+        "on_vad_stop",
+    }
+    assert set(default) == expected
+    assert set(default) == set(explicit)
+
+
+def test_build_callbacks_plain_swaps_the_key_and_closure_still_fires():
+    """'plain' registers on_realtime_transcription_update INSTEAD of stabilized; the closure
+    semantics (update_partial + note_partial + on_speech) are unchanged — only the key varies."""
+    fb = _FakeFeedback()
+    speech: list[int] = []
+    cb = daemon._build_callbacks(
+        fb, partial_source="plain", on_speech=lambda: speech.append(1)
+    )
+    assert "on_realtime_transcription_update" in cb
+    assert "on_realtime_transcription_stabilized" not in cb
+    cb["on_realtime_transcription_update"]("hello")
+    assert fb.partials == ["hello"]
+    assert speech == [1]  # on_speech still fires from the SAME closure
+    assert fb.phases == []
+
+
+@pytest.mark.parametrize(
+    "source,partial_key",
+    [
+        ("plain", "on_realtime_transcription_update"),
+        ("stabilized", "on_realtime_transcription_stabilized"),
+    ],
+)
+def test_build_callbacks_exactly_one_partial_key(source, partial_key):
+    """EXACTLY ONE partial key per build — never both ('no two callbacks delivering to one
+    consumer'); the three VAD keys are always present alongside it."""
+    other = (
+        "on_realtime_transcription_stabilized"
+        if partial_key == "on_realtime_transcription_update"
+        else "on_realtime_transcription_update"
+    )
+    cb = daemon._build_callbacks(_FakeFeedback(), partial_source=source)
+    assert partial_key in cb and other not in cb
+    assert set(cb) == {partial_key, "on_vad_detect_start", "on_vad_start", "on_vad_stop"}
+
+
+@pytest.mark.parametrize("bad", ["loud", "STABILIZED", "PLAIN", "", "off"])
+def test_build_callbacks_invalid_partial_source_raises(bad):
+    """An invalid value raises ValueError at the callback build (a bad ARGUMENT, not TOML —
+    no case folding, no silent fallback to the default)."""
+    with pytest.raises(ValueError, match="partial_source"):
+        daemon._build_callbacks(_FakeFeedback(), partial_source=bad)
+
+
+def test_construct_rejects_ineffective_partial_selection(cfg, monkeypatch):
+    """A selection whose key the signature filter DROPS -> ValueError naming the key: a
+    no-partial build is broken, not drift — refuse it. The log-and-drop filter stays lenient
+    for OTHER kwargs; the partial key is the one kwarg whose loss is fatal."""
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    with pytest.raises(ValueError, match="on_realtime_transcription_update"):
+        daemon._construct(
+            cfg, _FakeFeedback(), _StabilizedOnlyFakeRecorder, partial_source="plain"
+        )
+
+
+def test_construct_plain_selection_builds_when_the_fake_accepts_the_key(cfg, monkeypatch):
+    """A fake whose signature accepts the plain key builds, the filtered kwargs carry the key,
+    and the installed callback drives the feedback (build success ⟹ the key survived)."""
+    _cuda_resolve(monkeypatch, daemon.cuda_check.CUDA_DEFAULTS)
+    fb = _FakeFeedback()
+    rec = daemon._construct(cfg, fb, _PlainPartialFakeRecorder, partial_source="plain")
+    assert "on_realtime_transcription_update" in rec.kwargs
+    rec.kwargs["on_realtime_transcription_update"]("live")
+    assert fb.partials == ["live"]
+
+
+def test_partial_source_is_on_the_build_surface_with_stabilized_default():
+    """partial_source (default 'stabilized') is on the build_recorder AND _construct surface."""
+    import inspect
+
+    for fn in (daemon.build_recorder, daemon._construct):
+        p = inspect.signature(fn).parameters["partial_source"]
+        assert p.default == "stabilized"
+
+
+def test_daemon_stores_private_partial_source_seam():
+    """VoiceTypingDaemon takes a private keyword-only partial_source (default 'stabilized')
+    and stores it (the feed_input lab-seam precedent; NOT a config/env/CLI knob)."""
+    d, _fb, _rec, _be = _make_daemon()
+    assert d._partial_source == "stabilized"
+    d2 = daemon.VoiceTypingDaemon(
+        hermetic_cfg(VoiceTypingConfig()),
+        _DaemonFakeFeedback(),
+        recorder=None,
+        host_factory=None,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
+        partial_source="plain",
+    )
+    assert d2._partial_source == "plain"
+
+
+def test_load_host_passes_partial_source_to_the_real_host_only(monkeypatch):
+    """_load_host forwards partial_source to the REAL RecorderHost call ONLY — the injected
+    host_factory fake keeps the old surface (the is_listening/feed_input precedent)."""
+    seen: list[dict] = []
+
+    class _ProbeHost:
+        device = {"device": "cpu", "compute_type": "int8", "model": "tiny.en"}
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            seen.append(dict(kwargs))
+
+        def spawn(self) -> bool:
+            return True
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(daemon, "RecorderHost", _ProbeHost)
+    d = daemon.VoiceTypingDaemon(
+        hermetic_cfg(VoiceTypingConfig()),
+        _DaemonFakeFeedback(),
+        recorder=None,
+        host_factory=None,  # the REAL-host path (factory = the monkeypatched module global)
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
+        partial_source="plain",
+    )
+    assert d._load_host() is True
+    assert len(seen) == 1
+    assert seen[0].get("partial_source") == "plain"
+
+    # The injected-fake path is UNCHANGED: fakes never receive the new kwarg.
+    captured: list[dict] = []
+    base_factory = _fake_host_factory(spawn_result=True)
+
+    def _capturing_factory(cfg2, feedback, latency, on_final, on_partial, on_speech, **kw):
+        captured.append(dict(kw))
+        return base_factory(cfg2, feedback, latency, on_final, on_partial, on_speech, **kw)
+
+    d2 = daemon.VoiceTypingDaemon(
+        hermetic_cfg(VoiceTypingConfig()),
+        _DaemonFakeFeedback(),
+        recorder=None,
+        host_factory=_capturing_factory,
+        backend=_FakeBackend(),
+        mic_prober=_ok_probe,
+        partial_source="plain",
+    )
+    assert d2._load_host() is True
+    assert captured and "partial_source" not in captured[0]
 
 
 # ===========================================================================
@@ -3305,6 +3524,9 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
     # transcription executors — defaulted None so the daemon path is unchanged; cfg_to_kwargs
     # stays executor-free (asserted below).
     assert "extra_kwargs" in sb and sb["extra_kwargs"].default is None
+    # partial_source (P1.M2.T1.S1 / R.8): the ONE upstream partial callback to register —
+    # constructor DATA that rides the spawn args (spawn discards parent module state).
+    assert "partial_source" in sb and sb["partial_source"].default == "stabilized"
     assert list(sb) == [
         "cfg",
         "feedback",
@@ -3312,11 +3534,13 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
         "force_cpu",
         "on_speech",
         "extra_kwargs",
+        "partial_source",
     ], list(sb)
     sc = inspect.signature(daemon._construct).parameters
     assert "force_cpu" in sc and sc["force_cpu"].default is False
     assert "on_speech" in sc and sc["on_speech"].default is None
     assert "extra_kwargs" in sc and sc["extra_kwargs"].default is None
+    assert "partial_source" in sc and sc["partial_source"].default == "stabilized"
     assert list(sc) == [
         "cfg",
         "feedback",
@@ -3325,6 +3549,7 @@ def test_build_recorder_and_construct_force_cpu_in_signature():
         "force_cpu",
         "on_speech",
         "extra_kwargs",
+        "partial_source",
     ], list(sc)
     # cfg_to_kwargs kept the keyword-only resolved injection point (default None); the single-path
     # collapse (P1.M1.T2.S2) removed the old two-mode flag:

@@ -27,10 +27,12 @@ IPC PROTOCOL (two multiprocessing queues + one event):
       unblock sentinel MARKED ("cancelled": True) so the daemon drops the cancelled utterance.
       Plain abort() (stop/drain) semantics are UNCHANGED.
   event_queue (child -> daemon): ("ready", {device,compute_type,model,       # Rev 2: ONE model;
-                                            context_prompt})                #   context_prompt=True iff the
-                                                                            #   dynamic PromptedExecutor is armed
-                                                                            #   (P1.M2.T5.S1; additive key — daemon
-                                                                            #   consumption is P1.M2.T5.S2)
+                                            context_prompt,                  #   context_prompt=True iff the
+                                            partial_callback})               #   dynamic PromptedExecutor is armed
+                                                                             #   (P1.M2.T5.S1; additive keys — daemon
+                                                                             #   consumption is P1.M2.T5.S2). partial_callback
+                                                                             #   = the ONE upstream partial callback key the
+                                                                             #   child installed (R.8 provenance, P1.M2.T1.S1)
                                  | ("error", {msg}) |
                                  ("final", {text, utterance_id, session_gen}) |
                                           # R.5 identity: the id SETTLES (closes) the utterance
@@ -149,6 +151,7 @@ class RecorderHost:
         force_cpu: bool = False,
         is_listening: "Callable[[], bool] | None" = None,
         feed_input: bool = False,
+        partial_source: str = "stabilized",
     ) -> None:
         self._cfg = cfg
         self._feedback = feedback
@@ -165,6 +168,13 @@ class RecorderHost:
         # could only be read BETWEEN utterances — pacing would die. feed_audio is safe to call
         # from any thread while text() blocks (tests/test_feed_audio.py pattern).
         self._feed_input = bool(feed_input)
+        # R.8 partial-source selector (P1.M2.T1.S1; PRD §4.2sexies): the ONE upstream partial
+        # callback the CHILD's build_recorder should register — "stabilized" (the default =
+        # production byte-identical) or "plain". A picklable str carried in the spawn args on
+        # purpose: multiprocessing spawn gives the child a fresh interpreter, so parent-side
+        # module state (e.g. a monkeypatch of daemon._PARTIAL_CALLBACK_ATTR) never reaches it
+        # (the feed_input lab-seam precedent — private keyword-only, NOT a config knob).
+        self._partial_source = partial_source
         # Optional listening-gate predicate (bugfix Issue 2 residual / PRD §4.6). The child may emit
         # a stray ('vad', ...) event still in the IPC queue when the mic is disarmed (a late
         # on_vad_stop/on_vad_start that raced the disarm). Relaying it to feedback.set_phase() would
@@ -210,6 +220,10 @@ class RecorderHost:
         self._final_evt = threading.Event()
         self._ready_evt = threading.Event()
         self._device: dict[str, str] = {}
+        # R.8 provenance (P1.M2.T1.S1): the upstream partial callback key the child installed,
+        # from its 'ready' payload ("partial_callback"). "" until ready; a legacy child payload
+        # without the key degrades to "" (the context_prompt precedent).
+        self._partial_callback: str = ""
         self._error: str | None = None
         self._dead = False  # set when the child is known-gone (reader EOF / stop()); idempotent guards
         # R.5 relay identity (P1.M6.T1.S1). Reader-thread-ONLY state (G6): mutated solely inside
@@ -228,6 +242,16 @@ class RecorderHost:
     def device(self) -> dict[str, str]:
         """The resolved {device,compute_type,model} from the child's 'ready'."""
         return dict(self._device)
+
+    @property
+    def partial_callback(self) -> str:
+        """The upstream partial callback key the child INSTALLED (from its 'ready' payload).
+
+        R.8 provenance (P1.M2.T1.S1; PRD §4.2sexies): "" until the child reports ready. Build
+        success ⟹ the key survived the daemon's signature filter (daemon._construct rejects a
+        dropped selection), so the reported key IS the effective one.
+        """
+        return self._partial_callback
 
     @property
     def is_alive(self) -> bool:
@@ -259,8 +283,10 @@ class RecorderHost:
         """
         ctx = mp.get_context("spawn")
         # cfg is a picklable dataclass; the queues are spawn-context mp.Queue (picklable across
-        # spawn — they share the spawn context the Process uses); force_cpu is a bool. The child
-        # target _worker_main is a module-level fn (picklable).
+        # spawn — they share the spawn context the Process uses); force_cpu is a bool and
+        # partial_source a plain str — BOTH must be constructor DATA because the spawn child is
+        # a fresh interpreter (parent-side module state never survives). The child target
+        # _worker_main is a module-level fn (picklable).
         self._proc = ctx.Process(
             target=_worker_main,
             args=(
@@ -271,6 +297,7 @@ class RecorderHost:
                 self._cancel_event,
                 self._force_cpu,
                 self._feed_q,
+                self._partial_source,
             ),
             name="voice-typing-recorder-host",
             daemon=True,
@@ -509,6 +536,11 @@ class RecorderHost:
         """Dispatch one event to the daemon callbacks. Mirrors _build_callbacks (in-process today)."""
         if kind == "ready":
             self._device = dict(payload)
+            # R.8 provenance (P1.M2.T1.S1): expose the installed partial-callback key on the
+            # host (partial_callback property). ADDITIVE key — legacy children without it
+            # degrade to "" (the context_prompt precedent). The device dict deliberately keeps
+            # the whole payload (the context_prompt key already flows to the daemon's cache).
+            self._partial_callback = str(payload.get("partial_callback", ""))
             self._ready_evt.set()
         elif kind == "error":
             self._error = str(payload.get("msg", "unknown error"))
@@ -636,6 +668,7 @@ def _worker_main(
     cancel_event: Any,
     force_cpu: bool,
     feed_q: Any = None,
+    partial_source: str = "stabilized",
 ) -> None:
     """Child-process entry point: construct the recorder + serve commands until shutdown.
 
@@ -644,7 +677,10 @@ def _worker_main(
     is built via the UNCHANGED production path (daemon.build_recorder) — now in the child, so the
     daemon process stays CUDA-free. On construction failure, the child retries ONCE with
     force_cpu=True (CPU fallback, PRD §4.4 — only the child touches CUDA, so the retry is clean
-    here) then signals 'error' + exits.
+    here) then signals 'error' + exits. `partial_source` (PRD §4.2sexies R.8, default
+    "stabilized") rides the spawn args as picklable data and is passed to EVERY build_recorder
+    call — the normal build AND the force_cpu retry — so BOTH construction paths register the
+    SAME single upstream partial callback ("no two callbacks delivering to one consumer").
 
     CONTEXT PROMPT (P1.M2.T5.S1): when cfg.asr.context_prompt is true, the child first arms a
     prompt_engine.PromptedExecutor — CAPABILITY PROBE = construct + warmup transcription of 1 s
@@ -690,7 +726,9 @@ def _worker_main(
 
     # Lazy import: ONLY the child imports daemon.build_recorder (which lazy-imports RealtimeSTT).
     # This keeps the daemon process CUDA-free (the daemon imports only the RecorderHost handle).
-    from voice_typing.daemon import build_recorder
+    # _PARTIAL_SOURCES resolves the partial_source selector to the ONE upstream callback key
+    # registered on the recorder (also reported in the 'ready' payload as partial_callback).
+    from voice_typing.daemon import _PARTIAL_SOURCES, build_recorder
     # P1.M2.T5.S1 context-prompt wiring: augment_kwargs_with_executor (module-level, below) lazily
     # imports prompt_engine HERE IN THE CHILD. The prompt_engine MODULE is stdlib-only (CUDA-free)
     # at import, but the executor OBJECTS own faster-whisper/CUDA contexts: they are unpicklable
@@ -753,6 +791,7 @@ def _worker_main(
                 relay_lat,
                 on_speech=_child_on_speech,
                 extra_kwargs=_build_kwargs(extra_kwargs),
+                partial_source=partial_source,
             )
         except Exception as exc:
             if force_cpu:
@@ -772,6 +811,7 @@ def _worker_main(
                     force_cpu=True,
                     on_speech=_child_on_speech,
                     extra_kwargs=_build_kwargs(extra_kwargs),
+                    partial_source=partial_source,
                 )
             except Exception as exc2:
                 _safe_put(
@@ -785,7 +825,15 @@ def _worker_main(
         # P1.M2.T5.S1: + the additive context_prompt flag (True iff the executor is armed).
         resolved_device = _child_resolved_device(cfg, force_cpu)
         _safe_put(
-            evt_q, ("ready", _ready_payload(resolved_device, prompt_executor is not None))
+            evt_q,
+            (
+                "ready",
+                _ready_payload(
+                    resolved_device,
+                    prompt_executor is not None,
+                    _PARTIAL_SOURCES[partial_source],
+                ),
+            ),
         )
     except Exception as exc:
         _safe_put(evt_q, ("error", {"msg": f"unexpected construction error: {exc!r}"}))
@@ -1101,15 +1149,25 @@ def augment_kwargs_with_executor(
     return executor
 
 
-def _ready_payload(resolved_device: dict[str, str], context_prompt_active: bool) -> dict[str, Any]:
-    """The child's ('ready', ...) payload: resolved device/model + the context-prompt flag.
+def _ready_payload(
+    resolved_device: dict[str, str],
+    context_prompt_active: bool,
+    partial_callback: str = "",
+) -> dict[str, Any]:
+    """The child's ('ready', ...) payload: resolved device/model + flags.
 
     'context_prompt' is True iff the dynamic PromptedExecutor was armed (probe passed); False
     on the config-off OR probe-failure degrade path (identical stock configuration). The key is
     ADDITIVE — existing readers ignore it; the daemon-side consumer is P1.M2.T5.S2.
+
+    'partial_callback' (P1.M2.T1.S1; PRD §4.2sexies R.8) is the upstream partial callback key
+    ACTUALLY installed on this child's recorder — the G5 provenance field. Build success ⟹ the
+    key survived the daemon's signature filter (_construct rejects a dropped selection), so the
+    requested key IS the installed key. ADDITIVE; empty when unknown.
     """
     payload = dict(resolved_device)
     payload["context_prompt"] = bool(context_prompt_active)
+    payload["partial_callback"] = partial_callback
     return payload
 
 

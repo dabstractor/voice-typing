@@ -220,6 +220,20 @@ _FIXED_KWARGS: dict[str, Any] = {
 # (faster, rougher) — single source so the swap is a one-line change (PRD §4.2; item contract).
 _PARTIAL_CALLBACK_ATTR = "on_realtime_transcription_stabilized"
 
+# PRD §4.2sexies R.8 (BUG-002 remediation): the partial-source SELECTOR. RealtimeSTT 1.0.2
+# fires BOTH legacy callbacks in the same eligible decode, so a build must register EXACTLY
+# ONE. The choice travels as picklable DATA across the spawn boundary (daemon __init__ ->
+# RecorderHost -> ctx.Process args -> _worker_main -> build_recorder/_construct) because a
+# parent-side monkeypatch of _PARTIAL_CALLBACK_ATTR never reaches the fresh child interpreter.
+# _PARTIAL_CALLBACK_ATTR stays the DEFAULT resolved key: the default "stabilized" build is
+# byte-identical to the pre-selector dict; the G5 lab (P1.M2.T1.S4/S6) flips it per arm, and
+# the final selection (P1.M2.T2.S3) — if it flips the default — flips it HERE in the same
+# change as the stream-edit decision. One definition; the build site never re-types the keys.
+_PARTIAL_SOURCES = {
+    "plain": "on_realtime_transcription_update",
+    "stabilized": "on_realtime_transcription_stabilized",
+}
+
 # Mic-health probe TTL (bugfix Issue 3 / P1.M2.T2.S1): re-probe at most once every 30s so _arm()
 # does NOT pay the ~40ms PyAudio init on every keystroke. _refresh_mic_status() skips the probe
 # when the last probe is within this window; __init__ (force=True) and explicit force=True bypass it.
@@ -328,10 +342,18 @@ def _build_callbacks(
     feedback: "Feedback",
     latency: "LatencyLog | None" = None,
     on_speech: "Callable[[], None] | None" = None,
+    partial_source: str = "stabilized",
 ) -> dict[str, Callable[..., None]]:
     """Wire RealtimeSTT callbacks -> Feedback (+ optional LatencyLog; PRD §4.2; P1.M4.T1.S3).
 
-      on_realtime_transcription_stabilized(str) -> feedback.update_partial(text) [+ latency.note_partial]
+    Exactly ONE upstream partial callback is registered per build (PRD §4.2sexies R.8 —
+    RealtimeSTT 1.0.2 fires both in one eligible decode; two deliveries to one consumer is
+    forbidden): `partial_source` selects it via _PARTIAL_SOURCES — "stabilized" (the default,
+    byte-identical to the pre-selector wiring) or "plain". An invalid value raises ValueError
+    (a bad argument, not TOML). The `_partial` closure body is IDENTICAL for both sources —
+    only the upstream key name varies.
+
+      <partial key>         (str) -> feedback.update_partial(text) [+ latency.note_partial]
       on_vad_detect_start() -> feedback.set_phase("listening")   # system starts listening for VAD
       on_vad_start()        -> feedback.set_phase("speaking")    # voice activity detected
       on_vad_stop()         -> feedback.set_phase("listening")   # voice ended -> back to listening
@@ -341,6 +363,10 @@ def _build_callbacks(
     the partial/on_vad_stop callbacks behave exactly as S1 (no extra side effect). VoiceTypingDaemon
     passes its LatencyLog so the per-utterance latency log gets t_speech_end + partial count.
     """
+    if partial_source not in _PARTIAL_SOURCES:
+        raise ValueError(
+            f"partial_source expects 'plain' or 'stabilized', got {partial_source!r}"
+        )
 
     def _partial(text: str) -> None:
         feedback.update_partial(text)
@@ -355,7 +381,7 @@ def _build_callbacks(
             latency.note_speech_end()
 
     return {
-        _PARTIAL_CALLBACK_ATTR: _partial,
+        _PARTIAL_SOURCES[partial_source]: _partial,
         "on_vad_detect_start": lambda: feedback.set_phase("listening"),
         "on_vad_start": lambda: feedback.set_phase("speaking"),
         "on_vad_stop": _vad_stop,
@@ -402,6 +428,7 @@ def _construct(
     force_cpu: bool = False,
     on_speech: "Callable[[], None] | None" = None,
     extra_kwargs: "dict[str, Any] | None" = None,
+    partial_source: str = "stabilized",
 ) -> Any:
     """Build kwargs + callbacks, defensively filter to the signature, construct recorder_cls.
 
@@ -409,6 +436,14 @@ def _construct(
     RealtimeSTT / load models / touch CUDA. build_recorder() is the thin production wrapper that
     supplies the real AudioToTextRecorder via a lazy import. `latency` (optional, default None) is
     threaded into _build_callbacks so on_vad_stop/partial feed the per-utterance latency log.
+
+    `partial_source` (PRD §4.2sexies R.8, default "stabilized") selects the ONE upstream partial
+    callback registered on the recorder (see _build_callbacks). AFTER the signature filter the
+    selection is ENFORCED: if recorder_cls's signature DROPPED the chosen key, raise ValueError —
+    a build with NO partial callback is broken, not drift (the stream-edit + idle auto-stop
+    features all hang off the partial callback). Build success therefore ⟹ the key survived ⟹
+    the ready payload may report it as the installed key. The log-and-drop filter stays lenient
+    for every OTHER kwarg.
 
     force_cpu (bugfix Issue 3 / P1.M1.T3.S1, default False): when True, replace the resolved
     device dict with dict(cuda_check.CPU_FALLBACK) BEFORE building kwargs — this SKIPS the
@@ -421,7 +456,7 @@ def _construct(
     """
     resolved = dict(cuda_check.CPU_FALLBACK) if force_cpu else None
     kwargs = cfg_to_kwargs(cfg, resolved=resolved)
-    kwargs.update(_build_callbacks(feedback, latency, on_speech=on_speech))
+    kwargs.update(_build_callbacks(feedback, latency, on_speech=on_speech, partial_source=partial_source))
     if extra_kwargs:
         # P1.M2.T5.S1: the recorder-host CHILD injects the context-prompt executors here (after
         # cfg_to_kwargs — cfg_to_kwargs stays executor-free; the executor objects are constructed
@@ -430,6 +465,13 @@ def _construct(
         # so they survive the filter; unknown keys would still be logged-and-dropped defensively.
         kwargs.update(extra_kwargs)
     filtered = _filter_kwargs_to_signature(kwargs, recorder_cls)
+    partial_key = _PARTIAL_SOURCES[partial_source]
+    if partial_key not in filtered:
+        raise ValueError(
+            f"partial_source={partial_source!r}: {partial_key!r} was dropped by "
+            f"{recorder_cls.__name__}'s signature — refusing to build a recorder with no "
+            f"partial callback"
+        )
     return recorder_cls(**filtered)
 
 
@@ -440,6 +482,7 @@ def build_recorder(
     force_cpu: bool = False,
     on_speech: "Callable[[], None] | None" = None,
     extra_kwargs: "dict[str, Any] | None" = None,
+    partial_source: str = "stabilized",
 ) -> Any:
     """Construct ONE AudioToTextRecorder wired to feedback (+ optional latency) (PRD §4.2, §4.4).
 
@@ -448,6 +491,13 @@ def build_recorder(
     __init__) and stays resident — the main loop (P1.M4.T1.S2) reuses this single recorder for the
     daemon's lifetime. `latency` (optional) threads the per-utterance collector into on_vad_stop/
     partial. Returns the constructed AudioToTextRecorder.
+
+    `partial_source` (PRD §4.2sexies R.8, default "stabilized"): the ONE upstream partial callback
+    to register — "plain" (on_realtime_transcription_update) or "stabilized". Threaded through to
+    _construct/_build_callbacks; an ineffective selection (the installed signature lacks the key)
+    is REJECTED there, never silently dropped. The selector is constructor DATA on purpose: the
+    recorder-host child builds via this function inside a fresh spawn interpreter, so the choice
+    must arrive as a picklable parameter, not as parent-side module state.
 
     Heavy: imports RealtimeSTT + loads the model on first call (seconds). Unit tests call
     _construct() with a fake class instead; this function is exercised by the feed_audio test
@@ -475,6 +525,7 @@ def build_recorder(
         force_cpu=force_cpu,
         on_speech=on_speech,
         extra_kwargs=extra_kwargs,
+        partial_source=partial_source,
     )
 
 
@@ -799,6 +850,7 @@ class VoiceTypingDaemon:
         ducker: Any = None,
         bulk_target_factory: "Callable[[VoiceTypingConfig], Any] | None" = None,
         feed_input: bool = False,
+        partial_source: str = "stabilized",
     ) -> None:
         self._cfg = cfg
         # P1.M2.T3.S2 crash safety (PRD §4.2quinquies): read the persisted `ducked` flag FIRST —
@@ -838,6 +890,14 @@ class VoiceTypingDaemon:
         # (in _load_host, exactly like is_listening). False by default → the spawned child
         # is byte-identical to today; the lab passes True to feed synthetic audio.
         self._feed_input = feed_input
+        # R.8 partial-source selector (P1.M2.T1.S1): the PRIVATE upstream-callback choice,
+        # forwarded to the REAL RecorderHost ONLY (in _load_host, exactly like feed_input),
+        # which carries it as picklable data through the spawn args into the child's
+        # build_recorder calls. It must travel as a constructor str — multiprocessing spawn
+        # gives the child a fresh interpreter, so parent-side module state (e.g. a monkeypatch
+        # of _PARTIAL_CALLBACK_ATTR) never reaches it. Default "stabilized" = production
+        # byte-identical; the G5 lab (S4/S6) flips it per arm. NOT a config/env/CLI knob.
+        self._partial_source = partial_source
         self._lock = threading.Lock()
         # Serializes on_final callbacks (bugfix Issue 5 / P1.M2.T2.S1). RealtimeSTT fires each
         # on_final in a NEW thread without joining, so a second final can arrive while a slow
@@ -1140,6 +1200,7 @@ class VoiceTypingDaemon:
                 self._touch_speech,
                 is_listening=self.is_listening,
                 feed_input=self._feed_input,
+                partial_source=self._partial_source,
             )
         else:
             host = factory(

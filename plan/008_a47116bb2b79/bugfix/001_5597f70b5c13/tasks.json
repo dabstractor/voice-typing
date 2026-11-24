@@ -146,7 +146,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Select exactly one callback across the recorder spawn boundary",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S1"
@@ -163,7 +163,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Start the production IM route on the bulk arm worker",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2",
