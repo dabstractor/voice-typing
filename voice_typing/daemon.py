@@ -234,6 +234,25 @@ _PARTIAL_SOURCES = {
     "stabilized": "on_realtime_transcription_stabilized",
 }
 
+# BUG-002 / P1.M2.T2.S2 (PRD §4.2sexies R.1/R.8): the recognizer-cadence override for bulk
+# delivery. S6's stage decomposition (tests/G5_TIMING_EVIDENCE.md, "Paired callback comparison
+# and stage diagnosis") puts the dominant speech→visible share BEFORE the callback/adapter
+# stages — pi-ghostty per-word lag med 7786–11983 ms / p95 ~16070 ms against a ~4 ms
+# useful→field and a 29.8–42.7 ms qualified paint — i.e. in the decode-evaluation cadence +
+# delivery complex, NOT in the paint path ("the remediation should NOT spend effort on the
+# adapter paint path", verbatim). `realtime_processing_pause` is how long RealtimeSTT's
+# realtime decode loop sleeps between partial evaluations (cfg default 0.15 s): at bulk
+# cadence, the hypothesis update carrying a mid-clip word must not sit through that extra
+# sleep between eligible decodes. When the recorder build is for bulk-text delivery,
+# _construct tightens the pause to THIS constant — a MODE-SCOPED CODE CONSTANT (the §4.2ter
+# lite-mode precedent), deliberately NOT a new config key (the BUG-002 contract forbids a new
+# end-user knob). Stream-edit builds keep cfg.asr.realtime_processing_pause byte-identically.
+# R.8 selection note (why the callback default is NOT flipped in this changeset): S6 measured
+# plain vs stabilized at ±3 ms on both boundaries (callback +1.3 ms, field −3.3 ms — under the
+# editor's 10 ms read-poll quantum) and the im-gtk plain arm is not-run — there is NO
+# visible-lag win to harvest, so the selector default stays "stabilized".
+_BULK_REALTIME_PROCESSING_PAUSE = 0.05
+
 # Mic-health probe TTL (bugfix Issue 3 / P1.M2.T2.S1): re-probe at most once every 30s so _arm()
 # does NOT pay the ~40ms PyAudio init on every keystroke. _refresh_mic_status() skips the probe
 # when the last probe is within this window; __init__ (force=True) and explicit force=True bypass it.
@@ -461,9 +480,22 @@ def _construct(
     compute_type=int8, model=tiny.en — the CPU substitute fills BOTH slots). The NON-device kwargs
     (language, timing, _FIXED_KWARGS) still come from cfg as usual; only device/compute_type/
     model are overridden. Consumed via build_recorder(..., force_cpu=True).
+
+    BUG-002 / P1.M2.T2.S2 (PRD §4.2sexies R.1/R.8): BULK-ONLY recognizer cadence. When
+    cfg.output.delivery == "bulk-text", kwargs["realtime_processing_pause"] is overridden to
+    _BULK_REALTIME_PROCESSING_PAUSE AFTER cfg_to_kwargs (which stays delivery-blind, pure
+    cfg → kwargs) and BEFORE the callback merge. The override is a pure function of the
+    EXISTING cfg — no state, no knob — so the recorder-host child (which builds via THIS
+    function with the full pickled cfg) inherits it across the spawn boundary. Stream-edit
+    builds keep cfg.asr.realtime_processing_pause byte-identically (re-proven by
+    tests/test_bulk_stage_remediation.py). Rationale: S6's stage decomposition names the
+    decode-evaluation cadence — not relay, writer, or adapter paint — as the dominant
+    speech→visible stage; see _BULK_REALTIME_PROCESSING_PAUSE for the numbers.
     """
     resolved = dict(cuda_check.CPU_FALLBACK) if force_cpu else None
     kwargs = cfg_to_kwargs(cfg, resolved=resolved)
+    if cfg.output.delivery == "bulk-text":
+        kwargs["realtime_processing_pause"] = _BULK_REALTIME_PROCESSING_PAUSE
     kwargs.update(_build_callbacks(feedback, latency, on_speech=on_speech, partial_source=partial_source))
     if extra_kwargs:
         # P1.M2.T5.S1: the recorder-host CHILD injects the context-prompt executors here (after

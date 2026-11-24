@@ -569,3 +569,88 @@ Candidate criteria for the T2 subtasks: the winning arm's update volume/burst pr
   the arms' own `partial_callback` label (the treatment variable — excluded from
   the equality check by design). Effective sources: plain =
   `on_realtime_transcription_update`, stabilized = `on_realtime_transcription_stabilized`.
+
+## Candidate remediation (P1.M2.T2.S2)
+
+- Date: 2026-11-24. HEAD: a14335c (S1's controller-promptness change landed at this commit).
+- This section records a CANDIDATE, not a verdict. The verdict table above stays the
+  authoritative one; refreshing it (and the G6/README claims) is T2.S3's qualification.
+  Vocabulary here is the S6 evidence vocabulary (measured / candidate / blocked), never
+  route verdicts.
+
+### S6 verdict consumed (quoted numbers)
+
+- pi-ghostty, both arms: per-word speech→visible med 7786.2 ms (stabilized) / 11983.1 ms
+  (plain), p95 ~16070 ms — one to two orders of magnitude above every post-callback stage:
+  useful→field (merged) 3.5–4.4 ms; S5-qualified paint 29.8–42.7 ms.
+- im-gtk, stabilized arm: per-word speech→visible med 190.5 ms / p95 244.3 ms; useful→field
+  (merged) 2.6 ms.
+- S6's own pointer, verbatim: "the remediation should NOT spend effort on the adapter paint
+  path"; the dominant share sits BEFORE the callback/adapter stages — the decode-evaluation
+  cadence + delivery complex (hypothesis growth sparse: 14–17 of ~1400–1500 updates move the
+  field; 501–737 same-text no-ops; sentence-end dumps, backlog max 57).
+- im-gtk plain arm: not-run (two sanctioned attempts, runner-side re-arm gate error) — no
+  numbers exist and none were borrowed.
+
+### Selection (R.8) — deliberately NOT flipped, with the numbers
+
+- pi-ghostty callback boundary: plain's first useful update is +1.3 ms LATER than
+  stabilized's; field boundary: plain −3.3 ms earlier — under the editor's 10 ms read-poll
+  quantum. S6's conclusion stands: the callback choice does not move visible lag.
+- im-gtk's plain arm is not-run, so "plain wins on visible lag on BOTH routes" is not
+  satisfied even at the noise level. The `_PARTIAL_CALLBACK_ATTR` default stays
+  "stabilized"; churn deltas (737 vs 501 no-ops) are moot without a latency win.
+
+### Chosen stage and the exact diff/settings
+
+- Stage: the recognizer/decode cadence — the single dominant post-selection stage per S6 on
+  both routes (everything measured downstream is ≤43 ms; the lag is seconds).
+- Fix: module constant `_BULK_REALTIME_PROCESSING_PAUSE = 0.05` in `voice_typing/daemon.py`;
+  `_construct` overrides `kwargs["realtime_processing_pause"]` to it AFTER `cfg_to_kwargs`
+  (which stays delivery-blind) and BEFORE the callback merge, ONLY when
+  `cfg.output.delivery == "bulk-text"`. Stream-edit builds keep
+  `cfg.asr.realtime_processing_pause` byte-identically. Mode-scoped CODE constant (the
+  §4.2ter lite-mode precedent) — NO new config key, no schema change. Docstrings updated on
+  the constant + `_construct` (Mode A). One stage per changeset; relay and adapter untouched.
+- Why this moves the measured number: `realtime_processing_pause` is RealtimeSTT's realtime
+  decode loop's inter-evaluation sleep (cfg default 0.15 s). At bulk cadence, a mid-clip
+  word's hypothesis update waits through that sleep between eligible decodes; 0.05 s
+  shortens speech→useful-update without touching the paint path, the relay, the writer, or
+  any guard. The recorder-host child builds via the same `_construct` with the full pickled
+  cfg, so the spawn path inherits the override as a pure function of cfg (no state).
+
+### Regression proof (hermetic; no live desktop, no G5 lab run)
+
+- `timeout 300 .venv/bin/python -m pytest tests/test_bulk_stage_remediation.py -q`
+  → 9 tests green (bulk → 0.05; stream → cfg value byte-identical incl. a non-default 0.2;
+  override wins over ANY cfg value; pure function of cfg with no cross-build leak; config
+  schema unchanged — AsrConfig keeps exactly one pause field, OutputConfig gains none;
+  exactly ONE partial-callback key registered in BOTH modes and it is "stabilized";
+  a recorder signature without the pause kwarg still builds in bulk mode; the child's
+  executor `extra_kwargs` win their own keys and carry no pause key).
+- `timeout 300 .venv/bin/python -m pytest tests/test_bulk_dispatch.py
+  tests/test_bulk_context_prompt.py tests/test_session_recovery.py
+  tests/test_bulk_controller.py tests/test_g2_bulk_gate.py -q` → 131 green
+  (S1's gates + the bulk/recovery rails re-proven).
+- `timeout 600 .venv/bin/python -m pytest tests/ --ignore=tests/test_feed_audio.py -q`
+  → 40 not-green / 1629 green; the 40-name population is IDENTICAL with the two changed
+  files removed (control re-run: 40 not-green / 1620 green) — every one pre-existing
+  (39 daemon/streaming/systemd environmental + 1 ordering-dependent ime_manager import
+  flake that is green standalone). Zero not-green in any bulk or ducking suite.
+
+### Known limits (non-verdict)
+
+- CANDIDATE status: 0.05 s is a design choice inside the hermetic rails; its effect on the
+  real routes is unmeasured by S2 (no G5 run was started here, per the automation law).
+- S6 recorded no ack_ts on any route, so update→ack / ack→field stay unsplit; the relay and
+  adapter stages are NOT indicted by any measured number and were not touched.
+- The im-gtk/plain re-run and the paired-selection record remain open items (S6's list).
+
+### T2.S3 handoff
+
+- Qualify this candidate on BOTH real routes against the R.7 gate numbers, then refresh the
+  verdict table above and the G6/README claims. If pi-ghostty's per-word lag does not move
+  enough, the next measured suspects are the constant VALUE (0.05) and the bulk-delivery
+  writer complex (S1's controller) — NOT the adapter paint path. Re-open the selection
+  default ONLY on an im-gtk/plain re-run that shows a visible-lag win with churn inside
+  S1's absorbed profile.
