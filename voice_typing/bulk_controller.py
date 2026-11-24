@@ -222,6 +222,7 @@ class BulkController:
         *,
         queue_size: int = 32,
         on_stopped=None,
+        on_applied=None,
         op_deadline: float = 0.25,
     ) -> None:
         """Args:
@@ -234,6 +235,17 @@ class BulkController:
             disarm). Must be quick and non-blocking; it runs on whichever
             thread triggered the stop (reader or writer), never under the
             condition lock.
+        on_applied: optional per-op confirmation hook (P1.M6.T2.S1) fired on
+            EVERY in-time ShowResult.APPLIED show/finalize/cancel with
+            ``(kind, gen, utterance, seq, revision, chars, elapsed_ms)`` —
+            kind is "show"|"finalize"|"cancel", revision is the PRE-op
+            value, chars is the applied span length (NEGATIVE for cancel:
+            the removed owned-range size), elapsed_ms is the dispatch wall
+            time. Same law as on_stopped: quick and non-blocking, fired
+            OUTSIDE the condition lock (the writer thread for
+            show/finalize, the cancel caller's thread for cancel), wrapped —
+            a feedback failure must never kill the writer. Default None
+            keeps the controller byte-identical for existing callers.
         op_deadline: the 250 ms ENGINEERING DEADLINE per target operation,
             in seconds (R.5: "250 ms engineering deadline") — a code
             constant here, NOT config (the config surface is P1.M3.T3.S1's).
@@ -244,6 +256,7 @@ class BulkController:
         self._target = target
         self._queue_size = max(1, int(queue_size))
         self._on_stopped = on_stopped
+        self._on_applied = on_applied  # P1.M6.T2.S1: the per-APPLIED confirmation seam
         self._cond = threading.Condition()
         self._dq: collections.deque = collections.deque()
         self._session_gen: int | None = None
@@ -411,6 +424,11 @@ class BulkController:
             }
             if not pending:
                 return True
+            # P1.M6.T2.S1 on_applied capture (BEFORE the purge below): the uids /
+            # high-water seq / owned-range size being removed — counts only (R.5).
+            cancel_uids = sorted(str(k[1]) for k in pending)
+            cancel_seq = max((self._high_seq.get(k, 0) for k in pending), default=0)
+            cancel_chars = -sum(len(self._shown_span.get(k, "")) for k in pending)
             # Purge their queued partials, close the boundaries (late strays
             # discard on sight), kill the mutation-time re-check, drop the
             # shown spans — the owned range is about to leave the field.
@@ -432,6 +450,8 @@ class BulkController:
         with self._cond:
             if not self._active or epoch != self._dispatch_epoch:
                 return True  # a stop raced the purge: dead on arrival, ZERO target calls
+        import time  # local: the module's stdlib import allowlist is test-pinned
+        t0 = time.monotonic()  # P1.M6.T2.S1: on_applied wall-time stamp (pre-op)
         future = runner.submit(self._target.cancel)
         future.add_done_callback(lambda f: self._note_late(f, epoch))
         try:
@@ -453,18 +473,30 @@ class BulkController:
             logger.warning("bulk_controller: target cancel raised %s", type(exc).__name__)
             return False
 
+        ok = False
+        applied = False  # P1.M6.T2.S1: fire on_applied OUTSIDE _cond on APPLIED only
         with self._cond:
             if epoch != self._dispatch_epoch or not self._active:
                 return False  # LATE: the stop path owns the discard
             if result is ShowResult.APPLIED:
                 self._expected_revision = revision + 1  # +1 ONLY on applied
-                return True  # owned range removed; STAYS active (mic keeps listening)
-            if result is ShowResult.UNCHANGED:
-                return True  # nothing owned at the target — fine
-            stopped = self._stop_locked(result.value)  # REFUSED / UNKNOWN — never retry
+                applied = True  # owned range removed; STAYS active (mic keeps listening)
+                ok = True
+            elif result is ShowResult.UNCHANGED:
+                ok = True  # nothing owned at the target — fine
+            else:
+                stopped = self._stop_locked(result.value)  # REFUSED / UNKNOWN — never retry
         if stopped:
             self._fire_on_stopped()
-        return False
+        if applied and self._on_applied is not None:
+            try:
+                self._on_applied(
+                    "cancel", cur, ",".join(cancel_uids), cancel_seq, revision,
+                    cancel_chars, int((time.monotonic() - t0) * 1000),
+                )
+            except Exception:  # noqa: BLE001 — a feedback failure must never kill the caller
+                logger.warning("bulk_controller: on_applied callback failed", exc_info=True)
+        return ok
 
     # -- event entries (reader/control threads: enqueue-and-return ONLY) -----
 
@@ -702,6 +734,8 @@ class BulkController:
                 self._stats["discarded_stale"] += 1
                 return True
             epoch = self._dispatch_epoch  # give-up guard: captured BEFORE submit
+        import time  # local: the module's stdlib import allowlist is test-pinned
+        t0 = time.monotonic()  # P1.M6.T2.S1: on_applied wall-time stamp (pre-op)
         future = runner.submit(op, item.gen, item.utterance, item.seq, revision, item.span)
         future.add_done_callback(lambda f: self._note_late(f, epoch))
         try:
@@ -746,6 +780,17 @@ class BulkController:
                 stopped = self._stop_locked(result.value)
         if stopped:
             self._fire_on_stopped()
+        # P1.M6.T2.S1: per-APPLIED confirmation hook — OUTSIDE _cond (the
+        # on_stopped precedent), pre-op revision, counts + times only (R.5).
+        if result is ShowResult.APPLIED and self._on_applied is not None:
+            try:
+                self._on_applied(
+                    "show" if isinstance(item, _Partial) else "finalize",
+                    item.gen, item.utterance, item.seq, revision, len(item.span),
+                    int((time.monotonic() - t0) * 1000),
+                )
+            except Exception:  # noqa: BLE001 — a feedback failure must never kill the writer
+                logger.warning("bulk_controller: on_applied callback failed", exc_info=True)
         return True
 
     def drain(self, max_items: int | None = None) -> int:

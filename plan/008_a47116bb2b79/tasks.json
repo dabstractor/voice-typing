@@ -843,14 +843,14 @@
               "type": "Task",
               "id": "P1.M6.T2",
               "title": "Wire bulk delivery into the daemon + session recovery + voicectl session",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Route partial/final to the bulk controller when delivery=bulk-text; intercept bulk cancel BEFORE the legacy backspace compensation; disarm paths with no late flush; R.6 recovery memory; the session CLI.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T2.S1",
                   "title": "Dispatch wiring + bulk cancel intercept",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S3",
@@ -868,7 +868,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T2.S2",
                   "title": "Session recovery memory (R.6)",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T2.S1"
@@ -883,7 +883,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T2.S3",
                   "title": "voicectl session [--copy]",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T2.S2",
