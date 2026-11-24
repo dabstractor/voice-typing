@@ -18,11 +18,16 @@ Subcommands (PRD §4.8):
              + context-prompt + delivery (mode/state, reason/op when present)
     quit     request a clean daemon shutdown (releases GPU workers)
     cancel   drop the pending dictation fragment and keep listening (Backspace keybind fallback)
+    session  print the most recent COMPLETED dictation session (arm→disarm recovery,
+             R.6; never a moving draft). --copy stages it on the Wayland CLIPBOARD
+             instead — exact bytes, no added newline, PRIMARY untouched, never
+             types/erases/submits. Exit 1 when no completed session exists.
 
-Usage:  voicectl <toggle|start|stop|status|cancel|quit>
+Usage:  voicectl <toggle|start|stop|status|cancel|quit|session>
         (the full usage table is in the project README; this is the user-facing CLI surface.)
 
-Stdlib-only: argparse, json, socket, sys + the shared socket-path resolver from voice_typing.daemon.
+Stdlib-only: argparse, json, os, shutil, socket, subprocess, sys, threading, time + the shared
+socket-path resolver from voice_typing.daemon.
 """
 
 from __future__ import annotations
@@ -30,9 +35,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import threading
+import time
 
 from voice_typing.daemon import (
     _default_control_socket_path,
@@ -45,7 +53,9 @@ _COMMANDS: tuple[str, ...] = (
     "status",
     "quit",
     "cancel",
-)  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' = Backspace-cancel fallback (P1.M2.T7.S1)
+    "session",
+)  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' = Backspace-cancel fallback (P1.M2.T7.S1);
+# 'session' = R.6 recovery surface (P1.M6.T2.S3)
 # Migration shim (validation Issue 2): Rev 1's two-mode CLI survives in the wild — e.g. this
 # machine's own pre-Rev-2 Hyprland keybind wrapper still ends in `voicectl toggle-lite`.
 # main() remaps it to the canonical command BEFORE the _COMMANDS validation so stale callers
@@ -65,6 +75,16 @@ _LOADING_HINT_DELAY: float = 0.3
 # wedged daemon hung the keybind's `voicectl toggle` forever — the "stops responding to my
 # shortcut" report. Overridable: VOICECTL_TIMEOUT=<seconds> (tests use it).
 _SOCKET_TIMEOUT_S: float = 10.0
+
+# P1.M6.T2.S3 (--copy): wl-clipboard tools + subprocess bounds. Absolute paths preferred
+# (verified present on this machine) with a PATH fallback via shutil.which; a missing
+# binary is a REPORTED copy failure (exit 1), never a typing fallback (PRD §4.2sexies R.3).
+_WL_COPY = "/usr/bin/wl-copy"
+_WL_PASTE = "/usr/bin/wl-paste"
+_WL_STAGE_TIMEOUT_S = 5.0  # wl-copy subprocess timeout (fork-mode parent)
+_WL_VERIFY_DEADLINE_S = 2.0  # total wl-paste verify poll budget
+_WL_PASTE_TIMEOUT_S = 1.0  # each wl-paste attempt
+_WL_VERIFY_POLL_S = 0.025  # poll interval
 
 
 def _socket_timeout_s() -> float:
@@ -90,6 +110,9 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
                                         delivery reason/delivery op (only when non-empty)
                                         (PRD §4.8; mic per bugfix Issue 2; context-prompt P1.M2.T5.S2;
                                         delivery P1.M3.T3.S2 — PRD §4.2sexies R.5 status surface)
+      - session                       -> the recovered session text, exactly (print adds the
+                                        single terminal newline; P1.M6.T2.S3 — truncation is
+                                        reported on stderr by main(), never here)
       - toggle/start/stop/cancel      -> "listening: on" / "listening: off"
 
     Defensive .get(...) everywhere so a missing key never raises (the protocol guarantees the 8-key
@@ -159,13 +182,23 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         if load_error:  # surface §4.2bis load failures (absent on the happy path)
             text += f"\nload error: {load_error}"
         return text, 0
+    if cmd == "session":
+        # P1.M6.T2.S3 (§4.2sexies R.6): stdout is EXACTLY the recovered text (print adds
+        # the single terminal newline); truncation is reported on stderr by main(); the
+        # ok:false none-case never reaches here (first branch → exit 1).
+        session = response.get("session") or {}
+        return session.get("text", "") or "", 0
     # toggle / start / stop / cancel (cancel is NOT an arm command: no loading hint, falls through
     # to the default branch — P1.M2.T7.S1)
     return f"listening: {'on' if response.get('listening') else 'off'}", 0
 
 
-def send_command(socket_path: str, cmd: str) -> dict:
+def send_command(socket_path: str, cmd: str, extra: dict | None = None) -> dict:
     """Open the control socket, send {"cmd": <cmd>}\\n, read ONE JSON line, return the parsed dict.
+
+    `extra` payload keys are merged after 'cmd' (P1.M6.T2.S3: {"copy": true} for session
+    --copy); the daemon ignores unknown keys, so old daemons fail safe (unknown command
+    -> exit 1, clipboard untouched).
 
     Raises OSError (FileNotFoundError / ConnectionRefusedError / PermissionError) if the daemon is
     unreachable at connect time — caller maps to exit 2. Raises ValueError if the daemon replies with
@@ -181,7 +214,7 @@ def send_command(socket_path: str, cmd: str) -> dict:
         sock.connect(
             socket_path
         )  # raises FileNotFoundError/ConnectionRefusedError/PermissionError
-        sock.sendall((json.dumps({"cmd": cmd}) + "\n").encode("utf-8"))
+        sock.sendall((json.dumps({"cmd": cmd, **(extra or {})}) + "\n").encode("utf-8"))
         buf = bytearray()
         try:
             while b"\n" not in buf:
@@ -224,6 +257,68 @@ def _send_command_with_loading_hint(socket_path: str, cmd: str) -> dict:
         timer.cancel()
 
 
+def _resolve_tool(preferred: str, name: str) -> str | None:
+    """Absolute-path-first tool resolver (P1.M6.T2.S3): use the pinned path when it exists,
+    else fall back to $PATH via shutil.which. None = not installed (a REPORTED copy failure).
+    """
+    return preferred if os.path.exists(preferred) else shutil.which(name)
+
+
+def _copy_session_to_clipboard(text: str) -> tuple[bool, str]:
+    """Stage `text` on the Wayland CLIPBOARD — exact UTF-8 bytes, NO added newline —
+    and verify the round-trip. Returns (ok, error detail).
+
+    Stage: wl-copy FORK MODE (no --foreground — it blocks until the selection is
+    replaced; a CLI hang risk). Source-verified: wl-copy's parent exits 0 only AFTER
+    set_selection + roundtrip, so exit 0 means the selection is registered; the
+    forked child serves it until the next selection (normal paste UX). Verify:
+    `wl-paste --no-newline` stdout must BYTE-EQUAL the staged bytes (wl-paste always
+    appends \\n without --no-newline); bounded poll — a fresh connection can see the
+    new selection one event-loop turn later. PRIMARY untouched (no --primary); no
+    --paste-once (a history-manager read would consume the offer); no --trim-newline
+    (we add no newline). NEVER types/erases/submits: the only subprocesses are
+    wl-copy and wl-paste (PRD §4.2sexies R.6; research/wlclipboard_external.md).
+    """
+    wl_copy = _resolve_tool(_WL_COPY, "wl-copy")
+    if wl_copy is None:
+        return False, "wl-copy not found (install wl-clipboard)"
+    wl_paste = _resolve_tool(_WL_PASTE, "wl-paste")
+    if wl_paste is None:
+        return False, "wl-paste not found (install wl-clipboard)"
+    payload = text.encode("utf-8")
+    try:
+        staged = subprocess.run(
+            [wl_copy, "--type", "text/plain;charset=utf-8"],
+            input=payload,
+            capture_output=True,
+            timeout=_WL_STAGE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "wl-copy timed out staging the clipboard"
+    if staged.returncode != 0:
+        lines = staged.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        first = lines[0] if lines else f"exit {staged.returncode}"
+        return False, f"wl-copy failed: {first}"
+    deadline = time.monotonic() + _WL_VERIFY_DEADLINE_S
+    while True:
+        try:
+            readback = subprocess.run(
+                [wl_paste, "--no-newline"],
+                capture_output=True,
+                timeout=_WL_PASTE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "wl-paste timed out verifying the clipboard"
+        if readback.returncode == 0 and readback.stdout == payload:
+            return True, ""
+        if time.monotonic() >= deadline:
+            return False, (
+                "clipboard verification failed (content did not match within "
+                f"{_WL_VERIFY_DEADLINE_S:.0f}s)"
+            )
+        time.sleep(_WL_VERIFY_POLL_S)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """argparse with one optional positional `cmd`. choices validation is intentionally NOT done
     here — main() validates against _COMMANDS so usage errors map to exit 64 (EX_USAGE), not
@@ -235,12 +330,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "prints the result. Exits 0 on success, 1 on a logical failure, 2 if the daemon is not "
             "running, 64 on a usage error (unknown/missing command)."
         ),
-        epilog="subcommands: toggle, start, stop, status, quit, cancel  (see the project README for the full usage table)",
+        epilog="subcommands: toggle, start, stop, status, quit, cancel, session [--copy]  (see the project README for the full usage table)",
     )
     parser.add_argument(
         "cmd",
         nargs="?",
-        help="toggle | start | stop | status | quit | cancel",
+        help="toggle | start | stop | status | quit | cancel | session",
+    )
+    parser.add_argument(
+        "--copy",
+        action="store_true",
+        help="with 'session': copy the recovered text to the Wayland clipboard (exact "
+        "bytes, no added newline, PRIMARY untouched) instead of printing it",
     )
     return parser
 
@@ -257,6 +358,13 @@ def main(argv: list[str] | None = None) -> int:
     Migration (validation Issue 2): a command found in _ALIASES ('toggle-lite') is remapped to
     its canonical name BEFORE validation, so a Rev 1 caller arms dictation instead of dying
     with exit 64. Unknown names are untouched by the remap and still exit 64.
+
+    session (P1.M6.T2.S3): prints the most recent COMPLETED dictation session; --copy stages
+    it on the Wayland clipboard instead (exact bytes, byte-verified via wl-paste --no-newline)
+    and prints 'copied N chars'. Exit 1 when no completed session exists (clipboard untouched —
+    the ok:false reply rides format_result's error branch before any copy code runs). --copy
+    with a non-session command is a usage error (64). Truncation (store cap) is reported on
+    stderr only; stdout stays the exact recovered text.
     """
     args = _build_parser().parse_args(argv)
     cmd: str | None = args.cmd  # None when no command given (positional is nargs='?')
@@ -276,6 +384,9 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
         return _EX_USAGE
+    if args.copy and cmd != "session":
+        print("voicectl: --copy applies only to the 'session' command", file=sys.stderr)
+        return _EX_USAGE
 
     # 1. Resolve the socket path. XDG_RUNTIME_DIR unset -> RuntimeError -> daemon can't be running.
     try:
@@ -290,12 +401,15 @@ def main(argv: list[str] | None = None) -> int:
     #    start/toggle may block ~1–3 s on the COLD FIRST ARM (PRD §4.2bis lazy load of the single
     #    model); route them through _send_command_with_loading_hint so voicectl prints a 'loading
     #    models…' hint if the reply is slow (resident arms reply in ms → no hint).
-    #    stop/status/quit/cancel use plain send_command (cancel is NOT an arm command; P1.M2.T7.S1).
+    #    stop/status/quit/cancel/session use plain send_command (cancel is NOT an arm command;
+    #    P1.M2.T7.S1). session passes {"copy": true} on the wire when --copy was given (the
+    #    daemon logs it; the copy itself is CLIENT-side — P1.M6.T2.S3).
     try:
+        extra = {"copy": True} if (cmd == "session" and args.copy) else None
         if cmd in ("start", "toggle"):
             response = _send_command_with_loading_hint(socket_path, cmd)
         else:
-            response = send_command(socket_path, cmd)
+            response = send_command(socket_path, cmd, extra=extra)
     except (
         OSError
     ) as exc:  # FileNotFoundError / ConnectionRefusedError / PermissionError
@@ -307,6 +421,25 @@ def main(argv: list[str] | None = None) -> int:
 
     # 3. Format + print the human result; return the exit code.
     text, code = format_result(cmd, response)
+    if cmd == "session" and code == 0:
+        # P1.M6.T2.S3: truncation warning -> STDERR (stdout purity); then either the
+        # --copy flow (stage + verify + 'copied N chars') or the plain print below. The
+        # none-case never gets here: ok:false -> code 1 from format_result's first branch.
+        session = response.get("session") or {}
+        if session.get("truncated"):
+            dropped = session.get("finals_dropped", 0)
+            print(
+                f"voicectl: session was truncated ({dropped} finals dropped by the "
+                "1 MiB cap; the newest text that fits is shown)",
+                file=sys.stderr,
+            )
+        if args.copy:
+            copied, detail = _copy_session_to_clipboard(text)
+            if not copied:
+                print(f"voicectl: {detail}", file=sys.stderr)
+                return 1
+            print(f"copied {len(text)} chars")
+            return 0
     print(text)
     return code
 

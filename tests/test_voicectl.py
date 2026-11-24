@@ -191,9 +191,11 @@ def test_format_ok_false_missing_error_key_is_defensive():
 
 class _StubDaemon:
     """Duck-type VoiceTypingDaemon for round-trip tests (mirror tests/test_control_socket.py)."""
-    def __init__(self):
+    def __init__(self, session=None):
         self.calls = []
         self._listening = False
+        self._session = session
+        self.session_calls: list[bool] = []
 
     def toggle(self):
         self.calls.append("toggle")
@@ -220,6 +222,14 @@ class _StubDaemon:
 
     def status_snapshot(self):
         return {**_STATUS_ON, "listening": self._listening}
+
+    def session_reply(self, copy: bool = False):
+        # P1.M6.T2.S3: mirror VoiceTypingDaemon.session_reply() — records the copy flag,
+        # returns the canned shape (None -> the no-completed-session error).
+        self.session_calls.append(bool(copy))
+        if self._session is None:
+            return {"ok": False, "error": "no completed session yet"}
+        return {"ok": True, "session": dict(self._session)}
 
 
 @pytest.fixture
@@ -452,11 +462,12 @@ def test_dispatch_start_ok_true_when_no_load_error_attr():
 #  catches a stale epilog/docstring line the way Issue 3's positive sweep caught the missing ones.)
 # ===========================================================================
 def test_help_surfaces_list_all_commands():
-    """Rev 2 surface (P1.M1.T2.S3; 'cancel' added by P1.M2.T7.S1): exactly 6 commands in _COMMANDS,
+    """Rev 2 surface (P1.M1.T2.S3; 'cancel' added by P1.M2.T7.S1; 'session' added by
+    P1.M6.T2.S3): exactly 7 commands in _COMMANDS,
     --help (positional help + epilog), and the module docstring — and NO stale lite entries
     anywhere (bugfix Issue 3's consistency guard, inverted for the collapse).
     """
-    commands = {"toggle", "start", "stop", "status", "quit", "cancel"}
+    commands = {"toggle", "start", "stop", "status", "quit", "cancel", "session"}
     assert set(ctl._COMMANDS) == commands, sorted(ctl._COMMANDS)   # _COMMANDS = the source of truth
     # (1) argparse --help (format_help renders BOTH the positional help AND the epilog):
     help_text = ctl._build_parser().format_help()
@@ -477,7 +488,7 @@ def test_help_surfaces_list_all_commands():
 def test_cancel_in_commands_docstring_and_epilog():
     """'cancel' is a first-class subcommand: the _COMMANDS entry, the module docstring subcommand
     block, and the --help epilog all list it."""
-    assert ctl._COMMANDS == ("toggle", "start", "stop", "status", "quit", "cancel")
+    assert ctl._COMMANDS == ("toggle", "start", "stop", "status", "quit", "cancel", "session")
     assert "cancel" in (ctl.__doc__ or ""), "the module docstring's subcommand block must list cancel"
     epilog = ctl._build_parser().epilog or ""
     assert "cancel" in epilog, "the argparse epilog must list cancel"
@@ -498,3 +509,218 @@ def test_main_cancel_round_trip_returns_zero_and_routes(capsys, running_server):
     assert code == 0
     assert "listening:" in out
     assert srv._daemon.calls == ["cancel"], "the cancel command must reach the daemon"
+
+
+# ===========================================================================
+# P1.M6.T2.S3 — `voicectl session [--copy]` (R.6 recovery surface)
+# Layer A: format_result session branch (pure); Layer B: main() orchestration over the
+# running_server fixture; helper tests: _copy_session_to_clipboard with a fully mocked
+# subprocess (G10: no real clipboard is EVER touched in automated validation).
+# ===========================================================================
+
+_SESSION = {
+    "text": "hello dictated world", "truncated": False, "finals": 3,
+    "finals_dropped": 0, "tail_chars": 0, "ended_monotonic": 12345.678,
+}
+
+
+# --- Layer A: format_result session branch (PURE) -----------------------------------------
+
+def test_format_session_prints_text_exactly():
+    """session ok:true → (text, 0) — stdout is EXACTLY the recovered text, no metadata (G2)."""
+    text, code = ctl.format_result("session", {"ok": True, "session": dict(_SESSION)})
+    assert (text, code) == (_SESSION["text"], 0)
+    assert "truncated" not in text and "finals" not in text
+
+
+def test_format_session_none_is_error_exit1():
+    """The none-case rides format_result's FIRST branch (G1): ok:false → error text + exit 1 —
+    so --copy code in main() is unreachable when no session exists (clipboard untouched)."""
+    text, code = ctl.format_result("session", {"ok": False, "error": "no completed session yet"})
+    assert (text, code) == ("error: no completed session yet", 1)
+
+
+# --- Layer B: main() orchestration over the real socket -----------------------------------
+
+def test_main_session_round_trip_prints_text(capsys, running_server):
+    """Full stack: canned session → main(["session"]) == 0; stdout is EXACTLY text + one
+    terminal newline (byte-exact stdout purity, G2)."""
+    srv, _path = running_server
+    srv._daemon._session = dict(_SESSION)
+    code = ctl.main(["session"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out == _SESSION["text"] + "\n"
+
+
+def test_main_session_none_exits_1_no_subprocess(monkeypatch, capsys, running_server):
+    """No completed session → exit 1, 'error: no completed session yet' on stdout, and ZERO
+    subprocesses (clipboard untouched — G1/G10 by construction: ok:false → code 1 → the
+    --copy orchestration never runs)."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError("subprocess spawned on the none path")
+
+    monkeypatch.setattr(ctl.subprocess, "run", _boom)
+    srv, _path = running_server   # default stub: _session is None
+    code = ctl.main(["session"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert out == "error: no completed session yet\n"
+
+
+def test_main_session_truncation_warns_on_stderr(capsys, running_server):
+    """Truncated session (store cap): exit 0, stdout == text exactly, the warning + the
+    finals_dropped count on STDERR only (G2)."""
+    srv, _path = running_server
+    canned = {**_SESSION, "text": "only the newest tail", "truncated": True,
+              "finals_dropped": 2}
+    srv._daemon._session = canned
+    code = ctl.main(["session"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out == "only the newest tail\n"
+    assert "truncated" in err and "2" in err
+    assert "truncated" not in out
+
+
+def test_main_session_copy_calls_helper_with_exact_text(monkeypatch, capsys, running_server):
+    """--copy: the helper is called ONCE with EXACTLY the recovered text; stdout 'copied N chars'."""
+    calls: list[str] = []
+
+    def fake_copy(t):
+        calls.append(t)
+        return (True, "")
+
+    monkeypatch.setattr(ctl, "_copy_session_to_clipboard", fake_copy)
+    srv, _path = running_server
+    srv._daemon._session = dict(_SESSION)
+    code = ctl.main(["session", "--copy"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert calls == [_SESSION["text"]]
+    assert out == f"copied {len(_SESSION['text'])} chars\n"
+
+
+def test_main_session_copy_failure_exits_1(monkeypatch, capsys, running_server):
+    """A failed copy (wl-copy error / verify timeout) → exit 1, detail on stderr, no 'copied'."""
+    monkeypatch.setattr(
+        ctl, "_copy_session_to_clipboard", lambda t: (False, "wl-copy failed: boom")
+    )
+    srv, _path = running_server
+    srv._daemon._session = dict(_SESSION)
+    code = ctl.main(["session", "--copy"])
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert "wl-copy failed: boom" in err
+    assert "copied" not in out
+
+
+def test_main_session_copy_sends_copy_flag_through_socket(monkeypatch, running_server):
+    """Full-stack wire pin: --copy → {"copy": true} survives send_command → _dispatch → the
+    stub records session_calls == [True]."""
+    monkeypatch.setattr(ctl, "_copy_session_to_clipboard", lambda t: (True, ""))
+    srv, _path = running_server
+    srv._daemon._session = dict(_SESSION)
+    assert ctl.main(["session", "--copy"]) == 0
+    assert srv._daemon.session_calls == [True]
+
+
+def test_main_copy_flag_requires_session(capsys):
+    """--copy with a non-session command is a usage error (64) BEFORE any socket resolution."""
+    code = ctl.main(["status", "--copy"])
+    err = capsys.readouterr().err
+    assert code == 64
+    assert "--copy" in err
+
+
+# --- _copy_session_to_clipboard: fully mocked subprocess (G10) -----------------------------
+
+def test_copy_helper_stages_exact_bytes_no_newline(monkeypatch):
+    """THE clipboard contract (G3/G4/G6): wl-copy fork mode with explicit MIME, input == the
+    exact UTF-8 bytes (no trailing \\n added); wl-paste --no-newline byte-verify; the ONLY
+    subprocesses ever spawned are wl-copy and wl-paste (never wtype/ydotool)."""
+    text = "paste me exactly\nwith a legit trailing newline\n"
+    payload = text.encode("utf-8")
+    calls: list[tuple[list, dict]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs)))
+        if argv[0].endswith("wl-copy"):
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr=b"")
+
+    monkeypatch.setattr(ctl.subprocess, "run", fake_run)
+    ok, detail = ctl._copy_session_to_clipboard(text)
+    assert (ok, detail) == (True, "")
+    copy_calls = [c for c in calls if c[0][0].endswith("wl-copy")]
+    paste_calls = [c for c in calls if c[0][0].endswith("wl-paste")]
+    assert len(copy_calls) == 1 and len(paste_calls) == 1
+    argv, kwargs = copy_calls[0]
+    assert "--type" in argv and "text/plain;charset=utf-8" in argv
+    for banned in ("--primary", "--paste-once", "--trim-newline", "--foreground"):
+        assert banned not in argv
+    assert kwargs["input"] == payload  # EXACT bytes — no trailing b"\n" added
+    paste_argv, _paste_kwargs = paste_calls[0]
+    assert "--no-newline" in paste_argv
+    for argv_all, _kw in calls:  # G6: only wl tools, never wtype/ydotool
+        assert argv_all[0].endswith(("wl-copy", "wl-paste"))
+
+
+def test_copy_helper_verify_retries_then_succeeds(monkeypatch):
+    """A FRESH wl-paste connection may lag one compositor event-loop turn (G4): first readback
+    mismatches, second matches → (True, '')."""
+    text = "retry verify"
+    payload = text.encode("utf-8")
+    state = {"n": 0}
+
+    def fake_run(argv, **kwargs):
+        if argv[0].endswith("wl-paste"):
+            state["n"] += 1
+            out = b"stale" if state["n"] == 1 else payload
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr=b"")
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(ctl.subprocess, "run", fake_run)
+    monkeypatch.setattr(ctl, "_WL_VERIFY_POLL_S", 0.0)   # no real sleeping
+    ok, detail = ctl._copy_session_to_clipboard(text)
+    assert (ok, detail) == (True, "")
+    assert state["n"] == 2
+
+
+def test_copy_helper_verify_timeout_fails(monkeypatch):
+    """wl-paste never sees the bytes → bounded failure with 'verification failed' detail."""
+    text = "never matches"
+    bad = b"something else"
+
+    def fake_run(argv, **kwargs):
+        if argv[0].endswith("wl-paste"):
+            return subprocess.CompletedProcess(argv, 0, stdout=bad, stderr=b"")
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(ctl.subprocess, "run", fake_run)
+    monkeypatch.setattr(ctl, "_WL_VERIFY_DEADLINE_S", 0.05)
+    monkeypatch.setattr(ctl, "_WL_VERIFY_POLL_S", 0.0)
+    ok, detail = ctl._copy_session_to_clipboard(text)
+    assert ok is False and "verification failed" in detail
+
+
+def test_copy_helper_missing_binary(monkeypatch):
+    """wl-copy absent (pinned path missing AND not on PATH) → (False, 'wl-copy not found')."""
+    monkeypatch.setattr(ctl, "_WL_COPY", "/nonexistent/wl-copy")
+    monkeypatch.setattr(ctl.shutil, "which", lambda name: None)
+    ok, detail = ctl._copy_session_to_clipboard("anything")
+    assert ok is False and "wl-copy not found" in detail
+
+
+def test_copy_helper_wl_copy_error_surfaces_stderr(monkeypatch):
+    """wl-copy exit 1 (e.g. not on Wayland) → the first stderr line becomes the failure detail."""
+    err = b"Failed to connect to a Wayland server\n"
+
+    def fake_run(argv, **kwargs):
+        assert argv[0].endswith("wl-copy")
+        return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=err)
+
+    monkeypatch.setattr(ctl.subprocess, "run", fake_run)
+    ok, detail = ctl._copy_session_to_clipboard("anything")
+    assert ok is False and "Failed to connect to a Wayland server" in detail

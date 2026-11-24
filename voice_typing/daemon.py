@@ -3015,6 +3015,22 @@ class VoiceTypingDaemon:
             "ended_monotonic": s.ended_monotonic,
         }
 
+    def session_reply(self, copy: bool = False) -> dict:
+        """Control-socket reply for {"cmd": "session"} — P1.M6.T2.S3 (PRD §4.2sexies R.6).
+
+        Most recent COMPLETED session only (session_snapshot() never exposes an open
+        draft). None → ok:false, so the client's existing error path yields exit 1 with
+        the clipboard untouched. Log line is counts-only (R.6: no transcript-bearing logs).
+        """
+        snap = self.session_snapshot()
+        if snap is None:
+            return {"ok": False, "error": "no completed session yet"}
+        logger.info(
+            "session recovery: session served copy=%d chars=%d truncated=%d",
+            int(bool(copy)), len(snap.get("text", "")), int(bool(snap.get("truncated"))),
+        )
+        return {"ok": True, "session": snap}
+
     def status_snapshot(self) -> dict:
         """The status payload for the control socket `status`/`toggle`/`start`/`stop` cmds.
 
@@ -3290,6 +3306,7 @@ class ControlServer:
       {"cmd":"toggle"|"start"|"stop"|"status"} -> {"ok":true, **daemon.status_snapshot()}
       {"cmd":"cancel"}                         -> {"ok":true, **daemon.status_snapshot()}  (idempotent; T7.S1)
       {"cmd":"quit"}                           -> {"ok":true,"shutting_down":true}  (+ request_shutdown)
+      {"cmd":"session"}                        -> session reply (R.6 recovery surface; session_reply)
       malformed JSON (incl. empty/whitespace-only lines — BUG-005: silence would hang a
                                    client forever on this timeout-less socket)
                                    -> {"ok":false,"error":"malformed JSON: ..."}
@@ -3497,6 +3514,8 @@ class ControlServer:
                 except Exception:
                     logger.exception("on_quit callback failed")
             return {"ok": True, "shutting_down": True}
+        if cmd == "session":  # P1.M6.T2.S3 (§4.2sexies R.6): most recent COMPLETED session
+            return self._daemon.session_reply(copy=bool(msg.get("copy", False)))
         return {"ok": False, "error": f"unknown command: {cmd!r}"}
 
 

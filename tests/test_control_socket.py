@@ -26,9 +26,11 @@ from voice_typing import daemon
 
 class _StubDaemon:
     """Duck-type VoiceTypingDaemon for dispatch tests (no recorder, no CUDA)."""
-    def __init__(self, *, listening=False, snapshot=None):
+    def __init__(self, *, listening=False, snapshot=None, session=None):
         self.calls: list[str] = []
         self._listening = listening
+        self._session = session
+        self.session_calls: list[bool] = []
         self._snapshot = snapshot or {
             "listening": listening, "mode": "lite", "phase": "idle", "models_loaded": True,
             "load_error": "", "partial": "", "last_final": "", "uptime_s": 0.0,
@@ -48,6 +50,13 @@ class _StubDaemon:
     def is_listening(self): return self._listening
     def status_snapshot(self):
         s = dict(self._snapshot); s["listening"] = self._listening; return s  # noqa: E702
+    def session_reply(self, copy: bool = False):
+        # P1.M6.T2.S3: mirror VoiceTypingDaemon.session_reply() — records the copy flag,
+        # returns the canned shape (None -> the no-completed-session error).
+        self.session_calls.append(bool(copy))
+        if self._session is None:
+            return {"ok": False, "error": "no completed session yet"}
+        return {"ok": True, "session": dict(self._session)}
 
 
 def _wait_for(predicate, timeout=2.0, interval=0.01):
@@ -347,3 +356,47 @@ def test_dispatch_cancel_near_miss_still_unknown():
     """Guards the unknown-command fallthrough ordering: a near-miss of 'cancel' is still unknown
     (the 'cancel' case must not shadow other commands, and vice versa)."""
     assert _disp({"cmd": "cancel-now"}) == {"ok": False, "error": "unknown command: 'cancel-now'"}
+
+
+# --- P1.M6.T2.S3: dispatch 'session' ------------------------------------------------------
+
+_SESSION = {
+    "text": "hello world", "truncated": False, "finals": 2,
+    "finals_dropped": 0, "tail_chars": 0, "ended_monotonic": 12345.678,
+}
+
+
+def test_dispatch_session_returns_reply_verbatim():
+    """'session' dispatches to daemon.session_reply() and returns its dict verbatim — NOT via
+    _arm_response, so no status keys leak into the reply (it is exactly {ok, session})."""
+    stub = _StubDaemon(session=dict(_SESSION))
+    r = daemon.ControlServer(stub)._dispatch(json.dumps({"cmd": "session"}))
+    assert r == {"ok": True, "session": dict(_SESSION)}
+    assert set(r) == {"ok", "session"}
+
+
+def test_dispatch_session_reads_copy_flag():
+    """The dispatch reads the additive 'copy' payload key (send_command extra keys, P1.M6.T2.S3):
+    {"cmd":"session","copy":true} -> session_reply(copy=True); key absent -> copy=False."""
+    stub = _StubDaemon(session=dict(_SESSION))
+    daemon.ControlServer(stub)._dispatch(json.dumps({"cmd": "session", "copy": True}))
+    assert stub.session_calls == [True]
+    stub2 = _StubDaemon(session=dict(_SESSION))
+    daemon.ControlServer(stub2)._dispatch(json.dumps({"cmd": "session"}))
+    assert stub2.session_calls == [False]
+
+
+def test_dispatch_session_none_is_error():
+    """No completed session in the store -> the daemon's own ok:false reply rides the existing
+    error path (client exit 1, clipboard untouched — G1)."""
+    assert _disp({"cmd": "session"}) == {"ok": False, "error": "no completed session yet"}
+
+
+def test_socket_session_round_trip(server):
+    """Real AF_UNIX round-trip: the session reply survives the wire verbatim, in both variants."""
+    _srv, path = server
+    r = json.loads(_send(path, {"cmd": "session"}))
+    assert r == {"ok": False, "error": "no completed session yet"}   # none-variant (default stub)
+    _srv._daemon._session = dict(_SESSION)
+    r = json.loads(_send(path, {"cmd": "session"}))
+    assert r == {"ok": True, "session": dict(_SESSION)}

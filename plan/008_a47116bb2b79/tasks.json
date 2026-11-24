@@ -811,7 +811,7 @@
           "type": "Milestone",
           "id": "P1.M6",
           "title": "Recognition integration + delivery lifecycle (R.5/R.6 daemon-side) + G5 timing",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Utterance identities through the recorder relay; bulk wiring into the daemon (enqueue-and-return, cancel intercept before legacy compensation, disarm paths, session recovery memory, voicectl session); bulk committed-context decoupling; the G5 timing harness.",
           "tasks": [
             {
@@ -843,7 +843,7 @@
               "type": "Task",
               "id": "P1.M6.T2",
               "title": "Wire bulk delivery into the daemon + session recovery + voicectl session",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Route partial/final to the bulk controller when delivery=bulk-text; intercept bulk cancel BEFORE the legacy backspace compensation; disarm paths with no late flush; R.6 recovery memory; the session CLI.",
               "subtasks": [
                 {
@@ -883,7 +883,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T2.S3",
                   "title": "voicectl session [--copy]",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T2.S2",
@@ -902,14 +902,14 @@
               "type": "Task",
               "id": "P1.M6.T3",
               "title": "Decouple bulk committed context from StreamingOutput",
-              "status": "Planned",
+              "status": "Ready",
               "description": "The rolling context-prompt push reads _stream.committed today; bulk mode must not silently redefine it — read the bulk controller's last-confirmed text instead.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T3.S1",
                   "title": "Bulk-mode prompt source decision + implementation",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M6.T2.S1"
@@ -927,14 +927,14 @@
               "type": "Task",
               "id": "P1.M6.T4",
               "title": "G5 timing evidence (word-aligned real-voice replay)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Warm GPU, monotonic clocks, word-aligned replay of real voice: speech-end→word-visible median ≤500 ms / p95 <1 s; update-ready→first-changed-frame p95 ≤100 ms insert / ≤50 ms correct; ≥100 insertions and ≥100 corrections per claimed route.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T4.S1",
                   "title": "G5 harness + per-route timing evidence",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T2.S1",
