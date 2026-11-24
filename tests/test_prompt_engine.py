@@ -28,7 +28,7 @@ import types
 import pytest
 
 from voice_typing import prompt_engine
-from voice_typing.config import AsrConfig, VoiceTypingConfig
+from voice_typing.config import AsrConfig, OutputConfig, VoiceTypingConfig
 from voice_typing.prompt_engine import (
     PromptProbeResult,
     PromptedExecutor,
@@ -36,7 +36,12 @@ from voice_typing.prompt_engine import (
     rolling_context_prompt,
     trim_prompt,
 )
-from voice_typing.recorder_host import _ready_payload, augment_kwargs_with_executor
+from voice_typing.recorder_host import (
+    _prompt_targets,
+    _ready_payload,
+    arm_bulk_realtime_executor,
+    augment_kwargs_with_executor,
+)
 
 _RESOLVED_CUDA = {"device": "cuda", "compute_type": "float32", "model": "small.en"}
 _LOG = logging.getLogger("prompt-engine-tests")
@@ -388,3 +393,106 @@ def test_ready_payload_flag_true_and_false():
     assert ready["model"] == "small.en"
     assert _ready_payload(base, False)["context_prompt"] is False
     assert "context_prompt" not in base  # input dict not mutated
+
+
+# ---------------------------------------------------------------------------
+# BUG-002 / validation round 3 — the dedicated bulk REALTIME lane (child wiring)
+#
+# The qualification round measured the collapse of the shared-lane build (~3.7
+# update callbacks per ~17.5 s replay; the 57-word sentence-end dump). For
+# bulk-text builds the child splits the lanes: a DEDICATED beam-1
+# PromptedExecutor takes kwargs["realtime_transcription_executor"] (overriding
+# the shared object) while finals keep the beam-5 context-prompt lane. Any
+# probe failure degrades to the shared executor — the split is an optimization,
+# never a new failure mode. Stream-edit builds never split.
+# ---------------------------------------------------------------------------
+
+
+def _cfg_delivery(delivery: str, context_prompt: bool = True) -> VoiceTypingConfig:
+    return VoiceTypingConfig(
+        asr=AsrConfig(context_prompt=context_prompt),
+        output=OutputConfig(delivery=delivery),
+    )
+
+
+def test_bulk_delivery_splits_realtime_lane():
+    """bulk-text: two DISTINCT executors — finals keep the shared lane, partials get their own."""
+    kwargs: dict = {"model": "small.en", "device": "cuda"}
+    executor = augment_kwargs_with_executor(
+        kwargs, _cfg_delivery("bulk-text"), _RESOLVED_CUDA, _LOG,
+        executor_factory=_FakeExecutor,
+    )
+    assert isinstance(executor, _FakeExecutor) and executor.warmed == 1
+    finals_lane = kwargs["transcription_executor"]
+    realtime_lane = kwargs["realtime_transcription_executor"]
+    assert finals_lane is executor  # the final lane keeps the context-prompt executor
+    assert isinstance(realtime_lane, _FakeExecutor)
+    assert realtime_lane is not finals_lane  # the SPLIT — the whole point
+    assert realtime_lane.args == ("small.en", "cuda", "float32")  # same model, its own instance
+    assert realtime_lane.warmed == 1  # probed before arming, exactly once
+
+
+def test_bulk_realtime_lane_probe_failure_degrades_to_shared(caplog):
+    """A failed lane probe leaves the SHARED executor in the realtime kwarg — pre-split behavior."""
+    good = _FakeExecutor("small.en", "cuda", "float32")
+
+    class _BadExecutor(good.__class__):
+        def warmup(self) -> None:
+            raise RuntimeError("rt lane probe boom")
+
+    calls = {"n": 0}
+
+    def _factory(model: str, device: str, compute_type: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        return _BadExecutor(model, device, compute_type)
+
+    kwargs: dict = {"model": "small.en", "device": "cuda"}
+    with caplog.at_level(logging.INFO, logger="prompt-engine-tests"):
+        executor = augment_kwargs_with_executor(
+            kwargs, _cfg_delivery("bulk-text"), _RESOLVED_CUDA, _LOG,
+            executor_factory=_factory,
+        )
+    assert executor is good
+    assert kwargs["transcription_executor"] is good
+    # Degrade: the realtime kwarg points back at the SHARED executor (identical to
+    # the pre-split build — the lane split never becomes a failure mode):
+    assert kwargs["realtime_transcription_executor"] is good
+    assert calls["n"] == 2  # the dedicated lane WAS attempted before degrading
+    infos = [
+        r for r in caplog.records
+        if r.levelno == logging.INFO and "bulk realtime lane: probe failed" in r.getMessage()
+    ]
+    assert len(infos) == 1  # ONE concise degrade line
+
+
+def test_bulk_realtime_lane_default_factory_uses_greedy_beam(monkeypatch):
+    """Production factory (no injection): the dedicated lane is a greedy beam-1 PromptedExecutor."""
+    captured: dict = {}
+
+    def _fake_probe(executor):
+        captured["executor"] = executor
+        return prompt_engine.PromptProbeResult(ok=True)
+
+    monkeypatch.setattr(prompt_engine, "probe_prompt_executor", _fake_probe)
+    kwargs: dict = {"model": "small.en", "device": "cuda"}
+    executor = arm_bulk_realtime_executor(kwargs, _cfg_delivery("bulk-text"), _RESOLVED_CUDA, _LOG)
+    assert executor is captured["executor"]
+    assert executor._beam_size == 1  # greedy — the measured-collapse fix
+    assert kwargs["realtime_transcription_executor"] is executor
+
+
+def test_prompt_targets_fanout_helper():
+    """_prompt_targets: single lane unchanged; bulk split fans out to BOTH; no executor = none."""
+    main = _FakeExecutor("m", "d", "c")
+    rt = _FakeExecutor("m", "d", "c")
+    # Pre-split shape (stream-edit or degraded bulk): exactly the shared executor.
+    assert _prompt_targets({"realtime_transcription_executor": main}, main) == [main]
+    # Split shape: the distinct realtime executor joins the fan-out.
+    assert _prompt_targets(
+        {"realtime_transcription_executor": rt, "transcription_executor": main}, main
+    ) == [main, rt]
+    # Nothing armed: no targets (the command loop logs and ignores).
+    assert _prompt_targets(None, None) == []
+    assert _prompt_targets({}, None) == []

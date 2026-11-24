@@ -25,7 +25,7 @@ def test_repo_config_toml_equals_defaults():
 
 
 def test_repo_config_toml_has_no_extra_keys():
-    """The repo default must carry only the 27 schema keys."""
+    """The repo default must carry only the 28 schema keys."""
     import tomllib
 
     with open(_repo_config_path(), "rb") as fh:
@@ -44,7 +44,7 @@ def test_repo_config_toml_has_no_extra_keys():
             "auto_unload_idle_seconds",   # P1.M3.T1.S1: idle-unload knob (PRD §4.2bis)
             "graceful_stop",              # 2026-10: instant-stop default (drain is opt-in)
         },
-        "output": {"backend", "append_space", "streaming", "delivery"},  # streaming: §4.2quater; delivery: §4.2sexies (bulk-text opt-in)
+        "output": {"backend", "append_space", "streaming", "stream_chunks", "delivery"},  # streaming: §4.2quater; stream_chunks: 2026-11-24 word-chunk flush granularity; delivery: §4.2sexies (bulk-text opt-in)
         "cancel": {"on_backspace", "devices", "keypress_action"},  # §4.2quater + 2026-10 halt rule
         "audio": {"duck_mode", "duck_volume_pct"},   # §4.2quinquies media ducking (D1)
         "feedback": {"state_file", "hypr_notify", "notify_ms", "notify_on_final"},

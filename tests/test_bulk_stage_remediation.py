@@ -213,3 +213,77 @@ def test_extra_kwargs_win_for_their_own_keys_and_carry_no_pause(monkeypatch):
     )
     assert rec.kwargs["transcription_executor"] is executor
     assert rec.kwargs["realtime_processing_pause"] == 0.05  # the constant survives the merge
+
+
+# ---------------------------------------------------------------------------
+# The dedicated bulk REALTIME lane (validation round 3 — BUG-002 / R.1)
+#
+# The qualification round measured the collapse of the shared-lane build:
+# every partial decode re-decoded the ENTIRE growing buffer at beam 5 on the
+# MAIN executor/lock — ~3.7 update callbacks per ~17.5 s replay, the 57-word
+# sentence-end dump, speech→visible med 6714 ms ≈ 13× the 500 ms bar
+# (tests/G5_TIMING_EVIDENCE.md, production arms). The lane split gives bulk
+# builds a dedicated greedy-beam realtime engine (or, when the context-prompt
+# executor is armed, a dedicated beam-1 PromptedExecutor injected by
+# recorder_host.augment_kwargs_with_executor). Stream-edit builds keep Rev-2's
+# single-lane build BYTE-IDENTICALLY.
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_build_splits_the_realtime_lane(monkeypatch):
+    """A bulk build carries use_main_model_for_realtime=False + the greedy beam constant."""
+    rec = _build(_cfg_with("bulk-text"), monkeypatch)
+    assert rec.kwargs["use_main_model_for_realtime"] is False
+    assert rec.kwargs["beam_size_realtime"] == daemon._BULK_REALTIME_BEAM_SIZE
+    assert daemon._BULK_REALTIME_BEAM_SIZE == 1  # greedy: the whole point is cheap decodes
+    assert rec.kwargs["realtime_processing_pause"] == 0.05  # S2's cadence fix still applies
+    # Same model string in BOTH slots (Rev-2 model choice is NOT re-opened — only the
+    # decode settings of the partial lane get cheaper):
+    assert rec.kwargs["realtime_model_type"] == rec.kwargs["model"]
+
+
+def test_stream_build_keeps_the_single_lane_byte_identical(monkeypatch):
+    """Stream-edit builds keep Rev-2 single-model routing — no lane kwargs leak into them."""
+    rec = _build(_cfg_with("stream-edit"), monkeypatch)
+    assert rec.kwargs["use_main_model_for_realtime"] is True
+    assert "beam_size_realtime" not in rec.kwargs
+    assert rec.kwargs["realtime_processing_pause"] == 0.15  # cfg value, not the bulk constant
+
+
+def test_bulk_lane_is_a_module_constant_and_config_schema_is_unchanged():
+    assert isinstance(daemon._BULK_REALTIME_BEAM_SIZE, int)
+    assert daemon._BULK_REALTIME_BEAM_SIZE >= 1
+    # NO new config key on either side (the BUG-002 contract forbids an end-user knob):
+    asr_fields = [f.name for f in dataclasses.fields(AsrConfig) if "beam" in f.name]
+    out_fields = [f.name for f in dataclasses.fields(OutputConfig) if "beam" in f.name]
+    assert asr_fields == [] and out_fields == []
+    asr_main_fields = [
+        f.name for f in dataclasses.fields(AsrConfig) if "use_main_model" in f.name
+    ]
+    assert asr_main_fields == []
+
+
+def test_strict_signature_drops_lane_kwargs_and_still_builds_in_bulk_mode(monkeypatch):
+    """The lane kwargs follow the log-and-drop filter law: a signature without them builds
+    exactly like the pre-lane build (no new failure mode), while the partial-callback
+    enforcement still holds."""
+    _cuda_resolve(monkeypatch, dict(daemon.cuda_check.CUDA_DEFAULTS))
+    rec = daemon._construct(
+        _cfg_with("bulk-text"), _FakeFeedback(), _StrictNoPauseRecorder
+    )
+    assert "use_main_model_for_realtime" not in rec.kwargs  # dropped like any unknown kwarg
+    assert "beam_size_realtime" not in rec.kwargs
+    assert "realtime_processing_pause" not in rec.kwargs
+    assert rec.kwargs["model"]  # the build itself is healthy
+
+
+def test_lane_kwargs_pure_function_of_cfg_no_cross_build_leak(monkeypatch):
+    """Interleaved builds cannot leak lane settings across delivery modes."""
+    bulk_a = _build(_cfg_with("bulk-text"), monkeypatch)
+    stream = _build(_cfg_with("stream-edit"), monkeypatch)
+    bulk_b = _build(_cfg_with("bulk-text"), monkeypatch)
+    for bulk in (bulk_a, bulk_b):
+        assert bulk.kwargs["use_main_model_for_realtime"] is False
+        assert bulk.kwargs["beam_size_realtime"] == 1
+    assert stream.kwargs["use_main_model_for_realtime"] is True
+    assert "beam_size_realtime" not in stream.kwargs

@@ -70,8 +70,9 @@ cancel keeps the mic hot. All dispatch is non-blocking: every seam calls the inj
 AsyncDucker (ducking_async.py), whose engage()/release() return immediately — the subprocess work
 runs on its vt-ducking worker — because _arm()/_disarm()/_handle_dead_host() run UNDER self._lock
 and nothing blocking may ever be added there (the NEW-2 control-lock wedge class). cfg.audio
-duck_mode="off" (the shipped default; P1.M2.T4 flips it) ⇒ self._ducker is None ⇒ every seam
-no-ops: behavior byte-identical to pre-D1. Ducking is an enhancement, NEVER a gate: a dispatch
+duck_mode="off" ⇒ self._ducker is None ⇒ every seam no-ops: behavior byte-identical to
+pre-D1. (The SHIPPED default is "mpris" since P1.M2.T4 — a default-config daemon builds a
+ducker; "off" restores the pre-D1 behavior exactly.) Ducking is an enhancement, NEVER a gate: a dispatch
 failure is one WARNING and the arm proceeds. Feedback.set_ducked() mirrors the DESIRED state at
 each seam ("ducked" in state.json — the crash-safety signal T3.S2's boot self-heal reads).
 CRASH SAFETY (PRD §4.2quinquies, P1.M2.T3.S2): the boot reads the persisted `ducked` flag BEFORE
@@ -252,6 +253,37 @@ _PARTIAL_SOURCES = {
 # editor's 10 ms read-poll quantum) and the im-gtk plain arm is not-run — there is NO
 # visible-lag win to harvest, so the selector default stays "stabilized".
 _BULK_REALTIME_PROCESSING_PAUSE = 0.05
+
+# BUG-002 / validation round 3 (PRD §4.2sexies R.1): the dedicated bulk REALTIME decode lane.
+# The Rev-2 single-model build (cfg_to_kwargs) sets use_main_model_for_realtime=True, so every
+# partial decode re-decodes the ENTIRE growing utterance buffer through the MAIN engine —
+# serialized on the same executor/lock as final decodes and at the main engine's beam size
+# (PromptedExecutor beam_size=5). The qualification round measured the result: ~3.7 update
+# callbacks per ~17.5 s replay on im-gtk (73 total / 20 replays — the decode loop cannot keep
+# speaking pace), speech→visible med 6714 ms ≈ 13× the 500 ms bar, and the 57-word
+# sentence-end dump — the partial stream collapses to roughly one visible step per utterance
+# (tests/G5_TIMING_EVIDENCE.md, "im-gtk (PRODUCTION arm …)" + "Open items").
+#
+# For BULK builds ONLY, _construct therefore splits the lanes the way RealtimeSTT's own
+# default architecture does: use_main_model_for_realtime=False builds a DEDICATED realtime
+# engine from realtime_model_type (same model string — the partial lane keeps Rev-2's model,
+# only its decode settings get cheaper), driven by beam_size_realtime at THIS greedy constant.
+# Three effects, all in the measured dominant stage:
+#   1. beam 1 vs beam 5 per partial pass (≈2–4× cheaper decode → proportionally denser
+#      updates for the same audio);
+#   2. partial decodes no longer serialize with final decodes on one lock (a long final
+#      currently freezes every partial, and vice versa);
+#   3. when the context-prompt executor is armed, the child (recorder_host) injects a
+#      beam-1 PromptedExecutor as realtime_transcription_executor and RealtimeSTT skips its
+#      own realtime engine build (initialization.py gates on
+#      not _uses_external_realtime_transcription_executor) — one dedicated lane either way.
+# COST (accepted, opt-in mode): bulk arms load a SECOND instance of the same model
+# (~2× model VRAM + load time in bulk-text only). Stream-edit builds keep
+# use_main_model_for_realtime=True byte-identically. NOT a config key (the BUG-002 contract
+# forbids a new end-user knob). G5 re-measurement is REQUIRED before any G6/default
+# decision changes — this lands the lane the S6/Open-items diagnosis points at; the
+# evidence file's verdicts still govern.
+_BULK_REALTIME_BEAM_SIZE = 1
 
 # Mic-health probe TTL (bugfix Issue 3 / P1.M2.T2.S1): re-probe at most once every 30s so _arm()
 # does NOT pay the ~40ms PyAudio init on every keystroke. _refresh_mic_status() skips the probe
@@ -491,11 +523,23 @@ def _construct(
     tests/test_bulk_stage_remediation.py). Rationale: S6's stage decomposition names the
     decode-evaluation cadence — not relay, writer, or adapter paint — as the dominant
     speech→visible stage; see _BULK_REALTIME_PROCESSING_PAUSE for the numbers.
+
+    BUG-002 / validation round 3: BULK-ONLY dedicated realtime lane. Bulk builds additionally
+    override use_main_model_for_realtime to False and beam_size_realtime to
+    _BULK_REALTIME_BEAM_SIZE (see that constant for the measured collapse this attacks:
+    full-buffer re-decodes at beam 5 on the shared main lane ≈ 3.7 updates per replay).
+    Stream-edit builds keep Rev-2's single-lane build byte-identically. When the child arms
+    the context-prompt executor it injects a beam-1 realtime executor into the SAME lane
+    (recorder_host.augment_kwargs_with_executor) — the flag flip here is what makes that
+    injection take effect, since RealtimeSTT consults use_main_model_for_realtime BEFORE the
+    external executor.
     """
     resolved = dict(cuda_check.CPU_FALLBACK) if force_cpu else None
     kwargs = cfg_to_kwargs(cfg, resolved=resolved)
     if cfg.output.delivery == "bulk-text":
         kwargs["realtime_processing_pause"] = _BULK_REALTIME_PROCESSING_PAUSE
+        kwargs["use_main_model_for_realtime"] = False
+        kwargs["beam_size_realtime"] = _BULK_REALTIME_BEAM_SIZE
     kwargs.update(_build_callbacks(feedback, latency, on_speech=on_speech, partial_source=partial_source))
     if extra_kwargs:
         # P1.M2.T5.S1: the recorder-host CHILD injects the context-prompt executors here (after
@@ -1134,6 +1178,7 @@ class VoiceTypingDaemon:
             self._feedback,
             cfg.output.streaming,
             append_space=cfg.output.append_space,
+            stream_chunks=cfg.output.stream_chunks,
         )
         # P1.M2.T7.S2 (PRD §4.2quater): the passive evdev listener behind Backspace-cancel —
         # routes a physical Backspace press -> cancel() (S1) and any other keypress ->
@@ -1156,9 +1201,11 @@ class VoiceTypingDaemon:
             )
         # P1.M2.T3.S1: media ducking (PRD §4.2quinquies). Injected via ducker= (test double —
         # same seam pattern as backend=/latency=/mic_prober=/key_listener=) or built from
-        # cfg.audio by _build_default_ducker above. duck_mode="off" (the shipped default) ⇒
+        # cfg.audio by _build_default_ducker above. duck_mode="off" ⇒
         # self._ducker stays None ⇒ every _duck_engage/_duck_release seam no-ops: behavior
-        # byte-identical to pre-D1 (PRD acceptance). CONSTRUCTION IS PURE: the factory runs
+        # byte-identical to pre-D1. The SHIPPED default is "mpris" (config.py AudioConfig,
+        # P1.M2.T4), so a default-config daemon DOES build a ducker — set "off" to restore
+        # pre-D1 behavior exactly. CONSTRUCTION IS PURE: the factory runs
         # no subprocess and starts no thread — AsyncDucker's vt-ducking worker spawns lazily
         # on the first dispatch, exactly like the key_listener's reader threads start in run().
         self._ducker: Any = ducker
@@ -1835,7 +1882,7 @@ class VoiceTypingDaemon:
         Enhancement, NEVER a gate: any failure is one WARNING and the arm proceeds.
         """
         d = self._ducker
-        if d is None:  # duck_mode="off" (default) ⇒ no-op: byte-identical behavior
+        if d is None:  # duck_mode="off" ⇒ no-op: byte-identical behavior (shipped default is "mpris")
             return
         try:
             d.engage()  # AsyncDucker: non-blocking dispatch (S4); idempotent, coalesced

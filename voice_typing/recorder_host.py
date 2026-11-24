@@ -688,15 +688,20 @@ def _worker_main(
     kwargs (context-free decoding — the SAME path as config-off, PRD §8 never-crash). On success
     the SAME executor object is injected as BOTH transcription_executor and
     realtime_transcription_executor (ONE faster-whisper model total; RealtimeSTT skips its
-    TranscriptionWorker process). The 'ready' payload reports the outcome as
-    context_prompt: true|false. The executor is constructed HERE in the child (CUDA objects are
-    unpicklable and must never exist in the daemon process).
+    TranscriptionWorker process). BULK-TEXT builds (BUG-002 round 3) then SPLIT the lanes:
+    arm_bulk_realtime_executor injects a DEDICATED beam-1 PromptedExecutor as
+    realtime_transcription_executor (partials decode cheap and unsynchronized; finals keep
+    the beam-5 lane) — degrading to the shared executor on any probe failure. The 'ready'
+    payload reports the context-prompt outcome as context_prompt: true|false. The executors
+    are constructed HERE in the child (CUDA objects are unpicklable and must never exist in
+    the daemon process).
 
     Command loop: ("text", {}) -> recorder.text(child_on_final) (BLOCKS until a final, which puts
     a "final" event then returns); ("arm"/"disarm", {}) -> set_microphone; ("abort", {}) ->
-    recorder.abort(); ("prompt", {"text"}) -> prompt_executor.set_prompt (read only BETWEEN
-    utterances — the loop blocks inside text(); commit-time delivery is BY DESIGN, no watcher
-    thread); ("shutdown", {}) -> recorder.shutdown() (best-effort; the daemon SIGKILLs the
+    recorder.abort(); ("prompt", {"text"}) -> set_prompt fan-out via _prompt_targets (the
+    shared executor, plus the dedicated bulk realtime executor when the lanes are split)
+    (read only BETWEEN utterances — the loop blocks inside text(); commit-time delivery is BY
+    DESIGN, no watcher thread); ("shutdown", {}) -> recorder.shutdown() (best-effort; the daemon SIGKILLs the
     group anyway), put "gone", exit. cancel_event (P1.M2.T7.S1) is polled by the SAME abort-handler
     thread: a cancel unblocks text() like an abort but DISCARDS the audio and MARKS the sentinel.
     """
@@ -1006,9 +1011,14 @@ def _worker_main(
                     # watcher thread): this loop BLOCKS inside recorder.text() while an utterance
                     # is in flight, so prompt commands are only read BETWEEN utterances — exactly
                     # when the daemon sends them (commit time; the sender is P1.M2.T5.S2).
+                    # BUG-002 round 3: bulk builds fan the update out to BOTH lanes (the beam-5
+                    # final executor AND the dedicated beam-1 realtime executor) so partial
+                    # previews decode on the same rolling context the final will use.
                     text = payload.get("text") if isinstance(payload, dict) else None
-                    if prompt_executor is not None:
-                        prompt_executor.set_prompt(str(text) if text is not None else None)
+                    targets = _prompt_targets(extra_kwargs, prompt_executor)
+                    if targets:
+                        for _exec in targets:
+                            _exec.set_prompt(str(text) if text is not None else None)
                     else:
                         logger.debug("child: prompt command ignored (context-prompt not armed)")
                 elif kind == "shutdown":
@@ -1089,6 +1099,28 @@ def _with_identity(payload: dict, ids: "_RelayIds | None") -> dict:
     return ids.stamp(payload) if ids is not None else payload
 
 
+def _prompt_targets(
+    extra_kwargs: "dict[str, Any] | None", prompt_executor: Any
+) -> list[Any]:
+    """The executors a ("prompt", ...) command must update, in order.
+
+    BUG-002 / validation round 3: normally just [prompt_executor] (the shared context-prompt
+    executor — P1.M2.T5.S1 behavior, byte-identical when the list has one element). In bulk
+    mode augment_kwargs_with_executor may have split the lanes: extra_kwargs then carries a
+    DEDICATED realtime executor (a DIFFERENT object) under "realtime_transcription_executor"
+    — it joins the fan-out so partial previews decode on the same rolling context the final
+    will use. set_prompt itself never raises (prompt_engine contract), so a bad lane cannot
+    break the command loop.
+    """
+    if prompt_executor is None:
+        return []
+    targets = [prompt_executor]
+    realtime = (extra_kwargs or {}).get("realtime_transcription_executor")
+    if realtime is not None and realtime is not prompt_executor:
+        targets.append(realtime)
+    return targets
+
+
 def _default_prompt_executor_factory(model: str, device: str, compute_type: str) -> Any:
     """Build the production PromptedExecutor (injectable seam for CUDA-free unit tests)."""
     from voice_typing.prompt_engine import PromptedExecutor  # child-only import
@@ -1145,6 +1177,91 @@ def augment_kwargs_with_executor(
         cfg.asr.lite_model,
         resolved.get("device", "?"),
         resolved.get("compute_type", "?"),
+    )
+    # BUG-002 / validation round 3 (bulk-text only): split the lanes. The shared executor
+    # above decodes partials at beam 5 on the SAME model/lock as finals — the measured
+    # dominant stage (~3.7 update callbacks per ~17.5 s replay; see daemon
+    # _BULK_REALTIME_BEAM_SIZE for the numbers). Bulk builds get a DEDICATED beam-1 executor
+    # for the realtime lane; daemon._construct's matching use_main_model_for_realtime=False
+    # makes RealtimeSTT actually route partials through it (the flag is consulted BEFORE the
+    # external executor) and skips its own realtime engine build (initialization.py gates on
+    # not _uses_external_realtime_transcription_executor — exactly one dedicated lane, no
+    # third model). Any failure degrades to the SHARED executor (today's behavior) with ONE
+    # INFO line — never crash (PRD §8). Stream-edit builds never enter this branch.
+    if getattr(cfg.output, "delivery", "stream-edit") == "bulk-text":
+        realtime_executor = arm_bulk_realtime_executor(
+            kwargs, cfg, resolved, logger, executor_factory=executor_factory
+        )
+        if realtime_executor is not None:
+            kwargs["realtime_transcription_executor"] = realtime_executor
+    return executor
+
+
+def _default_bulk_realtime_executor_factory(
+    model: str, device: str, compute_type: str, beam_size: int
+) -> Any:
+    """Build the production BULK realtime PromptedExecutor (greedy beam — injectable seam)."""
+    from voice_typing.prompt_engine import PromptedExecutor  # child-only import
+
+    return PromptedExecutor(
+        model_name=model, device=device, compute_type=compute_type, beam_size=beam_size
+    )
+
+
+def arm_bulk_realtime_executor(
+    kwargs: dict[str, Any],
+    cfg: "VoiceTypingConfig",
+    resolved: dict[str, str],
+    logger: logging.Logger,
+    *,
+    executor_factory: "Callable[[str, str, str], Any] | None" = None,
+    beam_size: int = 1,
+) -> Any | None:
+    """Child-side: arm the DEDICATED bulk realtime-lane executor into recorder kwargs.
+
+    BUG-002 / validation round 3 (PRD §4.2sexies R.1). Called from
+    augment_kwargs_with_executor ONLY when cfg.output.delivery == "bulk-text" and the shared
+    context-prompt executor already probed OK: constructs a SECOND PromptedExecutor for the
+    SAME model/device/compute_type at a greedy beam_size (1), runs the same CAPABILITY PROBE
+    (build + 1 s warmup transcription), and on success sets
+    kwargs["realtime_transcription_executor"] = executor (overriding the shared object that
+    augment just wrote — partials decode cheap and unsynchronized; finals keep the beam-5
+    context-prompt lane untouched). On ANY probe failure the kwargs are left pointing at the
+    SHARED executor (the exact pre-split behavior) and None is returned — the lane SPLIT is
+    an optimization, never a new failure mode (PRD §8 degrade-not-crash).
+
+    executor_factory seam: None (production) builds via
+    _default_bulk_realtime_executor_factory at `beam_size`; a test-injected factory is called
+    with its 3-arg signature unchanged (tests assert the kwargs wiring, not the beam).
+    Must run IN THE CHILD only (CUDA-owned objects). Returns the armed executor or None.
+    """
+    try:
+        if executor_factory is not None:
+            executor = executor_factory(cfg.asr.lite_model, resolved["device"], resolved["compute_type"])
+        else:
+            executor = _default_bulk_realtime_executor_factory(
+                cfg.asr.lite_model, resolved["device"], resolved["compute_type"], beam_size
+            )
+        from voice_typing import prompt_engine  # child-only import (module scope is CUDA-free)
+
+        probe = prompt_engine.probe_prompt_executor(executor)
+        if not probe.ok:
+            raise RuntimeError(probe.error or "bulk realtime executor probe failed")
+    except Exception as exc:  # noqa: BLE001 — deliberate broad degrade (probe contract)
+        logger.info(
+            "voice-typing bulk realtime lane: probe failed (%s); "
+            "partials keep the shared executor",
+            exc,
+        )
+        return None
+    kwargs["realtime_transcription_executor"] = executor
+    logger.info(
+        "voice-typing bulk realtime lane: dedicated executor armed "
+        "(model=%s device=%s compute_type=%s beam_size=%d)",
+        cfg.asr.lite_model,
+        resolved.get("device", "?"),
+        resolved.get("compute_type", "?"),
+        beam_size,
     )
     return executor
 

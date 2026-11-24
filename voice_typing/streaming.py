@@ -148,6 +148,21 @@ def _ci_common_prefix_len(a: str, b: str) -> int:
     return k
 
 
+def _word_flush_point(s: str) -> int:
+    """Index of the LAST chunk-boundary char in `s` (-1 if none) — word chunking.
+
+    A boundary char is anything that is neither alphanumeric nor an apostrophe
+    (spaces, punctuation): a flush point ENDS a word (the \\W-to-\\W rule).
+    "hello world" -> 5 (the space); "world" -> -1 (word still growing — nothing
+    flushes yet). PURE: no I/O, no state.
+    """
+    for i in range(len(s) - 1, -1, -1):
+        ch = s[i]
+        if not (ch.isalnum() or ch == "'"):
+            return i
+    return -1
+
+
 def _echo_norm(text: str) -> str:
     """Normalize for the stray-echo comparison (ISSUE-002 fix): lowercase, drop
     non-alphanumerics, collapse runs to single spaces, strip the ends. "Thank you."
@@ -209,6 +224,7 @@ class StreamingOutput:
         streaming: bool,
         *,
         append_space: bool = True,
+        stream_chunks: str = "char",
         revision_debounce_s: float = _REVISION_DEBOUNCE_S,
         clock=time.monotonic,
     ) -> None:
@@ -230,6 +246,7 @@ class StreamingOutput:
         self._feedback = feedback
         self._streaming = bool(streaming)
         self._append_space = bool(append_space)
+        self._chunk_words = str(stream_chunks) == "word"
         self._revision_debounce_s = float(revision_debounce_s)
         self._clock = clock
         self._lock = threading.Lock()
@@ -617,6 +634,16 @@ class StreamingOutput:
                 self._diverged_since = None
                 self._diverged_text = ""
                 delta = text[len(vtail) :]
+                if self._chunk_words and _word_flush_point(delta) < 0:
+                    # WORD CHUNKING: the delta is still mid-word (no boundary char
+                    # yet) — hold it off the screen. Partials are cumulative, so the
+                    # next event recomputes the full excess from the LATEST text;
+                    # nothing is lost and no extra state is needed (the untyped
+                    # remainder lives only BETWEEN events, never in engine state).
+                    self._feedback.update_partial(self._tail)
+                    return
+                if self._chunk_words:
+                    delta = delta[: _word_flush_point(delta) + 1]
                 if not delta:
                     self._feedback.update_partial(self._tail)
                     return
@@ -645,8 +672,16 @@ class StreamingOutput:
             if not self._tail:
                 # Fresh start: not a revision — type the guarded partial now. No
                 # clock sample (nothing on screen to rewind, no window to open).
+                fresh = text
+                if self._chunk_words:
+                    cut = _word_flush_point(fresh)
+                    if cut < 0:
+                        # WORD CHUNKING: first word still growing — hold off screen.
+                        self._feedback.update_partial(self._tail)
+                        return
+                    fresh = fresh[: cut + 1]
                 guarded = textproc.apply_streaming_guards(
-                    self._guard_context(""), text
+                    self._guard_context(""), fresh
                 )
                 piece = guarded
                 if piece and self._pending_leading_space and self._append_space:
@@ -705,6 +740,29 @@ class StreamingOutput:
             self._diverged_text = ""
             self._feedback.update_partial(self._tail)
             return
+
+    def _repeats_last_sentence(self, text: str) -> bool:
+        """True iff `text` is a verbatim (normalized) repeat of the last COMMITTED
+        sentence AND shares no common prefix with the typed tail.
+
+        The hallucination signature from the field report: the decoder re-emits
+        the PREVIOUS sentence as the final while the user's real words are already
+        on screen as the tail. Narrow on purpose — BOTH conditions must hold:
+        k == 0 means the normal revise path would rewind the ENTIRE tail, and the
+        normalized equality (case/punctuation-insensitive, >= 8 chars) means the
+        retype payload would be a duplicate of committed text. A short repeat
+        ("yes." twice) never trips the >= 8-char floor; a legitimately re-dictated
+        long sentence still types (it would normally share a prefix with the tail
+        anyway). PURE over engine state; caller holds the lock.
+        """
+        prev = context_after_last_boundary(self._committed)
+        if not prev:
+            prev = self._committed  # no terminator yet: the whole committed text is "the last sentence"
+        n_prev = _echo_norm(prev)
+        if len(n_prev) < 8:
+            return False
+        vtail = self._tail[1:] if self._lead_sep else self._tail
+        return _ci_common_prefix_len(vtail, text) == 0 and _echo_norm(text) == n_prev
 
     # --- the commit (correction pass; PRD §4.2quater rule 2, P1.M2.T6.S2) ---
 
@@ -767,6 +825,29 @@ class StreamingOutput:
                 # own tiny wtype spawn, and browsers drop those short bursts (the
                 # app-dependent half of the missing-spaces report). The space is
                 # carried lazily (flag) and lands glued to the next fragment's payload.
+                _base = self._committed.rstrip()
+                _glue = "" if (not _base or self._tail.startswith(" ")) else " "
+                self._committed = _base + _glue + self._tail + space
+                if space:
+                    self._pending_leading_space = True
+                self._tail = ""
+                self._lead_sep = False
+                self._suppressed = False
+                self._feedback.update_partial(self._committed)
+                return
+            if self._tail and self._repeats_last_sentence(text):
+                # SENTENCE-EATER GUARD (user report 2026-11-24): a final that is a
+                # verbatim repeat of the last COMMITTED sentence while the tail
+                # holds the live utterance is a context-prompt hallucination, not
+                # a correction. The revise path would backspace the WHOLE tail and
+                # retype the duplicate — deleting the user's real sentence and
+                # replacing it with a copy of the previous one (the filed report).
+                # Absorb the tail WITHOUT keystrokes instead: the screen keeps the
+                # user's words, exactly like the frozen path.
+                logger.warning(
+                    "commit: final is a repeat of the last committed sentence "
+                    "(hallucination guard) — absorbing tail, no rewind"
+                )
                 _base = self._committed.rstrip()
                 _glue = "" if (not _base or self._tail.startswith(" ")) else " "
                 self._committed = _base + _glue + self._tail + space

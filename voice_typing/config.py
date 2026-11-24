@@ -144,6 +144,11 @@ class OutputConfig:
     append_space: bool = True  # daemon appends one trailing space to each final
     streaming: bool = True     # PRD §4.2quater: type stabilized partials live + revise in place;
                                # false = append-only finals (rollback hatch)
+    stream_chunks: str = "char"  # live-stream flush granularity (ONLY when streaming=true):
+                               # "word" = hold each partial's delta until the next non-word
+                               # char, then type the whole word-chunk at once (\W-to-\W — text
+                               # lands word-by-word, never letter-by-letter); "char" = legacy
+                               # behavior (every delta types as soon as it arrives).
     delivery: str = "stream-edit"  # Rev 4 §4.2sexies: "bulk-text" = paste-as-policy output path
                                # (one-edit corrections, NO typing/backspace fallback; opt-in
                                # until G6 graduation — verdict in tests/G6_GRADUATION.md:
@@ -172,6 +177,17 @@ class OutputConfig:
             raise TypeError(
                 f"[output] streaming expects bool, got "
                 f"{type(self.streaming).__name__}: {self.streaming!r}"
+            )
+        # stream_chunks VALUE validation (same typo class as backend/delivery):
+        # only "char" | "word" are valid.
+        if not isinstance(self.stream_chunks, str):
+            raise TypeError(
+                f"[output] stream_chunks expects str, got "
+                f"{type(self.stream_chunks).__name__}: {self.stream_chunks!r}"
+            )
+        if self.stream_chunks not in ("char", "word"):
+            raise ValueError(
+                f'[output] stream_chunks must be "char" or "word", got {self.stream_chunks!r}'
             )
         # delivery VALUE validation (backend / VT-005 precedent): only "stream-edit" | "bulk-text"
         # are valid. A typo such as delivery="Bulk-Text" is a valid str, but it would otherwise be

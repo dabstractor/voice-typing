@@ -325,6 +325,18 @@ editor-state proxy (unverified). They are not a claim about the field-class matr
 sessions on record. No route streams words at speaking pace yet; BUG-002 / PRD acceptance
 #13 remain open, and this, not the routes, is the main reason G6 stays opt-in.
 
+A third remediation increment landed AFTER that round (not yet re-measured — the numbers
+above still govern): bulk builds now decode partials on a DEDICATED greedy lane instead of
+re-decoding the whole utterance buffer at beam 5 on the executor shared with finals. The
+qualification round's own diagnosis attributed the collapse to exactly that stage (~3.7
+update callbacks per ~17.5 s replay on im-gtk). Concretely: `use_main_model_for_realtime`
+flips to false with `beam_size_realtime = 1` for bulk builds (a second instance of the SAME
+model — Rev-2's model choice is untouched; bulk arms load ~2× model memory), and when the
+context-prompt executor is armed the child injects a dedicated beam-1 executor for the
+realtime lane (prompt updates fan out to both lanes; any probe failure degrades to the
+shared executor). Stream-edit builds are byte-identical. G5 must be re-run with the exact
+existing harness before any verdict or default changes.
+
 ghostty-class terminals get a clipboard insert fallback: text is staged to the Wayland
 clipboard and pasted. The fallback refuses while a clipboard-history watcher is running,
 preserves every original clipboard format byte-exactly, and never touches the PRIMARY

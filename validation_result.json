@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 2,
+  "summary": "BUG-001/003/004 verified fixed (hermetic ducking tests, panic-bind exemption, test_daemon baseline); BUG-002 partially remediated but bulk-text R.1/acceptance #13 still unmet (Major, honestly gated opt-in); plus 1 new Minor (stale duck_mode default comments in daemon.py). 48 pure suites: 1243 passed, all 36 reds name-identical to the G1 baseline, 0 new."
+}
