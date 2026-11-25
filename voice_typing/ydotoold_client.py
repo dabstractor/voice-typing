@@ -37,8 +37,10 @@ logger = logging.getLogger(__name__)
 
 _MSG = struct.Struct("<6I")  # 24 bytes: 4 zero u32 + [code<<16|type] + value
 _BACKSPACE = 14  # evdev KEY_BACKSPACE keycode
-_CHAR_GAP_S = 0.012  # Rev 3d/3e: inter-char (release -> next press); 18 ms/char with the contact gap
-_CONTACT_GAP_S = 0.006  # P1.M1.T2.S2 (PRD §8 protocol finding): press->release contact time.
+_CHAR_GAP_S = 0.001  # EXPERIMENT 2026-11-25: was 0.012 (Rev 3d/3e) — word-chunk
+                      # bursts + corrections must outrun forward typing; drop chars
+                      # from coalescing = revert.
+_CONTACT_GAP_S = 0.001  # EXPERIMENT 2026-11-25: was 0.006 — same rationale.
 #   The CLI (`ydotool key -d 6`) gaps EVERY event; zero-contact pairs can read as no keypress
 #   in contact-sensitive apps. Socket-path parity for the contact half; the inter-char gap
 #   above stays 12 ms (matches the text path) -> 18 ms/char total.

@@ -104,7 +104,7 @@ class WtypeBackend(TypingBackend):
         # check=True -> nonzero exit raises CalledProcessError, caught by the
         # auto-fallback wrapper. A missing wtype binary raises FileNotFoundError
         # (an OSError), also caught by the fallback.
-        _paced_run(["wtype", "-d", "12", "--", text])
+        _paced_run(["wtype", "-d", "1", "--", text])
 
     def press_backspace(self, n: int) -> None:
         # ONE batched invocation: repeated "-k Backspace" pairs are verified to repeat
@@ -112,7 +112,7 @@ class WtypeBackend(TypingBackend):
         # all args are options (there is no positional text to separate).
         if n <= 0:
             return
-        _paced_run(["wtype", "-d", "12"] + ["-k", "Backspace"] * n)
+        _paced_run(["wtype", "-d", "1"] + ["-k", "Backspace"] * n)
 
 
 class YdotoolBackend(TypingBackend):
@@ -128,7 +128,7 @@ class YdotoolBackend(TypingBackend):
         # input coalescing silently DROPPED characters under sustained bursts; 12ms
         # still types ~80 chars/s, faster than any fragment needs).
         _paced_run(
-            ["ydotool", "type", "--key-delay", "12", "--", text]
+            ["ydotool", "type", "--key-delay", "1", "--", text]
         )
 
     def press_backspace(self, n: int) -> None:
@@ -145,7 +145,7 @@ class YdotoolBackend(TypingBackend):
                 )
         _paced_run(
             # -d 6 = 6ms/event, 2 events/char = 12ms/char — same pace as type (Rev 3d)
-            ["ydotool", "key", "-d", "6"] + ["14:1", "14:0"] * n
+            ["ydotool", "key", "-d", "0"] + ["14:1", "14:0"] * n
         )
 
 

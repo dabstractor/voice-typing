@@ -102,7 +102,7 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
 
 def test_wtype_invokes_exact_argv(recorder):
     WtypeBackend().type_text("hello world")
-    assert recorder.argvs == [("wtype", "-d", "12", "--", "hello world")]
+    assert recorder.argvs == [("wtype", "-d", "1", "--", "hello world")]
     assert not any(a[0] in ("busctl", "wpctl") for a in recorder.argvs)  # zero media leaks (S3/BUG-001)
 
 
@@ -116,7 +116,7 @@ def test_wtype_passes_check_true(recorder):
 def test_wtype_text_starting_with_dash_stays_literal(recorder):
     # `--` keeps "-5 degrees" positional (not parsed as an option) — PRD §4.3.
     WtypeBackend().type_text("-5 degrees")
-    assert recorder.argvs == [("wtype", "-d", "12", "--", "-5 degrees")]
+    assert recorder.argvs == [("wtype", "-d", "1", "--", "-5 degrees")]
 
 
 def test_wtype_never_appends_newline_or_space(recorder):
@@ -126,13 +126,13 @@ def test_wtype_never_appends_newline_or_space(recorder):
 
 
 # ---------------------------------------------------------------------------
-# YdotoolBackend — argv includes ["type","--key-delay", "12","--",text] (PRD §4.3)
+# YdotoolBackend — argv includes ["type","--key-delay", "1","--",text] (PRD §4.3)
 # ---------------------------------------------------------------------------
 
 
 def test_ydotool_uses_key_delay_2(recorder):
     YdotoolBackend().type_text("hi")
-    assert recorder.argvs[0][:4] == ("ydotool", "type", "--key-delay", "12")
+    assert recorder.argvs[0][:4] == ("ydotool", "type", "--key-delay", "1")
 
 
 def test_ydotool_invokes_exact_argv(recorder):
@@ -140,7 +140,7 @@ def test_ydotool_invokes_exact_argv(recorder):
     assert recorder.argvs[0] == (
         "ydotool",
         "type",
-        "--key-delay", "12",
+        "--key-delay", "1",
         "--",
         "hello",
     )
@@ -224,11 +224,11 @@ def test_wtype_nonzero_exit_falls_back_to_ydotool(recorder):
     # check=True converts a nonzero returncode into CalledProcessError -> caught -> fallback.
     recorder.raise_on("wtype", subprocess.CalledProcessError(1, ["wtype"]))
     make_backend(OutputConfig(backend="wtype")).type_text("hi")
-    assert recorder.argvs[0] == ("wtype", "-d", "12", "--", "hi")
+    assert recorder.argvs[0] == ("wtype", "-d", "1", "--", "hi")
     assert recorder.argvs[1] == (
         "ydotool",
         "type",
-        "--key-delay", "12",
+        "--key-delay", "1",
         "--",
         "hi",
     )
@@ -292,9 +292,9 @@ def test_no_real_subprocess_run_during_tests(monkeypatch):
     # fixture; this one asserts the mechanism directly.
     rec = _Recorder()
     rec.install(monkeypatch)
-    result = subprocess.run(["wtype", "-d", "12", "--", "x"], check=True)
+    result = subprocess.run(["wtype", "-d", "1", "--", "x"], check=True)
     assert result.returncode == 0
-    assert rec.argvs == [("wtype", "-d", "12", "--", "x")]
+    assert rec.argvs == [("wtype", "-d", "1", "--", "x")]
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +326,7 @@ def test_module_docstring_names_on_final_serialization_lock():
 def test_wtype_press_backspace_exact_argv(recorder):
     WtypeBackend().press_backspace(3)
     assert recorder.argvs == [
-        ("wtype", "-d", "12", "-k", "Backspace", "-k", "Backspace", "-k", "Backspace")
+        ("wtype", "-d", "1", "-k", "Backspace", "-k", "Backspace", "-k", "Backspace")
     ]
     assert recorder.calls[0][1].get("check") is True
 
@@ -334,7 +334,7 @@ def test_wtype_press_backspace_exact_argv(recorder):
 def test_ydotool_press_backspace_exact_argv(recorder):
     YdotoolBackend().press_backspace(2)
     assert recorder.argvs == [
-        ("ydotool", "key", "-d", "6", "14:1", "14:0", "14:1", "14:0")
+        ("ydotool", "key", "-d", "0", "14:1", "14:0", "14:1", "14:0")
     ]
     assert recorder.calls[0][1].get("check") is True
 
@@ -426,7 +426,7 @@ def test_socket_death_one_fallback_spawn_one_warning_then_heals(recorder, caplog
             backend.press_backspace(2)
     assert client.calls == 6                         # every burst routed to the client first
     assert len(recorder.argvs) == 1, f"expected exactly ONE fallback spawn: {recorder.argvs}"
-    assert recorder.argvs[0][:4] == ("ydotool", "key", "-d", "6")   # the CLI fallback argv
+    assert recorder.argvs[0][:4] == ("ydotool", "key", "-d", "0")   # the CLI fallback argv
     warns = [r for r in caplog.records if "ydotoold client failed" in r.getMessage()]
     assert len(warns) == 1, f"expected exactly ONE warning: {[r.getMessage() for r in warns]}"
 
@@ -439,7 +439,7 @@ def test_press_backspace_n80_is_one_invocation(recorder):
     assert recorder.argvs[0].count("Backspace") == 80
     YdotoolBackend().press_backspace(80)
     assert len(recorder.argvs) == 2  # one MORE call (total), still 1 each
-    assert len(recorder.argvs[1]) == 4 + 2 * 80  # + "-d", "6" pair
+    assert len(recorder.argvs[1]) == 4 + 2 * 80  # + "-d", "0" pair
     assert recorder.argvs[1].count("14:1") == 80 and recorder.argvs[1].count("14:0") == 80
 
 
@@ -447,8 +447,8 @@ def test_press_backspace_fallback_ordering(recorder):
     recorder.raise_on("wtype", subprocess.CalledProcessError(1, ["wtype"]))
     make_backend(OutputConfig(backend="wtype")).press_backspace(2)
     assert recorder.argvs == [
-        ("wtype", "-d", "12", "-k", "Backspace", "-k", "Backspace"),
-        ("ydotool", "key", "-d", "6", "14:1", "14:0", "14:1", "14:0"),
+        ("wtype", "-d", "1", "-k", "Backspace", "-k", "Backspace"),
+        ("ydotool", "key", "-d", "0", "14:1", "14:0", "14:1", "14:0"),
     ]  # retry exactly ONCE, correct argv each
 
 
