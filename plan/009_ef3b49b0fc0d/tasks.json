@@ -347,7 +347,7 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "Deliver accepted finals once and drain safely",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Add native recovery ledger, FIFO offers and verified ACKs, then connect identity-gated recorder events and terminal lifecycle to the bounded owner transport.",
               "subtasks": [
                 {
@@ -511,7 +511,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T4.S7",
                   "title": "Activate native v1 on the existing control socket",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S3",
@@ -549,7 +549,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T5.S1",
                   "title": "Serve an owner-only capped recovery reply",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T3.S1",

@@ -12,6 +12,32 @@ Also holds the v1 message validation contract (PRD §4.8.1 B/C) and the §C spli
 code-point-safe seed helpers (P1.M1.T3.S2).
 Also owns the owner connection pump: 2 s/6 s ping-lease, the single serialized bounded writer and the
 sticky terminal-loss contract (P1.M1.T3.S3; PRD §4.8.1 B).
+
+DISPATCH (P1.M1.T4.S7 — the wiring that makes this module live on the REAL socket):
+  voice_typing.daemon.ControlServer._handle routes a connection by its FIRST frame: a parsed
+  first frame with cmd == "editor-start" goes validate_request → daemon.reserve_native →
+  write_reject (one {"ok":false,"error":code} line + EOF, nothing reserved) | OwnerPump —
+  the SAME FrameReader instance is handed to the pump so `unread` coalesced bytes survive
+  the handoff; the generic voicectl loop never runs on that connection again. Every other
+  first frame (including native cmds from a voicectl-style client) keeps the generic
+  one-reply-per-line behaviour. Exactly ONE connection may be the live owner (reserve_native
+  enforces it; start/toggle/cancel from other clients return busy, §4.8.1 B).
+
+  MESSAGE LIFECYCLE on an owner connection (who emits what, in wire order):
+    starting   daemon session, ONCE, queued BEFORE begin_native_start (models may load)
+    listening  daemon session via begin_native_start(on_committed), ONCE, the moment the arm
+               commits — always before any final (capture opens only after LISTENING)
+    final      session tick: begin_offer (mark) → send_event → finish_offer (mark-before-write);
+               one outstanding, ≤ 8 unsettled, seq monotonic, ≤ 4 KiB text
+    pong       pump reader, one per valid ping (each ping renews the 6 s lease)
+    finishing  session, ONCE, on the DRAINING wake — ordered before any final accepted during
+               that drain (the S6 teardown hook backstops a fully-settled synchronous end)
+    ended      the daemon's ONE S6 teardown hook → pump.shutdown(state.frame()): last frame,
+               then EOF. Never built or sent anywhere else; a no-op once the pump is lost
+               (EOF/IO/FRAME/REQUEST/LEASE/WRITE losses shut the transport down first).
+  Timers: lease 6 s (pump) · Start cap 30 s (daemon watchdog) · ACK 5 s (OfferQueue deadline
+  checked on the session's ≤ 0.5 s tick) · write cap 2 s (writer, per whole line).
+
 Pure stdlib (json). No sockets are opened here; tests inject recv.
 """
 from __future__ import annotations
@@ -518,7 +544,9 @@ class ThreadTimers:
 def write_reject(conn, code: str, *, cap_s: float = WRITE_CAP_S) -> None:
     """A REJECTED FIRST request (T4.S7 calls this; S2's code): write native_error_reply(code) under the
     write cap, then EOF. Best effort on the connection thread BEFORE any pump exists — never raises,
-    never echoes the request."""
+    never echoes the request. This is the WHOLE refusal surface: unsupported_version / too_large /
+    invalid_request (validate_request), busy / duplicate_id (reserve_native) — one line, nothing
+    reserved, daemon byte-identical to before the attempt."""
     try:
         send_line_capped(conn, encode_line(native_error_reply(code)), cap_s=cap_s)
         conn.shutdown(socket.SHUT_WR)
@@ -559,6 +587,19 @@ class OwnerPump:
     socket I/O; queue the work elsewhere. After loss, send_event raises PumpClosed. A graceful
     shutdown(terminal) is NOT a loss: the terminal line (the session's `ended`) is written under the
     same cap, then the write side closes — "last frame then EOF"; an EOF observed afterwards is ignored.
+
+    T4.S7 DISPATCH (who constructs/drives this, and the wire order — Mode A): the daemon's
+    ControlServer._native_handshake constructs the pump on the connection thread with the LIVE
+    FrameReader (S1's `unread` handoff), queues `starting`, then start(); begin_native_start
+    (on_committed=) emits `listening` on commit; the session thread's ≤ 0.5 s tick drives
+    final offers (mark-before-write through send_event), `finishing` on DRAINING, and the ACK
+    deadline (q.check_deadline + the settle kick); on_command(obj) delivers the reader's
+    validated applied/stop/cancel/lost frames to the session inbox (never blocks, never writes);
+    on_loss(cause) routes to the S5 funnels (native_lost / terminate_native, token-fenced);
+    `ended` arrives ONLY through the daemon's ONE S6 teardown hook as shutdown(state.frame()).
+    Transport-level losses (EOF/IO/FRAME/REQUEST/LEASE/WRITE) shut the socket down BEFORE the
+    hook runs, so a lost pump delivers EOF only — the end state lives in daemon.native_last_end()
+    and status["native"]. See the module docstring for the full lifecycle table.
     """
 
     def __init__(self, conn, session_id: str, *, on_command, on_loss, reader=None,

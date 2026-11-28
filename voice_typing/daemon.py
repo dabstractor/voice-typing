@@ -114,7 +114,7 @@ be a SEPARATE opt-in integration — it is NOT an output.delivery backend.
 from __future__ import annotations
 
 import collections
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import json
 import logging
@@ -137,14 +137,22 @@ import voice_typing.typing_backends as typing_backends
 from voice_typing import cuda_check
 from voice_typing.config import VoiceTypingConfig
 from voice_typing.editor_protocol import (
+    END_REASONS,
     MAX_FRAME_BYTES,
     START_CAP_S,
     ThreadTimers,
+    WRITE_CAP_S,
     FrameError,
     FrameReader,
+    OwnerPump,
+    ProtocolError,
+    PumpClosed,
     encode_line,
     is_uuid_v4,
     remaining,
+    validate_event,
+    validate_request,
+    write_reject,
 )
 
 # P1.M1.T3.S4 (§4.8.1 B): native owner reservation + startup fence — the pure state machine the
@@ -431,6 +439,154 @@ _NATIVE_START_FAILURE = {
     "seed-unconfirmed": "load_failed",
     "prompt-unconfirmed": "load_failed",
 }
+
+
+@dataclass
+class _NativeSession:
+    """ONE owner connection's live native v1 session (P1.M1.T4.S7). Created on the connection
+    thread by ControlServer._native_handshake; the same thread runs _run_native_session until
+    the pump threads are joined. Flags are guarded by `lock` (the session tick and the S6
+    teardown hook run on different threads); `inbox` is the pump-reader → session-thread
+    command handoff (append on the reader thread, drain in step()). NEVER a socket write
+    outside OwnerPump.send_event (CRITICAL #2: one writer — the pump's)."""
+
+    sid: str                                    # the client's UUIDv4 == reservation id
+    token: int                                  # daemon owner token — THE fence on every call
+    pump: Any = None                            # editor_protocol.OwnerPump (single writer)
+    inbox: "collections.deque" = field(default_factory=collections.deque)
+    inbox_evt: threading.Event = field(default_factory=threading.Event)
+    started: bool = False                       # begin_native_start() returned True
+    listening_sent: bool = False                # `listening` emitted (on_committed, once)
+    finishing_sent: bool = False                # `finishing` emitted (once; tick OR hook backstop)
+    seed_empty: bool = True                     # handshake's normalized context was ""
+    context_prompt_enabled: bool = True         # cfg.asr.context_prompt at handshake
+    ended: Any = None                           # NativeEndState set by the S6 teardown hook
+    done: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)  # guards the flags only
+
+    # --- the session tick (connection thread; also unit-testable directly) --------
+
+    def step(self, d: "VoiceTypingDaemon") -> None:
+        """ONE tick, no sleeping: drain owner commands, then ONE d._lock hold decides
+        (stage transitions + begin_offer — CRITICAL #4), and everything that can block or
+        write happens after release (CRITICAL #3/#9). Order is load-bearing: `finishing`
+        is decided in the SAME hold that would begin an offer, and an observed DRAINING
+        defers the offer to the next tick — finishing is ordered before any final
+        accepted during that drain. ACK-deadline checks run only while an offer is
+        outstanding (each with the settle kick the S5 contract requires)."""
+        self._drain_inbox(d)
+        with d._lock:
+            live = d._native_owner_live_locked()
+            r = d._native
+            stage = r.stage if live else None
+            q = d._native_queue if live else None
+            now = d._native_clock()
+            due_finish = stage is Stage.DRAINING and not self.finishing_sent
+            attempt = None if (q is None or due_finish) else q.begin_offer(now)
+            revoked = bool(q.revoked) if q is not None else False
+            revocation_reason = q.revocation_reason if revoked else None
+            outstanding = q.outstanding is not None if q is not None else False
+        if due_finish:
+            with self.lock:
+                first = not self.finishing_sent
+                self.finishing_sent = True
+            if first:
+                self._send({"event": "finishing", "id": self.sid})
+        if attempt is not None:  # mark-before-write: finish_offer AFTER the queue put
+            ok = self._try_send(attempt.event())
+            with d._lock:
+                qn = d._native_queue
+                if qn is not None:
+                    qn.finish_offer(ok)
+        if outstanding or attempt is not None:
+            with d._lock:
+                qn = d._native_queue
+                if qn is not None:
+                    qn.check_deadline(d._native_clock())
+            d.native_settle_kick(token=self.token)  # off-lock; without it `ended` waits
+        if revoked and live:  # CRITICAL #12: overflow/stale-ACK revoke while still live
+            reason = (revocation_reason if revocation_reason in END_REASONS
+                      else "delivery_failed")
+            # native_lost() validates _LOSS_REASONS only — a queue revocation's reason
+            # (delivery_failed/timeout) ends through the generic terminate funnel instead;
+            # the queue already revoked itself (recovery retains whatever is unsettled).
+            d.terminate_native(reason, cause="queue-revoked", token=self.token)
+
+    def _drain_inbox(self, d: "VoiceTypingDaemon") -> None:
+        """Owner commands from the pump reader (S5 contracts, token-fenced; short lock
+        holds, no socket I/O — the pump's shutdown is a queue put)."""
+        self.inbox_evt.clear()
+        while True:
+            try:
+                obj = self.inbox.popleft()
+            except IndexError:
+                return
+            cmd = obj.get("cmd")
+            if cmd == "applied":
+                with d._lock:
+                    q = d._native_queue
+                    if q is not None:
+                        q.ack(obj, now=d._native_clock())
+                d.native_settle_kick(token=self.token)
+            elif cmd == "stop":
+                d.native_stop("stopped", token=self.token)
+            elif cmd == "cancel":
+                d.native_cancel(token=self.token)
+            elif cmd == "lost":
+                d.native_lost("target_lost", "owner-request", token=self.token)
+
+    def on_committed(self, out: "ArmOutcome") -> None:
+        """The native-start worker's commit callback (off-lock, before the park): emit
+        `listening` from the committed ArmOutcome with ZERO tick delay — before any final
+        can exist, since capture opens only after LISTENING (CRITICAL #4)."""
+        with self.lock:
+            first = not self.listening_sent
+            self.listening_sent = True
+        if first and self.ended is None:
+            self._send(_listening_frame(
+                self.sid, out, seed_empty=self.seed_empty,
+                context_prompt_enabled=self.context_prompt_enabled))
+
+    def _send(self, obj: dict) -> None:
+        """Queue ONE daemon→editor line through the pump (codec-validated first; loss is
+        the pump's business — a closed pump swallows the event, on_loss already fired)."""
+        try:
+            validate_event(obj)
+        except ProtocolError as exc:  # a daemon-side bug must never emit an invalid frame
+            logger.debug("native frame dropped (%s)", exc.code)
+            return
+        try:
+            self.pump.send_event(obj)
+        except (PumpClosed, FrameError):
+            pass
+
+    def _try_send(self, obj: dict) -> bool:
+        """_send, but reports whether the event was QUEUED (mark-before-write wants to
+        know; begin_offer pre-validated the event, so only transport failures remain)."""
+        try:
+            self.pump.send_event(obj)
+        except (PumpClosed, FrameError):
+            return False
+        return True
+
+
+def _listening_frame(sid: str, out: "ArmOutcome", *, seed_empty: bool,
+                     context_prompt_enabled: bool) -> dict:
+    """PRD §4.8.1 B `listening` — same reason derivation as VoiceTypingDaemon.start_context
+    (daemon.py `_context_reply`): empty seed → 'empty'; prompting disabled → 'disabled';
+    else 'unavailable'. `context_seeded` is True ONLY on a CONFIRMED seed
+    (out.context_seeded is True); None/False (unconfirmed/plain) is reported as
+    False + a context_reason. Never carries the seed text."""
+    if out.context_seeded is True:
+        return {"event": "listening", "id": sid, "context_seeded": True}
+    if seed_empty:
+        reason = "empty"
+    elif not context_prompt_enabled:
+        reason = "disabled"
+    else:
+        reason = "unavailable"
+    return {"event": "listening", "id": sid, "context_seeded": False,
+            "context_reason": reason}
 
 
 @dataclass(frozen=True)
@@ -3268,7 +3424,10 @@ class VoiceTypingDaemon:
             getattr(host, "generation", 0),
             getattr(host, "arm_seq", 0),
         )
-        self._native_queue = OfferQueue(native.owner.id, self._native_recovery)
+        # CRITICAL #13: the queue's ACK deadlines run on the INJECTED clock (FakeClock in
+        # tests) — the same clock the settle watchdog and the session tick read.
+        self._native_queue = OfferQueue(native.owner.id, self._native_recovery,
+                                        clock=self._native_clock)
         self._native_rejects = {}  # fresh per-session verdict counts (codes only)
         self._native_offer_evt.clear()
         self._publish_native_status_locked()  # P1.M1.T4.S6: "listening"
@@ -3451,17 +3610,23 @@ class VoiceTypingDaemon:
         self._flush_native_end()
 
     def begin_native_start(self, token: int, *, seed: str | None = None,
-                           streaming: bool | None = None) -> bool:
+                           streaming: bool | None = None,
+                           on_committed: "Callable[[ArmOutcome], None] | None" = None) -> bool:
         """INTERNAL (T4.S7): spawn the session's lifecycle thread for a reserved token. False if the
         token is no longer the current STARTING owner inside its cap (tombstoned/replaced/expired — an
-        expired one is ended here as 'timeout') or a worker already exists. Idempotent per token."""
+        expired one is ended here as 'timeout') or a worker already exists. Idempotent per token.
+        on_committed(ArmOutcome) — the T4.S7 owner-connection callback — fires OFF-LOCK on the worker
+        thread the moment the arm COMMITS (Stage.LISTENING), before the worker parks on end_evt: the
+        owner pump sends `listening` from the committed outcome with zero tick delay (CRITICAL #4:
+        before any final can exist — capture opens only after LISTENING). Never the seed text."""
         with self._lock:
             if not self._native_can_commit_locked(token) or self._native_worker is not None:
                 spawn = False
             else:
                 self._native_worker = threading.Thread(
                     target=self._native_start_worker, args=(token,),
-                    kwargs={"seed": seed, "streaming": streaming},
+                    kwargs={"seed": seed, "streaming": streaming,
+                            "on_committed": on_committed},
                     name=f"native-start-{token}", daemon=True)
                 spawn = True
         self._flush_native_end()
@@ -3944,12 +4109,14 @@ class VoiceTypingDaemon:
             self._safe_abort()
         return rec
 
-    def _native_start_worker(self, token: int, *, seed: str | None, streaming: bool | None) -> None:
+    def _native_start_worker(self, token: int, *, seed: str | None, streaming: bool | None,
+                             on_committed: "Callable[[ArmOutcome], None] | None" = None) -> None:
         """The native session's lifecycle thread. (1) runs the fenced start carrying its owner token
         (heavy waits inside _start_fenced run OUTSIDE _lock; stop/status stay responsive); (2) on
         failure ends the reservation with the mapped reason; (3) on success parks on its reservation's
-        end_evt and delivers the EndRecord an under-lock terminator (_disarm) stashed. Never holds the
-        lock across a wait; never logs text."""
+        end_evt and delivers the EndRecord an under-lock terminator (_disarm) stashed. P1.M1.T4.S7:
+        on a COMMIT, on_committed(outcome) fires off-lock before the park — the owner pump's
+        `listening` (T4.S7), with no tick delay. Never holds the lock across a wait; never logs text."""
         with self._lock:
             r = self._native
             if r is None or r.owner.token != token:
@@ -3967,6 +4134,11 @@ class VoiceTypingDaemon:
         self._flush_native_end()
         if not committed:
             return
+        if on_committed is not None:  # T4.S7: `listening` NOW, off-lock, before the park
+            try:
+                on_committed(out)
+            except Exception as exc:  # defensive: a misbehaving listener — TYPE name only
+                logger.warning("native on_committed raised (%s)", type(exc).__name__)
         r.end_evt.wait()                         # woken by _end_native_locked (per-reservation Event)
         self._flush_native_end()
 
@@ -4599,6 +4771,27 @@ class ControlServer:
       non-dict JSON                            -> {"ok":false,"error":"request must be a JSON object"}
       unknown/missing cmd                      -> {"ok":false,"error":"unknown command: ..."}
 
+    Native v1 (PRD §4.8.1 B; P1.M1.T4.S7) — the EDITOR route on this same socket:
+      FIRST frame {"cmd":"editor-start","version":1,"id":"<UUIDv4>","context":"..."}
+                                   -> ONE connection becomes the LIVE OWNER of a native
+                                      session; from then on it speaks the event protocol
+                                      (never the generic request/reply loop):
+        daemon→editor: starting {event,id} · listening {event,id,context_seeded[,context_reason]}
+                       · final {event,id,seq,text} · pong {event,id}
+                       · finishing {event,id} · ended {event,id,reason,recoverable} (LAST, then EOF)
+        editor→daemon: applied {cmd,id,seq} · stop/cancel/lost {cmd,id} · ping {cmd,id} (lease 6 s)
+        lifecycle:     starting (handshake, BEFORE begin_native_start) → listening (the moment
+                       the arm commits, via begin_native_start(on_committed)) → final/applied
+                       (one outstanding, 5 s ACK deadline, ≤8 unsettled) → finishing (graceful
+                       stop/drain; ordered before any final accepted during the drain) → ended
+                       (the S6 teardown hook; EOF after). EOF/IO/bad frame/bad request/lease
+                       expiry/write cap are LOSS: native_lost, delivery revoked first, NEVER a
+                       fallback to any generic output. Refused first frames get ONE
+                       {"ok":false,"error":"<code>"} (unsupported_version/too_large/
+                       invalid_request/busy/duplicate_id) then EOF, nothing reserved.
+        old clients:   status/stop/quit stay served on their own connections; start/toggle/cancel
+                       return busy while the owner holds the mic (§4.8.1 B).
+
     Framing (PRD §4.8.1 B; P1.M1.T3.S1): every request AND every reply/live event is ONE UTF-8
     JSON line bounded by 32 KiB INCLUDING the newline, enforced on raw bytes WHILE READING
     (editor_protocol.FrameReader — never an unbounded text readline). Oversized frame -> ONE
@@ -4628,6 +4821,14 @@ class ControlServer:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        # P1.M1.T4.S7: live native owner sessions (ONE per editor-start connection)
+        self._sessions: "dict[str, _NativeSession]" = {}
+        self._sessions_lock = threading.Lock()
+        # THE ONE daemon-level teardown hook (S6 contract): every ended native session —
+        # whatever thread terminated it — funnels into _on_native_ended, which queues the
+        # `ended` frame through that session's pump and releases its session thread.
+        if callable(getattr(daemon, "set_native_teardown", None)):
+            daemon.set_native_teardown(self._on_native_ended)
 
     def start(self) -> None:
         """Bind + listen + launch the accept thread. Idempotent (no-op if already running).
@@ -4672,8 +4873,11 @@ class ControlServer:
 
         Uses the stop Event (the accept loop polls via select(), so it notices within
         accept_timeout) and ALSO closes the socket (belt-and-suspenders: any blocked select/
-        accept raises immediately). Joins up to 2 s. Unlinks the socket file (next start() also
-        unlinks, but a clean quit leaves no stale .sock).
+        accept raises immediately). Joins up to 2 s. P1.M1.T4.S7: then retires any LIVE
+        native owner sessions (terminate_native('shutdown') per owner; bounded by 3 s —
+        each owner's `ended` frame + EOF go out through its pump via the S6 teardown hook).
+        Unlinks the socket file (next start() also unlinks, but a clean quit leaves no
+        stale .sock).
         """
         with self._lock:
             self._stop.set()
@@ -4687,6 +4891,7 @@ class ControlServer:
                 pass
         if thread is not None:
             thread.join(timeout=2.0)
+        self._retire_sessions(3.0)  # P1.M1.T4.S7: live owners end as 'shutdown', bounded
         try:
             os.unlink(self._socket_path)
         except (FileNotFoundError, OSError):
@@ -4713,6 +4918,14 @@ class ControlServer:
 
     def _handle(self, conn: Any) -> None:
         """Per-connection framed read loop: parse JSON, dispatch, write one JSON line per request.
+
+        P1.M1.T4.S7: the FIRST frame alone routes the connection — a first frame whose parsed
+        object has cmd == 'editor-start' hands the connection (with its LIVE FrameReader, so
+        coalesced bytes past the frame's newline survive via reader.unread) to the native v1
+        owner path (_native_handshake → _run_native_session); the generic loop below never
+        runs on that connection again. A refused handshake wrote {"ok":false,"error":code} +
+        EOF and returns here only to close. Every other first frame — including native cmds
+        like stop/ping from a voicectl-style client — keeps the generic behaviour verbatim.
 
         EVERY request line — including empty/whitespace-only ones (BUG-005) — gets exactly one
         response line: an empty line is just malformed JSON, and silence would hang a client
@@ -4760,7 +4973,33 @@ class ControlServer:
                 # No empty-line special case (BUG-005): "" falls through to _dispatch,
                 # where json.loads("") raises ValueError -> the standard malformed-JSON
                 # error reply. One response line per request line, no exceptions.
-                response = self._dispatch(line.strip())
+                stripped = line.strip()
+                # P1.M1.T4.S7 NATIVE HANDOFF: the FIRST frame alone decides the route.
+                # ONLY a first frame whose parsed object has cmd == 'editor-start' turns
+                # this connection into an owner session (NEVER request_kind — plain
+                # 'stop'/'cancel' are native cmds too but voicectl sends them too).
+                # Everything else — including a native cmd arriving FIRST from a voicectl
+                # client — keeps the generic behaviour below. The parsed object is used
+                # ONLY for detection; _dispatch re-parses the original line (its own
+                # parse is the error path for malformed JSON).
+                peek = None
+                try:
+                    peek = json.loads(stripped)
+                except ValueError:
+                    peek = None
+                if (isinstance(peek, dict) and peek.get("cmd") == "editor-start"
+                        and callable(getattr(self._daemon, "reserve_native", None))):
+                    if wfile is not None:  # release the makefile dup BEFORE the pump dups conn
+                        try:
+                            wfile.close()
+                        except OSError:
+                            pass
+                        wfile = None
+                    sess = self._native_handshake(conn, reader, peek)
+                    if sess is not None:  # a refusal already wrote {ok:false,error} + EOF
+                        self._run_native_session(sess)
+                    return  # the generic loop NEVER runs on an owner connection again
+                response = self._dispatch(stripped)
                 wfile.write(encode_line(response))
                 wfile.flush()  # CRITICAL: makefile("w") buffers; flush every reply
                 if response.get("shutting_down"):
@@ -4796,7 +5035,12 @@ class ControlServer:
         return {"ok": True, **self._daemon.status_snapshot()}
 
     def _dispatch(self, line: str) -> dict:
-        """Parse one request line -> dispatch cmd -> response dict. Never raises (robustness)."""
+        """Parse one request line -> dispatch cmd -> response dict. Never raises (robustness).
+
+        P1.M1.T4.S7: unchanged for ordinary clients — editor-start NEVER reaches here (the
+        _handle first-frame detection routes it to the native owner path first), and the
+        start/toggle/cancel busy branches (P1.M1.T3.S4) are what a second client sees while
+        a native owner holds the mic."""
         try:
             msg = json.loads(line)
         except ValueError as exc:  # json.JSONDecodeError is a ValueError subclass
@@ -4868,6 +5112,189 @@ class ControlServer:
         if cmd == "session":  # P1.M6.T2.S3 (§4.2sexies R.6): most recent COMPLETED session
             return self._daemon.session_reply(copy=bool(msg.get("copy", False)))
         return {"ok": False, "error": f"unknown command: {cmd!r}"}
+
+    # --- P1.M1.T4.S7: the native v1 owner route (§4.8.1 B) -----------------------
+
+    def _native_handshake(self, conn: Any, reader: FrameReader, peek: dict) -> "_NativeSession | None":
+        """Turn an `editor-start` FIRST frame into a reserved owner session — or refuse it.
+
+        Order is the T3.S4 prescription: validate_request → write_reject(refusal) | reserve →
+        `starting` → begin_native_start. Every refusal is ONE {"ok":false,"error":code} line
+        then EOF (write_reject), with NOTHING reserved and the daemon byte-identical. On
+        acceptance: the pump is built around the LIVE FrameReader (S1's unread bytes are the
+        handoff), registered BEFORE begin_native_start (CRITICAL #6: a synchronous end — stop-
+        during-start, shutdown, Start-cap — always finds its pump), `starting` is queued, then
+        pump.start() + begin_native_start(token, seed=…, on_committed=sess.on_committed).
+        A pump failure at the very first send ends the just-reserved session 'disconnected'.
+        Runs on the CONNECTION thread; never holds the daemon lock."""
+        d = self._daemon
+        try:
+            obj = validate_request(peek)
+        except ProtocolError as exc:  # S2 precedence: shape → version → size
+            write_reject(conn, exc.code)
+            logger.info("voice-typing native: rejected first frame (%s)", exc.code)
+            return None
+        res = d.reserve_native(conn, obj["id"], on_end=None)
+        if not res.accepted:  # busy | duplicate_id | invalid_request (state-dependent)
+            write_reject(conn, res.error)
+            logger.info("voice-typing native: refused reservation (%s) id=%s",
+                        res.error, obj["id"])
+            return None
+        sess = _NativeSession(sid=obj["id"], token=res.owner.token)
+        cfg = getattr(d, "_cfg", None)
+        asr = getattr(cfg, "asr", None)
+        sess.context_prompt_enabled = bool(getattr(asr, "context_prompt", True))
+        normalized = _normalize_context(obj.get("context"))
+        sess.seed_empty = not normalized
+        seed = normalized or None
+        if seed is not None and not sess.context_prompt_enabled:
+            seed = None  # prompting disabled: plain arm — the frame says 'disabled'
+        pump = OwnerPump(
+            conn, sess.sid,
+            on_command=lambda o: self._native_on_command(sess, o),
+            on_loss=lambda cause: self._native_on_loss(sess, cause),
+            reader=reader,  # CRITICAL #10: SAME reader — coalesced bytes preserved
+            clock=getattr(d, "_native_clock", None) or time.monotonic,
+            timers=getattr(d, "_native_timers", None),  # CRITICAL #13: tests' FakeClock
+        )
+        sess.pump = pump
+        with self._sessions_lock:
+            self._sessions[sess.sid] = sess  # BEFORE begin (CRITICAL #6)
+        try:
+            pump.send_event({"event": "starting", "id": sess.sid})  # CRITICAL #7 shape
+        except PumpClosed as exc:
+            cause = getattr(exc, "cause", None)
+            d.terminate_native("disconnected",
+                               cause=str(getattr(cause, "value", "write")),
+                               token=sess.token)
+            self._drop(sess)
+            return None
+        except FrameError:
+            d.terminate_native("disconnected", cause="frame", token=sess.token)
+            self._drop(sess)
+            return None
+        pump.start()
+        sess.started = d.begin_native_start(sess.token, seed=seed,
+                                             on_committed=sess.on_committed)
+        logger.info("voice-typing native: owner session live id=%s token=%d",
+                    sess.sid, sess.token)
+        return sess
+
+    def _run_native_session(self, sess: "_NativeSession") -> None:
+        """Drive ONE owner session on its connection thread until the S6 hook releases it.
+
+        The loop waits on d._native_offer_evt with a bounded 0.5 s tick (CRITICAL #9: never
+        an unbounded wait; the tick runs check_deadline and the revoked-queue safety net
+        even with nothing enqueued). Exits when the teardown hook sets sess.done; the pump
+        threads are joined BEFORE returning (CRITICAL #11: only then may _handle's finally
+        close the connection)."""
+        d = self._daemon
+        try:
+            while not sess.done.is_set():
+                if not sess.started and sess.ended is None:
+                    # begin lost the reservation (stop/shutdown/cap between reserve and
+                    # begin): the hook normally delivered already — give it a beat; if it
+                    # genuinely missed us (pre-registration race) retire EOF-only, no frame
+                    # is ours to build (PRP CRITICAL #5/#6).
+                    with d._lock:
+                        live = d._native_owner_live_locked()
+                    if not live and not sess.done.wait(0.05):
+                        logger.debug("native session end missed the pump id=%s", sess.sid)
+                        try:
+                            sess.pump.shutdown(None)
+                        except Exception:
+                            pass
+                        sess.done.set()
+                        break
+                sess.step(d)
+                if sess.done.is_set():
+                    break
+                d._native_offer_evt.wait(0.5)
+        finally:
+            sess.pump.wait(WRITE_CAP_S + 1.0)  # join BOTH pump threads, bounded
+            self._drop(sess)
+            logger.info("voice-typing native: owner session done id=%s", sess.sid)
+
+    def _on_native_ended(self, state) -> None:
+        """THE S6 teardown hook (ONE registration, at construction; fires exactly once per
+        ended session, off-lock, AFTER recovery is final). Delivers `ended` through the
+        session's pump — state.frame() VERBATIM, never rebuilt — as the LAST line, then
+        EOF (pump.shutdown), and releases the session thread. Also the graceful-stop
+        BACKSTOP for `finishing`: a fully-settled stop ends inside native_stop's own lock
+        hold, so the DRAINING tick can lose the race — queue `finishing` here (same writer,
+        FIFO: strictly before `ended`), exactly once via the shared flag."""
+        with self._sessions_lock:
+            sess = self._sessions.get(state.session_id)
+        if sess is None:
+            logger.debug("native teardown: no live owner session id=%s", state.session_id)
+            return
+        sess.ended = state
+        if (state.reason in _STOP_REASONS and sess.listening_sent):
+            with sess.lock:
+                first = not sess.finishing_sent
+                sess.finishing_sent = True
+            if first:
+                try:
+                    sess.pump.send_event({"event": "finishing", "id": sess.sid})
+                except (PumpClosed, FrameError):
+                    pass  # lost transport: `ended` would not have gone out either
+        try:
+            sess.pump.shutdown(state.frame())  # CRITICAL #5: S6's frame, last, then EOF
+        except Exception as exc:
+            logger.warning("native teardown shutdown raised (%s)", type(exc).__name__)
+        sess.done.set()
+
+    def _native_on_command(self, sess: "_NativeSession", obj: dict) -> None:
+        """Pump READER thread → session-thread inbox (never blocks on I/O; CRITICAL #8).
+        Both events are set so the parked tick wakes at once; a stale set after close is
+        harmless (step() finds nothing)."""
+        try:
+            sess.inbox.append(obj)
+            sess.inbox_evt.set()
+            ev = getattr(self._daemon, "_native_offer_evt", None)
+            if ev is not None:
+                ev.set()
+        except Exception as exc:  # defensive: the pump turns a raise into REQUEST loss
+            logger.warning("native on_command raised (%s)", type(exc).__name__)
+
+    def _native_on_loss(self, sess: "_NativeSession", cause) -> None:
+        """Pump loss callback (reader/writer/lease thread): route the sticky loss through
+        the S5 funnel, token-fenced. Codes only — never a frame detail (CRITICAL #14).
+        LossCause.REQUEST maps to 'delivery_failed', which is an END_REASONS code but NOT
+        a _LOSS_REASONS loss — that end goes through the generic terminate funnel."""
+        reason = cause.end_reason
+        code = str(getattr(cause, "value", "io"))
+        try:
+            if reason in _LOSS_REASONS:
+                self._daemon.native_lost(reason, code, token=sess.token)
+            else:
+                self._daemon.terminate_native(reason, cause=code, token=sess.token)
+        except Exception as exc:
+            logger.warning("native on_loss raised (%s)", type(exc).__name__)
+
+    def _drop(self, sess: "_NativeSession") -> None:
+        with self._sessions_lock:
+            self._sessions.pop(sess.sid, None)
+
+    def _retire_sessions(self, timeout: float = 3.0) -> None:
+        """End every LIVE owner session as 'shutdown' and wait, bounded (ControlServer.stop).
+        terminate_native is idempotent; already-done sessions are skipped; the S6 hook
+        delivers each `ended` frame through its pump."""
+        with self._sessions_lock:
+            sessions = list(self._sessions.values())
+        if not sessions:
+            return
+        deadline = time.monotonic() + timeout
+        term = getattr(self._daemon, "terminate_native", None)
+        for sess in sessions:
+            if sess.done.is_set():
+                continue
+            if callable(term):
+                try:
+                    term("shutdown", cause="shutdown", token=sess.token)
+                except Exception as exc:
+                    logger.warning("native retire raised (%s)", type(exc).__name__)
+            sess.done.wait(max(0.0, deadline - time.monotonic()))
 
 
 def install_shutdown_signal_handlers(
