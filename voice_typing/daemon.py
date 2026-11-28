@@ -149,8 +149,10 @@ from voice_typing.editor_protocol import (
 # daemon drives under _lock (this module owns the LOCKING, never the module itself).
 from voice_typing.editor_session import (
     EndRecord,
+    EnqueueOutcome,
     NativeReservation,
     NativeReserveResult,
+    OfferQueue,
     Owner,
     Stage,
 )
@@ -159,8 +161,9 @@ from voice_typing.editor_session import (
 # evdev pulls no torch/RealtimeSTT into the daemon process (import-purity rule, §4.2bis).
 from voice_typing.key_listener import KeyListener
 from voice_typing.recorder_host import (
+    FinalClass,
     RecorderHost,
-)  # P1.M3.T2.S2: child-subprocess recorder owner
+)  # P1.M3.T2.S2: child-subprocess recorder owner; FinalClass = T4.S3 relay classes (T4.S4)
 
 # P1.M2.T3.S1: the media-ducking stack (PRD §4.2quinquies). All four modules are
 # stdlib+subprocess-light — the import-purity rule holds (RealtimeSTT stays lazy inside
@@ -1017,6 +1020,21 @@ class VoiceTypingDaemon:
         self._native_timers = ThreadTimers(time.monotonic)
         self._native_end_cb = None                  # T4.S6/T4.S7: receives the EndRecord once, off-lock
         self._native_end_delivered = False
+        # P1.M1.T4.S4 — the native acceptance route (§4.8.1 B). _native_recovery is DAEMON-WIDE
+        # (it outlives sessions: T5.S1 `voicectl recover` serves retained finals after the
+        # session ended); _native_fence is the OPEN native capture's (host.generation,
+        # host.arm_seq) arm fence — latched in _arm AFTER the mic cmd bumps the host's arm_seq
+        # (T4.S3 Critical #4), assigned ONLY under _lock so the reader thread's lock-free
+        # sentinel read (`_native_fence is not None`) is atomic in CPython; _native_queue is
+        # the per-session offer FIFO (retain-before-offer — built at arm commit, closed at
+        # every native end); _native_offer_evt wakes the T4.S7 socket pump after a QUEUED
+        # enqueue; _native_rejects is a bounded verdict-code → count map (≤ 8 fixed keys —
+        # logs carry codes/counts only, never text).
+        self._native_recovery = session_recovery.NativeRecovery()
+        self._native_fence: "tuple[int, int] | None" = None
+        self._native_queue: OfferQueue | None = None
+        self._native_offer_evt = threading.Event()
+        self._native_rejects: dict[str, int] = {}
         # Boot lifecycle phase (delta D2/D3): 'idle' if a recorder was injected (loaded), else 'unloaded' (the lazy
         # boot state). _load_host() drives loading->idle; a failed load returns to 'unloaded'. (The feedback
         # models_loaded FIELD + status_snapshot/ctl exposure is P1.M2.T2.S1; T1 tracks the daemon-side
@@ -1471,6 +1489,18 @@ class VoiceTypingDaemon:
         accumulator and — on the FIRST acceptance of a seeded session — replaces the seed
         with this session's rolling context (or a known-empty prompt). A rejected final
         returns BEFORE that call and never consumes the seed ("say it again").
+
+        NATIVE ROUTE (P1.M1.T4.S4, PRD §4.8.1 B): while a native editor session has capture
+        open — the lock-free sentinel self._native_fence is not None (a tuple/None reference
+        assigned under _lock; atomic read on this reader thread) — the FIRST statement
+        inside _on_final_lock routes this final to _native_on_final and returns, bypassing
+        ALL generic output: the cancel-suppression window, StreamingOutput commit, generic
+        SessionRecovery, feedback.record_final, the latency log, the desktop notify and the
+        evdev guards. _native_final_verdict admits only the CONSUMER CONTRACT identity
+        (FinalClass.ACCEPTED and (host_generation, arm_seq) == the latched fence); reject
+        codes: "missing" | "kind" | "class:<value>" | "fence" | "filtered" | "ended". A
+        rejected final closes the utterance lifecycle (_final_pending False,
+        _utterance_finalized True) and NEVER consumes the seed.
         """
         t_final_ready = time.monotonic()  # entry stamp (PRD §4.2 latency logging)
         if (
@@ -1481,6 +1511,11 @@ class VoiceTypingDaemon:
         # P1.M2.T2.S1). The gate above stays OUTSIDE the lock (read-only race guard); the lock is
         # SEPARATE from _lock (see __init__) so this never stalls toggle/start/stop and never deadlocks.
         with self._on_final_lock:
+            # P1.M1.T4.S4: NATIVE ROUTE FIRST (§4.8.1 B) — before ANY generic output. The
+            # listening gate above already ran; everything generic below stays untouched.
+            if self._native_fence is not None:
+                self._native_on_final(text)
+                return
             # P1.M2.T7.S1 cancel window: while the flag is set, EVERY final is dropped — the real
             # final that raced the cancel AND the marked sentinel itself. The sentinel (relayed
             # with the "cancelled" mark) closes the window: consume_cancel_mark() True re-arms
@@ -1799,7 +1834,7 @@ class VoiceTypingDaemon:
                     "context-prompt clear skipped: host has no set_prompt seam"
                 )
 
-    def _arm(self, streaming: bool | None = None) -> None:
+    def _arm(self, streaming: bool | None = None, *, native: bool = False) -> None:
         """Private: arm mic + set listening + notify. Called under the lock by _start_fenced.
 
         `streaming` selects THIS session's output mode (see _session_streaming in __init__):
@@ -1819,19 +1854,29 @@ class VoiceTypingDaemon:
 
         set_listening(True) fires the transient 'Recording' start toast (feedback.py). A COLD first
         arm is preceded by a 'Loading…' toast from _load_host(); a warm arm fires only 'Recording'.
+
+        P1.M1.T4.S4: native=True (a native editor session's arm) skips ONLY the generic-session
+        setup — the engine output-mode pin, the generic recovery draft and the engine session
+        reset (§4.8.1 B: no stream-engine session state for native) — while the mic, the
+        listening gate, the lifecycle feedback and ducking run unchanged, and it latches the
+        native arm fence AFTER the mic opens (fail-closed: no fence → no capture).
         """
         self._listening.set()
-        # Per-session output mode: resolve BEFORE the engine's reset_session() so the engine
-        # and the daemon agree from the first partial on. Defensive getattr (engine doubles).
-        # None = plain start/toggle: the config stays the source of truth for this session
-        # (read live, so a config edited underneath a resident daemon is honored); a *-block /
-        # *-stream arm PINS the mode for this one session only.
-        self._session_streaming = None if streaming is None else bool(streaming)
-        set_mode = getattr(self._stream, "set_streaming", None)
-        if callable(set_mode):
-            set_mode(self._streaming_now())
-        # P1.M6.T2.S2 (R.6): fresh recovery draft per arm (resets any stale draft state).
-        self._session_recovery.open_session()
+        # P1.M1.T4.S4: generic-session setup ONLY — a native arm skips the engine output-mode
+        # pin and the generic recovery draft (§4.8.1 B: no stream-engine session state, no
+        # generic SessionRecovery for native; the lifecycle stores below run for BOTH routes).
+        if not native:
+            # Per-session output mode: resolve BEFORE the engine's reset_session() so the engine
+            # and the daemon agree from the first partial on. Defensive getattr (engine doubles).
+            # None = plain start/toggle: the config stays the source of truth for this session
+            # (read live, so a config edited underneath a resident daemon is honored); a *-block /
+            # *-stream arm PINS the mode for this one session only.
+            self._session_streaming = None if streaming is None else bool(streaming)
+            set_mode = getattr(self._stream, "set_streaming", None)
+            if callable(set_mode):
+                set_mode(self._streaming_now())
+            # P1.M6.T2.S2 (R.6): fresh recovery draft per arm (resets any stale draft state).
+            self._session_recovery.open_session()
         self._final_pending = False  # Issue 2: fresh arm = no utterance in flight (clear stale stray partials)
         self._utterance_finalized = (
             False  # validation Issue 2: fresh arm = no final yet for this session
@@ -1841,11 +1886,12 @@ class VoiceTypingDaemon:
         )
         self._cancel_suppress_since = None  # LOST-SENTINEL SELF-HEAL: fresh arm, fresh window
         self._cancel_suppress_drops = 0  # D3.3: fresh arm, fresh (full) drop budget
-        stream_reset = getattr(
-            self._stream, "reset_session", None
-        )  # P1.M2.T6.S2: NEW session
-        if callable(stream_reset):
-            stream_reset()  # a fresh arm legitimately unfreezes; engine strings reset for the session
+        if not native:  # P1.M1.T4.S4: no stream-engine session state for native
+            stream_reset = getattr(
+                self._stream, "reset_session", None
+            )  # P1.M2.T6.S2: NEW session
+            if callable(stream_reset):
+                stream_reset()  # a fresh arm legitimately unfreezes; engine strings reset for the session
         # P1.M2.T5.S2: fresh session = fresh rolling context (daemon-side trackers reset here).
         # P1.M1.T2.S3: the context-prompt CLEAR/SEED policy moved into _start_fenced — the prompt
         # state is CONFIRMED (applied / proven clear) BEFORE this arm opens the mic, never an
@@ -1870,6 +1916,18 @@ class VoiceTypingDaemon:
         )
         if self._host is not None:
             self._host.set_microphone(True)
+        # P1.M1.T4.S4: latch the native arm fence AFTER the mic cmd (the host bumps arm_seq
+        # BEFORE its put — T4.S3 Critical #4), inside this _lock hold (the _start_fenced call
+        # site commits the reservation under the same hold). Fail CLOSED: without a latched
+        # fence the capture must not open — close the mic, clear listening, end the
+        # reservation, stay disarmed (a native session without a fence must never capture).
+        if native and not self._native_open_capture_locked():
+            if self._host is not None:
+                self._host.set_microphone(False)
+            self._listening.clear()
+            self._end_native_locked("delivery_failed", "no-fence")
+            logger.warning("native: arm fence could not be latched; capture not opened")
+            return
         self._feedback.set_mode(
             "lite"
         )  # Rev 2 single-mode constant (§4.6 schema stable; ctl renders it)
@@ -1957,6 +2015,9 @@ class VoiceTypingDaemon:
         finished utterance (the final is the LAST event of an utterance; the run loop re-enters
         text() for the NEXT one). _utterance_finalized is reset False only when the run loop
         (re-)enters text(), so a stray late partial cannot resurrect a ~5s drain.
+
+        P1.M1.T4.S4: native sessions skip ONLY stream.resume() — the idle-clock reset and
+        the _final_pending flag still run (lifecycle-only).
         """
         # BUG-001 / P1.M1.T1.S2 (re-scoped by the Rev-2 validation, ISSUE-001/ISSUE-002):
         # this hook fires on EVERY stabilized partial (the child's on_speech hook lives
@@ -1975,7 +2036,8 @@ class VoiceTypingDaemon:
         # BUG-002 / P1.M1.T2.S2: this is the ONE post-cancel lift point — the on_final
         # sentinel branch deliberately does NOT resume (a stray late final of the cancelled
         # utterance must not lift suppression; only new speech may).
-        self._stream.resume()
+        if self._native_fence is None:  # P1.M1.T4.S4: native never touches the stream engine
+            self._stream.resume()
         self._last_speech_monotonic = time.monotonic()
         if not self._utterance_finalized:
             self._final_pending = True
@@ -1991,11 +2053,17 @@ class VoiceTypingDaemon:
         _touch_speech separately (which flags the in-flight utterance for the drain).
         Called from the host reader thread (daemon thread). The engine never raises
         (backend calls are fail-safe wrapped).
+
+        P1.M1.T4.S4: for a native session this hook is lifecycle-only — it returns right
+        after the gate (partials never reach the stream engine, recovery or latency; the
+        paired 'speech' event drives _touch_speech for the idle clock).
         """
         if (
             not self._listening.is_set()
         ):  # GATE: race guard (BUG-004 / P1.M1.T4.S1) — a stray
             return  #   post-disarm partial must neither type nor count into latency
+        if self._native_fence is not None:  # P1.M1.T4.S4: native partials are lifecycle-only
+            return  # (the paired 'speech' event drives _touch_speech; nothing generic runs)
         self._stream.on_partial(text)
         # P1.M6.T2.S2 (R.6): the engine tail is now current — newest visible fragment wins.
         # Defensive getattr (the _pending_tail_len seam style): minimal stream doubles in the
@@ -2092,8 +2160,14 @@ class VoiceTypingDaemon:
         Gated on _listening (a keypress while idle touches no engine state) and written in the
         defensive-getattr style of _pending_tail_len. Safe from ANY thread: the engine's
         internal lock serializes with on_partial/commit; never raises.
+
+        P1.M1.T4.S4: a NO-OP while a native session is listening — the editor's own input
+        (which is what a user is typing there) must neither HALT nor cancel native
+        dictation: no disarm, no cancel, no abort, no engine touch, mic stays on.
         """
         if not self._listening.is_set():
+            return
+        if self._native_fence is not None:  # P1.M1.T4.S4: native keypresses are expected input
             return
         if self._cfg.cancel.keypress_action == "disarm":
             # HALT semantics (user decision 2026-10): any real keypress while armed stops
@@ -2273,6 +2347,8 @@ class VoiceTypingDaemon:
         self._stream.committed (the engine's post-commit mirror); in the Rev 1 rollback
         hatch it is self._rev1_committed (the daemon-side accumulator) — StreamingOutput is
         NOT touched in that mode (T6.S2 pinned it keystroke-identical).
+        P1.M1.T4.S4: a native session sources ONLY _session_accepted (the FIRST branch —
+        its latched fence is the discriminator), regardless of output mode.
         P1.M1.T2.S4: once this session has handed its seed off (_seed_handoff_done), the
         source is ONLY _session_accepted — the accepted-finals accumulator — in BOTH modes:
         StreamingOutput.committed can absorb an unaccepted frozen tail and does not exist
@@ -2294,7 +2370,14 @@ class VoiceTypingDaemon:
                 or self._context_prompt_active is not True
             ):
                 return
-            if self._seed_handoff_done:  # P1.M1.T2.S4: accepted-only accumulator, BOTH modes
+            if self._native_fence is not None:
+                # P1.M1.T4.S4: native source = THIS session's accepted finals ONLY — its
+                # fence is the discriminator and the FIRST branch. An unseeded native session
+                # never sets _seed_handoff_done, so without this branch the fallbacks below
+                # would read a generic engine checkpoint that native sessions never feed
+                # (StreamingOutput.committed does not exist on the native path).
+                source = " ".join(self._session_accepted)
+            elif self._seed_handoff_done:  # P1.M1.T2.S4: accepted-only accumulator, BOTH modes
                 source = " ".join(self._session_accepted)
             elif self._streaming_now():
                 source = self._stream.committed
@@ -2814,7 +2897,9 @@ class VoiceTypingDaemon:
                     # else: plain arm, channel present, no prior seed → prompt provably None: skip
                     self._load_error = None
                     self._arming = None
-                    self._arm(streaming=streaming)
+                    # P1.M1.T4.S4: a native token's commit arms the NATIVE route — the fence
+                    # latch + offer queue are built inside _arm under this same lock hold.
+                    self._arm(streaming=streaming, native=native_tok is not None)
                     return ArmOutcome(
                         True,
                         True,
@@ -2888,6 +2973,164 @@ class VoiceTypingDaemon:
     def _native_blockers_locked(self) -> bool:
         """§4.8.1 B 'any other arm is loading, listening, or draining' — T2.S5's four flags, verbatim."""
         return (self._arming is not None or self._loading or self._listening.is_set() or self._drain)
+
+    # --- P1.M1.T4.S4: the native acceptance route (§4.8.1 B) ---------------------
+
+    def _native_open_capture_locked(self) -> bool:
+        """Latch the arm fence + build this session's offer queue (control thread, _lock held).
+
+        Called from _arm AFTER self._host.set_microphone(True) — the host bumps arm_seq
+        BEFORE its cmd put (T4.S3 Critical #4), so the read here is the fence of the capture
+        that is opening. Caller holds _lock (reads/writes shared in-memory state only — no
+        waits, no I/O, no callbacks). The fence tuple is what the reader thread's lock-free
+        sentinel (`self._native_fence is not None`) routes on.
+
+        A host WITHOUT the T4.S3 identity surface (test doubles predating it) latches (0, 0):
+        capture still opens (mic/gate/feedback are not identity-dependent), but every final
+        from such a host fails the verdict (arm_seq <= 0 / fence mismatch) — fail-closed at
+        the eligibility layer, exactly where the contract rejects missing identity."""
+        native = self._native
+        host = self._host
+        if not (
+            self._native_owner_live_locked()
+            and native.stage is Stage.LISTENING
+            and host is not None
+        ):
+            logger.warning(
+                "native: cannot latch arm fence (stage=%s host=%s)",
+                getattr(native, "stage", None),
+                "present" if host is not None else "missing",
+            )
+            return False
+        self._native_fence = (
+            getattr(host, "generation", 0),
+            getattr(host, "arm_seq", 0),
+        )
+        self._native_queue = OfferQueue(native.owner.id, self._native_recovery)
+        self._native_rejects = {}  # fresh per-session verdict counts (codes only)
+        self._native_offer_evt.clear()
+        logger.info(
+            "voice-typing native capture open: gen=%d arm_seq=%d", *self._native_fence
+        )
+        return True
+
+    def _native_close_capture_locked(self) -> None:
+        """Clear the fence + close the offer queue + clear the pump wakeup (control thread,
+        _lock held). Idempotent; called from _end_native_locked so EVERY native end cause
+        funnels here. close() makes later enqueue CLOSED (no retain) — a late final cannot
+        resurrect the ended session (T4.S2 contract). No I/O, no waits, no callbacks."""
+        self._native_fence = None
+        q, self._native_queue = self._native_queue, None
+        if q is not None:
+            q.close()
+        self._native_offer_evt.clear()
+
+    def _native_final_verdict(self, ev) -> str:
+        """Identity/fence verdict for the relayed event snapshot ("ok" | reject code).
+
+        Reader thread — reads ONLY the snapshot taken inside the callback
+        (host.relay_event), never a cached value (T4.S3: DUPLICATE/STALE finals never reach
+        on_final; the host drops them before the callback). Codes:
+          "missing"                    no snapshot / no utterance ids / arm_seq <= 0
+          "kind"                       not a "final" relay (partials are never admitted)
+          "class:<final_class.value>"  only FinalClass.ACCEPTED is eligible; SENTINEL /
+                                       CANCELLED / UNIDENTIFIED are diagnostic classes
+          "fence"                      (host_generation, arm_seq) != this session's latched
+                                       fence — a previous arm's or a respawned host's final
+          "ok"                         eligible — clean → handoff → refresh → enqueue
+
+        T4.S5 EXTENSION SEAM (documented, NOT implemented here): under Stage.DRAINING
+        acceptance must be narrowed to (host_generation, arm_seq, session_gen,
+        utterance_id) == host.capture_boundary (whole-value snapshot; at most 1 event may
+        be superseded)."""
+        if ev is None:
+            return "missing"
+        if ev.kind != "final":
+            return "kind"
+        if ev.final_class is not FinalClass.ACCEPTED:
+            return "class:" + ev.final_class.value
+        if ev.arm_seq <= 0 or ev.session_gen is None or ev.utterance_id is None:
+            return "missing"
+        if (ev.host_generation, ev.arm_seq) != self._native_fence:
+            return "fence"
+        return "ok"
+
+    def _native_reject_final(self, why: str) -> None:
+        """Close the utterance lifecycle for a REJECTED native final (reader thread).
+
+        Rejected ≠ lost-but-hanging: the same two stores as the generic path's exits
+        (_final_pending False, _utterance_finalized True) so run()/drain never waits for a
+        "typed" final that will not come. Counts the verdict (bounded fixed keys) and logs
+        the CODE only — never text, never a seed, never a ProtocolError detail. Deliberately
+        does NOT call _handoff_context_prompt: a rejected final never consumes the seed
+        (T2.S4 — "say it again" stays pending). No locks (the reader holds _on_final_lock;
+        these stores are atomic in CPython)."""
+        self._final_pending = False
+        self._utterance_finalized = True
+        self._native_rejects[why] = self._native_rejects.get(why, 0) + 1
+        logger.info("voice-typing native final rejected: %s", why)
+
+    def _native_on_final(self, text: str) -> None:
+        """THE NATIVE ACCEPTANCE ROUTE (§4.8.1 B) — replaces ALL generic output.
+
+        Runs on the recorder reader thread with _on_final_lock held (NEVER _lock except the
+        short in-memory enqueue below; no socket write, no begin_offer, no wait/join, no
+        _safe_abort, no _begin_drain — set_prompt inside _refresh_context_prompt is a
+        non-blocking queue put and is legal under _on_final_lock per its own contract).
+        Order is load-bearing: verdict → clean → handoff → refresh → enqueue → lifecycle
+        stores → wakeup. A rejected/ended final must not reach _handoff_context_prompt.
+
+        CONSUMER CONTRACT (hand to T4.S5 / T4.S6 / T4.S7 verbatim):
+          T4.S5 (stop/cancel/drain): extend _native_final_verdict for Stage.DRAINING — accept iff
+              (ev.host_generation, ev.arm_seq, ev.session_gen, ev.utterance_id) == host.capture_boundary
+              (whole-value snapshot, may be <=1 event superseded). The route already sets
+              _final_pending=False / _utterance_finalized=True exactly like the generic path, so the
+              existing _begin_drain / _drain_timeout seams work unchanged. Cancel/lost: with d._lock:
+              q.revoke("cancelled") (then the existing off-lock _safe_abort).
+          T4.S6 (ended): recoverable = q.drain_pending(); call
+              self._native_recovery.end_session(sid, reason) at end. The queue is already closed and
+              the fence cleared by _native_close_capture_locked.
+          T4.S7 (pump): wait on d._native_offer_evt (bounded by the 2 s ping tick); on wake: evt.clear();
+              loop `with d._lock: attempt = q.begin_offer(now)` → send_line_capped OUTSIDE the lock →
+              `with d._lock: q.finish_offer(ok)`; `with d._lock: q.ack(obj)` on "applied"; `with d._lock:
+              q.check_deadline(now)` on the timer. A stale set after close is harmless (q is None). Only
+              QUEUED enqueues set the event; REVOKED = recovery-only (T4.S6 surfaces delivery_failed).
+        """
+        why = self._native_final_verdict(getattr(self._host, "relay_event", None))
+        if why != "ok":
+            self._native_reject_final(why)
+            return
+        cleaned = textproc.clean(text, self._cfg.filter)
+        if not cleaned:  # rejected: blocklist hallucination / below min_chars
+            self._native_reject_final("filtered")
+            return
+        self._handoff_context_prompt(cleaned)  # T2.S4 acceptance point (seed → rolling, once)
+        self._refresh_context_prompt()  # native source branch (below) — accepted finals only
+        with self._lock:  # pure in-memory; NO I/O under the lock (CRITICAL: the OfferQueue
+            # is not thread-safe by design — EVERY mutation happens under _lock, and the
+            # reader thread must never hold it across anything but this enqueue)
+            q = self._native_queue
+            if not self._native_owner_live_locked() or q is None:
+                ended = True
+                outcome = None
+                pending = 0
+            else:
+                ended = False
+                outcome = q.enqueue(cleaned)  # retain-before-offer (T4.S2: overflow/invalid
+                # text REVOKES sticky but the final is STILL retained — recovery-only)
+                pending = q.pending_count
+        if ended:
+            self._native_reject_final("ended")
+            return
+        self._final_pending = False  # the in-flight utterance is finalized; a pending drain can finish
+        self._utterance_finalized = True  # validation Issue 2: this text() invocation is done
+        if outcome is EnqueueOutcome.QUEUED:
+            self._native_offer_evt.set()  # WAKEUP for the T4.S7 pump (REVOKED = recovery-only)
+        logger.info(
+            "voice-typing native final: %s pending=%d",
+            outcome.value,
+            pending,
+        )  # outcome code + count only — never text (G6)
 
     def native_id_known(self, session_id: str) -> bool:
         """duplicate_id predicate ('active or retained', §4.8.1 B); T4.S1 may extend it with its
@@ -2977,6 +3220,10 @@ class VoiceTypingDaemon:
         if r is None or not r.live:
             return None
         rec = r.terminate(reason, cause, now=self._native_clock() if now is None else now)
+        # P1.M1.T4.S4: the capture is over on EVERY end cause — clear the fence + close the
+        # offer queue in this same lock hold (a late final can no longer be routed native;
+        # a later enqueue would return CLOSED without retaining — no session resurrection).
+        self._native_close_capture_locked()
         handle, self._native_timer = self._native_timer, None
         if handle is not None:
             self._native_timers.cancel(handle)
