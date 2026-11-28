@@ -136,9 +136,23 @@ from voice_typing import cuda_check
 from voice_typing.config import VoiceTypingConfig
 from voice_typing.editor_protocol import (
     MAX_FRAME_BYTES,
+    START_CAP_S,
+    ThreadTimers,
     FrameError,
     FrameReader,
     encode_line,
+    is_uuid_v4,
+    remaining,
+)
+
+# P1.M1.T3.S4 (§4.8.1 B): native owner reservation + startup fence — the pure state machine the
+# daemon drives under _lock (this module owns the LOCKING, never the module itself).
+from voice_typing.editor_session import (
+    EndRecord,
+    NativeReservation,
+    NativeReserveResult,
+    Owner,
+    Stage,
 )
 
 # P1.M2.T7.S2: passive evdev Backspace-cancel listener (PRD §4.2quater). Pure-python import —
@@ -246,6 +260,16 @@ _CANCEL_SUPPRESS_TIMEOUT_S: float = 5.0
 # so a slow prime can never consume the whole deadline.
 _START_DEADLINE_S: float = 30.0
 _PRIME_BUDGET_S: float = 5.0
+
+# P1.M1.T3.S4: active + recently ended native ids → duplicate_id ("reject an id already active or
+# retained", §4.8.1 B). Retention is a bounded deque (memory-only; no recovery store — T4.S1).
+_NATIVE_ID_MEMORY: int = 8
+# ArmOutcome.reason → ended.reason for a native start (§4.8.1 B ended reasons; fixed codes only).
+_NATIVE_START_FAILURE = {
+    "load-failed": "load_failed",
+    "seed-unconfirmed": "load_failed",
+    "prompt-unconfirmed": "load_failed",
+}
 
 
 @dataclass(frozen=True)
@@ -979,6 +1003,20 @@ class VoiceTypingDaemon:
         # stop landing between a reservation and its commit aborts that commit (criterion: "a stop
         # between prime and commit aborts the commit"). Bookkeeping only — disarm logic unchanged.
         self._stop_seq = 0
+        # P1.M1.T3.S4 — native owner reservation (§4.8.1 B). _native is the ONE connection-bound owner
+        # (kept, ENDED, until the next reserve replaces it — a tombstoned token still fails the fence);
+        # _native_seq mints owner tokens (the startup fence); _native_ids remembers active + recently
+        # ended ids (duplicate_id). Clock + timer source are instance attributes so tests inject fakes;
+        # production uses editor_protocol's START_CAP_S + ThreadTimers (the client-facing 30 s reference).
+        self._native: NativeReservation | None = None
+        self._native_seq = 0
+        self._native_ids: collections.deque = collections.deque(maxlen=_NATIVE_ID_MEMORY)
+        self._native_timer = None                   # Start-cap watchdog handle (armed at reserve)
+        self._native_worker: threading.Thread | None = None
+        self._native_clock = time.monotonic
+        self._native_timers = ThreadTimers(time.monotonic)
+        self._native_end_cb = None                  # T4.S6/T4.S7: receives the EndRecord once, off-lock
+        self._native_end_delivered = False
         # Boot lifecycle phase (delta D2/D3): 'idle' if a recorder was injected (loaded), else 'unloaded' (the lazy
         # boot state). _load_host() drives loading->idle; a failed load returns to 'unloaded'. (The feedback
         # models_loaded FIELD + status_snapshot/ctl exposure is P1.M2.T2.S1; T1 tracks the daemon-side
@@ -1378,6 +1416,11 @@ class VoiceTypingDaemon:
             # the configured device with models_loaded=False / phase=unloaded / load_error set
             # until the next successful arm re-seeds the cache from the child.
             self._resolved_device_cache = self._unprobed_device_config()
+        # P1.M1.T3.S4: the reservation is bound to the recorder host's lifetime. AFTER the lock block
+        # (CRITICAL #10 — the terminator delivers off-lock and must not run under this lock).
+        with self._lock:
+            starting = self._native_owner_live_locked() and self._native.stage is Stage.STARTING
+        self.terminate_native("load_failed" if starting else "disconnected", cause="host-died")
 
     def _configure_log_level(self) -> None:
         """Apply cfg.log.level to the `voice_typing` namespace logger (PRD §4.2 'DEBUG via config').
@@ -1890,6 +1933,11 @@ class VoiceTypingDaemon:
         self._feedback.set_phase(
             "idle"
         )  # Issue 2 / P1.M2.T1.S1: 'loaded / not listening' ⇒ phase idle (PRD §4.2bis, §4.6)
+        # P1.M1.T3.S4: the native owner's mic just closed — end its reservation HERE (under _lock) with
+        # the drain reason recorded by _request_stop/_maybe_auto_stop (else 'stopped'); the record is
+        # delivered off-lock by the session's parked worker, never under this lock.
+        if self._native_owner_live_locked():
+            self._end_native_locked(self._native.end_reason, None)
         # NOTE: caller MUST call self._safe_abort() AFTER releasing _lock (see start/stop/toggle).
 
     def _touch_speech(self) -> None:
@@ -1972,7 +2020,11 @@ class VoiceTypingDaemon:
         re-arm it once on_final has set _utterance_finalized for this text() invocation (validation
         Issue 2 within-session residual): a stray post-final realtime partial cannot resurrect a
         ~5s drain the way it could when _final_pending was set on every partial.
+
+        P1.M1.T3.S4: a native LISTENING owner is tagged 'stopped' so _disarm ends it with that
+        reason.
         """
+        self._native_drain_or_stop("stopped")
         if (
             self._cfg.asr.graceful_stop
             and self._host is not None
@@ -2282,7 +2334,14 @@ class VoiceTypingDaemon:
         Idempotent (PRD §4.2quater freeze-rule): when NOT armed, or armed with NO pending tail,
         this issues no backspace and still replies ok — further Backspaces are plain user edits,
         never compensated (only typed dictation may be deleted, and only by this path).
+
+        P1.M1.T3.S4: cancel is not an owner command — while a native editor session owns the mic
+        it replies busy and performs no backspace/host cancel (§4.8.1 B).
         """
+        with self._lock:
+            if self._native_owner_live_locked():   # P1.M1.T3.S4: cancel is not an owner command
+                return {"ok": False, "listening": self._listening.is_set(), "busy": True,
+                        "error": "busy: a native editor session owns the mic"}
         with self._lock:
             if not self._listening.is_set():
                 # Not armed: nothing pending — idempotent no-op (never touch backend/host).
@@ -2374,6 +2433,7 @@ class VoiceTypingDaemon:
         threshold = self._cfg.asr.auto_stop_idle_seconds
         if threshold <= 0:
             return
+        self._native_drain_or_stop("idle")  # P1.M1.T3.S4: auto-stop of a native owner records 'idle'
         disarmed = False
         with self._lock:
             if not self._listening.is_set() or self._last_speech_monotonic is None:
@@ -2630,13 +2690,20 @@ class VoiceTypingDaemon:
 
     def _start_fenced(self, seed: str | None, *, streaming: bool | None = None,
                       timeout: float = _START_DEADLINE_S,
-                      reject_busy: bool = False) -> ArmOutcome:
+                      reject_busy: bool = False,
+                      native_tok: int | None = None) -> ArmOutcome:
         """Reserve → load → prime → atomic revalidate → arm (P1.M1.T2.S3; §4.8.1).
 
         P1.M1.T2.S5 (Mode A docs): with reject_busy=True (context-only starts) the reserve
         block REJECTS with reason 'busy' instead of superseding an in-flight arm — nothing is
         reserved (no _arm_seq bump, no token), so the in-flight arm / live session is untouched.
         The default (False) keeps start()/toggle()/start_with_seed()'s supersede semantics.
+
+        P1.M1.T3.S4: native_tok carries a native owner's token — the arm commits only into ITS OWN
+        live STARTING reservation inside the 30 s Start cap (checked here at reserve AND in the
+        atomic commit block; an expired one is ended as 'timeout'). Without native_tok, a live
+        native owner makes this call return reason 'busy' with NOTHING reserved — no generic or
+        context arm supersedes or joins a native session (§4.8.1 B).
 
         Reservation + the final arm decision run UNDER self._lock; the heavy waits (_load_host's
         spawn, the host's confirmed prime_prompt) run OUTSIDE it so status/stop/quit stay
@@ -2651,6 +2718,11 @@ class VoiceTypingDaemon:
         """
         t0 = time.monotonic()
         with self._lock:
+            if native_tok is not None:
+                if not self._native_can_commit_locked(native_tok):
+                    return ArmOutcome(False, False, "superseded", None, None, self._arm_seq)
+            elif self._native_owner_live_locked():   # P1.M1.T3.S4: never supersede/join a native owner
+                return ArmOutcome(False, False, "busy", None, None, self._arm_seq)
             if reject_busy and (  # P1.M1.T2.S5: context starts REJECT instead of superseding
                 self._arming is not None  # an arm is in flight (a live reservation token)
                 or self._loading  # a recorder load is in flight
@@ -2718,10 +2790,20 @@ class VoiceTypingDaemon:
                     or self._host is not host
                     or not getattr(host, "is_alive", True)
                     or self._stop_seq != stop_seq0
+                    or (native_tok is not None
+                        and not self._native_can_commit_locked(native_tok))
                 ):
                     abort_reason = "superseded" if stale else "aborted"
                 else:
                     # Commit: the prompt state is KNOWN — apply the policy, then capture.
+                    if native_tok is not None:
+                        # P1.M1.T3.S4 COMMIT HOOK — same lock hold as capture: STARTING→LISTENING is
+                        # atomic with the mic opening; the Start-cap watchdog is retired
+                        # (Timer.cancel = flag set, allowed here).
+                        self._native.commit(native_tok)
+                        handle, self._native_timer = self._native_timer, None
+                        if handle is not None:
+                            self._native_timers.cancel(handle)
                     if want_seed:
                         self._seed_active = installed  # applied → the seed IS the prompt; clear → known-clear
                         self._seed_handoff_pending = installed  # P1.M1.T2.S4: an APPLIED seed awaits the first accepted final
@@ -2796,6 +2878,197 @@ class VoiceTypingDaemon:
             except Exception:
                 logger.exception("start: isolating an unconfirmable host failed (ignored)")
 
+    # --- P1.M1.T3.S4: native owner reservation + startup fence (§4.8.1 B) ---
+
+    def _native_owner_live_locked(self) -> bool:
+        """§4.8.1 B 'a native reservation exists': the one owner is in a non-terminal stage.
+        Caller holds _lock (CRITICAL #1: this reads state only — no waits, no callbacks)."""
+        return self._native is not None and self._native.live
+
+    def _native_blockers_locked(self) -> bool:
+        """§4.8.1 B 'any other arm is loading, listening, or draining' — T2.S5's four flags, verbatim."""
+        return (self._arming is not None or self._loading or self._listening.is_set() or self._drain)
+
+    def native_id_known(self, session_id: str) -> bool:
+        """duplicate_id predicate ('active or retained', §4.8.1 B); T4.S1 may extend it with its
+        recovery store."""
+        return session_id in self._native_ids
+
+    def reserve_native(self, conn, session_id: str, *, on_end=None) -> NativeReserveResult:
+        """INTERNAL (T4.S7 wires `editor-start` to it). ATOMIC check-and-reserve under _lock, in this
+        order: shutdown → busy; id active/retained → duplicate_id; native owner live → busy; any
+        generic arm loading/listening/draining → busy. On acceptance mints the owner token, installs the
+        STARTING reservation, registers the id, and (outside the lock) arms the 30 s Start-cap watchdog.
+        Spawns nothing — call begin_native_start(token) after emitting `starting`. Never writes."""
+        if not is_uuid_v4(session_id):
+            return NativeReserveResult(False, None, "invalid_request")
+        with self._lock:
+            if self._shutdown.is_set():
+                return NativeReserveResult(False, None, "busy")
+            if session_id in self._native_ids:
+                return NativeReserveResult(False, None, "duplicate_id")
+            if self._native_owner_live_locked() or self._native_blockers_locked():
+                return NativeReserveResult(False, None, "busy")
+            self._native_seq += 1
+            now = self._native_clock()
+            owner = Owner(session_id, self._native_seq, now, now + START_CAP_S)
+            self._native = NativeReservation(owner, conn, now=now)
+            self._native_ids.append(session_id)
+            self._native_end_cb = on_end
+            self._native_end_delivered = False
+            self._native_worker = None
+        # outside the lock: arm the watchdog; a fire is re-checked against the clock under the lock
+        self._native_timer = self._native_timers.arm(
+            owner.deadline, lambda tok=owner.token: self._native_start_expired(tok))
+        logger.info("voice-typing native: reserved owner token=%d stage=starting cap=%.0fs",
+                    owner.token, START_CAP_S)
+        return NativeReserveResult(True, owner, None)
+
+    def _native_start_expired(self, token: int) -> None:
+        """Watchdog (timer thread). Ends the reservation as 'timeout' only if it is still the current
+        STARTING owner AND the injected clock says the cap has passed (a late/early fire is ignored)."""
+        with self._lock:
+            r = self._native
+            if (r is None or r.owner.token != token or r.stage is not Stage.STARTING
+                    or self._native_clock() < r.owner.deadline):
+                return
+            self._end_native_locked("timeout", "start-cap")
+        self._flush_native_end()
+
+    def begin_native_start(self, token: int, *, seed: str | None = None,
+                           streaming: bool | None = None) -> bool:
+        """INTERNAL (T4.S7): spawn the session's lifecycle thread for a reserved token. False if the
+        token is no longer the current STARTING owner inside its cap (tombstoned/replaced/expired — an
+        expired one is ended here as 'timeout') or a worker already exists. Idempotent per token."""
+        with self._lock:
+            if not self._native_can_commit_locked(token) or self._native_worker is not None:
+                spawn = False
+            else:
+                self._native_worker = threading.Thread(
+                    target=self._native_start_worker, args=(token,),
+                    kwargs={"seed": seed, "streaming": streaming},
+                    name=f"native-start-{token}", daemon=True)
+                spawn = True
+        self._flush_native_end()
+        if not spawn:
+            return False
+        self._native_worker.start()
+        return True
+
+    def _native_can_commit_locked(self, token: int) -> bool:
+        """THE STARTUP FENCE (caller holds _lock). True iff `token` is the CURRENT reservation, still
+        STARTING, inside its Start cap. An expired reservation is terminated HERE ('timeout',
+        'start-cap'; stashed for off-lock delivery) so the cap holds even when the watchdog fires late.
+        False for a tombstoned or replaced token."""
+        r = self._native
+        if r is None or r.owner.token != token or r.stage is not Stage.STARTING:
+            return False
+        now = self._native_clock()
+        if now >= r.owner.deadline:
+            self._end_native_locked("timeout", "start-cap", now=now)
+            return False
+        return True
+
+    def _end_native_locked(self, reason: str, cause: str | None,
+                           *, now: float | None = None) -> EndRecord | None:
+        """Transition the live reservation to ENDED under _lock; retire the watchdog (Timer.cancel is a
+        flag set — the ONE thing allowed under the lock); wake a parked worker. Idempotent."""
+        r = self._native
+        if r is None or not r.live:
+            return None
+        rec = r.terminate(reason, cause, now=self._native_clock() if now is None else now)
+        handle, self._native_timer = self._native_timer, None
+        if handle is not None:
+            self._native_timers.cancel(handle)
+        r.end_evt.set()
+        logger.info("voice-typing native: ended owner token=%d from=%s reason=%s cause=%s",
+                    r.owner.token, rec.stage.value, rec.reason, rec.cause)
+        return rec
+
+    def _claim_native_end_locked(self) -> EndRecord | None:
+        """Exactly-once delivery claim: the first caller gets the record, everyone after gets None."""
+        r = self._native
+        if r is None or r.end is None or self._native_end_delivered:
+            return None
+        self._native_end_delivered = True
+        return r.end
+
+    def _flush_native_end(self) -> None:
+        """Deliver the pending EndRecord to on_end — NEVER under _lock; swallows a raising callback
+        (type name only). Safe from any thread; a no-op when nothing is pending."""
+        with self._lock:
+            rec = self._claim_native_end_locked()
+        if rec is None:
+            return
+        cb = self._native_end_cb
+        if cb is None:
+            return
+        try:
+            cb(rec)
+        except Exception as exc:  # defensive: a misbehaving listener — TYPE name only
+            logger.warning("native end callback raised (%s)", type(exc).__name__)
+
+    def terminate_native(self, reason: str, *, cause: str | None = None,
+                         token: int | None = None) -> EndRecord | None:
+        """INTERNAL hook (T4.S5/S6/S7): end the live reservation with an §4.8.1 B reason; `token`
+        restricts the call to that owner (None = any). Must be called WITHOUT _lock held. Delivers
+        on_end on the calling thread after releasing the lock. Idempotent (None if already ended)."""
+        with self._lock:
+            r = self._native
+            if r is None or (token is not None and r.owner.token != token):
+                return None
+            rec = self._end_native_locked(reason, cause)
+        self._flush_native_end()
+        return rec
+
+    def begin_native_drain(self, reason: str) -> bool:
+        """INTERNAL hook (T4.S5; also _request_stop/_maybe_auto_stop): LISTENING -> DRAINING and record
+        the reason the end will carry. No-op (False) without a LISTENING native owner."""
+        with self._lock:
+            r = self._native
+            return r is not None and r.begin_drain(reason)
+
+    def _native_drain_or_stop(self, reason: str) -> None:
+        """Tag a LISTENING native owner so _disarm ends it with `reason` (no-op otherwise)."""
+        self.begin_native_drain(reason)
+
+    def _stop_native_start(self) -> bool:
+        """§4.8.1 B (emergency graceful stop): a STARTING native owner ends here ('stopped',
+        'stop-during-start'), delivered off-lock; the worker's late commit finds a tombstoned token.
+        False when there is nothing to stop (capture never opens from a stopped start)."""
+        with self._lock:
+            if not (self._native_owner_live_locked() and self._native.stage is Stage.STARTING):
+                return False
+            self._end_native_locked("stopped", "stop-during-start")
+        self._flush_native_end()
+        return True
+
+    def _native_start_worker(self, token: int, *, seed: str | None, streaming: bool | None) -> None:
+        """The native session's lifecycle thread. (1) runs the fenced start carrying its owner token
+        (heavy waits inside _start_fenced run OUTSIDE _lock; stop/status stay responsive); (2) on
+        failure ends the reservation with the mapped reason; (3) on success parks on its reservation's
+        end_evt and delivers the EndRecord an under-lock terminator (_disarm) stashed. Never holds the
+        lock across a wait; never logs text."""
+        with self._lock:
+            r = self._native
+            if r is None or r.owner.token != token:
+                return
+        out = self._start_fenced(seed, streaming=streaming,
+                                 timeout=max(0.0, remaining(r.owner.deadline, self._native_clock())),
+                                 reject_busy=True, native_tok=token)
+        with self._lock:
+            mine = self._native is r and r.live
+            if not out.ok and mine:
+                reason = _NATIVE_START_FAILURE.get(out.reason)
+                if reason is not None:          # superseded/aborted/busy/start-timeout → someone ended us already
+                    self._end_native_locked(reason, None)
+            committed = out.ok and self._native is r and r.stage is Stage.LISTENING
+        self._flush_native_end()
+        if not committed:
+            return
+        r.end_evt.wait()                         # woken by _end_native_locked (per-reservation Event)
+        self._flush_native_end()
+
     def start_with_seed(self, seed: str | None, *, streaming: bool | None = None,
                         timeout: float = _START_DEADLINE_S) -> ArmOutcome:
         """Fenced start with a §4.8.1 initial-prompt seed (P1.M1.T2.S3). Returns a sanitized
@@ -2863,9 +3136,12 @@ class VoiceTypingDaemon:
         return {"ok": True, "context_seeded": False,
                 "context_reason": unseeded_reason or "unavailable", **self.status_snapshot()}
 
-    def start(self, streaming: bool | None = None) -> None:
+    def start(self, streaming: bool | None = None) -> "ArmOutcome | None":
         """Arm the mic (lazy-loading the recorder-host child on the first arm) — via the fenced
         start seam (P1.M1.T2.S3).
+
+        P1.M1.T3.S4: returns the outcome — reason 'busy' while a native editor session owns the
+        mic (nothing reserved).
 
         `streaming`: None = config default, True/False = THIS session's output mode (_arm). The
         seam RESERVES the arm under _lock, runs the heavy waits (the child spawn in _load_host, a
@@ -2876,16 +3152,22 @@ class VoiceTypingDaemon:
         matches the pre-seam sequence (load → arm; the best-effort prompt clear still precedes the
         mic cmd for hosts without a confirmed channel). A load failure still leaves _load_error set
         so the control socket reports ok:false via _arm_response."""
-        self._start_fenced(None, streaming=streaming)
+        return self._start_fenced(None, streaming=streaming)
 
     def stop(self) -> None:
         # Graceful stop: if an utterance is in flight, let the final model finish + emit its text
         # before disarming (drain); otherwise disarm immediately + abort. See _request_stop.
+        # P1.M1.T3.S4: Stop during startup aborts the reservation; capture never opens.
+        if self._stop_native_start():
+            return
         self._request_stop()
 
-    def toggle(self, streaming: bool | None = None) -> None:
+    def toggle(self, streaming: bool | None = None) -> "ArmOutcome | None":
         """Single-path toggle (Rev 2 §4.2quater): disarm iff listening, arm otherwise.
         `streaming` only matters on the arm side (None = config default; see _arm).
+
+        P1.M1.T3.S4: the arm side returns the outcome — reason 'busy' while a native editor
+        session owns the mic (nothing reserved); the disarm side (toggle-off = a stop) is unchanged.
 
         Pressing the key while idle arms the ONE recorder; pressing it while armed disarms. There
         is no cross-mode switching (the two-mode substrate is gone): a re-arm while the resident
@@ -2902,7 +3184,7 @@ class VoiceTypingDaemon:
         if listening:
             self._request_stop()  # armed → disarm
             return
-        self._start_fenced(None, streaming=streaming)
+        return self._start_fenced(None, streaming=streaming)
 
     def request_shutdown(self) -> None:
         """Signal run() to exit + tear down the child so a blocked text() unblocks (BUG-1 fix).
@@ -2915,6 +3197,8 @@ class VoiceTypingDaemon:
         _safe_abort() alone leaves the loop stranded ~40% of the time -> SIGKILL after
         TimeoutStopSec. Killing the child (host.stop()) guarantees host.text()'s loop sees a dead
         child and returns within ~0.5s -> run() exits -> main()'s finally runs -> clean exit.
+
+        P1.M1.T3.S4: a live native reservation ends here as 'shutdown' before any teardown.
 
         This mirrors what the voicectl quit path already does (ControlServer._dispatch("quit") ->
         request_shutdown() -> on_quit=daemon.shutdown()). P1.M1.T2.S1: this method CLAIMS
@@ -2929,6 +3213,7 @@ class VoiceTypingDaemon:
         _shutdown.set() is the real signal the run() loop checks.
         """
         self._shutdown.set()
+        self.terminate_native("shutdown", cause="shutdown")  # P1.M1.T3.S4
         self._duck_release()  # §4.2quinquies: quit/SIGTERM must never leave media ducked
         # P1.M6.T2.S2 (R.6/G10): daemon exit clears the recovery store — memory only, no
         # crash persistence. A quit while armed may skip _disarm; clear() covers that too.
@@ -3221,7 +3506,11 @@ class VoiceTypingDaemon:
         text()) and main()'s finally block (after run() returns; covers the signal path). Must NOT
         run while the main thread is inside recorder.text() — request_shutdown()/abort() guarantees
         it has exited text() before this is reached.
+
+        P1.M1.T3.S4: a live native reservation ends here as 'shutdown' (idempotent; covers the
+        SIGTERM/finally path when request_shutdown did not already end it).
         """
+        self.terminate_native("shutdown", cause="shutdown")  # P1.M1.T3.S4 (idempotent)
         # P1.M1.T2.S1 / bugfix Issue 1: daemon-level single-flight. If request_shutdown() (the SIGTERM
         # signal thread) already CLAIMED _shutdown_done, a second _bounded_shutdown() here would race
         # it (the double-teardown that blew TimeoutStopSec). Instead WAIT on _teardown_done (bounded,
@@ -3605,9 +3894,12 @@ class ControlServer:
             # path, same response. 'start-lite' stays unknown-command (below).
             was_listening = self._daemon.is_listening()
             if mode is None:
-                self._daemon.toggle()  # duck-typed daemons keep the no-arg contract
+                out = self._daemon.toggle()  # duck-typed daemons keep the no-arg contract
             else:
-                self._daemon.toggle(streaming=mode)
+                out = self._daemon.toggle(streaming=mode)
+            if getattr(out, "reason", None) == "busy":   # P1.M1.T3.S4: duck-typed daemons return None
+                return {"ok": False, "listening": False, "busy": True,
+                        "error": "busy: a native editor session owns the mic"}
             # A toggle arms (from idle) or disarms (when armed) — Rev 2 single path, no cross-mode
             # switch. On every arm path a load may have failed: route through _arm_response whenever
             # an arm was ATTEMPTED so voicectl surfaces _load_error honestly (validation Issue
@@ -3617,9 +3909,12 @@ class ControlServer:
             return {"ok": True, **self._daemon.status_snapshot()}
         if cmd in ("start", "start-stream", "start-block"):
             if mode is None:
-                self._daemon.start()
+                out = self._daemon.start()
             else:
-                self._daemon.start(streaming=mode)
+                out = self._daemon.start(streaming=mode)
+            if getattr(out, "reason", None) == "busy":   # P1.M1.T3.S4: duck-typed daemons return None
+                return {"ok": False, "listening": False, "busy": True,
+                        "error": "busy: a native editor session owns the mic"}
             return (
                 self._arm_response()
             )  # ok:false+error if the first arm's model load failed (§4.2bis)

@@ -244,7 +244,7 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Define bounded v1 socket and session ownership",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Add a backward-compatible framing boundary, reusable native wire contract and exclusive reservation while cold arming remains interruptible.",
               "subtasks": [
                 {
@@ -319,7 +319,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T3.S4",
                   "title": "Reserve one native owner and fence its startup",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S3",
@@ -354,7 +354,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Retain bounded native recovery in memory",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S2"
@@ -377,7 +377,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T4.S2",
                   "title": "Enforce one sequenced offer and verified ACK",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S2",
