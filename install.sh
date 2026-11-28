@@ -204,10 +204,11 @@ echo "daemon : running and NOT listening (~0 VRAM; first 'voicectl toggle' loads
 echo "CUDA   : ${VERDICT:-unknown}"
 echo "offline: daemon runs fully local (HF_HUB_OFFLINE=1 via launch_daemon.sh) — no network at runtime"
 echo
-echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|cancel|session|quit"
+echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|cancel|session|recover|quit"
 echo "          (start-block / toggle-block choose final-only delivery; start-stream / toggle-stream choose live text)"
 echo "          (voicectl cancel drops the pending fragment)"
 echo "          (voicectl session [--copy] prints the last COMPLETED dictation; --copy stages it on the Wayland clipboard and prints 'copied N chars'; exit 1 when no completed session exists)"
+echo "          (voicectl recover [ID] prints the UNCONFIRMED words of an ended native editor session — read-only, never re-inserted, no --copy; exit 1 when nothing is retained)"
 echo "          (keybinds are user-owned: this installer sets no shortcut — bind the voicectl commands in your compositor config)"
 echo "stop a wedged service: systemctl --user stop voice-typing   (out-of-band stop when voicectl reports 'daemon wedged')"
 echo

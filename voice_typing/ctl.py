@@ -30,6 +30,15 @@ Subcommands (PRD §4.8):
              R.6; never a moving draft). --copy stages it on the Wayland CLIPBOARD
              instead — exact bytes, no added newline, PRIMARY untouched, never
              types/erases/submits. Exit 1 when no completed session exists.
+    recover [ID]
+             print the UNCONFIRMED words of an ENDED native editor session (PRD
+             §4.8.1 C): stdout is EXACTLY the text; warnings (truncation / may
+             already be partially inserted) go to STDERR; never re-inserted, never
+             copied, exit 1 when nothing is retained, 64 for a bad id/flags.
+             Ordinary copy vs explicit recovery: `session [--copy]` recovers the
+             last COMPLETED keyboard-typed dictation (--copy = clipboard), while
+             `recover [ID]` reads an ended NATIVE EDITOR session's unconfirmed
+             words — read-only, no --copy, never retried or replayed.
     start | start-block | start-stream --context-stdin
              arm with the pre-caret seed read from STDIN (newest 4 KiB): the EXISTING
              focus-based delivery with a first-utterance decode seed — NOT a pinned
@@ -57,13 +66,14 @@ Subcommands (PRD §4.8):
         Keybinds are user-owned (PRD §4.10): this tool installs no shortcut — bind the commands
         above (for example `voicectl toggle-stream`) in your own compositor config.
 
-Usage:  voicectl <toggle|start|stop|status|cancel|quit|session>
+Usage:  voicectl <toggle|start|stop|status|cancel|quit|session|recover>
         toggle-block | start-block   arm in BLOCK mode (whole final typed once at the end)
         toggle-stream| start-stream  arm in STREAM mode (live partials) — the config default
         (the full usage table is in the project README; this is the user-facing CLI surface.)
 
 Stdlib-only: argparse, json, os, shutil, socket, subprocess, sys, threading, time + the shared
-socket-path resolver from voice_typing.daemon.
+socket-path resolver and the 7 MiB recovery-reply cap from voice_typing.daemon (P1.M1.T5.S1) +
+the shared UUIDv4 session-id validator from voice_typing.editor_protocol (P1.M1.T5.S2).
 """
 
 from __future__ import annotations
@@ -79,8 +89,12 @@ import threading
 import time
 
 from voice_typing.daemon import (
+    MAX_RECOVERY_REPLY_BYTES,
     _default_control_socket_path,
-)  # canonical resolver (P1.M4.T2.S1); reuse, do not duplicate
+)  # canonical resolver (P1.M4.T2.S1) + the recovery-reply cap (P1.M1.T5.S1); reuse, do not duplicate
+from voice_typing.editor_protocol import (
+    is_uuid_v4,
+)  # the ONE session-id validator (P1.M1.T3.S2): the client rejects exactly what the daemon rejects
 
 _COMMANDS: tuple[str, ...] = (
     "toggle",
@@ -94,8 +108,10 @@ _COMMANDS: tuple[str, ...] = (
     "quit",
     "cancel",
     "session",
+    "recover",
 )  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' = Backspace-cancel fallback (P1.M2.T7.S1);
-# 'session' = R.6 recovery surface (P1.M6.T2.S3)
+# 'session' = R.6 recovery surface (P1.M6.T2.S3); 'recover' = native editor recovery read
+# (P1.M1.T5.S2, PRD §4.8.1 C)
 # Per-session output mode (2026-11-27): toggle-block / start-block arm in BLOCK mode (nothing
 # typed until the utterance ends, then the whole final once); toggle-stream / start-stream arm
 # in STREAM mode (live partials). Plain toggle/start keep the configured default ([output]
@@ -105,8 +121,14 @@ _COMMANDS: tuple[str, ...] = (
 # machine's own pre-Rev-2 Hyprland keybind wrapper still ends in `voicectl toggle-lite`.
 # main() remaps it to the canonical command BEFORE the _COMMANDS validation so stale callers
 # keep working. Deliberately NOT a member of _COMMANDS and NOT listed in any help surface
-# (--help / module docstring): the documented Rev 2 surface stays the six commands above.
+# (--help / module docstring): the documented Rev 2 surface stays the seven commands above.
 _ALIASES: dict[str, str] = {"toggle-lite": "toggle"}
+
+# P1.M1.T5.S2 (PRD §4.8.1 C): client-side reply bound for `recover` — the ONE command whose
+# reply can be huge (up to 7 MiB of retained unconfirmed text). Parity with the daemon's cap
+# (daemon.MAX_RECOVERY_REPLY_BYTES, S1), framing newline included; re-exported so tests can pin
+# equality. ONLY `recover` passes it — every other command keeps the default (None = unbounded).
+_RECOVERY_REPLY_MAX_BYTES: int = MAX_RECOVERY_REPLY_BYTES
 
 # BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
 # so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
@@ -327,7 +349,88 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
     return f"listening: {'on' if response.get('listening') else 'off'}", 0
 
 
-def send_command(socket_path: str, cmd: str, extra: dict | None = None) -> dict:
+def _recovery_shape_error(response: dict, requested_id: str | None) -> str:
+    """P1.M1.T5.S2: validate an ok:true editor-recover reply's SHAPE; "" when valid, else fixed
+    reason words — NEVER reply values. Strict five keys (ok was checked by the caller): id/text
+    must be str, truncated/possibly_applied must be REAL bools (`type(x) is bool`, not
+    isinstance — True is an int too); when an id was requested, the reply's id must MATCH
+    (never print another session's words). Extra keys are ignored (forward-compat, like status)."""
+    for key in ("id", "text", "truncated", "possibly_applied"):
+        if key not in response:
+            return f"missing key: {key}"
+    if not isinstance(response["id"], str) or not isinstance(response["text"], str):
+        return "bad type: id/text"
+    if type(response["truncated"]) is not bool or type(response["possibly_applied"]) is not bool:
+        return "bad type: truncated/possibly_applied"
+    if requested_id is not None and response["id"] != requested_id:
+        return "session id mismatch"
+    return ""
+
+
+def format_recovery(response: dict, requested_id: str | None) -> tuple[str, list[str], int]:
+    """P1.M1.T5.S2 (PRD §4.8.1 C; PURE — no I/O): render an `editor-recover` reply as
+    (stdout_text, stderr_lines, exit_code). stdout carries ONLY the recovered text (main()
+    adds the single terminal newline); every warning/error is a FIXED stderr line — reply
+    text and ids never appear in them. Strict: ok replies must carry id/text (str) +
+    truncated/possibly_applied (real bools), and when an id was requested it must match.
+    Deliberately NOT routed through format_result: its error branch would put "error: …" on
+    stdout. Exit codes per the PRP table: 0 ok (warnings allowed), 1 error/malformed reply;
+    OSError→2 and usage→64 stay in main()."""
+    if response.get("ok") is not True:
+        err = str(response.get("error", ""))
+        if err.startswith("unknown command"):  # old daemon — the T2.S5 idiom, S1's reply shape
+            return "", [
+                "voicectl: this daemon predates native recovery (editor-recover) — update "
+                "voice-typing and restart the unit; nothing was read"
+            ], 1
+        if err == "not_found":
+            what = (
+                f"session {requested_id}"
+                if requested_id
+                else "any ended native editor session"
+            )
+            return "", [
+                f"voicectl: nothing to recover (no retained unconfirmed text for {what}; "
+                "recovery is not kept across daemon restarts)"
+            ], 1
+        if err == "busy":  # S1: key on the ERROR CODE — there is NO "busy": True flag here
+            return "", [
+                "voicectl: that native editor session is still active — stop it first "
+                "(the editor's Stop or 'voicectl stop'); nothing was read"
+            ], 1
+        if err == "invalid_request":
+            return "", [
+                "voicectl: daemon rejected the recovery request (invalid_request) — "
+                "re-check the session id from 'voicectl status'"
+            ], 1
+        return "", [f"voicectl: recovery failed ({err or 'unknown error'})"], 1
+    reason = _recovery_shape_error(response, requested_id)
+    if reason:
+        return "", [
+            f"voicectl: malformed recovery reply from the daemon ({reason}); nothing printed"
+        ], 1
+    warnings: list[str] = []
+    if response["truncated"]:
+        warnings.append(
+            "voicectl: recovery text is TRUNCATED — some unconfirmed words were not retained "
+            "(recovery keeps at most 1 MiB per session); proofread against the editor"
+        )
+    if response["possibly_applied"]:
+        warnings.append(
+            "voicectl: this text MAY ALREADY BE (partially) inserted in the editor — an edit "
+            "was attempted without a confirmed acknowledgement; check for duplication before "
+            "pasting. Nothing was re-inserted."
+        )
+    return response["text"], warnings, 0
+
+
+def send_command(
+    socket_path: str,
+    cmd: str,
+    extra: dict | None = None,
+    *,
+    max_reply_bytes: int | None = None,
+) -> dict:
     """Open the control socket, send {"cmd": <cmd>}\\n, read ONE JSON line, return the parsed dict.
 
     `extra` payload keys are merged after 'cmd' (P1.M6.T2.S3: {"copy": true} for session
@@ -340,6 +443,12 @@ def send_command(socket_path: str, cmd: str, extra: dict | None = None) -> dict:
     the connection but never replies within the socket timeout (WEDGED — previously this hung
     FOREVER: makefile("r") silently ignores settimeout). Reads exactly ONE line then closes
     (voicectl is one-shot).
+
+    max_reply_bytes (P1.M1.T5.S2, keyword-only): optional cap on the BUFFERED reply — checked
+    after each 4096-byte chunk, so a line longer than the cap raises ValueError naming the byte
+    bound (never reply content) without meaningfully over-buffering. ONLY `recover` passes it
+    (the daemon may retain up to 7 MiB of unconfirmed text); every other command keeps the
+    default None = unbounded — byte-identical to the pre-T5.S2 behaviour.
     """
     timeout = _socket_timeout_s()
     line = ""
@@ -356,6 +465,13 @@ def send_command(socket_path: str, cmd: str, extra: dict | None = None) -> dict:
                 if not chunk:
                     break
                 buf.extend(chunk)
+                if max_reply_bytes is not None and len(buf) > max_reply_bytes:
+                    # P1.M1.T5.S2: refuse BEFORE the newline is found — bounded buffering, and
+                    # the message names the bound only, never any reply content.
+                    raise ValueError(
+                        f"daemon reply exceeded {max_reply_bytes} bytes before its "
+                        "newline — refused"
+                    )
         except socket.timeout:
             # P1.M1.T1.S4: name the OUT-OF-BAND stop for the unit install.sh installs. The control
             # socket has no server-side deadline, so VOICECTL_TIMEOUT only gets the client back; the
@@ -478,8 +594,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "running, 64 on a usage error (unknown/missing command)."
         ),
         epilog=(
-            "subcommands: toggle, start, stop, status, quit, cancel, session [--copy]"
-            "  (see the project README for the full usage table)\n"
+            "subcommands: toggle, start, stop, status, quit, cancel, session [--copy],\n"
+            "recover [ID]  (see the project README for the full usage table)\n"
+            "ordinary copy vs explicit recovery: `session [--copy]` prints the last COMPLETED\n"
+            "keyboard-typed dictation (--copy = clipboard); `recover [ID]` prints the UNCONFIRMED\n"
+            "words of an ENDED native editor session — read-only, never re-inserted, no --copy.\n"
             "per-session output mode: toggle-block | start-block   arm in BLOCK mode (nothing typed\n"
             "until the utterance ends, then the whole final once); toggle-stream | start-stream\n"
             "arm in STREAM mode (live partials — the configured default). Plain toggle/start\n"
@@ -497,7 +616,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "  one. Rejected (exit 1) while arming/listening/draining, by an old daemon, or on timeout —\n"
             "  never retried, never downgraded to a plain start.\n"
             "native editor sessions: `status` shows the session state, the last end reason and a\n"
-            "recovery hint (codes only — never dictated text); `voicectl recover` is the explicit read.\n"
+            "recovery hint (codes only — never dictated text); `voicectl recover [ID]` is the\n"
+            "explicit, one-shot read of the retained unconfirmed words (never auto-inserted).\n"
             "keybinds are user-owned: this tool installs no shortcut — bind commands in your\n"
             "own compositor config."
         ),
@@ -505,7 +625,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "cmd",
         nargs="?",
-        help="toggle | start | stop | status | quit | cancel | session",
+        help="toggle | start | stop | status | quit | cancel | session | recover",
+    )
+    parser.add_argument(
+        "id",
+        nargs="?",
+        help="with 'recover': the native session id (UUIDv4) shown by 'voicectl status'",
     )
     parser.add_argument(
         "--copy",
@@ -541,6 +666,15 @@ def main(argv: list[str] | None = None) -> int:
     the ok:false reply rides format_result's error branch before any copy code runs). --copy
     with a non-session command is a usage error (64). Truncation (store cap) is reported on
     stderr only; stdout stays the exact recovered text.
+
+    recover (P1.M1.T5.S2, PRD §4.8.1 C): the EXPLICIT native editor recovery read. One plain
+    send_command on a fresh connection ({"cmd": "editor-recover"}[, "id"]), bounded at the
+    daemon's 7 MiB reply cap, NEVER retried. stdout is exactly the retained text; warnings
+    (truncation / may already be inserted) and all errors are fixed-words stderr lines
+    (format_recovery — never format_result, whose error text would pollute stdout). Exit 0 ok,
+    1 error/malformed/wedge, 2 daemon not running, 64 usage (bad id / flags / an id with a
+    non-recover command — all validated BEFORE any I/O; the id must be the UUIDv4 'status'
+    shows, checked with the daemon's own is_uuid_v4).
     """
     args = _build_parser().parse_args(argv)
     cmd: str | None = args.cmd  # None when no command given (positional is nargs='?')
@@ -572,6 +706,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return _EX_USAGE
+    # P1.M1.T5.S2 (§4.8.1 C): the optional positional id is valid ONLY with 'recover', and for
+    # recover it must be the lowercase UUIDv4 'status' shows — the SAME validator the daemon
+    # applies (S1), so the client never sends what the daemon would reject. Usage error (64)
+    # BEFORE any socket I/O / stdin read (mirrors --copy / --context-stdin).
+    if args.id is not None and cmd != "recover":
+        print("voicectl: an id applies only to the 'recover' command", file=sys.stderr)
+        return _EX_USAGE
+    if cmd == "recover" and args.id is not None and not is_uuid_v4(args.id):
+        print(
+            f"voicectl: invalid session id {args.id!r} for 'recover' — expected the "
+            "UUIDv4 shown by 'voicectl status'",
+            file=sys.stderr,
+        )
+        return _EX_USAGE
 
     # 1. Resolve the socket path. XDG_RUNTIME_DIR unset -> RuntimeError -> daemon can't be running.
     try:
@@ -592,6 +740,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         extra = {"copy": True} if (cmd == "session" and args.copy) else None
         wire_cmd = cmd
+        if cmd == "recover":
+            # P1.M1.T5.S2 (§4.8.1 C): wire remap (the start-context pattern) + the bounded
+            # read: ONE plain send on a fresh connection — NOT the loading-hint wrapper
+            # (recover is not an arm), max_reply_bytes at the daemon's 7 MiB cap, never
+            # retried (see the ValueError handler below).
+            wire_cmd = "editor-recover"
+            extra = {"id": args.id} if args.id is not None else None
         if context_route:
             try:  # P1.M1.T2.S5: bounded stdin read BEFORE any socket I/O (empty "" is valid)
                 text_in = _read_context_stdin(getattr(sys.stdin, "buffer", sys.stdin))
@@ -606,7 +761,15 @@ def main(argv: list[str] | None = None) -> int:
                 extra["mode"] = "stream"
         # Per-session mode commands (toggle-*/start-*) take the SAME arm path -> loading hint;
         # start-context rides the same wrapper (cold load ~1–3 s).
-        if wire_cmd in ("start", "toggle", "start-context") or wire_cmd.startswith(
+        if wire_cmd == "editor-recover":
+            # P1.M1.T5.S2: bounded read at the daemon cap; plain send, no loading hint.
+            response = send_command(
+                socket_path,
+                wire_cmd,
+                extra=extra,
+                max_reply_bytes=_RECOVERY_REPLY_MAX_BYTES,
+            )
+        elif wire_cmd in ("start", "toggle", "start-context") or wire_cmd.startswith(
             ("start-", "toggle-")
         ):
             response = _send_command_with_loading_hint(socket_path, wire_cmd, extra=extra)
@@ -627,9 +790,31 @@ def main(argv: list[str] | None = None) -> int:
                 "check 'voicectl status'",
                 file=sys.stderr,
             )
+        if cmd == "recover":
+            # P1.M1.T5.S2: outcome UNKNOWN (wedge / malformed / over-cap line) — report and
+            # stop. Never retried, never fallen back to `session`; the read is non-consuming,
+            # so the user can simply run it again.
+            print(
+                "voicectl: recovery read outcome unknown — not retried; the read is "
+                "non-consuming, run it again",
+                file=sys.stderr,
+            )
         return 1
 
     # 3. Format + print the human result; return the exit code.
+    if cmd == "recover":
+        # P1.M1.T5.S2 (§4.8.1 C): stdout is EXACTLY the recovered text (print adds the single
+        # terminal newline, like `session`) — and ONLY on an ok reply (exit 0): every error
+        # row of the PRP table leaves stdout completely EMPTY (not even a newline), warnings/
+        # errors are fixed stderr lines. Warnings print FIRST — a `voicectl recover | wl-copy`
+        # user still sees them on stderr. An ok reply with empty text (S1 cap path) prints
+        # the empty line and exits 0 — the daemon is the source of truth.
+        out, lines, code = format_recovery(response, args.id)
+        for line in lines:
+            print(line, file=sys.stderr)
+        if code == 0:
+            print(out)
+        return code
     text, code = format_result(wire_cmd, response)
     if (
         context_route

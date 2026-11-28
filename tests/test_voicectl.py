@@ -474,7 +474,7 @@ def test_dispatch_start_ok_true_when_no_load_error_attr():
 # ===========================================================================
 def test_help_surfaces_list_all_commands():
     """Rev 2 surface (P1.M1.T2.S3; 'cancel' added by P1.M2.T7.S1; 'session' added by
-    P1.M6.T2.S3): exactly 7 commands in _COMMANDS,
+    P1.M6.T2.S3; 'recover' added by P1.M1.T5.S2): exactly 12 commands in _COMMANDS,
     --help (positional help + epilog), and the module docstring — and NO stale lite entries
     anywhere (bugfix Issue 3's consistency guard, inverted for the collapse).
     """
@@ -490,6 +490,7 @@ def test_help_surfaces_list_all_commands():
         "start-block",  # per-session output mode (2026-11-27)
         "toggle-stream",
         "start-stream",
+        "recover",  # native editor recovery read (P1.M1.T5.S2)
     }
     assert set(ctl._COMMANDS) == commands, sorted(ctl._COMMANDS)   # _COMMANDS = the source of truth
     # (1) argparse --help (format_help renders BOTH the positional help AND the epilog):
@@ -513,7 +514,7 @@ def test_cancel_in_commands_docstring_and_epilog():
     block, and the --help epilog all list it."""
     assert ctl._COMMANDS == (
         "toggle", "start", "toggle-block", "toggle-stream", "start-block", "start-stream",
-        "stop", "status", "quit", "cancel", "session",
+        "stop", "status", "quit", "cancel", "session", "recover",
     )
     assert "cancel" in (ctl.__doc__ or ""), "the module docstring's subcommand block must list cancel"
     epilog = ctl._build_parser().epilog or ""
