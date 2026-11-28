@@ -397,90 +397,98 @@ def test_valid_backend_values_load():
 
 
 # ---------------------------------------------------------------------------
-# [output] delivery key (P1.M3.T3.S1, PRD §4.5 + §4.2sexies): "stream-edit" |
-# "bulk-text", plus the LOAD-TIME precondition triple — bulk-text requires
-# output.streaming=true, asr.graceful_stop=false, cancel.keypress_action="disarm"
-# (R.3: no typing fallback; R.5: HALT keypress semantics). The triple spans THREE
-# sections (graceful_stop lives in [asr], keypress_action in [cancel]), so it is
-# enforced by a NEW top-level VoiceTypingConfig.__post_init__ (VT-005/Issue 3
-# fail-fast posture; ALL violated keys collected into ONE ValueError).
+# [output] delivery key (P1.M3.T3.S1; retired P1.M1.T1.S1, PRD §4.2sexies superseded):
+# the ONLY accepted value is "stream-edit" (or the key omitted). The retired "bulk-text"
+# experiment gets its own actionable migration ValueError at load (OutputConfig.__post_init__
+# — the earliest boundary: it fires for BOTH direct construction and the from_toml overlay,
+# before any daemon arming or backend construction). The old precondition triple
+# (output.streaming/asr.graceful_stop/cancel.keypress_action) died with the value — its
+# top-level gate was removed as unreachable dead code.
 # ---------------------------------------------------------------------------
 
 
 def test_invalid_delivery_value_raises():
-    """P1.M3.T3.S1: a delivery value outside {stream-edit, bulk-text} is rejected at load with a ValueError naming it."""
+    """A delivery value outside {stream-edit} is rejected at load with a ValueError naming it.
+
+    Note the two distinct error classes: the exact retired token "bulk-text" gets the
+    migration message (see test_bulk_text_is_rejected_with_migration_guidance); every OTHER
+    unknown string is the plain typo-class error pinned here.
+    """
     for bad in ("Bulk-Text", "stream", "bulk", "paste", "", "STREAM-EDIT"):
         with pytest.raises(ValueError, match="delivery"):
             VoiceTypingConfig.from_toml({"output": {"delivery": bad}})
 
 
 def test_delivery_rejects_non_str():
-    """P1.M3.T3.S1: a non-str delivery is a TYPE error (string-field precedent — bool fields reject int)."""
+    """A non-str delivery is a TYPE error (string-field precedent — bool fields reject int)."""
     for bad in (True, 1, 2.0, None, ["bulk-text"]):
         with pytest.raises(TypeError, match="delivery"):
             VoiceTypingConfig.from_toml({"output": {"delivery": bad}})
 
 
 def test_valid_delivery_values_load():
-    """P1.M3.T3.S1: both delivery values round-trip through TOML."""
-    for good in ("stream-edit", "bulk-text"):
-        cfg = VoiceTypingConfig.from_toml({"output": {"delivery": good}})
-        assert cfg.output.delivery == good
+    """delivery round-trips: "stream-edit" loads; the retired "bulk-text" now RAISES."""
+    cfg = VoiceTypingConfig.from_toml({"output": {"delivery": "stream-edit"}})
+    assert cfg.output.delivery == "stream-edit"
+    with pytest.raises(ValueError, match="bulk-text"):
+        VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
 
 
 def test_default_delivery_is_stream_edit():
-    """P1.M3.T3.S1: default delivery is "stream-edit" (opt-in until G6 graduation) — default is a no-op."""
+    """Default delivery is "stream-edit" (the only supported value; absent key behaves the same)."""
     assert VoiceTypingConfig().output.delivery == "stream-edit"
 
 
-def test_bulk_text_with_all_default_companions_loads():
-    """P1.M3.T3.S1: bulk-text + all-default asr/cancel satisfies the triple (streaming=True, graceful_stop=False, keypress_action="disarm") → loads."""
-    cfg = VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
-    assert cfg.output.delivery == "bulk-text"
-    assert cfg.output.streaming is True
-    assert cfg.asr.graceful_stop is False
-    assert cfg.cancel.keypress_action == "disarm"
-
-
-def test_bulk_text_requires_streaming_true():
-    """P1.M3.T3.S1: bulk-text + streaming=false → ValueError naming output.streaming."""
-    with pytest.raises(ValueError, match=r"output\.streaming"):
-        VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text", "streaming": False}})
-
-
-def test_bulk_text_requires_graceful_stop_false():
-    """P1.M3.T3.S1: bulk-text + graceful_stop=true → ValueError naming asr.graceful_stop.
-
-    Gotcha pinned: graceful_stop is an [asr] field (NOT [output] despite PRD §4.5's listing) —
-    the clause must carry the section-qualified asr.graceful_stop key.
-    """
-    with pytest.raises(ValueError, match=r"asr\.graceful_stop"):
-        VoiceTypingConfig.from_toml({"asr": {"graceful_stop": True}, "output": {"delivery": "bulk-text"}})
-
-
-def test_bulk_text_requires_keypress_action_disarm():
-    """P1.M3.T3.S1: bulk-text + keypress_action="freeze" → ValueError naming cancel.keypress_action."""
-    with pytest.raises(ValueError, match=r"cancel\.keypress_action"):
-        VoiceTypingConfig.from_toml({"cancel": {"keypress_action": "freeze"}, "output": {"delivery": "bulk-text"}})
-
-
-def test_bulk_text_two_violations_named_together():
-    """P1.M3.T3.S1: ALL violations collected into ONE error — two violated keys BOTH appear, the unviolated one does not."""
+def test_bulk_text_is_rejected_with_migration_guidance():
+    """bulk-text is RETIRED: the load-time ValueError names the value, says "retired", and
+    gives BOTH remedies (remove the key / set "stream-edit") — actionable, not a bare typo
+    error. This is the message a stale ~/.config config sees under systemd."""
     with pytest.raises(ValueError) as excinfo:
-        VoiceTypingConfig.from_toml(
-            {
-                "output": {"delivery": "bulk-text", "streaming": False},
-                "asr": {"graceful_stop": True},
-            }
-        )
+        VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
     msg = str(excinfo.value)
-    assert "output.streaming" in msg
-    assert "asr.graceful_stop" in msg
-    assert "keypress_action" not in msg
+    assert "bulk-text" in msg
+    assert "retired" in msg
+    assert "remove" in msg
+    assert "stream-edit" in msg
+
+
+def test_bulk_text_rejected_as_direct_output_config():
+    """The rejection lives in OutputConfig.__post_init__: DIRECT section construction (not
+    just the from_toml overlay) cannot admit the retired value either — no construction
+    path may produce a bulk-text OutputConfig."""
+    with pytest.raises(ValueError, match="retired"):
+        OutputConfig(delivery="bulk-text")
+
+
+def test_bulk_text_rejected_even_with_former_valid_companions():
+    """The old 'bulk-text + all-default companions' input (the precondition triple's happy
+    path) now raises — the retirement is unconditional; the triple is moot."""
+    with pytest.raises(ValueError, match="retired"):
+        VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
+
+
+def test_loader_boundary_never_builds_a_backend_for_retired_delivery(monkeypatch):
+    """Boundary proof (fakes only — no subprocess, no daemon): a rejected config raises at
+    LOAD, before any backend construction. The daemon's main() reaches
+    typing_backends.make_backend() only AFTER VoiceTypingConfig.load() succeeds, so a
+    make_backend recorder that would fail the test if invoked is never invoked."""
+    import voice_typing.typing_backends as tb
+
+    calls: list = []
+
+    def _fail_backend(cfg):
+        calls.append(cfg)
+        raise AssertionError("make_backend must never be reached for a rejected config")
+
+    monkeypatch.setattr(tb, "make_backend", _fail_backend, raising=True)
+    with pytest.raises(ValueError, match="retired"):
+        VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
+    assert calls == []
 
 
 def test_stream_edit_ignores_all_violations():
-    """P1.M3.T3.S1: the triple is enforced ONLY for bulk-text — stream-edit loads with every precondition violated."""
+    """stream-edit loads with every former bulk precondition "violated" — the retirement
+    rejects ONLY the exact retired token (no over-rejection of supported configs)."""
     cfg = VoiceTypingConfig.from_toml(
         {
             "output": {"delivery": "stream-edit", "streaming": False},

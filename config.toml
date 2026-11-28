@@ -48,7 +48,7 @@ backend     = "wtype"   # "wtype" (Wayland virtual keyboard, default) | "ydotool
 append_space = true     # append one trailing space after each final so consecutive utterations flow as words. false = type text verbatim.
 streaming   = true      # PRD §4.2quater: type stabilized partials live as the utterance grows. Revisions are debounced for smoothness: live typing is extend-only while the decoder wobbles, one mid-utterance correction only after ~2 s of sustained divergence, and one authoritative correction at the end of each utterance. false = append-only finals (rollback hatch to the pre-Rev-2 typing behavior).
 stream_chunks = "char" # live-stream flush granularity (ONLY when streaming=true): "word" = hold each partial's delta until the next non-word char, then type the whole word-chunk at once (\W-to-\W — text lands word-by-word, never letter-by-letter); "char" = legacy behavior (every delta types as soon as it arrives). Word chunks cost a fraction of a second of extra latency per word and cut the number of injected bursts dramatically.
-delivery    = "stream-edit"  # Normal system-wide keystroke output, including final-only block mode. "bulk-text" is a legacy lab experiment slated for retirement; not an editor integration.
+delivery    = "stream-edit"  # The ONLY accepted value (or omit the key): system-wide keyboard delivery of finals/partials. "bulk-text" (a retired lab experiment) is rejected at load with migration guidance — remove the key or set "stream-edit". Editor integrations do not use this selector.
 
 
 [cancel]   # Rev 2: erase the last committed utterance (PRD §4.2quater)

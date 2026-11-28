@@ -20,7 +20,7 @@ import subprocess
 
 import pytest
 
-from voice_typing.config import OutputConfig
+from voice_typing.config import OutputConfig, VoiceTypingConfig
 from voice_typing.typing_backends import (
     NullBackend,
     TypingBackend,
@@ -202,6 +202,16 @@ def test_legacy_tmux_config_uses_only_system_wide_keystrokes(recorder):
     assert cfg.backend == "ydotool"
     make_backend(cfg).type_text("synthetic final")
     assert recorder.argvs == [("ydotool", "type", "--key-delay", "1", "--", "synthetic final")]
+
+
+def test_retired_delivery_never_reaches_backend_subprocess(recorder):
+    """BUG-fix P1.M1.T1.S1: delivery="bulk-text" is retired AT THE CONFIG BOUNDARY — the
+    load raises ValueError before any backend dispatch, so the argv recorder stays empty
+    (no ydotool/tmux/wtype invocation, no subprocess of any kind). The stale-lab config
+    fails fast with migration guidance instead of silently arming anything."""
+    with pytest.raises(ValueError, match="retired"):
+        VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
+    assert recorder.argvs == []
 
 
 def test_make_backend_null():
