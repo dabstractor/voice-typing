@@ -85,60 +85,26 @@ no-ops unless a crash left the flag set).
 PURE IMPORTS at module top (inspect, logging, threading, time, typing, voice_typing.config,
 voice_typing.cuda_check, voice_typing.textproc, voice_typing.typing_backends — all cheap stdlib +
 already-landed pure-stdlib modules; plus the ducking stack audio_ducking/ducking_async/
-ducking_mpris/ducking_volume, equally cheap; plus the bulk stack bulk_controller/ime.manager/
-ime.target/ime.takeover for the P1.M6.T2.S1 wiring — all pure-python, no torch). RealtimeSTT is
+ducking_mpris/ducking_volume, equally cheap — all pure-python, no torch). RealtimeSTT is
 imported LAZILY inside build_recorder so `import voice_typing.daemon` stays cheap and unit tests
 never touch torch/ctranslate2. Feedback is imported only under TYPE_CHECKING. The daemon class
 holds self._recorder as a REFERENCE, never importing AudioToTextRecorder (so import purity holds).
 
-DELIVERY — BULK-TEXT WIRING (PRD §4.2sexies R.5, P1.M6.T2.S1): output.delivery selects the path.
-"stream-edit" (default) keeps today's behavior BYTE-IDENTICAL — every bulk branch below is gated
-on _bulk_mode() and inert otherwise. "bulk-text" routes recognition to a BulkController +
-DeliveryTarget adapter (the field is edited via the IM child's one-edit protocol, NEVER typed):
-- DISPATCH LAW: on_final/_on_partial run on the host reader thread and only ENQUEUE —
-  ctrl.on_partial/on_final/on_final_dropped are cond+deque ops that return immediately. No
-  subprocess, editor wait, or display polling there or under self._lock (R.5). The controller's
-  writer thread owns every target call under the 250 ms engineering deadline. Identity comes from
-  host.relay_identity (read INSIDE the callbacks, where it is valid — P1.M6.T1.S1); seq is
-  synthesized daemon-side per (gen, utterance); a missing identity drops + counts (never a
-  constant-utterance fallback — the controller would dedup every later event, silent death).
-- CANCEL INTERCEPT: cancel() branches at the TOP, before the legacy lock/compensation body:
-  bulk mode performs ZERO physical-character compensation (no len(tail)-1 backspace math, R.1).
-  ctrl.cancel(gen) runs OUTSIDE _lock first (its on_stopped can fire synchronously and the
-  handler takes _lock — the deadlock hazard), then the SHARED under-lock recognition cancel
-  (suppress latch + host.cancel() gated on _text_in_flight + partial-mirror clear) runs. Both
-  entry points (control socket, evdev Backspace) funnel through cancel() — no entry-point edits.
-- CONTEXT PROMPT (P1.M6.T3.S1): the rolling-context-prompt SOURCE in bulk mode is the
-  controller's confirmed_visible() (its OWN mirror of target-CONFIRMED text; _stream is
-  read-only in every mode and never written by the bulk path). Pushes fire at accepted-final
-  enqueue (A — covers UNCHANGED finals) + finalize-APPLIED (B — post-correction); cancel
-  pushes a context-free clear (D4 — a removed fragment is never decode context). Partial
-  shows never push; bulk-but-unwired (no controller) pushes nothing.
-- LIFECYCLE: _arm() bumps gen/epoch and spawns the "vt-bulk-arm" thread (acquire→arm→start —
-  subprocess round-trips NEVER on the reader thread nor under _lock; acquire failure ⇒
-  delivery_state="unsupported"+reason, recording STAYS armed). _disarm() clears the active flag
-  FIRST (a fault reason must never be erased — feedback overwrites on every call) and spawns the
-  epoch-guarded "vt-bulk-stop" stopper (ctrl.stop(leave=True) + bundle teardown — bounded,
-  never under _lock; a stale stop must not kill a newer delivery lifetime). The controller's
-  on_stopped (fault-class: queue-overflow | op-deadline | refused | unknown | target-error |
-  takeover: *) ⇒ delivery_state="fault" + THE one concise reason, then disarms recording too
-  (_disarm + out-of-lock _safe_abort). Stop/toggle-off/idle-stop/HALT/quit disarm immediately
-  with NO late flush: post-stop events are rejected controller-side by construction. The
-  per-APPLIED on_applied hook records counts+times op descriptors via
-  feedback.record_confirmed_op (never recognition text).
-- SEAM: bulk_target_factory= (ctor kwarg, test seam) replaces the default bundle factory
-  (_build_default_bulk_target: IM route — ImeProcess+ImeTarget+per-lifetime TakeoverWatch; the
-  pi-editor adapter is reachable through the same seam; no config key in this item).
+DELIVERY — GENERIC ONLY (P1.M1.T1.S2 detach): output.delivery has ONE constructible value,
+"stream-edit" — "bulk-text" is REJECTED at config load (P1.M1.T1.S1). Output is stream
+partials/finals (output.streaming) or explicit block accepted-final-only, selected per arm via
+the -stream/-block commands; keyboard injection via output.backend (wtype|ydotool|null). The
+Rev-4 bulk-text experiment (PRD §4.2sexies) is RETIRED: its daemon wiring is removed and
+bulk_controller/ime/* survive only as lab references. Native editor routing (PRD §4.8.1) will
+be a SEPARATE opt-in integration — it is NOT an output.delivery backend.
 - RECOVERY — SESSION MEMORY (PRD §4.2sexies R.6, P1.M6.T2.S2): the daemon holds the last
   nonempty arm→disarm session in a pure-memory leaf store (voice_typing/session_recovery.py —
   own lock, no persistence, no crash recovery, cleared at exit via request_shutdown() →
   clear()). Hooks are 1-3-line insertions AFTER the existing gates (the listening gate, the
   cancel-suppression window, the rejected-final block) in BOTH delivery modes: stream-edit
   (on_final accepted → note_final after record_final; rejected block top → note_rejected;
-  _on_partial → note_tail(self._stream.tail); legacy cancel → note_cancel) and bulk
-  (_bulk_handle_final/_bulk_handle_partial/_bulk_cancel one-liners INSIDE S1's bodies, keyed
-  by (gen, uid) for exactly-once). The exclusion rules are inherited from gate placement,
-  never duplicated. Cap: 2 sessions × 1 MiB UTF-8, code constants — on overflow the newest
+  _on_partial → note_tail(self._stream.tail); legacy cancel → note_cancel). The exclusion
+  rules are inherited from gate placement, never duplicated. Cap: 2 sessions × 1 MiB UTF-8, code constants — on overflow the newest
   complete text that fits is kept (whole oldest items dropped first; only a lone oversized
   item is sliced at a codepoint boundary), with truncated=True + finals_dropped reported.
   The close-time INFO line carries counts/times ONLY (never session text — R.5/R.6); the one
@@ -181,14 +147,10 @@ from voice_typing.recorder_host import (
 # tier backends, S4 owns AsyncDucker; this module only CALLS them (via _build_default_ducker +
 # the _duck_engage/_duck_release dispatch helpers).
 from voice_typing.audio_ducking import AudioDucker
-from voice_typing.bulk_controller import BulkController
 from voice_typing.ducking_async import AsyncDucker
 from voice_typing.ducking_mpris import MprisBusctlBackend
 from voice_typing.ducking_volume import WpctlVolumeBackend
 import voice_typing.ducking_heal as ducking_heal  # crash-safety heal (P1.M2.T3.S2; stdlib-light)
-from voice_typing.ime.manager import ImeProcess  # bulk-text default route (P1.M6.T2.S1; pure import)
-from voice_typing.ime.target import ImeTarget    # the R.3 DeliveryTarget over ImeProcess
-from voice_typing.ime.takeover import TakeoverWatch  # per-lifetime IM-takeover wiring (G10)
 
 if TYPE_CHECKING:
     # Type hint only — never executed at runtime, so importing daemon.py is safe even while
@@ -235,56 +197,6 @@ _PARTIAL_SOURCES = {
     "stabilized": "on_realtime_transcription_stabilized",
 }
 
-# BUG-002 / P1.M2.T2.S2 (PRD §4.2sexies R.1/R.8): the recognizer-cadence override for bulk
-# delivery. S6's stage decomposition (tests/G5_TIMING_EVIDENCE.md, "Paired callback comparison
-# and stage diagnosis") puts the dominant speech→visible share BEFORE the callback/adapter
-# stages — pi-ghostty per-word lag med 7786–11983 ms / p95 ~16070 ms against a ~4 ms
-# useful→field and a 29.8–42.7 ms qualified paint — i.e. in the decode-evaluation cadence +
-# delivery complex, NOT in the paint path ("the remediation should NOT spend effort on the
-# adapter paint path", verbatim). `realtime_processing_pause` is how long RealtimeSTT's
-# realtime decode loop sleeps between partial evaluations (cfg default 0.15 s): at bulk
-# cadence, the hypothesis update carrying a mid-clip word must not sit through that extra
-# sleep between eligible decodes. When the recorder build is for bulk-text delivery,
-# _construct tightens the pause to THIS constant — a MODE-SCOPED CODE CONSTANT (the §4.2ter
-# lite-mode precedent), deliberately NOT a new config key (the BUG-002 contract forbids a new
-# end-user knob). Stream-edit builds keep cfg.asr.realtime_processing_pause byte-identically.
-# R.8 selection note (why the callback default is NOT flipped in this changeset): S6 measured
-# plain vs stabilized at ±3 ms on both boundaries (callback +1.3 ms, field −3.3 ms — under the
-# editor's 10 ms read-poll quantum) and the im-gtk plain arm is not-run — there is NO
-# visible-lag win to harvest, so the selector default stays "stabilized".
-_BULK_REALTIME_PROCESSING_PAUSE = 0.05
-
-# BUG-002 / validation round 3 (PRD §4.2sexies R.1): the dedicated bulk REALTIME decode lane.
-# The Rev-2 single-model build (cfg_to_kwargs) sets use_main_model_for_realtime=True, so every
-# partial decode re-decodes the ENTIRE growing utterance buffer through the MAIN engine —
-# serialized on the same executor/lock as final decodes and at the main engine's beam size
-# (PromptedExecutor beam_size=5). The qualification round measured the result: ~3.7 update
-# callbacks per ~17.5 s replay on im-gtk (73 total / 20 replays — the decode loop cannot keep
-# speaking pace), speech→visible med 6714 ms ≈ 13× the 500 ms bar, and the 57-word
-# sentence-end dump — the partial stream collapses to roughly one visible step per utterance
-# (tests/G5_TIMING_EVIDENCE.md, "im-gtk (PRODUCTION arm …)" + "Open items").
-#
-# For BULK builds ONLY, _construct therefore splits the lanes the way RealtimeSTT's own
-# default architecture does: use_main_model_for_realtime=False builds a DEDICATED realtime
-# engine from realtime_model_type (same model string — the partial lane keeps Rev-2's model,
-# only its decode settings get cheaper), driven by beam_size_realtime at THIS greedy constant.
-# Three effects, all in the measured dominant stage:
-#   1. beam 1 vs beam 5 per partial pass (≈2–4× cheaper decode → proportionally denser
-#      updates for the same audio);
-#   2. partial decodes no longer serialize with final decodes on one lock (a long final
-#      currently freezes every partial, and vice versa);
-#   3. when the context-prompt executor is armed, the child (recorder_host) injects a
-#      beam-1 PromptedExecutor as realtime_transcription_executor and RealtimeSTT skips its
-#      own realtime engine build (initialization.py gates on
-#      not _uses_external_realtime_transcription_executor) — one dedicated lane either way.
-# COST (accepted, opt-in mode): bulk arms load a SECOND instance of the same model
-# (~2× model VRAM + load time in bulk-text only). Stream-edit builds keep
-# use_main_model_for_realtime=True byte-identically. NOT a config key (the BUG-002 contract
-# forbids a new end-user knob). G5 re-measurement is REQUIRED before any G6/default
-# decision changes — this lands the lane the S6/Open-items diagnosis points at; the
-# evidence file's verdicts still govern.
-_BULK_REALTIME_BEAM_SIZE = 1
-
 # Mic-health probe TTL (bugfix Issue 3 / P1.M2.T2.S1): re-probe at most once every 30s so _arm()
 # does NOT pay the ~40ms PyAudio init on every keystroke. _refresh_mic_status() skips the probe
 # when the last probe is within this window; __init__ (force=True) and explicit force=True bypass it.
@@ -305,14 +217,6 @@ _COLD_LOAD_NOTIFY_LOADING = "Loading…"
 # post_speech_silence_duration (~0.8s trailing silence to trigger finalization) + the model's
 # transcription time (~0.5–1.5s); raise if you load a much larger model.
 _DRAIN_TIMEOUT_S: float = 5.0
-
-# Bulk IM startup bounds (P1.M2.T1.S2). bundle.start() on the vt-bulk-arm thread spawns
-# the production IM child, then pumps READ-ONLY activation pings until the compositor
-# activates the IM (ime_host replies carry activated=) — bounded so the arm thread can
-# never hang. POLL doubles as the per-ping request timeout; fake bundles (_proc is None)
-# no-op through start().
-_IME_ACTIVATE_TIMEOUT_S: float = 2.0
-_IME_ACTIVATE_POLL_S: float = 0.05
 
 # Cancel-suppression window bound (the Backspace stuck-suppression bug). cancel() latches
 # _cancel_suppress_final, and ONLY the child's MARKED sentinel final (or a fresh _arm()) was
@@ -513,33 +417,13 @@ def _construct(
     (language, timing, _FIXED_KWARGS) still come from cfg as usual; only device/compute_type/
     model are overridden. Consumed via build_recorder(..., force_cpu=True).
 
-    BUG-002 / P1.M2.T2.S2 (PRD §4.2sexies R.1/R.8): BULK-ONLY recognizer cadence. When
-    cfg.output.delivery == "bulk-text", kwargs["realtime_processing_pause"] is overridden to
-    _BULK_REALTIME_PROCESSING_PAUSE AFTER cfg_to_kwargs (which stays delivery-blind, pure
-    cfg → kwargs) and BEFORE the callback merge. The override is a pure function of the
-    EXISTING cfg — no state, no knob — so the recorder-host child (which builds via THIS
-    function with the full pickled cfg) inherits it across the spawn boundary. Stream-edit
-    builds keep cfg.asr.realtime_processing_pause byte-identically (re-proven by
-    tests/test_bulk_stage_remediation.py). Rationale: S6's stage decomposition names the
-    decode-evaluation cadence — not relay, writer, or adapter paint — as the dominant
-    speech→visible stage; see _BULK_REALTIME_PROCESSING_PAUSE for the numbers.
-
-    BUG-002 / validation round 3: BULK-ONLY dedicated realtime lane. Bulk builds additionally
-    override use_main_model_for_realtime to False and beam_size_realtime to
-    _BULK_REALTIME_BEAM_SIZE (see that constant for the measured collapse this attacks:
-    full-buffer re-decodes at beam 5 on the shared main lane ≈ 3.7 updates per replay).
-    Stream-edit builds keep Rev-2's single-lane build byte-identically. When the child arms
-    the context-prompt executor it injects a beam-1 realtime executor into the SAME lane
-    (recorder_host.augment_kwargs_with_executor) — the flag flip here is what makes that
-    injection take effect, since RealtimeSTT consults use_main_model_for_realtime BEFORE the
-    external executor.
+    BUG-002 / P1.M2.T2.S2 (PRD §4.2sexies R.1/R.8): RETIRED with the bulk experiment
+    (P1.M1.T1.S2). The former bulk-only recognizer-cadence overrides
+    (realtime_processing_pause / use_main_model_for_realtime / beam_size_realtime) are gone —
+    every build now uses the cfg's own values byte-identically (the stream-edit shape).
     """
     resolved = dict(cuda_check.CPU_FALLBACK) if force_cpu else None
     kwargs = cfg_to_kwargs(cfg, resolved=resolved)
-    if cfg.output.delivery == "bulk-text":
-        kwargs["realtime_processing_pause"] = _BULK_REALTIME_PROCESSING_PAUSE
-        kwargs["use_main_model_for_realtime"] = False
-        kwargs["beam_size_realtime"] = _BULK_REALTIME_BEAM_SIZE
     kwargs.update(_build_callbacks(feedback, latency, on_speech=on_speech, partial_source=partial_source))
     if extra_kwargs:
         # P1.M2.T5.S1: the recorder-host CHILD injects the context-prompt executors here (after
@@ -842,116 +726,6 @@ def _build_default_ducker(cfg: VoiceTypingConfig) -> Any:
     return AsyncDucker(AudioDucker.from_config(cfg, backend))
 
 
-# P1.M6.T2.S1 (PRD §4.2sexies R.5): the controller stop reasons that are FAULT-class — they
-# disarm bulk delivery AND recording with THE one concise reason ("fault" + reason). Any other
-# on_stopped reason ("stopped", takeover-prefix handled separately) is a clean/other stop whose
-# state the disarm/acquire path already wrote. "takeover: *" reasons are matched by prefix
-# (the TakeoverWatch/halt_for_takeover law records "takeover: <reason>").
-_BULK_FAULT_REASONS = frozenset(
-    {"queue-overflow", "op-deadline", "refused", "unknown", "target-error"}
-)
-
-
-class _BulkTargetBundle:
-    """One deliverable target + its per-lifetime takeover wiring + bounded teardown (P1.M6.T2.S1).
-
-    The DEFAULT route is the IM adapter (R.4 route assignment): ImeProcess + ImeTarget
-    (the R.3 DeliveryTarget). The pi-editor adapter (pi_editor.PiEditorTarget/PiEditorClient)
-    is reachable via the daemon's bulk_target_factory= seam — no config key in this item.
-
-    Construction (via _build_default_bulk_target) is PURE. The production IM child is
-    started LATER, on the vt-bulk-arm thread, by start() (P1.M2.T1.S2): ImeProcess.spawn
-    + a bounded READ-ONLY activation pump (request('ping') replies carry activated=) —
-    the pump mutates nothing and acquire stays exactly-once. Fake/test bundles (_proc is
-    None) no-op through attach/start/teardown.
-
-    attach(controller) subscribes a FRESH TakeoverWatch for THIS delivery lifetime (G10: the
-    watch latches ONE revocation and never resets — a new lifetime needs a new object). It
-    MUST precede start(): the watch late-binds proc._on_event, so a child event during
-    activation (incl. a takeover) is never missed.
-    teardown() is the bounded best-effort subprocess stop for the stopper thread; it NEVER
-    raises (a dead target must not break teardown — the ctrl.stop(leave=True) best-effort
-    precedent).
-    """
-
-    def __init__(self, target: Any, proc: Any = None) -> None:
-        self.target = target          # DeliveryTarget (bulk_delivery contract)
-        self._proc = proc             # ImeProcess duck, or None (fake/test bundles)
-        self._watch: Any = None       # fresh per attach() (G10)
-
-    def attach(self, controller: Any) -> None:
-        """Subscribe a FRESH TakeoverWatch for this delivery lifetime (G10)."""
-        if self._proc is None:
-            return  # fake/test bundles carry no takeover feed to subscribe
-        self._watch = TakeoverWatch(target=self.target, controller=controller)
-        # Real ImeProcess fires the PRIVATE _on_event slot (manager.py's feed line); the
-        # ctor slot would need the watch at construction, but the watch needs the controller,
-        # which exists only after the arm thread builds it — late-bind here instead. This is
-        # exactly TakeoverWatch.attach()'s documented real-manager fallback.
-        self._proc._on_event = self._watch.on_event
-
-    def start(self, timeout: "float | None" = None) -> "str | None":
-        """Start the production IM child on the ARM thread (P1.M2.T1.S2) — None = ready
-        to acquire; a concise reason = start failed (the caller tears down + writes the
-        ONE unsupported reason; recording stays armed, R.5).
-
-        Spawn once per lifetime (idempotent while RUNNING; a respawn after
-        unsupported/fault is the SANCTIONED NEXT-arm path — manager.py's spawn contract),
-        then pump READ-ONLY activation: request('ping') replies carry activated= (the
-        child may be RUNNING before the compositor activates the IM — ime_host._acquire
-        refuses until then), bounded by _IME_ACTIVATE_TIMEOUT_S with _IME_ACTIVATE_POLL_S
-        polls. Ping mutates nothing, so polling it is safe; acquire is still called
-        exactly-once by the caller — never here. Fake bundles (_proc is None) are a no-op
-        success (the attach() guard precedent). Call ONLY after attach(): the watch
-        late-binds proc._on_event, so no child event during activation is missed.
-        """
-        if self._proc is None:
-            return None  # fake/test bundle — nothing to start
-        if not self._proc.spawn():
-            st = self._proc.state  # 'unsupported' (seat held) | 'fault' | 'starting'/'idle'
-            return (
-                "ime seat held (unsupported)"
-                if st == "unsupported"
-                else f"ime spawn failed ({st})"
-            )
-        deadline = time.monotonic() + (
-            timeout if timeout is not None else _IME_ACTIVATE_TIMEOUT_S
-        )
-        while time.monotonic() < deadline:
-            r = self._proc.request("ping", timeout=_IME_ACTIVATE_POLL_S)  # read-only probe
-            if r is not None and r.get("activated"):
-                return None  # activated → the caller proceeds to its exactly-once acquire
-            time.sleep(_IME_ACTIVATE_POLL_S)
-        return "ime not activated"  # never activated within the bound
-
-    def teardown(self) -> None:
-        """Bounded best-effort subprocess stop (stopper thread ONLY — never under _lock)."""
-        if self._proc is None:
-            return
-        try:
-            self._proc.stop()
-        except Exception:  # noqa: BLE001 — teardown must never raise into the stopper
-            logger.warning("bulk: target teardown raised (ignored)", exc_info=True)
-
-
-def _build_default_bulk_target(
-    cfg: VoiceTypingConfig, on_delivery_state: Any = None
-) -> _BulkTargetBundle:
-    """Build the production bulk bundle for the daemon's arm seam (P1.M6.T2.S1).
-
-    IM route (R.4): ImeProcess + ImeTarget. CONSTRUCTION IS PURE (mirrors _build_default_ducker):
-    no subprocess runs and no thread starts here. The child is started on the vt-bulk-arm
-    thread by _BulkTargetBundle.start() (P1.M2.T1.S2): ImeProcess.spawn + the bounded
-    read-only activation pump run there, outside _lock — never in this factory and never
-    "inside acquire()" (acquire is a request, not a spawn). teardown runs on the
-    vt-bulk-stop thread. on_delivery_state is the M6 feedback seam (ImeProcess emits unsupported/fault ONLY, on its
-    reader thread — feedback.set_delivery_state is a plain state-file write, safe there; it
-    never raises).
-    """
-    proc = ImeProcess(on_delivery_state=on_delivery_state)
-    return _BulkTargetBundle(target=ImeTarget(proc), proc=proc)
-
-
 class VoiceTypingDaemon:
     """The listen-forever daemon core: recorder loop + on_final→type + listening gate + toggle.
 
@@ -975,7 +749,6 @@ class VoiceTypingDaemon:
         mic_prober: Callable[[], tuple[bool, str | None]] | None = None,
         key_listener: KeyListener | None = None,
         ducker: Any = None,
-        bulk_target_factory: "Callable[[VoiceTypingConfig], Any] | None" = None,
         feed_input: bool = False,
         partial_source: str = "stabilized",
     ) -> None:
@@ -1253,29 +1026,6 @@ class VoiceTypingDaemon:
         # of the last probe; 0.0 == never (sentinel matching MicRetryRateLimitFilter._last_seen).
         # Read/written ONLY under self._lock (via _arm) or here in single-threaded __init__.
         self._mic_probe_at: float = 0.0
-        # P1.M6.T2.S1 — bulk delivery wiring. INERT unless cfg.output.delivery == "bulk-text"
-        # (every behavior below is gated on _bulk_mode(); in the default "stream-edit" mode none
-        # of this state is ever touched and behavior stays byte-identical). All construction is
-        # cheap/pure: the bundle factory runs no subprocess and starts no thread (spawn is lazy
-        # inside the arm thread's acquire; teardown runs on the stopper thread).
-        self._bulk_target_factory = bulk_target_factory or (
-            # default IM route (R.4); the feedback seam fires from the manager's reader thread
-            lambda cfg_: _build_default_bulk_target(
-                cfg_, on_delivery_state=self._feedback.set_delivery_state
-            )
-        )
-        self._bulk_ctrl: Any = None            # BulkController — built on the first arm thread
-        self._bulk_bundle: Any = None          # _BulkTargetBundle (or the injected fake)
-        self._bulk_gen: int = 0                # arm generation — bumped in _arm BEFORE the arm
-        #   cmd put (G5: the host child stamps session_gen per arm cmd — 1:1 by construction)
-        self._bulk_epoch: int = 0              # stopper guard — bumped in _arm (G11)
-        self._bulk_delivery_active: bool = False  # set by the arm thread on acquire success
-        #   (G7: _disarm's "inactive" write is conditional on this, so it can never erase a
-        #   just-written fault reason — feedback overwrites reason on every call)
-        self._bulk_seq: dict[tuple[int, int], int] = {}  # (gen, uid) -> last seq (G4: seq is
-        self._bulk_seq_gen: int = -1           #   NOT in the relay payload — daemon-synthesized,
-        self._bulk_dropped_no_id: int = 0      #   lazily cleared when gen advances; G6 counter)
-        self._bulk_stop_thread: Any = None     # joinable stopper (test seam; request_shutdown joins)
         # P1.M6.T2.S2 (R.6): session recovery store — pure-memory leaf (own Lock, never calls
         # back into the daemon). Fed by hooks placed AFTER the existing gates (G1); holds the
         # last nonempty arm→disarm session, ≤2 sessions × 1 MiB UTF-8, cleared at exit (G10).
@@ -1726,10 +1476,6 @@ class VoiceTypingDaemon:
                     else:
                         return  # sentinel consumed (healthy close above): its final is dropped
             cleaned = textproc.clean(text, self._cfg.filter)
-            if self._bulk_mode():  # P1.M6.T2.S1: bulk path — enqueue-and-return. G2: this stays
-                #   AFTER the suppression window above (its early-returns are the double-type
-                #   guard; ctrl.cancel already closed the cancelled utterance controller-side).
-                return self._bulk_handle_final(cleaned, text, t_final_ready)
             if not cleaned:  # rejected: blocklist hallucination / below min_chars
                 # P1.M6.T2.S2 (R.6): rejected final — content no-op; the shown tail is
                 # retained (the gate above already dropped the racing/suppressed finals).
@@ -1920,18 +1666,16 @@ class VoiceTypingDaemon:
     def _clear_context_prompt(self) -> None:
         """Queue the child's context-prompt CLEAR (set_prompt("")), best-effort (P1.M2.T5.S2).
 
-        P1.M6.T3.S1 extracted _arm's inline clear VERBATIM so _bulk_cancel's D4 reuses the
-        exact same gates + put — behavior-identical; do not 'improve'. From _arm it is
-        called BEFORE the arm/mic cmd: the child reads its cmd queue FIFO between
-        utterances, so a warm re-arm (the child stays resident across disarm/arm,
-        §4.2bis) never conditions the session's FIRST decode on the previous session's
-        text — the child blocks in text() right after arming. An idle-unload respawn
-        starts a fresh child (prompt already None), so the clear is a harmless no-op
-        there. From _bulk_cancel (D4) it guarantees a CANCELLED fragment can never
-        become decode context (the stream-edit divergence is documented there). Gated
-        like the commit-time push (config AND the child's ready flag); the put is
-        best-effort (S1 contract) — no retries; NEVER raises into the caller, takes no
-        daemon lock, and never calls a ctrl mutator.
+        P1.M6.T3.S1 extracted _arm's inline clear VERBATIM into this helper so the arm path
+        and any other caller reuse the exact same gates + put — behavior-identical; do not
+        'improve'. From _arm it is called BEFORE the arm/mic cmd: the child reads its cmd
+        queue FIFO between utterances, so a warm re-arm (the child stays resident across
+        disarm/arm, §4.2bis) never conditions the session's FIRST decode on the previous
+        session's text — the child blocks in text() right after arming. An idle-unload
+        respawn starts a fresh child (prompt already None), so the clear is a harmless
+        no-op there. Gated like the commit-time push (config AND the child's ready flag);
+        the put is best-effort (S1 contract) — no retries; NEVER raises into the caller,
+        takes no daemon lock.
         """
         if self._cfg.asr.context_prompt and self._context_prompt_active is True:
             clearer = getattr(self._host, "set_prompt", None)
@@ -1967,9 +1711,6 @@ class VoiceTypingDaemon:
             set_mode(self._streaming_now())
         # P1.M6.T2.S2 (R.6): fresh recovery draft per arm (resets any stale draft state).
         self._session_recovery.open_session()
-        if self._bulk_mode():  # P1.M6.T2.S1 (G5): gen bump BEFORE the arm cmd put below (the
-            self._bulk_gen += 1  #   host child stamps session_gen per arm cmd — 1:1 by
-            self._bulk_epoch += 1  #   construction); the stopper-epoch guard rides the same bump
         self._final_pending = False  # Issue 2: fresh arm = no utterance in flight (clear stale stray partials)
         self._utterance_finalized = (
             False  # validation Issue 2: fresh arm = no final yet for this session
@@ -1995,7 +1736,7 @@ class VoiceTypingDaemon:
         # AND the child's ready flag); the put is best-effort (S1 contract) — no retries.
         # P1.M6.T3.S1: the put itself moved verbatim into _clear_context_prompt() — the
         # FIFO pin (set_prompt("") BEFORE set_microphone(True) below) is load-bearing for
-        # warm re-arm and is now shared with _bulk_cancel's D4 clear.
+        # warm re-arm.
         self._rev1_committed = ""
         self._clear_context_prompt()
         self._armed_monotonic = (
@@ -2017,8 +1758,6 @@ class VoiceTypingDaemon:
         self._refresh_mic_status()  # TTL-cached (Issue 3 / P1.M2.T2.S1): re-probes at most once / 30s
         # P1.M2.T7.S2: once-only zero-keyboard WARNING (latched — see _warn_no_keyboards_once).
         self._warn_no_keyboards_once()
-        self._bulk_begin_delivery()  # P1.M6.T2.S1: spawns vt-bulk-arm (thread spawn only —
-        #   non-blocking under _lock, the _duck_engage precedent; subprocess work on the thread)
 
     def _disarm(self) -> None:
         """Private: disarm mic + clear listening + notify. Called under lock.
@@ -2073,11 +1812,6 @@ class VoiceTypingDaemon:
         self._feedback.set_phase(
             "idle"
         )  # Issue 2 / P1.M2.T1.S1: 'loaded / not listening' ⇒ phase idle (PRD §4.2bis, §4.6)
-        if self._bulk_mode():  # P1.M6.T2.S1: bump the epoch + schedule the stopper — thread
-            self._bulk_epoch += 1  #   spawn ONLY under _lock; the teardown never runs here. The
-            #   stopper OWNS the G7-conditional "inactive" write (it clears _bulk_delivery_active
-            #   first, so a fault path that already cleared the flag keeps its just-written reason).
-            self._bulk_schedule_stop()
         # NOTE: caller MUST call self._safe_abort() AFTER releasing _lock (see start/stop/toggle).
 
     def _touch_speech(self) -> None:
@@ -2136,397 +1870,12 @@ class VoiceTypingDaemon:
             not self._listening.is_set()
         ):  # GATE: race guard (BUG-004 / P1.M1.T4.S1) — a stray
             return  #   post-disarm partial must neither type nor count into latency
-        if self._bulk_mode():  # P1.M6.T2.S1: bulk path — enqueue-and-return, NO stream typing
-            return self._bulk_handle_partial(text)
         self._stream.on_partial(text)
         # P1.M6.T2.S2 (R.6): the engine tail is now current — newest visible fragment wins.
         # Defensive getattr (the _pending_tail_len seam style): minimal stream doubles in the
         # untouched suites lack .tail; the real StreamingOutput always has it (streaming.py).
         self._session_recovery.note_tail(getattr(self._stream, "tail", ""))
         self._latency.note_partial(text)
-
-    # ---------------------------------------------------------------------
-    # P1.M6.T2.S1 — bulk-text delivery wiring (PRD §4.2sexies R.5).
-    # EVERYTHING here is inert unless cfg.output.delivery == "bulk-text"; in the
-    # default "stream-edit" mode none of it runs and behavior is byte-identical.
-    # LOCK LAW (G1): ctrl.cancel()/ctrl.stop() NEVER under self._lock — they can
-    # fire on_stopped SYNCHRONOUSLY (the handler takes _lock → deadlock) and stop()
-    # joins the writer ≤5 s (the NEW-2 wedge class). Thread spawns are the ONLY
-    # thing _arm/_disarm do for bulk (non-blocking under _lock — the _duck_engage
-    # precedent); subprocess round-trips run on vt-bulk-arm / vt-bulk-stop ONLY
-    # (G3). Reader-thread dispatch is enqueue-and-return ONLY (R.5).
-    # ---------------------------------------------------------------------
-
-    def _bulk_mode(self) -> bool:
-        """True when the config selects the bulk-text delivery path (cheap; any thread)."""
-        return self._cfg.output.delivery == "bulk-text"
-
-    def _bulk_wired(self) -> bool:
-        """True when bulk mode AND a controller exists (the arm thread built one)."""
-        return self._bulk_mode() and self._bulk_ctrl is not None
-
-    def _bulk_identity(self):
-        """host.relay_identity() snapshot — None fields when the payload was id-less (G6).
-
-        Valid INSIDE on_final/_on_partial ONLY (they run on the host reader thread inside
-        _dispatch, so the snapshot IS the identity of the event that triggered the callback —
-        the P1.M6.T1.S1 seam). Degrades to None when the host is a legacy fake without the
-        seam (drop + count — NEVER a constant-utterance fallback: the controller closes the
-        key on a final, so every later partial would dup-discard — silent death).
-        """
-        relay = getattr(self._host, "relay_identity", None)
-        if callable(relay):
-            # method-backed seam (test fakes) — call it
-            try:
-                return relay()
-            except Exception:  # noqa: BLE001 — a broken seam is a drop, never a crash
-                return None
-        # property-backed seam (the real RecorderHost): getattr ALREADY returned the
-        # snapshot value (a _RelayIdentity NamedTuple with session_gen/utterance_id).
-        # P1.M6.T4.S1 fix: the property shape used to fall through to None here (callable()
-        # is False for the snapshot), so the REAL bulk path dropped every event as id-less
-        # (the T2.S1 seam was only ever exercised through method-shaped fakes). Return the
-        # snapshot directly; a missing attribute still degrades to None (the legacy fake).
-        return relay
-
-    def _bulk_next_seq(self, gen: int, uid: int) -> int:
-        """Daemon-synthesized per-(gen, utterance) seq (G4: seq is NOT in the relay payload).
-
-        +1 per partial AND per final (the final takes last+1); the map is lazily cleared when
-        the generation advances so a fresh arm starts every utterance at seq 1 again. Reader
-        thread ONLY (on_final/_on_partial) — no lock needed for a dict of counters.
-        """
-        if gen != self._bulk_seq_gen:
-            self._bulk_seq.clear()
-            self._bulk_seq_gen = gen
-        key = (gen, uid)
-        seq = self._bulk_seq.get(key, 0) + 1
-        self._bulk_seq[key] = seq
-        return seq
-
-    def _bulk_handle_final(self, cleaned: str, raw: str, t_final_ready: float) -> None:
-        """Bulk-path final: enqueue-and-return on the reader thread (R.5). NO typing.
-
-        The suppression-window block in on_final STAYS AHEAD of this call (G2): its
-        early-returns drop the cancelled utterance's racing final + sentinel — correct for
-        bulk too, because ctrl.cancel() already purged + closed the utterance controller-side.
-        """
-        # Drain flags ALWAYS (mirror the legacy paths — the run loop's text() bookkeeping is
-        # delivery-agnostic; a missing identity must not strand a pending drain).
-        self._final_pending = False
-        self._utterance_finalized = True
-        ident = self._bulk_identity()
-        if ident is None or ident.utterance_id is None or ident.session_gen is None:
-            self._bulk_dropped_no_id += 1  # G6: drop + count, record nothing
-            logger.debug(
-                "bulk final dropped: no relay identity (dropped_no_id=%d)",
-                self._bulk_dropped_no_id,
-            )
-            return
-        gen, uid = ident.session_gen, ident.utterance_id
-        ctrl = self._bulk_ctrl
-        if not cleaned:
-            # Parity with the legacy rejected-final UX: the hallucination notify, NO stream
-            # calls; the controller gets a BOUNDARY (on_final_dropped) so the utterance's
-            # shown span stays owned-but-settled — nothing auto-erased (R.5).
-            if ctrl is not None and ctrl.is_active():
-                ctrl.on_final_dropped(utterance=str(uid), gen=gen)
-            # P1.M6.T2.S2 (R.6): rejected final — content no-op, the shown tail is retained.
-            self._session_recovery.note_rejected()
-            self._feedback.notify("filtered hallucination — not typed; keep dictating")
-            return
-        seq = self._bulk_next_seq(gen, uid)
-        if ctrl is not None and ctrl.is_active():
-            ctrl.on_final(cleaned, utterance=str(uid), seq=seq, gen=gen)
-            # P1.M6.T3.S1 trigger A — enqueue-time prompt push: covers UNCHANGED finals,
-            # which fire NO on_applied (that hook is APPLIED-only), so a finalize-only
-            # trigger would fall an utterance behind forever. At enqueue,
-            # confirmed_visible() = this utterance's last APPLIED show span, which
-            # renders equal to the final exactly when the finalize will be UNCHANGED.
-            # Non-blocking + never raises: the reader-thread enqueue-and-return law
-            # (R.5) is preserved.
-            self._refresh_context_prompt()
-        self._feedback.record_final(cleaned)  # recognition meaning (feedback mirrors keep it)
-        # P1.M6.T2.S2 (R.6): accepted final → recovery draft, keyed (gen, uid) RAW hashables
-        # for exactly-once dedupe (G7 — the str(uid) form is the controller's, not the store's).
-        self._session_recovery.note_final(cleaned, key=(gen, uid))
-        rec = self._latency.finalize_utterance(
-            text=cleaned, t_final_ready=t_final_ready, t_typed=time.monotonic()
-        )
-        depth = ctrl.stats().get("queue_depth", 0) if ctrl is not None else 0
-        # G8: counts + times ONLY — never the recognition text (the legacy text=<repr> INFO
-        # line is skipped on the bulk path; this line replaces it).
-        logger.info(
-            "bulk final gen=%d utt=%d seq=%d chars=%d queue=%d partials=%d",
-            gen,
-            uid,
-            seq,
-            len(cleaned),
-            depth,
-            rec["partials"],
-        )
-        # NO _stream.commit, NO backend.type_text, NO text-bearing latency line. The
-        # P1.M6.T3.S1 prompt refresh DOES fire (trigger A, above): in bulk mode the
-        # prompt source is the controller's confirmed_visible(), NEVER _stream
-        # (read-only everywhere — the bulk path never feeds nor writes it). Rejected
-        # finals returned earlier — zero pushes there, parity with the stream-edit
-        # deliberate no-op.
-
-    def _bulk_handle_partial(self, text: str) -> None:
-        """Bulk-path partial: enqueue-and-return on the reader thread (R.5). NO stream typing."""
-        ident = self._bulk_identity()
-        if ident is None or ident.utterance_id is None or ident.session_gen is None:
-            self._bulk_dropped_no_id += 1  # G6: drop + count, note nothing (no text delivered)
-            logger.debug(
-                "bulk partial dropped: no relay identity (dropped_no_id=%d)",
-                self._bulk_dropped_no_id,
-            )
-            return
-        gen, uid = ident.session_gen, ident.utterance_id
-        ctrl = self._bulk_ctrl
-        if ctrl is not None and ctrl.is_active():
-            ctrl.on_partial(
-                text, utterance=str(uid), seq=self._bulk_next_seq(gen, uid), gen=gen
-            )
-        self._feedback.update_partial(text)  # the partial mirror keeps recognition meaning
-        # P1.M6.T2.S2 (R.6): recognized tail (D2 — confirmed lags by design; the raw partial
-        # is the recognized fragment). One overwrite; no stream call.
-        self._session_recovery.note_tail(text)
-        self._latency.note_partial(text)  # legacy latency counter (partials=N)
-
-    def _bulk_begin_delivery(self) -> None:
-        """Spawn the vt-bulk-arm thread: fresh bundle + start IM child + acquire→arm→start
-        (called from _arm under _lock — thread spawn is non-blocking, the _duck_engage
-        precedent).
-
-        The subprocess round-trips (P1.M2.T1.S2: ImeProcess.spawn + the bounded read-only
-        activation pump in bundle.start(), then ctrl.arm's queue ops are instant) NEVER run
-        on the reader thread nor under _lock (G1/G3). A FRESH bundle is built per delivery
-        lifetime: teardown() kills that lifetime's IM child and nothing re-spawns a stopped
-        ImeProcess, so reuse across lifetimes would dead-acquire. Start failure OR acquire
-        failure ⇒ delivery_state="unsupported" + one concise reason — recording STAYS armed
-        (R.5). Acquire stays exactly-once (no retry of possibly-applied mutations).
-        """
-        if not self._bulk_mode():
-            return
-        gen, epoch = self._bulk_gen, self._bulk_epoch
-
-        def _arm_work() -> None:
-            try:
-                if epoch != self._bulk_epoch:
-                    return  # a stop/new-arm superseded this one before it started
-                old_ctrl = self._bulk_ctrl
-                if old_ctrl is not None and old_ctrl.is_active():
-                    # A stale stopper skipped by the epoch guard must not orphan a live
-                    # lifetime: stop it here (bounded, out of lock, idempotent).
-                    old_ctrl.stop(leave=True)
-                bundle = self._bulk_target_factory(self._cfg)  # fresh per lifetime
-                self._bulk_bundle = bundle
-                ctrl = BulkController(
-                    bundle.target,
-                    on_stopped=self._on_bulk_stopped,
-                    on_applied=self._on_bulk_applied,
-                )
-                self._bulk_ctrl = ctrl
-                bundle.attach(ctrl)  # FRESH takeover watch per lifetime (G10) — BEFORE
-                # start(): the watch late-binds proc._on_event, so a child event during
-                # activation (incl. a takeover) is never missed.
-                # P1.M2.T1.S2: start the production IM child HERE on the arm thread
-                # (construction stayed pure) — spawn + bounded READ-ONLY activation pump,
-                # all subprocess round-trips out of _lock (G1/G3). Duck-typed older test
-                # bundles without start() are a no-op success (the getattr stream seam).
-                _bundle_start = getattr(bundle, "start", None)
-                start_reason = _bundle_start() if _bundle_start is not None else None
-                if start_reason is not None:
-                    bundle.teardown()  # bounded cleanup of any leftover child (never raises)
-                    self._feedback.set_delivery_state("unsupported", start_reason)
-                    logger.info(
-                        "bulk delivery start failed: gen=%d reason=%s", gen, start_reason
-                    )
-                    return  # recording STAYS armed (R.5 — the acquire-failure shape)
-                if epoch != self._bulk_epoch or not self._listening.is_set():
-                    # A stop raced the subprocess round-trips: never ghost-arm — tear THIS
-                    # lifetime down immediately (the user's stop already bumped the epoch).
-                    ctrl.stop(leave=True)
-                    bundle.teardown()
-                    return
-                if not ctrl.acquire():
-                    reason = ctrl.stats().get("stopped_reason") or "acquire-failed"
-                    self._feedback.set_delivery_state("unsupported", reason)
-                    logger.info(
-                        "bulk delivery acquire failed: gen=%d reason=%s", gen, reason
-                    )
-                    return
-                if epoch != self._bulk_epoch or not self._listening.is_set():
-                    # A stop raced the subprocess round-trip: never ghost-arm — tear THIS
-                    # lifetime down immediately (the user's stop already bumped the epoch).
-                    ctrl.stop(leave=True)
-                    bundle.teardown()
-                    return
-                ctrl.arm(gen)  # G5: gen parity with the host child's session_gen (1:1 per arm)
-                ctrl.start()
-                self._bulk_delivery_active = True
-                self._feedback.set_delivery_state("active")
-                logger.info(
-                    "bulk delivery armed: gen=%d target=%s",
-                    gen,
-                    type(bundle.target).__name__,
-                )
-            except Exception:  # noqa: BLE001 — the arm thread must never crash the daemon
-                logger.exception("bulk arm thread failed (gen=%d)", gen)
-
-        threading.Thread(target=_arm_work, daemon=True, name="vt-bulk-arm").start()
-
-    def _bulk_schedule_stop(self) -> None:
-        """Spawn the epoch-guarded vt-bulk-stop stopper (G11). Thread spawn ONLY — safe under
-        _lock; the teardown itself NEVER runs under _lock (G1/G3).
-
-        The stopper OWNS the conditional "inactive" write (G7): it clears _bulk_delivery_active
-        FIRST, so a fault path that already cleared it keeps its just-written reason, a clean
-        disarm writes inactive, and a quit ditto. The epoch guard skips a stopper superseded by
-        a newer arm (a stale stop must never kill the new delivery lifetime); ctrl.stop() and
-        teardown() are idempotent, so a no-skip double-stop is still safe.
-        """
-        if not self._bulk_mode():
-            return
-        epoch = self._bulk_epoch
-
-        def _stop_work() -> None:
-            if epoch != self._bulk_epoch:
-                return  # G11: superseded by a newer arm — never touch the new lifetime
-            ctrl = self._bulk_ctrl
-            if ctrl is not None:
-                try:
-                    ctrl.stop(leave=True)  # bounded; writer join ≤5 s; leave() exactly once
-                except Exception:  # noqa: BLE001 — teardown must never raise into the stopper
-                    logger.warning("bulk stopper: ctrl.stop raised", exc_info=True)
-            bundle = self._bulk_bundle
-            if bundle is not None:
-                bundle.teardown()  # bounded subprocess stop (never raises)
-            if self._bulk_delivery_active:
-                # G7: clear FIRST; the fault path already cleared the flag before writing its
-                # reason, so this write can never erase a fault (feedback overwrites on every
-                # call — an unconditional write WOULD, which is exactly the G7 bug class).
-                self._bulk_delivery_active = False
-                self._feedback.set_delivery_state("inactive")
-            logger.debug("bulk stopper done: epoch=%d", epoch)
-
-        self._bulk_stop_thread = threading.Thread(
-            target=_stop_work, daemon=True, name="vt-bulk-stop"
-        )
-        self._bulk_stop_thread.start()
-
-    def _on_bulk_stopped(self, reason: str | None) -> None:
-        """The controller's on_stopped consumer (the BulkController ctor docstring's named
-        seam). Runs on the writer/reader/cancel thread — quick + non-blocking.
-
-        Fault-class reasons (queue-overflow | op-deadline | refused | unknown | target-error |
-        takeover: *) disarm BOTH bulk delivery AND recording with THE one concise reason (R.5):
-        delivery_state="fault" + reason, then _disarm (which schedules the epoch-matched
-        stopper; it sees the flag already cleared and keeps the fault) + the out-of-lock
-        _safe_abort nudge. Any other reason (a clean "stopped") already had its state written
-        by the disarm/acquire path — log counts/reasons only (G8).
-        """
-        self._bulk_delivery_active = False  # FIRST (G7) — _disarm's stopper skips the write
-        reason = reason or "stopped"
-        if reason in _BULK_FAULT_REASONS or reason.startswith("takeover:"):
-            self._feedback.set_delivery_state("fault", reason)  # THE one concise reason (R.5)
-            with self._lock:
-                # Short critical section ONLY: _disarm spawns a thread (non-blocking). Never
-                # call ctrl.* here — this handler runs FROM a ctrl callback (the G1 deadlock).
-                if self._listening.is_set():
-                    self._disarm()  # clears listening + schedules the stopper
-            self._safe_abort()  # out-of-lock nudge (the established start/stop/toggle shape)
-            logger.info("bulk delivery fault: reason=%s (recording disarmed)", reason)
-        else:
-            logger.info("bulk delivery stopped: reason=%s", reason)  # reasons only (G8)
-
-    def _on_bulk_applied(
-        self,
-        kind: str,
-        gen: int,
-        utterance: str,
-        seq: int,
-        revision: int,
-        chars: int,
-        elapsed_ms: int,
-    ) -> None:
-        """The controller's per-APPLIED hook (P1.M6.T2.S1 additive): counts + times ONLY (R.5).
-
-        Runs on the writer thread (show/finalize) or the cancel caller's thread — the
-        controller fires it OUTSIDE _cond and exception-wraps it. Descriptor format per the
-        feedback contract: verb + utterance/seq ids + revision + char count + elapsed ms;
-        chars is negative for cancel (the removed owned-range size).
-        """
-        op = "insert" if kind == "show" else kind  # show→insert, finalize→finalize, cancel
-        try:
-            self._feedback.record_confirmed_op(
-                f"{op} utt={utterance} seq={seq} rev={revision} {chars:+d}ch"
-                f" {elapsed_ms:.0f}ms"
-            )
-        except Exception:  # noqa: BLE001 — a feedback failure must never kill the writer
-            logger.warning("bulk: record_confirmed_op failed", exc_info=True)
-        if kind == "finalize":
-            # P1.M6.T3.S1 trigger B — finalize-APPLIED prompt push: corrects the context
-            # after a REVISED finalize (this fires OUTSIDE _cond AFTER _confirmed_visible
-            # was set under it, so confirmed_visible() reads the finalize's exact span).
-            # kind == "show" deliberately does NOT push (mid-utterance
-            # self-conditioning — the executor runs condition_on_previous_text=False
-            # precisely because the daemon owns cross-utterance context); UNCHANGED
-            # finals never get here (on_applied is APPLIED-only) — trigger A covers
-            # them; the cancel clear is D4 in _bulk_cancel.
-            try:
-                self._refresh_context_prompt()
-            except Exception:  # noqa: BLE001 — never kill the writer thread
-                logger.debug(
-                    "bulk finalize prompt refresh failed (ignored)", exc_info=True
-                )
-
-    def _bulk_cancel(self) -> dict:
-        """Bulk-mode cancel (the intercept at the top of cancel()): ZERO physical-character
-        compensation — no tail_len, no max(tail_len-1, 0), no press_backspace (R.5; R.1).
-
-        ctrl.cancel(gen) runs OUTSIDE _lock FIRST (G1: it may fire on_stopped synchronously
-        and the handler takes _lock; cancel() also does a bounded op-runner wait). Then the
-        SHARED under-lock recognition cancel runs — the same suppress latch + host.cancel()
-        (gated on _text_in_flight, exactly like the legacy tail) + the Feedback partial-mirror
-        clear. Entry points need NO edits: the control socket and the evdev Backspace listener
-        both funnel through cancel(). Idempotent when not armed (parity with the legacy
-        not-listening reply).
-        """
-        if not self._listening.is_set():
-            return {"ok": True, **self.status_snapshot()}  # idempotent parity
-        ctrl = self._bulk_ctrl
-        if ctrl is not None and ctrl.is_active():
-            # OUT of _lock (G1). Nothing pending ⇒ controller-side one-op no-op. A refused/
-            # deadlined cancel stops delivery → on_stopped fires → the fault disarm runs.
-            ctrl.cancel(gen=self._bulk_gen)
-        # P1.M6.T3.S1 D4 — post-cancel context-free clear: ctrl.cancel does NOT reset the
-        # controller's _confirmed_visible (it transiently holds the removed fragment), so
-        # without this a later accepted final with zero shows of its own could push that
-        # REMOVED text as decode context. Deliberate divergence from stream-edit (which
-        # KEEPS pre-cancel context — committed unchanged): bulk has no cumulative mirror,
-        # so context-free until the next finalize-APPLIED rebuilds it is the conservative
-        # degrade (PRD degrade philosophy). No ctrl mutator here; _clear_context_prompt
-        # never raises.
-        self._clear_context_prompt()
-        with self._lock:
-            if self._listening.is_set():  # re-check: a fault may have disarmed mid-cancel
-                if self._text_in_flight.is_set() and self._host is not None:
-                    host_cancel = getattr(self._host, "cancel", None)
-                    if callable(host_cancel):
-                        # the SHARED suppression latch (on_final's window consumes it)
-                        self._cancel_suppress_final = True
-                        self._cancel_suppress_since = time.monotonic()
-                        host_cancel()
-                self._reset_stream_after_cancel()  # clears the Feedback partial mirror
-                # P1.M6.T2.S2 (R.6): the cancelled fragment is excluded — clear the tail.
-                self._session_recovery.note_cancel()
-        return {
-            "ok": True,
-            "listening": self.is_listening(),
-            **self.status_snapshot(),
-        }
 
     def _request_stop(self) -> None:
         """Stop listening — gracefully: let the final model finish an in-flight utterance, then disarm.
@@ -2738,30 +2087,10 @@ class VoiceTypingDaemon:
           - self._context_prompt_active is True — the loaded child's ready payload
             reported the executor armed. None (no child loaded) or False (probe
             degraded) -> zero pushes, status 'degraded'.
-        SOURCE (P1.M6.T3.S1 DECISION — risk #7, d2_bulk_delivery_map.md §9 row 7): in
-        bulk-text mode the committed checkpoint lives in the BULK CONTROLLER —
-        self._bulk_ctrl.confirmed_visible(), the controller's OWN mirror of
-        target-CONFIRMED text (R.5 three-value law #3), read read-only here. _stream is
-        READ-ONLY in every mode and NEVER written by the bulk path: the bulk path never
-        feeds it, so its .committed stays "" all session and reading it would silently
-        disable conditioning (the risk-#7 failure); there is deliberately NO daemon-side
-        cumulative accumulator (that would be a second source of truth — the contract
-        names the controller's mirror). Trigger sites: A = accepted-final enqueue in
-        _bulk_handle_final (covers UNCHANGED finals — on_applied fires on APPLIED only);
-        B = finalize-APPLIED in _on_bulk_applied (post-correction context); D4 = the
-        post-cancel ""-clear in _bulk_cancel (a removed fragment must never become
-        decode context — stream-edit keeps pre-cancel context; bulk, having no
-        cumulative mirror, degrades context-free until the next finalize-APPLIED).
-        Preserved NO-OPs: partial shows never push (mid-utterance self-conditioning),
-        rejected finals push nothing, bulk-but-unwired (pre-arm / acquire-failed
-        "unsupported" / torn down) early-returns — no source of truth exists there and
-        the arm-time clear already left the child context-free. Accepted divergence:
-        confirmed_visible() is the LAST confirmed utterance span (R.3 spans are
-        per-utterance), so a multi-utterance unpunctuated run conditions only on its
-        newest confirmed utterance where stream-edit's committed carries the whole run.
-        Under streaming: self._stream.committed; self._rev1_committed (the daemon-side
-        accumulator) in the Rev 1 rollback hatch — StreamingOutput is NOT touched in
-        that mode (T6.S2 pinned it keystroke-identical).
+        SOURCE (P1.M1.T1.S2, post-bulk-detach): under streaming the committed checkpoint is
+        self._stream.committed (the engine's post-commit mirror); in the Rev 1 rollback
+        hatch it is self._rev1_committed (the daemon-side accumulator) — StreamingOutput is
+        NOT touched in that mode (T6.S2 pinned it keystroke-identical).
 
         Defensive getattr seam (unchanged from the T6.S2 thin version): a host without
         set_prompt (unit-test fakes, the legacy recorder adapter) is a silent DEBUG
@@ -2769,10 +2098,9 @@ class VoiceTypingDaemon:
         is never logged above DEBUG (it is user dictation).
 
         Deliberate NO-OPs (do not 'fix'): rejected finals (blocklist/min_chars —
-        nothing confirmed changed), stream-edit cancel() (the fragment is never
-        committed), and unload teardown (a respawned child starts with no prompt).
-        Bulk-mode cancel() is the D4 exception: it pushes the ""-clear (see SOURCE
-        above); partial shows never push (trigger B is finalize-only).
+        nothing confirmed changed), cancel() (the fragment is never committed), and
+        unload teardown (a respawned child starts with no prompt). Partial shows never
+        push (the push sites are commit-time only).
         """
         try:
             if (
@@ -2780,14 +2108,7 @@ class VoiceTypingDaemon:
                 or self._context_prompt_active is not True
             ):
                 return
-            if self._bulk_mode():
-                # Bulk FIRST (P1.M6.T3.S1): bulk runs with streaming=true, so the
-                # streaming branch below would pick _stream.committed — "" all session
-                # in bulk mode, silently disabling conditioning (risk #7).
-                if not self._bulk_wired():
-                    return  # no controller: no source of truth; arm-clear left it context-free
-                source = self._bulk_ctrl.confirmed_visible()
-            elif self._streaming_now():
+            if self._streaming_now():
                 source = self._stream.committed
             else:
                 source = self._rev1_committed
@@ -2825,14 +2146,7 @@ class VoiceTypingDaemon:
         Idempotent (PRD §4.2quater freeze-rule): when NOT armed, or armed with NO pending tail,
         this issues no backspace and still replies ok — further Backspaces are plain user edits,
         never compensated (only typed dictation may be deleted, and only by this path).
-
-        P1.M6.T2.S1 — bulk mode intercepts at the TOP (before the lock + the legacy compensation
-        math): in delivery="bulk-text" there is NO len(tail)-1 backspace (R.1/R.5) — ctrl.cancel
-        removes the owned range in ONE controller op and the shared recognition cancel runs
-        after. See _bulk_cancel.
         """
-        if self._bulk_mode():  # bulk: NO tail math, NO press_backspace (R.5); ctrl.cancel runs
-            return self._bulk_cancel()  # OUT of _lock — the on_stopped deadlock (G1)
         with self._lock:
             if not self._listening.is_set():
                 # Not armed: nothing pending — idempotent no-op (never touch backend/host).
@@ -3251,14 +2565,6 @@ class VoiceTypingDaemon:
         timer, self._drain_timer = self._drain_timer, None
         if timer is not None:
             timer.cancel()
-        # P1.M6.T2.S1: bulk teardown on quit/SIGTERM — schedule the epoch-guarded stopper and
-        # bounded-join it (1.0 s): quit must not strand a live IM child or writer. An overrun
-        # stopper keeps running daemon-side; the host teardown below proceeds regardless.
-        if self._bulk_mode():
-            self._bulk_schedule_stop()
-            stopper, self._bulk_stop_thread = self._bulk_stop_thread, None
-            if stopper is not None:
-                stopper.join(timeout=1.0)
         if self._host is None:
             # Nothing loaded (never armed, or already torn down) -> _shutdown is enough — but
             # CLAIM the teardown + signal _teardown_done anyway (validation Issue 2): with no

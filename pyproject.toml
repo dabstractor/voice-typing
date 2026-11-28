@@ -25,3 +25,9 @@ packages = ["voice_typing"]
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+# P1.M1.T1.S2: tools/ hosts LAB REFERENCES (the retired Rev-4 bulk-text suites under
+# tools/lab-tests/) — never product acceptance; keep them out of every pytest run.
+# Superset of pytest's own norecursedirs defaults (setting the key replaces them).
+norecursedirs = [".*", "build", "dist", "node_modules", "venv", "tools"]

@@ -9,12 +9,11 @@ Two layers, fakes ONLY (no CUDA, no subprocess, no live desktop — AGENTS.md):
   oldest finals dropped first; a lone oversized item sliced at a codepoint boundary keeping
   its START), truncation reporting, clear-at-exit + reuse, and a bounded thread-safety smoke.
 
-  Layer B — daemon wiring in BOTH delivery modes (stream-edit default + S1's bulk-text):
-  the hook-placement precedents (listening gate, cancel-suppression window, rejected-final
-  block) pinned through the public daemon surface (on_final/_on_partial/cancel/_disarm/
-  request_shutdown) + the S3 contract point session_snapshot(). Stream-edit tests reuse
-  test_daemon's fakes; bulk tests reuse test_bulk_dispatch's fixtures (identity host, fake
-  bundle, spy backend, real BulkController).
+  Layer B — daemon wiring in the stream-edit delivery mode (the daemon's only mode since
+  the bulk-text retirement, P1.M1.T1.S2): the hook-placement precedents (listening gate,
+  cancel-suppression window, rejected-final block) pinned through the public daemon surface
+  (on_final/_on_partial/cancel/_disarm/request_shutdown) + the S3 contract point
+  session_snapshot(). Tests reuse test_daemon's fakes.
 
 Run:
     cd /home/dustin/projects/voice-typing
@@ -42,7 +41,6 @@ from voice_typing.session_recovery import (  # noqa: E402
     SessionRecovery,
 )
 
-import test_bulk_dispatch as tbd  # noqa: E402 — S1's bulk fixtures (identity host, fakes)
 import test_daemon as td  # noqa: E402 — stream-edit fakes (_make_daemon, _fake_host_factory)
 
 # ===========================================================================
@@ -87,7 +85,7 @@ def test_tail_only_session_text_is_the_tail():
 
 
 def test_exactly_once_same_key_deduped():
-    """(G7) bulk (gen, uid) closed set: the same key records exactly once."""
+    """(G7) closed-set key: the same key records exactly once."""
     sr = SessionRecovery()
     sr.open_session()
     sr.note_final("hello", key=(1, 7))
@@ -433,69 +431,3 @@ def test_close_log_line_counts_only(caplog):
         lines[0],
     ), lines[0]
     assert "wordone" not in lines[0] and "wordtwo" not in lines[0]
-
-
-# ===========================================================================
-# Layer B — daemon wiring, bulk-text mode (S1's fixtures; G3/G7)
-# ===========================================================================
-
-
-def _make_armed_bulk_daemon(identity):
-    """A bulk daemon ARMED through start() (→ _arm bumps gen to 1, opens the recovery
-    session, and the arm thread builds + arms the real controller over the fake target)."""
-    d, fb, be, host = tbd._make_bulk_daemon(identity=identity)
-    assert d._load_host() is True
-    d.start()
-    assert tbd._wait_until(lambda: d._bulk_delivery_active), "arm thread must settle"
-    return d, fb, be, host
-
-
-def test_bulk_accepted_final_exactly_once():
-    """(a) + (G7): a bulk final is recorded keyed (gen, uid); replaying the SAME final
-    (same identity, no re-arm) does NOT duplicate it."""
-    d, fb, be, host = _make_armed_bulk_daemon(tbd._Identity(1, 7))
-    d.on_final("hello world")
-    d.on_final("hello world")  # dup delivery of the same (gen, uid)
-    with d._lock:
-        d._disarm()
-    snap = d.session_snapshot()
-    assert snap is not None
-    assert snap["text"] == "hello world"
-    assert snap["finals"] == 1
-
-
-def test_bulk_cancel_excludes_tail_and_racing_final():
-    """(c) the bulk entry point funnels the same exclusions: the partial tail is cleared
-    by the cancel and the racing final is dropped by the suppression window."""
-    d, fb, be, host = _make_armed_bulk_daemon(tbd._Identity(1, 8))
-    d.on_final("kept")
-    d._on_partial("hello wor")  # bulk partial → note_tail (recognized tail, D2)
-    d._text_in_flight.set()
-    d.cancel()  # bulk intercept: ctrl.cancel + shared latch + note_cancel
-    d.on_final("racing final")  # latched window → dropped BEFORE the bulk dispatch
-    with d._lock:
-        d._disarm()
-    snap = d.session_snapshot()
-    assert snap is not None and snap["text"] == "kept"
-
-
-def test_bulk_rejected_final_retains_tail():
-    """(b) bulk rejected final (min_chars): no final recorded; the recognized tail survives."""
-    d, fb, be, host = _make_armed_bulk_daemon(tbd._Identity(1, 9))
-    d._on_partial("abc")
-    d._cfg.filter.min_chars = 50
-    d.on_final("hi")  # below min_chars → the bulk rejected branch → note_rejected
-    with d._lock:
-        d._disarm()
-    snap = d.session_snapshot()
-    assert snap is not None and snap["finals"] == 0 and snap["text"] == "abc"
-
-
-def test_bulk_identity_missing_drop_records_nothing():
-    """G6: an id-less payload is dropped BEFORE the recovery hook — nothing recorded."""
-    d, fb, be, host = _make_armed_bulk_daemon(None)
-    host.relay_identity_value = None
-    d.on_final("no identity")
-    with d._lock:
-        d._disarm()
-    assert d.session_snapshot() is None  # empty session → discarded
