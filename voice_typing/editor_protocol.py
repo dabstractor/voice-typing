@@ -10,6 +10,8 @@ failure never corrupts the handoff buffer. encode_line() is the live/event encod
 Errors are replyable (FrameError carries a stable reason) — never a crash, never a raw-request echo.
 Also holds the v1 message validation contract (PRD §4.8.1 B/C) and the §C splice-padding + §A
 code-point-safe seed helpers (P1.M1.T3.S2).
+Also owns the owner connection pump: 2 s/6 s ping-lease, the single serialized bounded writer and the
+sticky terminal-loss contract (P1.M1.T3.S3; PRD §4.8.1 B).
 Pure stdlib (json). No sockets are opened here; tests inject recv.
 """
 from __future__ import annotations
@@ -378,3 +380,439 @@ def splice_padding(before: str, text: str, after: str) -> tuple:
     if after != "" and not _is_ws(after[0]) and after[0] not in CLOSE_PUNCTUATION:
         right = " "
     return (left, right)
+
+
+# --- owner connection pump (P1.M1.T3.S3; PRD §4.8.1 B: lease, bounded writes, terminal callbacks) ---
+# Transport ONLY: no daemon import, no reservation/offer state (T3.S4/T4.*), no ACK deadline (T4.S2).
+import enum
+import json
+import queue
+import socket
+import struct
+import threading
+import time
+
+PING_INTERVAL_S: float = 2.0    # §4.8.1 B: client pings every 2 s while reserved (incl. load + drain) — client reference
+LEASE_S: float = 6.0            # §4.8.1 B: owner lease expires 6 s after the last valid ping (three missed pings)
+WRITE_CAP_S: float = 2.0        # §4.8.1 B: "bounded socket writes (at most 2 s)" — per WHOLE encoded line
+START_CAP_S: float = 30.0       # §4.8.1 B: total Start budget incl. load/priming — SESSION-owned (T3.S4/T4.S7)
+ACK_DEADLINE_S: float = 5.0     # §4.8.1 B: offer ACK deadline from offer write — SESSION-owned (T4.S2), never the ping path
+OUTBOUND_QUEUE_MAX: int = 64    # bounded writer queue (the 8-final live cap is the session's FIFO, not this)
+_PUMP_POLL_S: float = 0.1
+
+
+def deadline_after(budget: float, now: float | None = None) -> float:
+    """Absolute monotonic deadline = now + budget (every timer in this module is expressed this way)."""
+    return (time.monotonic() if now is None else now) + budget
+
+
+def remaining(deadline: float, now: float | None = None) -> float:
+    """Remaining budget to an ABSOLUTE deadline, clamped at 0 — the only way this module waits."""
+    return max(0.0, deadline - (time.monotonic() if now is None else now))
+
+
+class LossCause(str, enum.Enum):
+    """Why an owner connection ended abnormally (sticky; first cause wins). `.end_reason` is the
+    §4.8.1 B `ended.reason` the session SHOULD report (T4.S6 owns the actual `ended` frame)."""
+    EOF = "eof"            # clean EOF / partial frame at EOF  -> disconnected
+    IO = "io"              # recv/send OSError                 -> disconnected
+    FRAME = "frame"        # oversize, invalid UTF-8, bad JSON  -> disconnected
+    REQUEST = "request"    # ProtocolError, wrong id, 2nd start -> delivery_failed
+    LEASE = "lease"        # 6 s without a valid ping          -> timeout
+    WRITE = "write"        # 2 s whole-frame cap / full queue  -> disconnected
+
+    @property
+    def end_reason(self) -> str:
+        if self is LossCause.LEASE:
+            return "timeout"
+        if self is LossCause.REQUEST:
+            return "delivery_failed"
+        return "disconnected"
+
+
+class PumpClosed(Exception):
+    """send_event() after the pump is lost or gracefully closing."""
+
+    def __init__(self, cause: object) -> None:
+        super().__init__(f"owner pump closed ({cause})")
+        self.cause = cause
+
+
+def _timeval(timeout: float) -> bytes:
+    """struct timeval for SO_SNDTIMEO: whole seconds + microseconds (native long layout, Linux)."""
+    sec = int(timeout)
+    usec = max(0, min(999_999, int((timeout - sec) * 1_000_000)))
+    return struct.pack("@ll", sec, usec)
+
+
+def _arm_send_budget(conn, timeout: float) -> bool:
+    """Cap the writer's NEXT blocking send at `timeout` seconds. Returns False if the budget was
+    consumed by the wait itself (test doubles) — the caller re-checks the absolute deadline.
+
+    SO_SNDTIMEO ON PURPOSE: CPython's socket.settimeout() flips O_NONBLOCK on the underlying open file
+    description, which dup() SHARES with the reader — a settimeout'd writer twin would make the
+    reader's blocking recv raise BlockingIOError (EAGAIN) and cause a spurious loss. SO_SNDTIMEO is a
+    send-only socket option: the reader's recv is governed by SO_RCVTIMEO (never set here), so the
+    reader's recv stays genuinely blocking. A budget-expired send raises BlockingIOError/TimeoutError
+    (no byte accepted → retry at the same offset) or returns a PARTIAL byte count (progress → resume).
+    Test doubles expose poll_send(timeout) instead (duck-typed, same contract)."""
+    wait = getattr(conn, "poll_send", None)
+    if wait is not None:
+        return wait(timeout)
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, _timeval(timeout))
+    return True
+
+
+def _clear_send_budget(conn) -> None:
+    """Disarm a leftover SO_SNDTIMEO so no later line inherits a stale budget (no-op for doubles)."""
+    if getattr(conn, "poll_send", None) is None:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, _timeval(0.0))
+
+
+def send_line_capped(conn, line: bytes, *, cap_s: float = WRITE_CAP_S,
+                     clock=time.monotonic) -> bool:
+    """Send ONE whole encoded line under an ABSOLUTE cap (default 2 s). True = fully sent; False = cap
+    exceeded; raises OSError on a hard socket error (caller maps it). Never resends: each attempt
+    resumes at the byte offset (socket.send, NOT sendall — a partial write must never be repeated).
+    Per attempt the REMAINING budget is armed as the send timeout (_arm_send_budget) BEFORE the send,
+    so a wedged peer can hold the line hostage for at most the cap. `conn` must be the writer's own
+    socket object (see _arm_send_budget for why this is SO_SNDTIMEO and never settimeout)."""
+    deadline = clock() + cap_s
+    view = memoryview(line)
+    sent = 0
+    try:
+        while sent < len(line):
+            left = deadline - clock()
+            if left <= 0:
+                return False
+            if not _arm_send_budget(conn, left):   # per-attempt budget = the REMAINING cap (absolute deadline)
+                continue                            # budget burned with no byte accepted; re-check the clock
+            try:
+                n = conn.send(view[sent:])          # offset-tracked; the kernel reports partial progress
+            except (TimeoutError, BlockingIOError):  # budget expired, nothing accepted — retry at the offset
+                continue
+            if n > 0:
+                sent += n
+        return True
+    finally:
+        _clear_send_budget(conn)                    # never leave a send budget armed across lines
+
+
+class ThreadTimers:
+    """Production timer source: one daemon threading.Timer per arm, relative to the injected clock."""
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+
+    def arm(self, deadline: float, fire) -> object:
+        timer = threading.Timer(max(0.0, deadline - self._clock()), fire)
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    @staticmethod
+    def cancel(handle) -> None:
+        handle.cancel()
+
+
+def write_reject(conn, code: str, *, cap_s: float = WRITE_CAP_S) -> None:
+    """A REJECTED FIRST request (T4.S7 calls this; S2's code): write native_error_reply(code) under the
+    write cap, then EOF. Best effort on the connection thread BEFORE any pump exists — never raises,
+    never echoes the request."""
+    try:
+        send_line_capped(conn, encode_line(native_error_reply(code)), cap_s=cap_s)
+        conn.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
+class OwnerPump:
+    """Owner connection pump (PRD §4.8.1 B). Transport for ONE native v1 session after its first
+    `editor-start` was accepted; T4.S7 constructs it on the connection thread with the live FrameReader
+    (so S1's `unread` handoff bytes are preserved), queues `starting`, calls start(), then waits.
+
+    THREAD OWNERSHIP (Mode A):
+      * `owner-pump-read`  — FrameReader loop: decodes, validate_request (S2), routes. ping -> pong +
+                             lease renewal; applied/stop/cancel/lost -> on_command(obj). Never writes.
+      * `owner-pump-write` — the ONLY writer: drains a bounded queue of encoded lines through
+                             send_line_capped on `conn.dup()`. Never reads.
+      * the lease timer's thread — ThreadTimers (or the test's ManualTimers) fires _lease_fired.
+    NOTHING here runs on the daemon control lock or the recorder reader thread, and nothing here takes
+    a daemon lock. send_event() is non-blocking and does no socket I/O (encode_line + put_nowait), so
+    the session may call it from any thread, including under the control lock or on the recorder
+    reader thread (§4.8.1 B: "enqueue it without socket I/O").
+
+    ABSOLUTE DEADLINES (Mode A): lease_deadline = last_ping_at + LEASE_S (armed at start(), re-armed
+    per valid ping; a stale timer fire is ignored via a generation counter; a ping AFTER the deadline
+    is loss, never a renewal). Each outbound line gets ONE deadline = clock() + write_cap_s; every
+    send attempt arms its REMAINING budget as a send-only SO_SNDTIMEO cap (never settimeout, whose
+    O_NONBLOCK would leak across dup() into the reader). The Start cap (30 s) and ACK
+    deadline (5 s) belong to the session and are exported as constants only.
+
+    TERMINAL CALLBACK CONTRACT (Mode A): on_loss(cause) is called EXACTLY ONCE, on the thread that
+    first detected the failure (reader, writer or timer thread), after the socket has been shut down
+    (so both I/O threads wake) and with NO pump lock held. Callbacks must not block, raise, or do
+    socket I/O; queue the work elsewhere. After loss, send_event raises PumpClosed. A graceful
+    shutdown(terminal) is NOT a loss: the terminal line (the session's `ended`) is written under the
+    same cap, then the write side closes — "last frame then EOF"; an EOF observed afterwards is ignored.
+    """
+
+    def __init__(self, conn, session_id: str, *, on_command, on_loss, reader=None,
+                 clock=time.monotonic, timers=None, lease_s: float = LEASE_S,
+                 write_cap_s: float = WRITE_CAP_S, queue_max: int = OUTBOUND_QUEUE_MAX) -> None:
+        self._conn = conn                      # duck type: recv, dup, shutdown, close (writer twin: send, poll_send)
+        self._wconn = conn.dup()               # D5: the writer's OWN object; the cap is a send-only option
+                                               # (SO_SNDTIMEO) so NO fd flag (O_NONBLOCK) ever leaks into the reader
+        self._id = session_id
+        self._reader = reader if reader is not None else FrameReader(conn.recv)
+        self._on_command = on_command
+        self._on_loss_cb = on_loss
+        self._clock = clock
+        self._timers = timers if timers is not None else ThreadTimers(clock)
+        self._lease_s = float(lease_s)
+        self._write_cap_s = float(write_cap_s)
+        self._q: queue.Queue = queue.Queue(maxsize=int(queue_max))
+        self._lock = threading.Lock()          # guards ONLY the fields below; never held during I/O/callbacks
+        self._lost = False
+        self._closing = False
+        self._cause = None
+        self._detail = ""
+        self._last_ping_at = float(clock())
+        self._lease_gen = 0
+        self._lease_timer = None
+        self._threads: list = []
+        self._done = 0
+        self._all_done = threading.Event()
+
+    @property
+    def lost(self) -> bool:
+        return self._lost
+
+    @property
+    def loss_cause(self):
+        return self._cause
+
+    @property
+    def loss_detail(self) -> str:
+        return self._detail
+
+    @property
+    def closed(self) -> bool:
+        return self._closing
+
+    @property
+    def last_ping_at(self) -> float:
+        return self._last_ping_at
+
+    @property
+    def lease_deadline(self) -> float:
+        return self._last_ping_at + self._lease_s
+
+    def start(self) -> None:
+        """Arm the lease and spawn the reader + writer threads. Returns immediately. Once per pump."""
+        with self._lock:
+            if self._threads or self._lost or self._closing:
+                raise RuntimeError("owner pump already started or closed")
+            self._arm_lease()
+            self._threads = [
+                threading.Thread(target=self._read_loop, name="owner-pump-read", daemon=True),
+                threading.Thread(target=self._write_loop, name="owner-pump-write", daemon=True),
+            ]
+        for t in self._threads:
+            t.start()
+
+    def send_event(self, obj: dict) -> None:
+        """Queue ONE daemon->editor event (encode on the CALLER's thread; FrameError propagates for an
+        oversize event). Non-blocking, no socket I/O. Raises PumpClosed when lost/closing; a full queue
+        is a WRITE loss (the peer stopped reading long ago) and raises PumpClosed."""
+        line = encode_line(obj)
+        full = False
+        with self._lock:
+            if self._lost or self._closing:
+                raise PumpClosed(self._cause or "closing")
+            try:
+                self._q.put_nowait(line)
+            except queue.Full:
+                full = True
+        if full:
+            self._on_loss(LossCause.WRITE, "outbound queue full")
+            raise PumpClosed(LossCause.WRITE)
+
+    def shutdown(self, terminal: dict | None = None) -> None:
+        """Graceful end: queue `terminal` (the session's `ended` frame) as the LAST line, then EOF.
+        Idempotent; no-op once lost. The terminal is queued under the same lock hold that sets
+        _closing, so nothing can be queued after it and the writer cannot exit before it."""
+        line = encode_line(terminal) if terminal is not None else None
+        timer = None
+        full = False
+        with self._lock:
+            if self._lost or self._closing:
+                return
+            self._closing = True
+            self._lease_gen += 1
+            timer, self._lease_timer = self._lease_timer, None
+            try:
+                if line is not None:
+                    self._q.put_nowait(line)
+            except queue.Full:
+                self._closing = False
+                full = True
+        if timer is not None:
+            self._timers.cancel(timer)
+        if full:
+            self._on_loss(LossCause.WRITE, "outbound queue full at shutdown")
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until BOTH pump threads exited. True if they did within `timeout`."""
+        return self._all_done.wait(timeout)
+
+    # --- lease (all under _lock) ---
+    def _arm_lease(self) -> None:
+        self._lease_gen += 1
+        gen = self._lease_gen
+        if self._lease_timer is not None:
+            self._timers.cancel(self._lease_timer)
+        self._lease_timer = self._timers.arm(self._last_ping_at + self._lease_s,
+                                             lambda: self._lease_fired(gen))
+
+    def _lease_fired(self, gen: int) -> None:
+        with self._lock:
+            if gen != self._lease_gen or self._lost or self._closing:
+                return
+        self._on_loss(LossCause.LEASE, "lease expired")
+
+    def _renew_lease(self) -> None:
+        with self._lock:
+            if self._lost or self._closing:
+                return
+            now = self._clock()
+            if now > self._last_ping_at + self._lease_s:
+                expired = True          # a ping after the deadline never revives the lease
+            else:
+                expired = False
+                self._last_ping_at = now
+                self._arm_lease()
+        if expired:
+            self._on_loss(LossCause.LEASE, "ping after lease deadline")
+
+    # --- sticky loss ---
+    def _on_loss(self, cause: LossCause, detail: str = "") -> bool:
+        with self._lock:
+            if self._lost or self._closing:
+                return False
+            self._lost = True
+            self._cause = cause
+            self._detail = detail
+            self._lease_gen += 1
+            timer, self._lease_timer = self._lease_timer, None
+        if timer is not None:
+            self._timers.cancel(timer)
+        try:
+            self._conn.shutdown(socket.SHUT_RDWR)   # wakes recv (-> b"") and send (-> OSError)
+        except OSError:
+            pass
+        self._on_loss_cb(cause)                    # exactly once; no lock held; detecting thread
+        return True
+
+    # --- reader thread ---
+    def _read_loop(self) -> None:
+        try:
+            while True:
+                with self._lock:
+                    if self._lost or self._closing:
+                        return
+                try:
+                    raw = self._reader.read_frame_bytes()
+                except FrameError as fe:
+                    if fe.reason == "eof":
+                        self._on_loss(LossCause.EOF, fe.detail)
+                    elif fe.reason == "frame-too-large":
+                        self._on_loss(LossCause.FRAME, "frame too large")
+                    else:
+                        self._on_loss(LossCause.IO, fe.detail)
+                    return
+                if not self._handle_frame(raw):
+                    return
+        finally:
+            self._finished()
+
+    def _handle_frame(self, raw: bytes) -> bool:
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+            validate_request(obj)
+        except (UnicodeDecodeError, ValueError):     # bad UTF-8 / bad JSON (JSONDecodeError is a ValueError)
+            self._on_loss(LossCause.FRAME, "undecodable or malformed frame")
+            return False
+        except ProtocolError as exc:                 # right JSON, not a valid v1 request
+            self._on_loss(LossCause.REQUEST, exc.detail)
+            return False
+        if obj["id"] != self._id:
+            self._on_loss(LossCause.REQUEST, "id mismatch")
+            return False
+        cmd = obj["cmd"]
+        if cmd == "editor-start":
+            self._on_loss(LossCause.REQUEST, "duplicate start on owner connection")
+            return False
+        if cmd == "ping":
+            self._renew_lease()
+            try:
+                self.send_event({"event": "pong", "id": self._id})
+            except PumpClosed:
+                pass
+        else:                                       # applied | stop | cancel | lost
+            try:
+                self._on_command(obj)                # reader thread; must not block / raise / do I/O
+            except Exception:
+                self._on_loss(LossCause.REQUEST, "command handler failed")
+                return False
+        with self._lock:
+            return not self._lost and not self._closing
+
+    # --- writer thread ---
+    def _write_loop(self) -> None:
+        try:
+            while True:
+                with self._lock:
+                    if self._lost or (self._closing and self._q.empty()):
+                        return
+                try:
+                    item = self._q.get(timeout=_PUMP_POLL_S)
+                except queue.Empty:
+                    continue
+                try:
+                    sent = send_line_capped(self._wconn, item, cap_s=self._write_cap_s, clock=self._clock)
+                except OSError as exc:
+                    self._on_loss(LossCause.IO, type(exc).__name__)
+                    return
+                if not sent:
+                    self._on_loss(LossCause.WRITE, "write cap exceeded")
+                    return
+        finally:
+            try:
+                self._wconn.shutdown(socket.SHUT_WR)     # peer sees EOF AFTER the last frame
+            except OSError:
+                pass
+            try:
+                self._wconn.shutdown(socket.SHUT_RDWR)   # wakes our reader
+            except OSError:
+                pass
+            try:
+                self._wconn.close()
+            except OSError:
+                pass
+            self._finished()
+
+    def _finished(self) -> None:
+        with self._lock:
+            self._done += 1
+            done = self._done >= len(self._threads)
+        if done:
+            try:
+                self._conn.close()
+            except OSError:
+                pass
+            self._all_done.set()
