@@ -2230,6 +2230,7 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
             "delivery_state",
             "delivery_reason",
             "last_confirmed_op",
+            "native",  # P1.M1.T4.S6: the native editor session block (additive, always present)
         }
     )  # P1.M1.T2.S2: ONE 'model' key (Rev 2); + context_prompt (P1.M2.T5.S2, additive label); + 4 delivery keys (P1.M3.T3.S2)
     assert (
@@ -3769,7 +3770,8 @@ def test_status_snapshot_has_single_model_key():
     assert snap["mode"] == "lite"  # constant before AND after arming
     assert "model" in snap
     assert "final_model" not in snap and "realtime_model" not in snap
-    assert len(snap) == 19  # + 'output_mode' (2026-11-27: per-session block/stream)
+    assert len(snap) == 20  # + 'output_mode' (2026-11-27: per-session block/stream);
+    # + 'native' (P1.M1.T4.S6: the native editor session block, additive + always present)
     d.start()
     assert d.status_snapshot()["mode"] == "lite"
 

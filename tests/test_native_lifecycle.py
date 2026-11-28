@@ -376,7 +376,11 @@ def test_settlement_deadline_ends_timeout():
     assert d._native.stage is Stage.ENDED
     assert d._native_end_facts == NativeEndFacts("timeout", "timeout", True)
     assert q.revoked and q.revocation_reason == "timeout"  # queue revoked; text recoverable
-    assert q.pending_count == 1 and d._native_recovery.counts() == (0, 1)
+    assert q.pending_count == 1
+    # P1.M1.T4.S6: the terminal action calls NativeRecovery.end_session on EVERY end, so the
+    # retained final now lives in the ENDED list (still recoverable via recover(SID_A)).
+    assert d._native_recovery.counts() == (1, 0)
+    assert d._native_recovery.recover(SID_A) is not None  # the intent: the text stays recoverable
     assert settle_handle in mt.cancelled
 
 
@@ -427,7 +431,10 @@ def test_cancel_revokes_aborts_and_never_drains():
     # a late final with matching identity is neither retained nor typed
     host.relay_event = _ev(7)
     d.on_final("late words")
-    assert d._native_recovery.counts() == (0, 1)  # unchanged (the cancelled final stays)
+    # P1.M1.T4.S6: end_session moved the cancelled final to the ENDED list — the count is
+    # UNCHANGED by the late final (it is neither retained nor typed) and stays recoverable.
+    assert d._native_recovery.counts() == (1, 0)  # unchanged (the cancelled final stays)
+    assert d._native_recovery.recover(SID_A) is not None
     assert q.pending_count == 0
 
 

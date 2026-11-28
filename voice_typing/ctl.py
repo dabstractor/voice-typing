@@ -21,7 +21,8 @@ Subcommands (PRD §4.8):
     stop     disarm the mic (stop listening); on a native editor session: emergency graceful
              stop (finishes the in-flight utterance, then ends the session)
     status   pretty-print listening + mode + phase + partial + last final + uptime + device + mic
-             + context-prompt + output delivery
+             + context-prompt + output delivery + native editor session (state / last end
+             reason / recovery hint)
     quit     request a clean daemon shutdown (releases GPU workers)
     cancel   drop the pending dictation fragment and keep listening (Backspace keybind fallback);
              busy while a native editor session owns the mic - use the editor's Cancel
@@ -286,6 +287,25 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
             text += f"\ndelivery op: {delivery_op}"
         if load_error:  # surface §4.2bis load failures (absent on the happy path)
             text += f"\nload error: {load_error}"
+        # P1.M1.T4.S6 (PRD §4.8.1 C): the native editor session's state + last end. Codes and
+        # the opaque session id only — never dictated text; the hint tells the user HOW to
+        # recover (`voicectl recover`, T5, is the only surface that ever prints words).
+        native = response.get("native") or {}
+        if (native.get("state") or "inactive") != "inactive":
+            text += f"\nnative: {native['state']}"
+            if native.get("id"):
+                text += f" ({native['id']})"
+        if native.get("reason"):
+            hint = native.get("hint") or "none"
+            sid = native.get("id") or "<id>"
+            if hint == "recover":
+                hint = f"unconfirmed text: voicectl recover {sid}"
+            elif hint == "recover_maybe_applied":
+                hint = (
+                    f"unconfirmed text: voicectl recover {sid}"
+                    " (may already be partially typed)"
+                )
+            text += f"\nnative end: {native['reason']}  recovery: {hint}"
         return text, 0
     if cmd == "session":
         # P1.M6.T2.S3 (§4.2sexies R.6): stdout is EXACTLY the recovered text (print adds
@@ -476,6 +496,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "  the seed on both decode lanes; 'context: unseeded (empty|disabled|unavailable)' starts without\n"
             "  one. Rejected (exit 1) while arming/listening/draining, by an old daemon, or on timeout —\n"
             "  never retried, never downgraded to a plain start.\n"
+            "native editor sessions: `status` shows the session state, the last end reason and a\n"
+            "recovery hint (codes only — never dictated text); `voicectl recover` is the explicit read.\n"
             "keybinds are user-owned: this tool installs no shortcut — bind commands in your\n"
             "own compositor config."
         ),

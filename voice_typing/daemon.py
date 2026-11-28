@@ -120,8 +120,10 @@ import json
 import logging
 import os
 import select
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -254,6 +256,28 @@ NATIVE_SETTLE_TIMEOUT_S: float = 5.0
 _STOP_REASONS = frozenset({"stopped", "idle"})
 _LOSS_REASONS = frozenset({"target_lost", "disconnected", "timeout"})
 
+# P1.M1.T4.S6 (PRD §4.8.1 C): recovery-hint vocabulary for the status `native` block and the
+# teardown state. Codes only — never dictated text.
+NATIVE_HINT_NONE = "none"
+NATIVE_HINT_RECOVER = "recover"                            # unconfirmed text is retained
+NATIVE_HINT_RECOVER_MAYBE_APPLIED = "recover_maybe_applied"  # … and an edit may have landed
+
+# Desktop warning is attempted ONLY when the transport itself is gone (disconnected / a lease
+# or settle timeout): the editor UI may be gone, so the daemon warns on the desktop instead.
+# `target_lost` arrives over a LIVE transport (the editor warns itself); stopped / cancelled /
+# shutdown are user actions; load_failed leaves the transport alive — a second popup is noise.
+_NATIVE_DESKTOP_WARN_REASONS = frozenset({"disconnected", "timeout"})
+_NATIVE_WARN_TEXT = {
+    # Fixed, transcript-free templates; the only variable is the OPAQUE session UUID.
+    "disconnected": "Dictation stopped: editor connection lost. Start again in your editor.",
+    "timeout": "Dictation stopped: editor stopped responding. Start again in your editor.",
+}
+# Everything except stopped / idle: an abnormal end logs at WARNING (journal-worthy).
+_NATIVE_ABNORMAL = frozenset(
+    {"cancelled", "timeout", "target_lost", "disconnected", "delivery_failed",
+     "load_failed", "shutdown"}
+)
+
 
 @dataclass(frozen=True)
 class NativeEndFacts:
@@ -266,6 +290,115 @@ class NativeEndFacts:
     reason: str
     revoked: str | None
     recoverable: bool
+
+
+def native_end_hint(reason: str, snapshot: "session_recovery.NativeRecoverySnapshot | None") -> tuple[bool, str]:
+    """P1.M1.T4.S6 (pure): (recoverable, hint) from the recovery snapshot taken AFTER
+    end_session (§4.8.1 C). None → nothing retained → not recoverable. A `cancelled`
+    session is NEVER advertised as recoverable — the user asked to drop the words — unless
+    an edit may already have landed (snapshot.possibly_applied), which MUST be reported."""
+    if snapshot is None:
+        return False, NATIVE_HINT_NONE
+    if reason == "cancelled" and not snapshot.possibly_applied:
+        return False, NATIVE_HINT_NONE
+    if snapshot.possibly_applied:
+        return True, NATIVE_HINT_RECOVER_MAYBE_APPLIED
+    return True, NATIVE_HINT_RECOVER
+
+
+def build_ended_frame(session_id: str, reason: str, recoverable: bool) -> dict:
+    """P1.M1.T4.S6 (pure): the §4.8.1 B `ended` frame — EXACTLY these four keys (the v1
+    codec rejects a 5th). Built ONLY here; consumers send state.frame() verbatim."""
+    return {"event": "ended", "id": session_id, "reason": reason,
+            "recoverable": bool(recoverable)}
+
+
+@dataclass(frozen=True)
+class NativeEndState:
+    """Transcript-free end state of ONE native session (P1.M1.T4.S6). Built under _lock in
+    the terminal action; consumed off-lock by on_end's caller, the teardown callback, status
+    and the desktop warning. reason = EndRecord.reason (the wire `ended.reason`,
+    codec-validated); cause = EndRecord.cause (fixed code); recoverable/hint follow the
+    recovery store AFTER end_session (recover(sid) is the truth); possibly_applied = an
+    offer write was attempted without a verified ACK. Codes/ids/booleans only — never text.
+
+    HANDOFF — CONSUMER CONTRACT (P1.M1.T4.S7 owner-connection pump; verbatim):
+      d.set_native_teardown(cb)  — ONE daemon-level hook; cb(NativeEndState) fires exactly
+          once per ended session, off-lock, AFTER on_end(EndRecord) and AFTER
+          NativeRecovery.end_session — i.e. recover(id) is final.
+          In cb: `pump.send_event(state.frame())` (the `ended` frame — EXACTLY
+          {"event","id","reason","recoverable"}), then close the owner connection /
+          retire pump timers. Do NOT build the frame yourself.
+          `finishing` stays the pump's: emit {"event":"finishing","id":…} ONCE on
+          _native_offer_evt wake while d._native.stage is DRAINING (S5 handoff). The daemon
+          core never writes to the socket.
+          Keep passing on_end=… to reserve_native if you need the raw EndRecord (cause,
+          stage, ended_at).
+      d.native_last_end() → NativeEndState | None (lock-free) for diagnostics;
+          status["native"] for the CLI.
+      P1.M1.T5.S1 (owner-only capped recovery reply): no new API — after end_session the
+          snapshot is immutable: active_id() == id → busy; recover(id or None) → None →
+          not_found; else {ok, id, text, truncated, possibly_applied} from
+          NativeRecoverySnapshot (≤ 1 MiB escaped). Daemon exit clears the store (no durable
+          recovery promised). Use state.hint only for hints, never for the reply.
+      Adapters (P1.M2.T1/T2): on `ended` with reason ∉ {stopped, idle} show the editor-side
+          warning; with recoverable == true append "Unconfirmed text: voicectl recover <id>"
+          (§4.8.1 C wording).
+    """
+
+    session_id: str
+    reason: str
+    cause: str | None
+    recoverable: bool
+    possibly_applied: bool
+    hint: str
+
+    def frame(self) -> dict:
+        """PRD §4.8.1 B — EXACTLY the four codec keys; the pump sends this verbatim."""
+        return build_ended_frame(self.session_id, self.reason, self.recoverable)
+
+    @property
+    def desktop_warning(self) -> str | None:
+        """The §4.8.1 C desktop warning text — ONLY for a lost transport (the editor UI may
+        be gone); None for every other reason. Fixed template + the opaque session id.
+        EXCEPTION: reason 'disconnected' with cause 'host-died' is the RECORDER child's
+        death, not the editor transport's — the editor link is still alive, so the editor
+        warns itself from the `ended` frame and a desktop popup would be noise."""
+        if self.reason not in _NATIVE_DESKTOP_WARN_REASONS or self.cause == "host-died":
+            return None
+        msg = _NATIVE_WARN_TEXT[self.reason]
+        if self.recoverable:
+            msg += f" Unconfirmed text: voicectl recover {self.session_id}"
+            if self.possibly_applied:
+                msg += " (may already be partially typed)"
+        return msg
+
+
+@dataclass(frozen=True)
+class NativeStatus:
+    """The `native` block of status_snapshot() (P1.M1.T4.S6): an immutable value published
+    under _lock and read lock-free as ONE reference — the ENDED reservation stays in
+    self._native (tombstoned), so status must never read that attribute lock-free. Codes /
+    the opaque session id only — never dictated text (§4.8.1 C)."""
+
+    state: str  # "inactive" | "starting" | "listening" | "draining" | "ended"
+    session_id: str | None
+    reason: str | None
+    recoverable: bool
+    hint: str | None
+
+    @classmethod
+    def inactive(cls) -> "NativeStatus":
+        return cls("inactive", None, None, False, None)
+
+    def as_dict(self) -> dict:
+        return {
+            "state": self.state,
+            "id": self.session_id,
+            "reason": self.reason,
+            "recoverable": self.recoverable,
+            "hint": self.hint,
+        }
 
 # Cancel-suppression window bound (the Backspace stuck-suppression bug). cancel() latches
 # _cancel_suppress_final, and ONLY the child's MARKED sentinel final (or a fresh _arm()) was
@@ -1058,6 +1191,17 @@ class VoiceTypingDaemon:
         self._native_settle_deadline: float | None = None
         self._native_settle_timer = None        # _native_timers handle (same as _native_timer)
         self._native_end_facts: NativeEndFacts | None = None
+        # P1.M1.T4.S6 — end-state publication (§4.8.1 B/C). _native_last_end is the last
+        # ended session's NativeEndState (read lock-free — ONE attribute reference);
+        # _native_status is THE immutable `native` block of status_snapshot(): published
+        # under _lock, read as one reference (the ENDED reservation stays in self._native,
+        # so status must never read THAT lock-free); _native_teardown_cb is T4.S7's one
+        # daemon-level per-end hook; _native_warning_sink is injectable (tests record;
+        # production = _desktop_warning, the §4.8.1 C notify-send attempt).
+        self._native_last_end: NativeEndState | None = None
+        self._native_status = NativeStatus.inactive()
+        self._native_teardown_cb: Callable[[NativeEndState], None] | None = None
+        self._native_warning_sink: Callable[[str], None] = self._desktop_warning
         # P1.M1.T4.S4 — the native acceptance route (§4.8.1 B). _native_recovery is DAEMON-WIDE
         # (it outlives sessions: T5.S1 `voicectl recover` serves retained finals after the
         # session ended); _native_fence is the OPEN native capture's (host.generation,
@@ -1444,6 +1588,14 @@ class VoiceTypingDaemon:
         _models_loaded), this racing call is a NO-OP — a clean unload is not a child death. The
         explicit condition also documents why: the dead-host detection is only meaningful when the
         host reference is STILL live (host died but nobody cleaned it up yet).
+
+        P1.M1.T4.S6: a live native owner ends through the terminal action — reason
+        'load_failed' while STARTING else 'disconnected', cause 'host-died' — with NO drain
+        and NO host.abort/cancel/stop on the dead child (CRITICAL: abort/cancel on a dead
+        host can block forever; the child is already gone). Media ducking is released; the
+        transcript-free reason + recovery hint surface in the status `native` block and the
+        §4.8.1 C journal line. The recovery store is NOT expired here (an ended session
+        stays recoverable until daemon exit).
         """
         with self._lock:
             # Race guard (validation Issue 1): a concurrent _unload_host() (or a prior dead-host
@@ -2709,6 +2861,13 @@ class VoiceTypingDaemon:
         self._host is None -> idle (~0 VRAM); the next arm reloads via _load_host(). Killing the
         child GROUP releases ALL VRAM (including the realtime-model CUDA context) -> daemon tree
         ABSENT on nvidia-smi while the daemon lives (PRD §7.9 + §6 T6(d)).
+
+        P1.M1.T4.S6 (PRD §4.8.1 B): a LIVE native owner (STARTING/LISTENING/DRAINING) DEFERS
+        the unload — the under-lock condition returns without tearing down while
+        _native_owner_live_locked() holds. The idle-unload watchdog never kills the models
+        out from under a starting/draining editor session; the session's lifetime is already
+        bounded (the 30 s start cap / the drain + settle budgets), and the NEXT tick after
+        it reaches ENDED reclaims the VRAM normally (the clock keeps running).
         """
         threshold = self._cfg.asr.auto_unload_idle_seconds
         with self._lock:
@@ -2719,6 +2878,10 @@ class VoiceTypingDaemon:
                 is None  # never disarmed (shouldn't happen here)
                 or threshold <= 0  # disabled
                 or time.monotonic() - self._disarmed_monotonic < threshold  # not yet
+                or self._native_owner_live_locked()  # P1.M1.T4.S6: a live native owner
+                # (STARTING/LISTENING/DRAINING) DEFERS the unload — never kill the models
+                # out from under a session; its lifetime is already bounded (the start cap /
+                # drain + settle budgets), and the NEXT tick after it ends reclaims normally.
             ):
                 return
             logger.info(
@@ -3108,6 +3271,7 @@ class VoiceTypingDaemon:
         self._native_queue = OfferQueue(native.owner.id, self._native_recovery)
         self._native_rejects = {}  # fresh per-session verdict counts (codes only)
         self._native_offer_evt.clear()
+        self._publish_native_status_locked()  # P1.M1.T4.S6: "listening"
         logger.info(
             "voice-typing native capture open: gen=%d arm_seq=%d", *self._native_fence
         )
@@ -3267,6 +3431,7 @@ class VoiceTypingDaemon:
             self._native_end_cb = on_end
             self._native_end_delivered = False
             self._native_worker = None
+            self._publish_native_status_locked()  # P1.M1.T4.S6: "starting"
         # outside the lock: arm the watchdog; a fire is re-checked against the clock under the lock
         self._native_timer = self._native_timers.arm(
             owner.deadline, lambda tok=owner.token: self._native_start_expired(tok))
@@ -3324,8 +3489,12 @@ class VoiceTypingDaemon:
         """THE terminal action (P1.M1.T4.S5): transition the live reservation to ENDED under
         _lock — every native end cause (stop/loss/cancel/drain/settle/shutdown/host death)
         funnels HERE and nowhere else. Stashes NativeEndFacts BEFORE T4.S4's hook drops the
-        queue; retires BOTH watchdogs (Timer.cancel is a flag set — the ONE thing allowed
-        under the lock); wakes a parked worker. Idempotent."""
+        queue; P1.M1.T4.S6: _native_finish_locked then finalises recovery (end_session),
+        builds the NativeEndState and publishes the `native` status block while still under
+        the lock (leaf-store calls only — NativeRecovery has its own lock, no callbacks);
+        retires BOTH watchdogs (Timer.cancel is a flag set — the ONE thing allowed under the
+        lock); wakes a parked worker. Idempotent. Cleanup/warning/callbacks run off-lock in
+        _flush_native_end, exactly once per claim."""
         r = self._native
         if r is None or not r.live:
             return None
@@ -3338,6 +3507,10 @@ class VoiceTypingDaemon:
             revoked=q.revocation_reason if q is not None else None,
             recoverable=q.drain_pending() if q is not None else False,
         )
+        # P1.M1.T4.S6: finalise recovery (end_session), build the NativeEndState and publish
+        # the `native` status block — BEFORE the queue is closed. Leaf-store calls only in
+        # this hold: NativeRecovery has its own lock, touches no callbacks, never blocks.
+        self._native_finish_locked(rec, self._native_end_facts)
         settle_handle, self._native_settle_timer = self._native_settle_timer, None
         if settle_handle is not None:
             self._native_timers.cancel(settle_handle)
@@ -3355,6 +3528,52 @@ class VoiceTypingDaemon:
                     r.owner.token, rec.stage.value, rec.reason, rec.cause)
         return rec
 
+    def _native_finish_locked(self, rec: EndRecord,
+                              facts: NativeEndFacts) -> NativeEndState:
+        """P1.M1.T4.S6 — finalise the recovery store + publish the end state (caller holds
+        _lock; called ONCE from the terminal action). Leaf-store calls only in this hold:
+        NativeRecovery.end_session/recover keep their own lock, touch no callbacks and never
+        block on the daemon. `recover(sid)` AFTER end_session is the recoverable TRUTH (a
+        fully-ACKed / empty ending is DISCARDED → None); facts.recoverable (drain_pending()
+        at end) stays a cross-check only. A `cancelled` session is never advertised as
+        recoverable unless an edit may already have landed. Builds the transcript-free
+        NativeEndState, remembers it for native_last_end()/status, publishes the `native`
+        status block."""
+        sid = rec.owner.id
+        self._native_recovery.end_session(sid, rec.reason)  # T4.S1: retains ONLY unconfirmed
+        snapshot = self._native_recovery.recover(sid)       # None ⇒ nothing to recover
+        recoverable, hint = native_end_hint(rec.reason, snapshot)
+        state = NativeEndState(
+            session_id=sid,
+            reason=rec.reason,
+            cause=rec.cause,
+            recoverable=recoverable,
+            possibly_applied=bool(snapshot.possibly_applied) if snapshot is not None else False,
+            hint=hint,
+        )
+        self._native_last_end = state
+        self._publish_native_status_locked()
+        return state
+
+    def _publish_native_status_locked(self) -> None:
+        """Publish the `native` status block (caller holds _lock; attribute store ONLY — no
+        I/O, no waits, no callbacks). One immutable NativeStatus per phase transition: live
+        stages read the reservation; a ended/absent one reports the last end (or inactive
+        before the first session). status_snapshot() reads this as ONE lock-free reference
+        (CRITICAL: never read self._native there — a tombstoned ENDED reservation stays)."""
+        r = self._native
+        if r is None or not r.live:
+            e = self._native_last_end
+            self._native_status = (
+                NativeStatus("ended", e.session_id, e.reason, e.recoverable, e.hint)
+                if e is not None
+                else NativeStatus.inactive()
+            )
+        else:
+            self._native_status = NativeStatus(
+                r.stage.value.lower(), r.owner.id, None, False, None
+            )
+
     def _claim_native_end_locked(self) -> EndRecord | None:
         """Exactly-once delivery claim: the first caller gets the record, everyone after gets None."""
         r = self._native
@@ -3364,25 +3583,128 @@ class VoiceTypingDaemon:
         return r.end
 
     def _flush_native_end(self) -> None:
-        """Deliver the pending EndRecord to on_end — NEVER under _lock; swallows a raising callback
-        (type name only). Safe from any thread; a no-op when nothing is pending."""
+        """P1.M1.T4.S6 — the ONE per-end cleanup + delivery (off-lock; swallows raising
+        listeners; a no-op when nothing is pending). Exactly-once comes ONLY from the
+        _claim_native_end_locked claim (T3.S4) — the FIRST statement here; a late/second
+        call returns at the claim, so cleanup and callbacks never double-run. The cleanup
+        NEVER depends on a callback being registered and NEVER runs under _lock. Order:
+          1. seed clear       (best-effort _clear_context_prompt; a no-op when the prompt is
+                              off, the capability is gone or there is no host; never writes
+                              the _seed_* flags — T2.S4 rule)
+          2. diagnostic log   (PRD §4.8.1 C: reason/hint codes + the opaque id — WARNING for
+                              an abnormal reason, INFO for stopped/idle; never text)
+          3. desktop warning  (only when the transport is gone; injectable sink, bounded,
+                              never raises into the end path)
+          4. on_end(EndRecord) then set_native_teardown's cb(NativeEndState) — each isolated
+                              (type name only in logs). Do NOT wait on end_evt here.
+        Safe from any thread; runs on the terminator's thread after the lock is released."""
         with self._lock:
             rec = self._claim_native_end_locked()
         if rec is None:
             return
+        state = self._native_last_end
+        if state is None or state.session_id != rec.owner.id:
+            state = None  # defensive: never hand out another session's end state
+        # 1) seed clear — best-effort, off-lock, no-op when inactive / no host (T2 rule:
+        #    never write _seed_active / _seed_handoff_pending from here).
+        self._clear_context_prompt()
+        # 2) the PRD §4.8.1 C diagnostic — codes/ids only, never text.
+        line = ("voice-typing native: ended id=%s reason=%s cause=%s recoverable=%s hint=%s")
+        args = (
+            rec.owner.id,
+            rec.reason,
+            rec.cause,
+            state.recoverable if state is not None else False,
+            state.hint if state is not None else NATIVE_HINT_NONE,
+        )
+        (logger.warning if rec.reason in _NATIVE_ABNORMAL else logger.info)(line, *args)
+        # 3) desktop warning (editor UI may be gone) — injectable, bounded, never raises.
+        if state is not None and state.desktop_warning:
+            try:
+                self._native_warning_sink(state.desktop_warning)
+            except Exception as exc:  # defensive: a misbehaving sink — TYPE name only
+                logger.warning("native warning sink raised (%s)", type(exc).__name__)
+        # 4) callbacks — each isolated by type name; teardown fires AFTER on_end so
+        #    recover(id) is final by the time the pump sends the `ended` frame.
         cb = self._native_end_cb
-        if cb is None:
-            return
+        if cb is not None:
+            try:
+                cb(rec)
+            except Exception as exc:  # defensive: a misbehaving listener — TYPE name only
+                logger.warning("native end callback raised (%s)", type(exc).__name__)
+        tcb = self._native_teardown_cb
+        if tcb is not None and state is not None:
+            try:
+                tcb(state)
+            except Exception as exc:  # defensive: a misbehaving listener — TYPE name only
+                logger.warning("native teardown callback raised (%s)", type(exc).__name__)
+
+    def set_native_teardown(self, cb: Callable[[NativeEndState], None] | None) -> None:
+        """Register the ONE daemon-level per-end teardown hook (P1.M1.T4.S7 wires the owner
+        pump with it). cb(NativeEndState) fires exactly once per ended session, off-lock,
+        AFTER on_end(EndRecord) and AFTER NativeRecovery.end_session — i.e. recover(id) is
+        final by the time cb runs. See NativeEndState's docstring for the full CONSUMER
+        CONTRACT (send state.frame() verbatim; never build the frame; the daemon core never
+        writes to the socket). Re-registering replaces the hook; None unregisters."""
+        self._native_teardown_cb = cb
+
+    def native_last_end(self) -> NativeEndState | None:
+        """The last ended native session's NativeEndState (None before the first end).
+        Lock-free diagnostic read: ONE attribute reference (atomic in CPython); the CLI
+        surface is status_snapshot()["native"] instead."""
+        return self._native_last_end
+
+    def _desktop_warning(self, msg: str) -> None:
+        """§4.8.1 C desktop warning sink: notify-send if available, the configured notifier
+        as the optional fallback — never a dependency, never blocking, never raising.
+        notify-send is probed via which() and run with a hard 1 s timeout, check=False and
+        DEVNULL stdio (same bounded-subprocess precedent as ducking's wpctl/playerctl); a
+        TimeoutExpired/OSError falls through to self._feedback.notify (fire-and-forget).
+        Gated on feedback.hypr_notify so the popup prefers the user's notifier settings.
+        Injectable via _native_warning_sink (tests record instead)."""
         try:
-            cb(rec)
-        except Exception as exc:  # defensive: a misbehaving listener — TYPE name only
-            logger.warning("native end callback raised (%s)", type(exc).__name__)
+            if not self._cfg.feedback.hypr_notify:
+                return
+            exe = shutil.which("notify-send")
+            if exe is not None:
+                try:
+                    subprocess.run(
+                        [
+                            exe,
+                            "-a",
+                            "voice-typing",
+                            "-t",
+                            str(int(self._cfg.feedback.notify_ms)),
+                            msg,
+                        ],
+                        timeout=1.0,
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return
+                except (subprocess.TimeoutExpired, OSError):
+                    pass  # missing/failed binary -> the configured notifier fallback
+            self._feedback.notify(msg)
+        except Exception as exc:  # best-effort popup: never raise into the end path
+            logger.debug("native desktop warning raised (%s)", type(exc).__name__)
+
+    def _native_expire_at_exit(self) -> None:
+        """P1.M1.T4.S6 (§4.8.1 C: 'No durable recovery promised after daemon restart'): drop
+        the whole native recovery store — active + ended — leaving it reusable. Daemon exit
+        only (request_shutdown / shutdown); never on stop/cancel/loss, where an ended session
+        stays recoverable until exit."""
+        self._native_recovery.clear()
 
     def terminate_native(self, reason: str, *, cause: str | None = None,
                          token: int | None = None) -> EndRecord | None:
         """INTERNAL hook (T4.S5/S6/S7): end the live reservation with an §4.8.1 B reason; `token`
         restricts the call to that owner (None = any). Must be called WITHOUT _lock held. Delivers
-        on_end on the calling thread after releasing the lock. Idempotent (None if already ended)."""
+        on_end — plus the S6 cleanup (seed clear, diagnostic log, desktop warning) and the T4.S7
+        teardown callback — on the calling thread after releasing the lock. Ends WITHOUT drain
+        (no settle window is armed; the caller owns expiry of the recovery store —
+        request_shutdown/shutdown call _native_expire_at_exit; _handle_dead_host does not).
+        Idempotent (None if already ended)."""
         with self._lock:
             r = self._native
             if r is None or (token is not None and r.owner.token != token):
@@ -3461,6 +3783,7 @@ class VoiceTypingDaemon:
                 flush = True
             elif r.stage is Stage.LISTENING:
                 r.begin_drain(reason)
+                self._publish_native_status_locked()  # P1.M1.T4.S6: "draining"
                 self._native_offer_evt.set()  # wake the pump: `finishing` before any offer
                 host = self._host
                 b = getattr(host, "capture_boundary", None) if host is not None else None
@@ -3602,6 +3925,7 @@ class VoiceTypingDaemon:
                 flush = True
             else:
                 r.begin_drain(reason)  # LISTENING: recovery-only drain of the in-flight utterance
+                self._publish_native_status_locked()  # P1.M1.T4.S6: "draining"
                 host = self._host
                 b = getattr(host, "capture_boundary", None) if host is not None else None
                 self._native_drain_boundary = b
@@ -3776,6 +4100,11 @@ class VoiceTypingDaemon:
         child and returns within ~0.5s -> run() exits -> main()'s finally runs -> clean exit.
 
         P1.M1.T3.S4: a live native reservation ends here as 'shutdown' before any teardown.
+        P1.M1.T4.S6: the native recovery store is EXPIRED beside the generic session store
+        (§4.8.1 C: no durable recovery is promised past daemon exit); the end carries the
+        transcript-free reason/hint in status + the journal. The native session ends WITHOUT
+        drain (terminate_native → _end_native_locked), so a STARTING/LISTENING/DRAINING
+        owner never waits for a recoverable drain here.
 
         This mirrors what the voicectl quit path already does (ControlServer._dispatch("quit") ->
         request_shutdown() -> on_quit=daemon.shutdown()). P1.M1.T2.S1: this method CLAIMS
@@ -3795,6 +4124,7 @@ class VoiceTypingDaemon:
         # P1.M6.T2.S2 (R.6/G10): daemon exit clears the recovery store — memory only, no
         # crash persistence. A quit while armed may skip _disarm; clear() covers that too.
         self._session_recovery.clear()
+        self._native_expire_at_exit()  # P1.M1.T4.S6: §4.8.1 C — no durable native recovery
         # Cancel any pending graceful-stop drain watchdog so it can't fire mid-teardown.
         timer, self._drain_timer = self._drain_timer, None
         if timer is not None:
@@ -3933,7 +4263,7 @@ class VoiceTypingDaemon:
 
         Returns {listening, mode, phase, models_loaded, load_error, partial, last_final, uptime_s,
         device, compute_type, model, mic_ok, mic_error, context_prompt, delivery_mode,
-        delivery_state, delivery_reason, last_confirmed_op} — 18 keys. `mode` is the
+        delivery_state, delivery_reason, last_confirmed_op, native} — 19 keys. `mode` is the
         Rev 2 CONSTANT "lite" (§4.6 schema stability: state.json/ctl rendering unchanged; there is
         only one mode). phase/models_loaded come from the LIVE in-memory Feedback state (the lazy-load lifecycle,
         §4.2bis — unloaded/loading/idle/listening/speaking + models resident bool); load_error is
@@ -3950,7 +4280,13 @@ class VoiceTypingDaemon:
         (P1.M6.T2.S1 — the daemon core never calls those setters or reads the [output]
         delivery config value),
         so the defaults are the truthful "surface unwired" values (stream-edit/inactive/empty).
-        Safe to call from the socket thread; never raises (device probe failures degrade to 'unknown').
+        `native` (P1.M1.T4.S6, PRD §4.8.1 C) is the native editor session's transcript-free
+        state: ALWAYS present — {state, id, reason, recoverable, hint} — built from ONE
+        immutable attribute (self._native_status, published under _lock at every phase
+        transition) read LOCK-FREE; it never touches self._native / the offer queue / the
+        recovery store (a tombstoned ENDED reservation stays in self._native), and it
+        carries codes/ids only — never dictated text or the seed. Safe to call from the
+        socket thread; never raises (device probe failures degrade to 'unknown').
         """
         snap = self._feedback.snapshot()
         dev = self._resolved_device()
@@ -3985,6 +4321,8 @@ class VoiceTypingDaemon:
             "delivery_state": snap.get("delivery_state", "inactive"),
             "delivery_reason": snap.get("delivery_reason", ""),
             "last_confirmed_op": snap.get("last_confirmed_op", ""),
+            "native": self._native_status.as_dict(),  # P1.M1.T4.S6: lock-free,
+            # transcript-free (§4.8.1 C) — codes/ids only; ALWAYS present (inactive default)
         }
 
     def _resolved_device(self) -> dict[str, str]:
@@ -4085,9 +4423,12 @@ class VoiceTypingDaemon:
         it has exited text() before this is reached.
 
         P1.M1.T3.S4: a live native reservation ends here as 'shutdown' (idempotent; covers the
-        SIGTERM/finally path when request_shutdown did not already end it).
+        SIGTERM/finally path when request_shutdown did not already end it). P1.M1.T4.S6: the
+        native recovery store is expired right after (§4.8.1 C — no durable recovery past
+        daemon exit; native_last_end() still reports reason='shutdown' for status).
         """
         self.terminate_native("shutdown", cause="shutdown")  # P1.M1.T3.S4 (idempotent)
+        self._native_expire_at_exit()  # P1.M1.T4.S6: §4.8.1 C — no durable native recovery
         # P1.M1.T2.S1 / bugfix Issue 1: daemon-level single-flight. If request_shutdown() (the SIGTERM
         # signal thread) already CLAIMED _shutdown_done, a second _bounded_shutdown() here would race
         # it (the double-teardown that blew TimeoutStopSec). Instead WAIT on _teardown_done (bounded,
