@@ -25,7 +25,7 @@ WHY AN EXECUTOR (verified line-by-line against the installed RealtimeSTT 1.0.2):
     .info.language_probability (core/transcription_api.py:113-115).
 
 IMPORT PURITY: this module is importable ANYWHERE — module scope is stdlib-only (dataclasses,
-logging, threading); faster_whisper + numpy are imported LAZILY inside methods, so importing
+enum, logging, threading); faster_whisper + numpy are imported LAZILY inside methods, so importing
 the module never touches CUDA. The executor OBJECTS, however, own CUDA contexts and are not
 picklable: they are CONSTRUCTED only inside the recorder-host child process (P1.M2.T5.S1
 wiring in recorder_host.augment_kwargs_with_executor) and never cross the spawn IPC.
@@ -33,10 +33,11 @@ wiring in recorder_host.augment_kwargs_with_executor) and never cross the spawn 
 
 from __future__ import annotations
 
+import enum
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,151 @@ def rolling_context_prompt(committed: str) -> str:
     return trim_prompt(source)
 
 
+# --- §4.8.1 initial-prompt seed: confirmed install primitives (P1.M1.T2.S1) -----------------
+
+
+class PromptState(str, enum.Enum):
+    """Tri-state outcome of a CONFIRMED prompt install — never a bare boolean.
+
+    APPLIED     -> the fitted prompt is installed on a WARMED executor; the token bound is
+                   proven against the same model object the decode will use.
+    CLEAR       -> the prompt is None on a WARMED executor (proven — the decode sees no prompt).
+    UNCONFIRMED -> the executor is cold, the tokenizer/model is missing or broken, or the fit
+                   failed: UNKNOWN, not "unavailable" (the arch-note distinction — a timeout/
+                   partial update/ambiguous old child must land here too). The install still
+                   forces the stored prompt to None so the decode degrades to context-free
+                   (PRD §8 fail-closed) — but the caller cannot treat the state as known.
+    """
+
+    APPLIED = "applied"
+    CLEAR = "clear"
+    UNCONFIRMED = "unconfirmed"
+
+
+@dataclass(frozen=True)
+class PromptInstallResult:
+    """What install_initial_prompt() reports — SAFE TO LOG/ACK: counts only, never text.
+
+    `tokens` is the fitted prompt's token count (an int) when state == APPLIED, else None.
+    There is deliberately no text field: the seed is user dictation and must never leak into
+    logs, ACKs, exceptions or repr()s.
+    """
+
+    state: PromptState
+    tokens: int | None = None
+
+
+def prompt_token_budget(model: Any) -> int | None:
+    """The initial-prompt token budget, READ FROM THE WARMED MODEL — never a copied literal.
+
+    faster-whisper's get_prompt() keeps `previous_tokens[-(max_length // 2 - 1):]` — an
+    over-long initial_prompt is silently LEFT-CLIPPED (the OLDEST tokens dropped, the exact
+    opposite of what a newest-context seed wants), so we fit to that same formula up front.
+    Returns None when the model exposes no usable integer max_length (cold / wrong attribute
+    shape → the caller must fail closed to UNCONFIRMED, never guess). 448 → 223 on the
+    installed faster-whisper; the value is DERIVED from the warmed model at runtime.
+    """
+    ml = getattr(model, "max_length", None)
+    if isinstance(ml, bool) or not isinstance(ml, int):
+        return None
+    budget = ml // 2 - 1
+    return budget if budget >= 1 else None
+
+
+def fit_initial_prompt(
+    text: str,
+    *,
+    encode: Callable[[str], list[int]],
+    decode: Callable[[Any], str],
+    budget: int,
+) -> str:
+    """Fit the §4.8.1 seed to the model's prompt budget: keep the NEWEST token-aligned tail.
+
+    PURE (unit-tested) and sentence-cut-FREE: unlike rolling_context_prompt — which slices at
+    .?! (the ROLLING path's rule once finals exist) — the seed is pre-caret editor text and
+    is fitted purely by tokens; the .?! characters carry no special meaning here.
+
+    Algorithm: whitespace-normalize; encode; if the token count is within budget, return the
+    normalized text. Otherwise binary-search the smallest cut whose suffix (a) round-trips
+    the codepoints — decode(prefix) + decode(suffix) == decode(all), so a multi-token
+    codepoint or emoji ZWJ sequence can never be cut in half — and (b) re-encodes to <=
+    budget tokens, then refines downward token by token to grab back everything the budget
+    still allows. Returns "" (NEVER raises) on non-str input, budget < 1, non-callable
+    encode/decode, empty input, or when no codepoint-safe suffix fits.
+    """
+    try:
+        if budget is None or budget < 1 or not callable(encode) or not callable(decode):
+            return ""
+        if not isinstance(text, str):
+            return ""
+        norm = " ".join(text.split())
+        if not norm:
+            return ""
+        toks = encode(norm)
+        total = len(toks)
+        if total <= budget:
+            return norm
+        full = decode(toks)
+
+        def fits(cut: int) -> bool:
+            suffix = toks[cut:]
+            if not suffix:
+                return False
+            decoded_suffix = decode(suffix)
+            if cut > 0 and decode(toks[:cut]) + decoded_suffix != full:
+                return False  # the cut would split a codepoint / emoji sequence
+            return len(encode(decoded_suffix)) <= budget
+
+        # The search's upper bound must be a FEASIBLE cut: scanning down from the last token
+        # skips the tail's partial codepoint group (a cut inside the final multi-token emoji
+        # would decode with replacement glue and can never round-trip). The scan is bounded
+        # by the group size (a few tokens for real BPE).
+        hi = total - 1
+        while hi > 0 and not fits(hi):
+            hi -= 1
+        if not fits(hi):
+            return ""
+        lo = 0
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if fits(mid):
+                hi = mid
+            else:
+                lo = mid + 1
+        cut = hi
+        while cut > 0 and fits(cut - 1):
+            cut -= 1
+        return decode(toks[cut:])
+    except Exception:  # noqa: BLE001 — pure helper: the caller degrades (UNCONFIRMED), never crashes
+        return ""
+
+
+def utf8_suffix_within(text: str, max_bytes: int = 4096) -> str:
+    """The longest codepoint-aligned suffix of `text` whose UTF-8 encoding is <= max_bytes.
+
+    Pure, never raises (non-str or max_bytes <= 0 → ""; a codepoint that cannot encode, e.g.
+    a lone surrogate, is dropped along with everything before it). Walks codepoints from the
+    END accumulating byte lengths, so a 4-byte emoji at the edge is included whole or
+    excluded whole — never half. This is the §4.8.1 ADAPTER-side input bound (the seed may
+    cross the recorder IPC as at most 4 KiB of UTF-8), validated separately from the model
+    token budget (prompt_token_budget/fit_initial_prompt above).
+    """
+    if not isinstance(text, str) or max_bytes <= 0:
+        return ""
+    total = 0
+    i = len(text)
+    while i > 0:
+        try:
+            b = len(text[i - 1].encode("utf-8"))
+        except UnicodeEncodeError:  # unencodable codepoint: exclude it and everything before
+            break
+        if total + b > max_bytes:
+            break
+        total += b
+        i -= 1
+    return text[i:]
+
+
 class PromptedExecutor:
     """Object-style RealtimeSTT executor: ONE faster-whisper model + a thread-safe mutable prompt.
 
@@ -157,6 +303,15 @@ class PromptedExecutor:
     result is returned. warmup() is the deliberate exception: it RAISES so the startup
     capability probe can distinguish healthy from broken and degrade BEFORE the recorder is
     built.
+
+    Prompt installation has two deliberate paths (P1.M1.T2.S1): set_prompt() is the ordinary
+    BEST-EFFORT rolling update — it swallows failures and keeps the previous prompt, so its
+    success can never be treated as confirmation. install_initial_prompt() is the CONFIRMED
+    §4.8.1 seed path: it fits the seed to the warmed model's REAL token budget (read from
+    the model, never a copied constant), installs it under the lock, and returns a tri-state
+    PromptInstallResult (applied / clear / unconfirmed + token count — never text).
+    UNCONFIRMED forces the stored prompt to None (fail-closed to context-free), never
+    raises, and never logs seed content — counts and exception TYPE names only.
     """
 
     def __init__(
@@ -193,6 +348,70 @@ class PromptedExecutor:
             )
         except Exception:  # noqa: BLE001 — prompt updates must never break the cmd loop
             logger.exception("context-prompt: set_prompt failed (previous prompt kept)")
+
+    def install_initial_prompt(self, text: str | None) -> PromptInstallResult:
+        """CONFIRMED §4.8.1 seed install — the observable counterpart of best-effort set_prompt.
+
+        Semantics (all under self._lock — the SAME lock the decode's prompt read takes, so a
+        decode never sees a half-updated prompt):
+          - text with content AND a WARMED self._model: fit the seed to the model's real
+            prompt budget (fit_initial_prompt — newest tokens, token-boundary/codepoint-safe,
+            no sentence cut), install it, report APPLIED with the token count. APPLIED is
+            honest because the budget + tokenizer consulted are the SAME warmed model object
+            _transcribe_locked will use for the next decode.
+          - None/"" on a WARMED executor: CLEAR — prompt None, proven.
+          - Cold model (warmup not done), missing/broken tokenizer or budget, non-str text,
+            or ANY failure: UNCONFIRMED — unknown, not "unavailable" — with the stored prompt
+            forced to None (fail-closed: the decode degrades to context-free, PRD §8).
+
+        Never raises; never builds the model here (that would import CUDA on the caller's
+        thread — warmup() owns model construction); NEVER logs or returns the seed text
+        (counts and exception TYPE names only — the seed is user dictation).
+        """
+        with self._lock:
+            model = self._model
+            if model is None:
+                self._prompt = None  # cold: nothing is provable — fail closed to no prompt
+                logger.debug("context-prompt: initial install unconfirmed (executor cold)")
+                return PromptInstallResult(PromptState.UNCONFIRMED)
+            budget = prompt_token_budget(model)
+            tok = getattr(model, "tokenizer", None)
+            enc = getattr(tok, "encode", None)
+            dec = getattr(tok, "decode", None)
+            if budget is None or not callable(enc) or not callable(dec):
+                self._prompt = None
+                logger.warning(
+                    "context-prompt: initial install unconfirmed (no usable tokenizer/budget)"
+                )
+                return PromptInstallResult(PromptState.UNCONFIRMED)
+            try:
+                if not (text or "").strip():  # None/""/whitespace: a CLEAR request (warm only)
+                    self._prompt = None
+                    logger.debug("context-prompt: initial install clear")
+                    return PromptInstallResult(PromptState.CLEAR)
+                fitted = fit_initial_prompt(text, encode=enc, decode=dec, budget=budget)
+                if not fitted:
+                    self._prompt = None
+                    logger.warning("context-prompt: initial install unconfirmed (empty fit)")
+                    return PromptInstallResult(PromptState.UNCONFIRMED)
+                n = len(enc(fitted))
+                if n == 0 or n > budget:  # the bound must be PROVEN on the fitted text
+                    self._prompt = None
+                    logger.warning(
+                        "context-prompt: initial install unconfirmed (bound not proven)"
+                    )
+                    return PromptInstallResult(PromptState.UNCONFIRMED)
+                self._prompt = fitted
+                logger.info(
+                    "context-prompt: initial install applied (%d tokens, budget %d)", n, budget
+                )
+                return PromptInstallResult(PromptState.APPLIED, n)
+            except Exception as exc:  # noqa: BLE001 — fail-closed; never raise with seed content
+                self._prompt = None
+                logger.warning(
+                    "context-prompt: initial install unconfirmed (%s)", type(exc).__name__
+                )
+                return PromptInstallResult(PromptState.UNCONFIRMED)
 
     @property
     def prompt(self) -> str | None:

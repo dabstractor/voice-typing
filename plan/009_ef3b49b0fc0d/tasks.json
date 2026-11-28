@@ -120,7 +120,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Fit and confirm an initial prompt in the executor",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S3"
@@ -143,7 +143,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Acknowledge priming across recorder IPC",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S1"
@@ -167,7 +167,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "Gate warm and cold capture on current priming",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2",

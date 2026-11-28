@@ -30,11 +30,16 @@ import pytest
 from voice_typing import prompt_engine
 from voice_typing.config import AsrConfig, VoiceTypingConfig
 from voice_typing.prompt_engine import (
+    PromptInstallResult,
     PromptProbeResult,
+    PromptState,
     PromptedExecutor,
+    fit_initial_prompt,
     probe_prompt_executor,
+    prompt_token_budget,
     rolling_context_prompt,
     trim_prompt,
+    utf8_suffix_within,
 )
 from voice_typing.recorder_host import (
     _prompt_targets,
@@ -431,3 +436,278 @@ def test_recorder_host_has_no_bulk_lane_surface():
     # S1's chain: no constructible config can request the retired lane
     with pytest.raises(ValueError, match="retired"):
         VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
+
+
+# ---------------------------------------------------------------------------
+# §4.8.1 initial-prompt seed (P1.M1.T2.S1): confirmed install + tokenizer-proven fit
+# ---------------------------------------------------------------------------
+
+
+_ASTRAL_MARK = 0x200000  # pair-start token for astral codepoints (see _FakeTokenizer)
+
+
+class _FakeTokenizer:
+    """Deterministic invertible tokenizer: a BMP codepoint encodes to 1 token (its codepoint);
+    an astral codepoint encodes to 2 tokens (marker + offset) — so emoji/ZWJ sequences are
+    genuinely multi-token and a naive token-list cut CAN split them. decode() inverts
+    exactly; a SPLIT pair decodes to U+FFFD glue, so decode(prefix)+decode(suffix) !=
+    decode(all) for a cut inside a codepoint — the exact property the fitter's alignment
+    check relies on. encode() raises TypeError on non-str (the failure path)."""
+
+    def encode(self, text):
+        if not isinstance(text, str):
+            raise TypeError("encode expects str")
+        out = []
+        for ch in text:
+            cp = ord(ch)
+            if cp < 0x10000:
+                out.append(cp)
+            else:
+                out.append(_ASTRAL_MARK)
+                out.append(cp - 0x10000)
+        return out
+
+    def decode(self, tokens):
+        chars = []
+        pending = False
+        for t in tokens:
+            if t == _ASTRAL_MARK:
+                if pending:
+                    chars.append("\ufffd")  # orphaned marker (a split pair)
+                pending = True
+            elif pending:
+                chars.append(chr(0x10000 + t))
+                pending = False
+            else:
+                chars.append(chr(t))
+        if pending:
+            chars.append("\ufffd")
+        return "".join(chars)
+
+
+class _WarmModel:
+    """Just the attributes install_initial_prompt reads from a warmed faster-whisper model:
+    the integer `.max_length` (448 on the installed faster-whisper) and a `.tokenizer`
+    exposing encode/decode."""
+
+    def __init__(self, max_length=448, tokenizer=None):
+        self.max_length = max_length
+        self.tokenizer = _FakeTokenizer() if tokenizer is None else tokenizer
+
+
+def _warm_executor(model=None) -> PromptedExecutor:
+    ex = _executor()
+    ex._model = _WarmModel() if model is None else model
+    return ex
+
+
+def test_prompt_state_is_str_backed_and_result_carries_counts_only():
+    assert PromptState.APPLIED == "applied"
+    assert PromptState.CLEAR == "clear"
+    assert PromptState.UNCONFIRMED == "unconfirmed"
+    assert set(PromptInstallResult.__dataclass_fields__) == {"state", "tokens"}  # NO text field
+    assert PromptInstallResult(PromptState.APPLIED, 5).tokens == 5
+    assert PromptInstallResult(PromptState.CLEAR).tokens is None
+
+
+def test_prompt_token_budget_read_from_model_not_copied():
+    assert prompt_token_budget(_WarmModel(max_length=448)) == 223  # the faster-whisper number
+    assert prompt_token_budget(_WarmModel(max_length=450)) == 224  # derived, not a literal
+    assert prompt_token_budget(_WarmModel(max_length=4)) == 1
+    assert prompt_token_budget(_WarmModel(max_length=3)) is None  # formula floor: >= 1
+    assert prompt_token_budget(_WarmModel(max_length=None)) is None
+    assert prompt_token_budget(_WarmModel(max_length="448")) is None  # non-int
+    assert prompt_token_budget(_WarmModel(max_length=True)) is None  # bool is not a length
+
+    class _NoLen:
+        pass
+
+    assert prompt_token_budget(_NoLen()) is None  # missing attribute
+
+
+def test_install_initial_prompt_applied_on_warm_installs_fitted_tail():
+    ex = _warm_executor()
+    seed = "meeting notes for the weekly sync " + " ".join(f"w{i}" for i in range(400))
+    result = ex.install_initial_prompt(seed)
+    assert result.state is PromptState.APPLIED
+    assert result.tokens is not None and result.tokens <= 223  # 448 // 2 - 1, READ from the model
+    fitted = ex.prompt
+    assert fitted
+    toks = _FakeTokenizer().encode(fitted)
+    assert len(toks) <= 223  # the decode-side prompt window cannot clip it
+    assert result.tokens == len(toks)
+    assert fitted.endswith("w399")  # the NEWEST context survived the fit
+
+
+def test_install_initial_prompt_under_budget_installs_normalized_verbatim():
+    ex = _warm_executor()
+    result = ex.install_initial_prompt("  hello \t world  ")
+    assert result.state is PromptState.APPLIED
+    assert result.tokens == 11  # the fake is char-per-token: "hello world" = 11 codepoints
+    assert ex.prompt == "hello world"
+
+
+def test_install_initial_prompt_clear_on_warm():
+    ex = _warm_executor()
+    ex._prompt = "previous"
+    for blank in (None, "", "   "):
+        result = ex.install_initial_prompt(blank)
+        assert result.state is PromptState.CLEAR
+        assert result.tokens is None
+        assert ex.prompt is None
+
+
+def test_install_initial_prompt_unconfirmed_when_cold_forces_prompt_none():
+    ex = _executor()  # cold: warmup never built the model
+    ex._prompt = "stale"
+    result = ex.install_initial_prompt("seed text")
+    assert result.state is PromptState.UNCONFIRMED
+    assert result.tokens is None
+    assert ex.prompt is None  # forced defensively — the decode degrades to context-free
+    result2 = ex.install_initial_prompt(None)  # a cold CLEAR is just as unprovable
+    assert result2.state is PromptState.UNCONFIRMED
+    assert ex.prompt is None
+
+
+def test_install_initial_prompt_unconfirmed_without_usable_budget_or_tokenizer():
+    ex = _warm_executor(_WarmModel(max_length=None))
+    assert ex.install_initial_prompt("seed").state is PromptState.UNCONFIRMED
+    assert ex.prompt is None
+
+    class _NoLen:  # no max_length attribute at all
+        tokenizer = _FakeTokenizer()
+
+    ex2 = _warm_executor(_NoLen())
+    assert ex2.install_initial_prompt("seed").state is PromptState.UNCONFIRMED
+    assert ex2.prompt is None
+
+    class _NoTok:  # max_length fine, tokenizer missing (unexpected attribute shape)
+        max_length = 448
+
+    ex3 = _warm_executor(_NoTok())
+    assert ex3.install_initial_prompt("seed").state is PromptState.UNCONFIRMED
+    assert ex3.prompt is None
+
+
+def test_install_initial_prompt_unconfirmed_when_tokenizer_raises():
+    seed = "secret seed content " + "x" * 250  # > budget: the fit MUST call encode + decode
+
+    class _BoomEncodeTok(_FakeTokenizer):
+        def encode(self, text):
+            raise RuntimeError(f"tokenize exploded on {text}")
+
+    ex = _warm_executor(_WarmModel(tokenizer=_BoomEncodeTok()))
+    result = ex.install_initial_prompt(seed)  # must NOT raise
+    assert result.state is PromptState.UNCONFIRMED
+    assert ex.prompt is None
+
+    class _BoomDecodeTok(_FakeTokenizer):
+        def decode(self, tokens):
+            raise RuntimeError(f"decode exploded on {seed}")
+
+    ex2 = _warm_executor(_WarmModel(tokenizer=_BoomDecodeTok()))
+    result2 = ex2.install_initial_prompt(seed)  # failure inside the fitter
+    assert result2.state is PromptState.UNCONFIRMED
+    assert ex2.prompt is None
+
+    # non-str input is a failure too (fail-closed), never a crash:
+    ex3 = _warm_executor()
+    assert ex3.install_initial_prompt(123).state is PromptState.UNCONFIRMED  # type: ignore[arg-type]
+    assert ex3.prompt is None
+
+
+def test_fit_initial_prompt_keeps_newest_tokens_under_budget():
+    words = [f"w{i}" for i in range(400)]
+    text = " ".join(words)
+    tok = _FakeTokenizer()
+    out = fit_initial_prompt(text, encode=tok.encode, decode=tok.decode, budget=223)
+    out_toks = tok.encode(out)
+    assert len(out_toks) <= 223
+    assert out.endswith("w399")  # newest kept
+    # In this fake every character is a token, so the newest-TOKEN tail may end mid-word —
+    # the contract is token alignment, not word alignment. Assert a true suffix + tail-ness:
+    assert text.endswith(out)
+    assert len(out) < len(text)  # something was dropped from the OLDEST end
+
+
+def test_fit_initial_prompt_never_splits_a_codepoint():
+    emoji = "\U0001F469\u200D\U0001F4BB"  # 👩‍💻 ZWJ sequence: 2 + 1 + 2 = 5 tokens in the fake
+    assert len(_FakeTokenizer().encode(emoji)) == 5  # genuinely multi-token
+    tok = _FakeTokenizer()
+    text = "context " + emoji * 120  # 8 + 840 tokens — well over the budget
+    out = fit_initial_prompt(text, encode=tok.encode, decode=tok.decode, budget=223)
+    assert out
+    assert "\ufffd" not in out  # nothing decoded to replacement glue — no half codepoints
+    assert out.endswith(emoji)  # the newest emoji survived WHOLE
+    assert tok.decode(tok.encode(out)) == out  # round-trips exactly
+    assert len(tok.encode(out)) <= 223
+
+
+def test_fit_initial_prompt_ignores_sentence_boundaries():
+    # Under budget, the '.' must NOT cut (the sentence cut is the ROLLING path's rule):
+    tok = _FakeTokenizer()
+    out = fit_initial_prompt("hello. world tail", encode=tok.encode, decode=tok.decode, budget=223)
+    assert out == "hello. world tail"  # rolling_context_prompt would return only "world tail"
+
+
+def test_utf8_suffix_within_is_codepoint_safe_and_bounded():
+    emoji = "\U0001F600"  # 4 UTF-8 bytes
+    text = "aaa" + emoji  # 3 + 4 = 7 bytes
+    assert utf8_suffix_within(text, 7) == text
+    assert utf8_suffix_within(text, 6) == "aa" + emoji  # the leading 'a' drops WHOLE
+    big = emoji * 1200  # 4800 bytes
+    out = utf8_suffix_within(big, 4096)
+    assert len(out) == 1024 and len(out.encode("utf-8")) == 4096
+    assert all(ch == emoji for ch in out)  # whole emoji only — never half
+    mixed = ("aaa" + emoji) * 1000  # 7000 bytes
+    out2 = utf8_suffix_within(mixed, 4096)
+    assert len(out2.encode("utf-8")) <= 4096
+    assert out2.endswith(emoji) and "\ufffd" not in out2
+    assert mixed.endswith(out2)  # a true suffix
+    assert utf8_suffix_within("ok", 4096) == "ok"
+    assert utf8_suffix_within(mixed, 0) == ""
+    assert utf8_suffix_within(None, 4096) == ""  # type: ignore[arg-type]
+
+
+def test_install_initial_prompt_never_leaks_seed_into_logs_or_results(caplog):
+    seed = "TOP SECRET dictation 👩‍💻 never log this " + "y" * 250  # > budget: fit decodes
+    marker = "TOP SECRET"
+
+    class _BoomDecodeTok(_FakeTokenizer):
+        def decode(self, tokens):
+            # the EXCEPTION ITSELF carries seed-derived content — fit swallows it to "" and
+            # the caller must never log/propagate it (shape/counts only):
+            raise RuntimeError(f"decode exploded on {seed}")
+
+    caplog.set_level(logging.DEBUG, logger="voice_typing.prompt_engine")
+    ex = _warm_executor()
+    applied = ex.install_initial_prompt(seed)
+    assert applied.state is PromptState.APPLIED  # even the success path must not log text
+    unconfirmed = _warm_executor(_WarmModel(tokenizer=_BoomDecodeTok())).install_initial_prompt(seed)
+    assert unconfirmed.state is PromptState.UNCONFIRMED
+    cold = _executor().install_initial_prompt(seed)
+    assert cold.state is PromptState.UNCONFIRMED
+    clear = _warm_executor().install_initial_prompt(None)
+    assert clear.state is PromptState.CLEAR
+    nonstr = _warm_executor().install_initial_prompt(123)  # type: ignore[arg-type]
+    assert nonstr.state is PromptState.UNCONFIRMED  # the except branch: exception TYPE logged
+    # every captured log record: counts/shape/exception TYPE only — no seed text anywhere
+    assert any("AttributeError" in r.getMessage() for r in caplog.records)  # type-only logging lives
+    for rec in caplog.records:
+        assert marker not in rec.getMessage()
+        assert "👩" not in rec.getMessage()
+    # results carry counts only — repr is safe by construction:
+    for res in (applied, unconfirmed, cold, clear, nonstr):
+        assert marker not in repr(res)
+
+
+def test_set_prompt_remains_best_effort_word_proxy_distinct_from_install():
+    # The ordinary rolling path is byte-identical: word-proxy cap, works cold, no tri-state.
+    ex = _warm_executor()
+    ex.set_prompt(" ".join(["x"] * 500))
+    assert ex.prompt is not None
+    assert len(ex.prompt.split()) == prompt_engine._PROMPT_TOKEN_CAP
+    cold = _executor()
+    cold.set_prompt("hello there")  # cold set_prompt: still best-effort, no UNCONFIRMED dance
+    assert cold.prompt == "hello there"
+    assert rolling_context_prompt("done first. now the second") == "now the second"
