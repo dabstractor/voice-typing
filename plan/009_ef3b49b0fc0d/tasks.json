@@ -113,7 +113,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Confirm private prompt seeds before capture",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Implement reusable Start priming across warm and cold hosts, then expose focus-based context-only starts without changing plain start semantics.",
               "subtasks": [
                 {
@@ -216,7 +216,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S5",
                   "title": "Expose bounded focus-based context starts",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S4",
@@ -251,7 +251,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Bound control framing while reading bytes",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S5"
@@ -273,7 +273,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T3.S2",
                   "title": "Define versioned message validation and shared vectors",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S1"

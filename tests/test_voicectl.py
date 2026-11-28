@@ -14,6 +14,7 @@ NO RealtimeSTT / NO CUDA / NO real VoiceTypingDaemon. Run:
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import socket
 import subprocess
@@ -232,6 +233,14 @@ class _StubDaemon:
         if self._session is None:
             return {"ok": False, "error": "no completed session yet"}
         return {"ok": True, "session": dict(self._session)}
+
+    def start_context(self, context, *, streaming=None):
+        # P1.M1.T2.S5: mirror VoiceTypingDaemon.start_context() — records the wire triple,
+        # returns a canned SEEDED reply (dispatch passes it through verbatim).
+        self.calls.append(("start-context", context, streaming))
+        self._listening = True
+        return {"ok": True, "listening": True, "context_seeded": True,
+                "context_tokens": 5, **self.status_snapshot()}
 
 
 @pytest.fixture
@@ -808,3 +817,265 @@ def test_copy_helper_wl_copy_error_surfaces_stderr(monkeypatch):
     monkeypatch.setattr(ctl.subprocess, "run", fake_run)
     ok, detail = ctl._copy_session_to_clipboard("anything")
     assert ok is False and "Failed to connect to a Wayland server" in detail
+
+
+# ===========================================================================
+# P1.M1.T2.S5 — context starts (§4.8.1 A): start|start-block|start-stream
+# --context-stdin. Bounded stdin reader, the start-context wire route, the
+# format branch, usage pairing (64), old-daemon + uncertain-outcome handling.
+# Hermetic: send paths are monkeypatched (or the in-process ControlServer stub
+# is used) — NO real daemon, NO CUDA, no sleeps (bounded joins / Events only).
+# ===========================================================================
+
+_SEED_MARKER = "SEEDTEXT-MARKER-7f3a"  # a seed string asserted ABSENT from all output
+
+
+def test_context_flag_on_non_start_commands_is_usage_error(monkeypatch, capsys):
+    """--context-stdin with any non-start command is a usage error (64) BEFORE any socket
+    I/O — mirror of the --copy check (PRD §4.8 exit-code contract; CRITICAL #10)."""
+
+    def _boom(*a, **k):
+        raise AssertionError("send paths must not be called on a usage error")
+
+    monkeypatch.setattr(ctl, "send_command", _boom)
+    monkeypatch.setattr(ctl, "_send_command_with_loading_hint", _boom)
+    for argv in (
+        ["toggle", "--context-stdin"],
+        ["status", "--context-stdin"],
+        ["stop", "--context-stdin"],
+        ["quit", "--context-stdin"],
+        ["cancel", "--context-stdin"],
+        ["session", "--context-stdin"],
+        ["session", "--copy", "--context-stdin"],  # --copy + --context-stdin together: 64
+    ):
+        assert ctl.main(argv) == ctl._EX_USAGE, argv
+        assert capsys.readouterr().out == ""  # usage errors print to stderr only
+
+
+def test_utf8_suffix_keeps_newest_4k_on_codepoint_boundary():
+    """The newest 4096 BYTES survive; a cut landing mid-character drops the leading
+    continuation byte(s) instead of emitting U+FFFD at the head (CRITICAL #7)."""
+    s = "é" * 3000  # 6000 bytes of 2-byte chars
+    out = ctl._utf8_suffix(s.encode("utf-8"))
+    assert out.encode("utf-8") == s.encode("utf-8")[-4096:]  # exact newest suffix
+    assert out.startswith("é")
+    e = "\U0001f600" * 2000  # 8000 bytes of 4-byte chars
+    out2 = ctl._utf8_suffix(e.encode("utf-8"))
+    assert len(out2.encode("utf-8")) <= 4096 and out2.startswith("\U0001f600")
+    odd = "a" + "é" * 3000  # 6001 bytes: the 4096-byte cut lands mid-character
+    out3 = ctl._utf8_suffix(odd.encode("utf-8"))
+    assert out3.startswith("é") and not out3.startswith("\ufffd")
+
+
+def test_read_context_stdin_multiline_unicode_and_empty():
+    """Round-trips to EOF: interior newlines survive, empty stdin is VALID ("")."""
+    assert ctl._read_context_stdin(io.BytesIO("a\nb\n日本語".encode("utf-8"))) == "a\nb\n日本語"
+    assert ctl._read_context_stdin(io.BytesIO(b"")) == ""
+    got = ctl._read_context_stdin(io.BytesIO(b"x" * 9000))
+    assert got == "x" * 4096  # only the newest 4 KiB are retained whatever the size
+
+
+def test_read_context_stdin_unreadable_stream_raises_type_name():
+    """A stream without .read -> ValueError carrying the exception TYPE name only."""
+    with pytest.raises(ValueError, match="TypeError"):
+        ctl._read_context_stdin(object())
+
+
+def test_read_context_stdin_unreadable_sys_stdin_is_exit_1(monkeypatch, tmp_path, capsys):
+    """Unreadable stdin fails BEFORE the socket: exit 1, zero sends (CRITICAL #8/#9)."""
+
+    def _boom(*a, **k):
+        raise AssertionError("send paths must not be called on an unreadable stdin")
+
+    monkeypatch.setattr(ctl, "send_command", _boom)
+    monkeypatch.setattr(ctl, "_send_command_with_loading_hint", _boom)
+    monkeypatch.setattr(sys, "stdin", object())  # no .buffer, no .read
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert ctl.main(["start", "--context-stdin"]) == 1
+    assert "TypeError" in capsys.readouterr().err
+
+
+def test_read_context_stdin_deadline_is_uncertain_and_sends_nothing(
+    monkeypatch, tmp_path, capsys
+):
+    """EOF never reached within _STDIN_DEADLINE_S -> UNCERTAIN input: ValueError BEFORE the
+    socket, nothing sent, exit 1 well inside the bound (a hung producer can't hang the keybind)."""
+    gate = threading.Event()  # never set: the producer never closes its pipe
+
+    class _HangingStream:
+        def read(self, _n):
+            gate.wait(5.0)  # bounded so the daemon pump thread cannot outlive the test
+            return b""
+
+    def _boom(*a, **k):
+        raise AssertionError("send paths must not be called on an uncertain stdin")
+
+    monkeypatch.setattr(ctl, "send_command", _boom)
+    monkeypatch.setattr(ctl, "_send_command_with_loading_hint", _boom)
+    monkeypatch.setattr(sys, "stdin", _HangingStream())
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(ctl, "_STDIN_DEADLINE_S", 0.2)
+    t0 = time.monotonic()
+    try:
+        code = ctl.main(["start-block", "--context-stdin"])
+        dt = time.monotonic() - t0
+    finally:
+        gate.set()  # release the pump thread (daemon thread; hygiene only)
+    assert code == 1
+    assert dt < 1.5  # the 0.2 s budget + join slack, never the full deadline default
+    err = capsys.readouterr().err
+    assert "EOF" in err and "nothing was sent" in err
+
+
+@pytest.mark.parametrize(
+    "argv,mode",
+    [
+        (["start", "--context-stdin"], None),
+        (["start-block", "--context-stdin"], "block"),
+        (["start-stream", "--context-stdin"], "stream"),
+    ],
+)
+def test_context_start_wires_start_context_with_mode(
+    monkeypatch, tmp_path, capsys, argv, mode
+):
+    """Wire/CLI parity: each start variant sends EXACTLY ONE start-context line with the
+    right mode extra, prints 'listening: on' + 'context: seeded', exits 0."""
+    sends = []
+
+    def _fake_send(socket_path, cmd, extra=None):
+        sends.append((socket_path, cmd, extra))
+        return {"ok": True, "listening": True, "context_seeded": True, "context_tokens": 7}
+
+    monkeypatch.setattr(ctl, "_send_command_with_loading_hint", _fake_send)
+    monkeypatch.setattr(ctl, "send_command", _fake_send)
+    monkeypatch.setattr(ctl, "_default_control_socket_path", lambda: str(tmp_path / "c.sock"))
+    monkeypatch.setattr(sys, "stdin", io.BytesIO(b"hello"))
+    code = ctl.main(argv)
+    out = capsys.readouterr()
+    assert code == 0
+    assert len(sends) == 1  # exactly one send on the happy path too
+    _path, cmd, extra = sends[0]
+    assert cmd == "start-context"
+    assert extra["context"] == "hello"
+    assert extra.get("mode") == mode
+    assert out.out == "listening: on\ncontext: seeded\n"
+
+
+def test_context_start_old_daemon_hint_exit_1(monkeypatch, tmp_path, capsys):
+    """An OLD daemon answers unknown command: exit 1 + the stderr hint; exactly one send,
+    never a retry or a plain-start fallback (CRITICAL #9)."""
+    sends = []
+
+    def _fake_send(socket_path, cmd, extra=None):
+        sends.append(cmd)
+        return {"ok": False, "error": "unknown command: 'start-context'"}
+
+    monkeypatch.setattr(ctl, "_send_command_with_loading_hint", _fake_send)
+    monkeypatch.setattr(ctl, "_default_control_socket_path", lambda: str(tmp_path / "c.sock"))
+    monkeypatch.setattr(sys, "stdin", io.BytesIO(_SEED_MARKER.encode()))
+    code = ctl.main(["start", "--context-stdin"])
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    assert code == 1 and sends == ["start-context"]
+    assert "predates context starts" in err and "nothing was armed" in err
+    assert _SEED_MARKER not in out + err  # the seed never reaches stdout/stderr
+
+
+def test_context_start_timeout_is_uncertain_no_retry(monkeypatch, tmp_path, capsys):
+    """Socket timeout / malformed reply -> UNCERTAIN outcome: exit 1 + 'outcome unknown',
+    exactly one send, no retry (the daemon may still have completed its fenced start)."""
+    sends = []
+
+    def _raise(socket_path, cmd, extra=None):
+        sends.append(cmd)
+        raise ValueError("daemon wedged: no reply within 10s")
+
+    monkeypatch.setattr(ctl, "_send_command_with_loading_hint", _raise)
+    monkeypatch.setattr(ctl, "_default_control_socket_path", lambda: str(tmp_path / "c.sock"))
+    monkeypatch.setattr(sys, "stdin", io.BytesIO(b"seed"))
+    code = ctl.main(["start", "--context-stdin"])
+    assert code == 1 and sends == ["start-context"]
+    assert "outcome unknown" in capsys.readouterr().err
+
+
+def test_context_start_busy_reply_exit_1(monkeypatch, tmp_path, capsys):
+    """The daemon's busy rejection renders as 'error: ...' on stdout, exit 1."""
+
+    def _fake_send(socket_path, cmd, extra=None):
+        return {"ok": False, "listening": False, "context_seeded": False,
+                "error": "start-context rejected: busy (arming, listening or draining)"}
+
+    monkeypatch.setattr(ctl, "_send_command_with_loading_hint", _fake_send)
+    monkeypatch.setattr(ctl, "_default_control_socket_path", lambda: str(tmp_path / "c.sock"))
+    monkeypatch.setattr(sys, "stdin", io.BytesIO(_SEED_MARKER.encode()))
+    code = ctl.main(["start", "--context-stdin"])
+    out = capsys.readouterr()
+    assert code == 1
+    assert "error: start-context rejected: busy" in out.out
+    assert _SEED_MARKER not in out.out + out.err
+
+
+def test_format_start_context_unseeded_reasons():
+    """Pure format_result: the three reason codes + the defensive 'unknown'."""
+    for reason in ("empty", "disabled", "unavailable"):
+        text, code = ctl.format_result(
+            "start-context",
+            {"ok": True, "listening": True, "context_seeded": False,
+             "context_reason": reason},
+        )
+        assert code == 0
+        assert text == f"listening: on\ncontext: unseeded ({reason})"
+    text, code = ctl.format_result(
+        "start-context", {"ok": True, "listening": False, "context_seeded": False}
+    )
+    assert code == 0 and "unseeded (unknown)" in text
+
+
+def test_context_seed_never_in_output(monkeypatch, tmp_path, capsys):
+    """On every reply shape the seed string stays off stdout+stderr (CRITICAL #6); it only
+    rides the wire inside the request extra."""
+    for reply in (
+        {"ok": False, "listening": False, "context_seeded": False,
+         "error": "start-context rejected: busy (arming, listening or draining)"},
+        {"ok": False, "error": "unknown command: 'start-context'"},
+        {"ok": True, "listening": True, "context_seeded": False, "context_reason": "empty"},
+        {"ok": True, "listening": True, "context_seeded": True, "context_tokens": 3},
+    ):
+        seen = {}
+
+        def _fake_send(socket_path, cmd, extra=None, _r=reply):
+            seen["extra"] = extra
+            return dict(_r)
+
+        monkeypatch.setattr(ctl, "_send_command_with_loading_hint", _fake_send)
+        monkeypatch.setattr(ctl, "_default_control_socket_path", lambda: str(tmp_path / "c.sock"))
+        monkeypatch.setattr(sys, "stdin", io.BytesIO(_SEED_MARKER.encode()))
+        code = ctl.main(["start", "--context-stdin"])
+        out = capsys.readouterr()
+        assert code in (0, 1)
+        assert seen["extra"]["context"] == _SEED_MARKER  # sent (on the wire), never echoed
+        assert _SEED_MARKER not in out.out + out.err
+
+
+def test_help_lists_context_stdin_flag(capsys):
+    """--help surfaces the flag + the focus-vs-native Mode A paragraph."""
+    with pytest.raises(SystemExit) as exc_info:
+        ctl.main(["--help"])
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "--context-stdin" in out
+    assert "NOT a safe editor integration" in out
+
+
+def test_context_round_trip_over_real_server(monkeypatch, capsys, running_server):
+    """One real-socket round trip: the wire request reaches _dispatch and the stub's
+    start_context, and the seeded reply renders through format_result."""
+    srv, _path = running_server
+    monkeypatch.setattr(sys, "stdin", io.BytesIO(b"piped seed\n"))
+    code = ctl.main(["start", "--context-stdin"])
+    out = capsys.readouterr()
+    assert code == 0
+    assert "listening: on" in out.out and "context: seeded" in out.out
+    assert srv._daemon.calls == [("start-context", "piped seed\n", None)]  # raw wire value
+    # (the CLIENT never strips — the daemon's _normalize_context owns .strip(); an echo-style
+    # trailing newline must not become prompt text server-side)

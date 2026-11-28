@@ -27,6 +27,15 @@ Subcommands (PRD §4.8):
              R.6; never a moving draft). --copy stages it on the Wayland CLIPBOARD
              instead — exact bytes, no added newline, PRIMARY untouched, never
              types/erases/submits. Exit 1 when no completed session exists.
+    start | start-block | start-stream --context-stdin
+             arm with the pre-caret seed read from STDIN (newest 4 KiB): the EXISTING
+             focus-based delivery with a first-utterance decode seed — NOT a pinned
+             native editor integration (P1.M1.T2.S5). Prints 'context: seeded' when the
+             recognizer child confirmed the seed on both decode lanes, otherwise
+             'context: unseeded (<reason>)'. Rejected (exit 1) while
+             arming/listening/draining, by an old daemon, on a socket timeout, or when
+             stdin does not reach EOF within 2 s — never retried, never downgraded to a
+             plain start; the seed is never echoed (P1.M1.T2.S5).
 
         Troubleshooting — the daemon runs as the systemd USER unit that install.sh installs
         (systemd/voice-typing.service); voicectl itself only talks to the control socket:
@@ -119,6 +128,63 @@ _WL_STAGE_TIMEOUT_S = 5.0  # wl-copy subprocess timeout (fork-mode parent)
 _WL_VERIFY_DEADLINE_S = 2.0  # total wl-paste verify poll budget
 _WL_PASTE_TIMEOUT_S = 1.0  # each wl-paste attempt
 _WL_VERIFY_POLL_S = 0.025  # poll interval
+
+# P1.M1.T2.S5 (§4.8.1 A): context-only starts read the pre-caret seed from STDIN (never argv).
+# Bounded twice: memory (only the newest _CONTEXT_MAX_BYTES are retained whatever the producer
+# writes) and time (monotonic _STDIN_DEADLINE_S to reach EOF — a producer that never closes its
+# pipe is an UNCERTAIN input: fail before the socket, send nothing).
+_CONTEXT_MAX_BYTES: int = 4096      # newest UTF-8 suffix, cut on a code-point boundary
+_CONTEXT_CHUNK_BYTES: int = 65536   # per read; the rolling suffix keeps memory at <= 4 KiB + chunk
+_STDIN_DEADLINE_S: float = 2.0      # monotonic budget for stdin to reach EOF
+
+
+def _utf8_suffix(raw: bytes, max_bytes: int = _CONTEXT_MAX_BYTES) -> str:
+    """Newest <= max_bytes of `raw` decoded as UTF-8, cut on a code-point boundary. Never raises."""
+    if len(raw) > max_bytes:
+        raw = raw[-max_bytes:]
+        i = 0
+        while i < 3 and i < len(raw) and 0x80 <= raw[i] <= 0xBF:  # drop a cut continuation byte
+            i += 1
+        raw = raw[i:]
+    return raw.decode("utf-8", errors="replace")
+
+
+def _read_context_stdin(stream: object, *, deadline_s: float | None = None) -> str:
+    """Read `stream` (bytes) to EOF; return the newest <= 4 KiB as str ("" is valid → unseeded).
+
+    Raises ValueError with a FIXED message (exception TYPE only, never stream content) when the
+    stream cannot be read or EOF is not reached within the deadline. The pump thread is a daemon:
+    voicectl is one-shot, so a stuck producer cannot keep the process alive.
+    """
+    budget = _STDIN_DEADLINE_S if deadline_s is None else deadline_s
+    box: dict[str, object] = {}
+
+    def _pump() -> None:
+        try:
+            tail = b""
+            read = getattr(stream, "read", None)
+            if not callable(read):
+                raise TypeError("stdin is not readable")
+            while True:
+                chunk = read(_CONTEXT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                tail = (tail + chunk)[-_CONTEXT_MAX_BYTES:]
+            box["tail"] = tail
+        except Exception as exc:  # OSError / TypeError / non-bytes
+            box["error"] = type(exc).__name__
+
+    t = threading.Thread(target=_pump, daemon=True)
+    t.start()
+    t.join(budget)  # monotonic deadline: a producer that never closes must not hang the keybind
+    if "error" in box:
+        raise ValueError(f"context stdin could not be read ({box['error']})")
+    if t.is_alive():
+        raise ValueError(
+            f"context stdin did not reach EOF within {budget:.0f}s — "
+            "pipe or redirect the seed text; nothing was sent"
+        )
+    return _utf8_suffix(box["tail"])  # type: ignore[arg-type]
 
 
 def _socket_timeout_s() -> float:
@@ -225,6 +291,15 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         # ok:false none-case never reaches here (first branch → exit 1).
         session = response.get("session") or {}
         return session.get("text", "") or "", 0
+    if cmd == "start-context":
+        # P1.M1.T2.S5 (§4.8.1 A): focus-based start with a decode seed. Only fixed words below —
+        # the seed never appears in any reply, error or this text.
+        listening = "on" if response.get("listening") else "off"
+        if response.get("context_seeded") is True:
+            ctx = "seeded"
+        else:
+            ctx = f"unseeded ({response.get('context_reason') or 'unknown'})"
+        return f"listening: {listening}\ncontext: {ctx}", 0
     # toggle / start / stop / cancel (cancel is NOT an arm command: no loading hint, falls through
     # to the default branch — P1.M2.T7.S1)
     return f"listening: {'on' if response.get('listening') else 'off'}", 0
@@ -275,15 +350,19 @@ def send_command(socket_path: str, cmd: str, extra: dict | None = None) -> dict:
     return json.loads(line)  # json.JSONDecodeError is a ValueError subclass
 
 
-def _send_command_with_loading_hint(socket_path: str, cmd: str) -> dict:
-    """send_command for start/toggle: print a 'loading models…' hint to stderr if the daemon doesn't reply
+def _send_command_with_loading_hint(
+    socket_path: str, cmd: str, extra: dict | None = None
+) -> dict:
+    """send_command for start/toggle/start-context: print a 'loading models…' hint to stderr if the daemon doesn't reply
     within _LOADING_HINT_DELAY (PRD §4.2bis — "voicectl prints a loading models… hint" while the first arm blocks).
 
     Why CLIENT-SIDE: start()/toggle() block inside the daemon's _load_recorder() (~1–3 s), so the JSON response
     is produced only AFTER the load completes — an in-band 'loading' signal is impossible under the one-line-
-    request/one-line-response protocol. Why a Timer (not socket timeout): send_command uses makefile('r'),
-    which is incompatible with settimeout. The hint goes to STDERR so stdout (the structured result) stays
-    clean for scripts; the Timer is cancelled in `finally`, so a fast (resident) arm never prints it.
+    request/one-line-response protocol. Why a Timer (not socket timeout): the hint must fire DURING the wait,
+    while send_command's socket timeout stays the hard bound on the wait itself. `extra` payload keys pass
+    through to send_command (P1.M1.T2.S5: {"context": ..., "mode": ...} for start-context). The hint goes to
+    STDERR so stdout (the structured result) stays clean for scripts; the Timer is cancelled in `finally`, so
+    a fast (resident) arm never prints it.
     """
     timer = threading.Timer(
         _LOADING_HINT_DELAY,
@@ -294,7 +373,7 @@ def _send_command_with_loading_hint(socket_path: str, cmd: str) -> dict:
     timer.daemon = True
     timer.start()
     try:
-        return send_command(socket_path, cmd)
+        return send_command(socket_path, cmd, extra=extra)
     finally:
         timer.cancel()
 
@@ -389,6 +468,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "(start it again to resume; logs: journalctl --user -u voice-typing -e).\n"
             'config: output.delivery="bulk-text" is retired — remove the key (default "stream-edit")\n'
             'or set delivery = "stream-edit".\n'
+            "context starts (focus-based delivery — NOT a safe editor integration):\n"
+            "  start | start-block | start-stream --context-stdin   seed = newest 4 KiB read from stdin\n"
+            "  (piped/redirected stdin only). Reply 'context: seeded' means the recognizer child confirmed\n"
+            "  the seed on both decode lanes; 'context: unseeded (empty|disabled|unavailable)' starts without\n"
+            "  one. Rejected (exit 1) while arming/listening/draining, by an old daemon, or on timeout —\n"
+            "  never retried, never downgraded to a plain start.\n"
             "keybinds are user-owned: this tool installs no shortcut — bind commands in your\n"
             "own compositor config."
         ),
@@ -403,6 +488,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="with 'session': copy the recovered text to the Wayland clipboard (exact "
         "bytes, no added newline, PRIMARY untouched) instead of printing it",
+    )
+    parser.add_argument(
+        "--context-stdin",
+        action="store_true",
+        help="with start | start-block | start-stream: read the pre-caret seed (newest 4 KiB) "
+        "from stdin — piped/redirected only, never argv — and arm FOCUS-based dictation with it",
     )
     return parser
 
@@ -448,6 +539,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.copy and cmd != "session":
         print("voicectl: --copy applies only to the 'session' command", file=sys.stderr)
         return _EX_USAGE
+    # P1.M1.T2.S5: --context-stdin is valid ONLY with an arm command that can carry a seed.
+    # Usage error (64) BEFORE anything else — no socket I/O, no stdin read (mirrors --copy).
+    context_route = bool(args.context_stdin)
+    if context_route and cmd not in ("start", "start-block", "start-stream"):
+        print(
+            "voicectl: --context-stdin applies only to start, start-block or start-stream",
+            file=sys.stderr,
+        )
+        return _EX_USAGE
 
     # 1. Resolve the socket path. XDG_RUNTIME_DIR unset -> RuntimeError -> daemon can't be running.
     try:
@@ -467,11 +567,27 @@ def main(argv: list[str] | None = None) -> int:
     #    daemon logs it; the copy itself is CLIENT-side — P1.M6.T2.S3).
     try:
         extra = {"copy": True} if (cmd == "session" and args.copy) else None
-        # Per-session mode commands (toggle-*/start-*) take the SAME arm path -> loading hint.
-        if cmd in ("start", "toggle") or cmd.startswith(("start-", "toggle-")):
-            response = _send_command_with_loading_hint(socket_path, cmd)
+        wire_cmd = cmd
+        if context_route:
+            try:  # P1.M1.T2.S5: bounded stdin read BEFORE any socket I/O (empty "" is valid)
+                text_in = _read_context_stdin(getattr(sys.stdin, "buffer", sys.stdin))
+            except ValueError as exc:
+                print(f"voicectl: {exc}", file=sys.stderr)
+                return 1
+            wire_cmd = "start-context"
+            extra = {"context": text_in}
+            if cmd == "start-block":
+                extra["mode"] = "block"
+            elif cmd == "start-stream":
+                extra["mode"] = "stream"
+        # Per-session mode commands (toggle-*/start-*) take the SAME arm path -> loading hint;
+        # start-context rides the same wrapper (cold load ~1–3 s).
+        if wire_cmd in ("start", "toggle", "start-context") or wire_cmd.startswith(
+            ("start-", "toggle-")
+        ):
+            response = _send_command_with_loading_hint(socket_path, wire_cmd, extra=extra)
         else:
-            response = send_command(socket_path, cmd, extra=extra)
+            response = send_command(socket_path, wire_cmd, extra=extra)
     except (
         OSError
     ) as exc:  # FileNotFoundError / ConnectionRefusedError / PermissionError
@@ -479,10 +595,30 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except ValueError as exc:  # empty / malformed response line
         print(f"voicectl: {exc}", file=sys.stderr)
+        if context_route:
+            # UNCERTAIN (timeout / malformed reply): the daemon may still complete its fenced
+            # start — report, never retry, never fall back to a plain start (§4.8.1 A).
+            print(
+                "voicectl: context start outcome unknown — not retried; "
+                "check 'voicectl status'",
+                file=sys.stderr,
+            )
         return 1
 
     # 3. Format + print the human result; return the exit code.
-    text, code = format_result(cmd, response)
+    text, code = format_result(wire_cmd, response)
+    if (
+        context_route
+        and response.get("ok") is not True
+        and str(response.get("error", "")).startswith("unknown command")
+    ):
+        # P1.M1.T2.S5: an OLD daemon answers "unknown command" — the distinct wire cmd worked
+        # as designed: nothing was armed silently. Hint on stderr; no retry, no fallback.
+        print(
+            "voicectl: this daemon predates context starts (start-context) — update "
+            "voice-typing and restart the unit; nothing was armed",
+            file=sys.stderr,
+        )
     if cmd == "session" and code == 0:
         # P1.M6.T2.S3: truncation warning -> STDERR (stdout purity); then either the
         # --copy flow (stage + verify + 'copied N chars') or the plain print below. The

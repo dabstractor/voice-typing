@@ -16,6 +16,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -6176,3 +6177,178 @@ def test_host_prime_raising_fails_closed():
     assert out.ok is False and out.reason == "seed-unconfirmed" and out.context_seeded is None
     assert d._host.recorder.mic == []  # no capture
     assert "boom" not in repr(out)  # sanitized outcome
+
+
+# ===========================================================================
+# P1.M1.T2.S5 — context starts (§4.8.1 A): VoiceTypingDaemon.start_context policy
+# + the ATOMIC busy rejection inside S3's reserve block. Drives the daemon
+# directly on S3's seam fakes (_PrimeableFakeHost) — NO real daemon / mic /
+# CUDA; no sleeps (bounded joins / Events only).
+# ===========================================================================
+
+_CTX_SEED = "Hello world"
+
+
+def test_start_context_seeded_confirms_then_captures(caplog):
+    """Non-empty seed on a primeable host: load -> prime(seed) -> mic; the reply carries
+    context_seeded + the opaque token count; the seed text reaches NO reply, status or log."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory())
+    with caplog.at_level(logging.DEBUG, logger="voice_typing.daemon"):
+        reply = d.start_context(_CTX_SEED)
+    h = d._host
+    assert reply["ok"] is True and reply["context_seeded"] is True
+    assert reply["context_tokens"] == 7 and reply["listening"] is True
+    assert h.prime_calls[0][0] == _CTX_SEED
+    assert h.recorder.mic == [True]  # capture opened AFTER the confirmed prime (S2/S3)
+    assert d.is_listening() is True
+    blob = json.dumps(reply) + json.dumps(d.status_snapshot()) + caplog.text
+    assert _CTX_SEED not in blob  # the seed never reaches replies, status, or DEBUG logs
+
+
+def test_start_context_block_and_stream_modes():
+    """streaming=False/True arm the session in block/stream (same seam as start-block/-stream)."""
+    d1, _ = _make_lazy_daemon(host_factory=_primeable_factory())
+    assert d1.start_context("s", streaming=False)["ok"] is True
+    assert d1._streaming_now() is False
+    assert d1.status_snapshot()["output_mode"] == "block"
+    d2, _ = _make_lazy_daemon(host_factory=_primeable_factory())
+    assert d2.start_context("s", streaming=True)["ok"] is True
+    assert d2._streaming_now() is True
+    assert d2.status_snapshot()["output_mode"] == "stream"
+
+
+def test_start_context_empty_and_whitespace_unseeded():
+    """Empty / whitespace-only is VALID: unseeded plain fenced arm, reason 'empty',
+    NO prime call, still armed (listening)."""
+    for text in ("", "   \n  ", None):  # None is a legal wire value (str/None, CRITICAL #12)
+        d, _fb = _make_lazy_daemon(host_factory=_primeable_factory())
+        r = d.start_context(text)
+        assert r["ok"] is True and r["context_seeded"] is False
+        assert r["context_reason"] == "empty"
+        assert d._host.prime_calls == []
+        assert d.is_listening() is True
+
+
+def test_start_context_disabled_by_config_unseeded():
+    """asr.context_prompt=false -> unseeded 'disabled'; no prime; still armed."""
+    cfg = VoiceTypingConfig()
+    cfg.asr.context_prompt = False
+    d, _fb = _make_lazy_daemon(cfg=cfg, host_factory=_primeable_factory())
+    r = d.start_context(_CTX_SEED)
+    assert r["ok"] is True and r["context_seeded"] is False
+    assert r["context_reason"] == "disabled"
+    assert d._host.prime_calls == []
+    assert d.is_listening() is True
+
+
+def test_start_context_unavailable_on_host_without_prime_channel():
+    """CRITICAL #3: S3's seam reports context_seeded=True whenever want_seed, even on a host
+    WITHOUT prime_prompt; the reply layer must DOWNGRADE that to 'unavailable' (a best-effort
+    put is not confirmation) — never context_seeded:true."""
+    d, _fb = _make_lazy_daemon(host_factory=_fake_host_factory(True))
+    r = d.start_context(_CTX_SEED)
+    assert r["ok"] is True and r["context_seeded"] is False
+    assert r["context_reason"] == "unavailable"
+    assert d.is_listening() is True  # armed UNSEEDED (plain fenced arm guarantees)
+    assert d._seed_active is False  # no confirmed channel -> no seed ever resident
+    assert _CTX_SEED not in json.dumps(r)
+
+
+def test_start_context_busy_while_listening():
+    """Busy while LISTENING: fixed error, no reservation, no prime, the live session is
+    untouched (CRITICAL #2: the check is atomic inside S3's reserve block)."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory())
+    d.start()
+    assert d.is_listening() is True
+    r = d.start_context(_CTX_SEED)
+    assert r["ok"] is False and r["context_seeded"] is False
+    assert "busy" in r["error"]
+    assert d._host.prime_calls == []  # NO new prime call
+    assert d.is_listening() is True  # the live session is unaffected
+    assert d._arming is None  # no reservation token was ever taken
+
+
+def test_start_context_busy_while_arming():
+    """Busy while an arm is IN FLIGHT (gated prime): the context start rejects; the in-flight
+    arm then completes exactly as S3 specifies (no supersede, no interference)."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(
+        lambda h: setattr(h, "prime_gate", threading.Event())))
+    t = threading.Thread(target=lambda: d.start_with_seed("a"), daemon=True)
+    t.start()
+    try:
+        assert _wait_for(lambda: len(d._host.prime_calls) == 1, 2.0)  # the arm's prime is parked
+        r = d.start_context("b")
+        assert r["ok"] is False and "busy" in r["error"]
+        assert len(d._host.prime_calls) == 1  # the context start NEVER primed
+    finally:
+        d._host.prime_gate.set()
+    t.join(3.0)
+    assert not t.is_alive()
+    assert d.is_listening() is True and d._seed_active is True  # the first arm completed
+    assert [c[0] for c in d._host.prime_calls] == ["a"]  # 'b' never reached the seam
+
+
+def test_start_context_busy_while_draining():
+    """Busy while DRAINING: fixed error, nothing armed or primed; the drain flag is reset."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory())
+    d.start()
+    with d._lock:
+        d._drain = True
+    try:
+        r = d.start_context(_CTX_SEED)
+        assert r["ok"] is False and "busy" in r["error"]
+        assert d.is_listening() is True
+        assert d._host.prime_calls == []
+    finally:
+        with d._lock:
+            d._drain = False
+
+
+def test_start_context_unconfirmed_seed_not_armed():
+    """UNKNOWN prompt state (unconfirmed prime) -> ok:false, fixed error, NOT armed (§4.8.1 A:
+    'If the child state is unknown, fail without arming')."""
+    def _script(h):
+        h.prime_results[_CTX_SEED] = _PrimeResult("unconfirmed", None, 1, 1, "timeout")
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    r = d.start_context(_CTX_SEED)
+    assert r["ok"] is False and r["context_seeded"] is False
+    assert "unconfirmed" in r["error"]
+    assert d._host.recorder.mic == []  # mic NEVER opened
+    assert d.is_listening() is False
+
+
+def test_start_context_normalizes_newest_4k():
+    """The daemon re-normalizes the wire value: newest 4096 BYTES on a code-point boundary
+    (server must not trust the client — CRITICAL #7)."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory())
+    assert d.start_context("x" * 6000)["ok"] is True
+    assert d._host.prime_calls[0][0] == "x" * 4096  # the newest 4 KiB only
+    d2, _fb2 = _make_lazy_daemon(host_factory=_primeable_factory())
+    r2 = d2.start_context("日" * 3000)  # 9000 bytes of 3-byte chars
+    assert r2["ok"] is True
+    # The 4096-byte cut lands 1 byte into a char; the leading continuation byte is dropped:
+    assert d2._host.prime_calls[0][0] == "日" * 1365
+    assert _CTX_SEED not in json.dumps(r2)
+
+
+def test_start_context_load_failed_reports_load_error():
+    """A failed load -> ok:false with the 'model load failed: ...' fixed text; not armed."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(
+        lambda h: setattr(h, "spawn_result", False)))
+    r = d.start_context(_CTX_SEED)
+    assert r["ok"] is False and r["context_seeded"] is False
+    assert r["error"].startswith("model load failed")
+    assert d.is_listening() is False
+
+
+def test_start_context_after_seeded_session_reprimes():
+    """A seeded start after a previous seeded session re-primes the resident child — S3's
+    fence guarantees the new seed replaces the old one (no clear needed between seeds)."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory())
+    assert d.start_context("first")["ok"] is True
+    d.stop()
+    assert _wait_for(lambda: not d.is_listening(), 2.0)
+    r = d.start_context("new")
+    assert r["ok"] is True and r["context_seeded"] is True
+    assert [c[0] for c in d._host.prime_calls] == ["first", "new"]  # re-prime; no clear between

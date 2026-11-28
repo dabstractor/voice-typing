@@ -31,6 +31,9 @@ class _StubDaemon:
         self._listening = listening
         self._session = session
         self.session_calls: list[bool] = []
+        self.context_calls: list[tuple] = []  # P1.M1.T2.S5: (context, streaming) triples
+        self._context_reply = {"ok": True, "listening": True, "context_seeded": True,
+                               "context_tokens": 3}
         self._snapshot = snapshot or {
             "listening": listening, "mode": "lite", "phase": "idle", "models_loaded": True,
             "load_error": "", "partial": "", "last_final": "", "uptime_s": 0.0,
@@ -57,6 +60,13 @@ class _StubDaemon:
         if self._session is None:
             return {"ok": False, "error": "no completed session yet"}
         return {"ok": True, "session": dict(self._session)}
+
+    def start_context(self, context, *, streaming=None):
+        # P1.M1.T2.S5: mirror VoiceTypingDaemon.start_context() — records the call and
+        # returns the canned reply (dispatch passes it through VERBATIM).
+        self.calls.append("start-context")
+        self.context_calls.append((context, streaming))
+        return dict(self._context_reply)
 
 
 def _wait_for(predicate, timeout=2.0, interval=0.01):
@@ -400,3 +410,61 @@ def test_socket_session_round_trip(server):
     _srv._daemon._session = dict(_SESSION)
     r = json.loads(_send(path, {"cmd": "session"}))
     assert r == {"ok": True, "session": dict(_SESSION)}
+
+
+# --- P1.M1.T2.S5: start-context routing (§4.8.1 A) ----------------------------------------
+
+def _disp_on(stub, msg_obj_or_str):
+    """_dispatch on a KNOWN stub (so the recorded call is assertable — unlike _disp)."""
+    return daemon.ControlServer(stub)._dispatch(
+        msg_obj_or_str if isinstance(msg_obj_or_str, str) else json.dumps(msg_obj_or_str)
+    )
+
+
+def test_dispatch_start_context_routes_with_mode_and_default_none():
+    """start-context reaches daemon.start_context(context, streaming=...) with mode mapped:
+    stream -> True, block -> False, absent -> None; the reply passes through verbatim."""
+    stub = _StubDaemon()
+    r = _disp_on(stub, {"cmd": "start-context", "context": "abc", "mode": "stream"})
+    assert stub.context_calls == [("abc", True)]
+    assert r == stub._context_reply  # passthrough, untouched
+    stub_b = _StubDaemon()
+    _disp_on(stub_b, {"cmd": "start-context", "context": "abc", "mode": "block"})
+    assert stub_b.context_calls == [("abc", False)]
+    stub_n = _StubDaemon()
+    _disp_on(stub_n, {"cmd": "start-context", "context": "abc"})
+    assert stub_n.context_calls == [("abc", None)]
+    assert stub_n.calls == ["start-context"]
+
+
+def test_dispatch_start_context_rejects_bad_mode_without_echo():
+    """mode outside {block, stream, absent} -> ok:false; the bad value is NEVER echoed and
+    the daemon is not called (no coercion, CRITICAL #12)."""
+    stub = _StubDaemon()
+    r = _disp_on(stub, {"cmd": "start-context", "context": "abc", "mode": "Stream"})
+    assert r["ok"] is False and r["context_seeded"] is False
+    assert stub.context_calls == []
+    assert "Stream" not in json.dumps(r)  # the invalid value is not reflected anywhere
+
+
+def test_dispatch_start_context_rejects_missing_or_non_string_context():
+    """Missing / non-string context -> ok:false WITHOUT str()-coercion; never dispatched."""
+    for msg in (
+        {"cmd": "start-context"},
+        {"cmd": "start-context", "mode": "block"},  # mode valid but context missing
+        {"cmd": "start-context", "context": 123},
+        {"cmd": "start-context", "context": {"nested": True}},
+        {"cmd": "start-context", "context": ["a"]},
+    ):
+        stub = _StubDaemon()
+        r = _disp_on(stub, msg)
+        assert r["ok"] is False and stub.context_calls == [], msg
+        assert r["context_seeded"] is False
+
+
+def test_socket_start_context_round_trip(server):
+    """Real AF_UNIX round-trip: the start-context reply survives the wire verbatim."""
+    _srv, path = server
+    r = json.loads(_send(path, {"cmd": "start-context", "context": "abc", "mode": "block"}))
+    assert r == _srv._daemon._context_reply
+    assert _srv._daemon.context_calls == [("abc", False)]

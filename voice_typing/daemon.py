@@ -2623,8 +2623,14 @@ class VoiceTypingDaemon:
             logger.exception("host.abort() raised (best-effort; ignored)")
 
     def _start_fenced(self, seed: str | None, *, streaming: bool | None = None,
-                      timeout: float = _START_DEADLINE_S) -> ArmOutcome:
+                      timeout: float = _START_DEADLINE_S,
+                      reject_busy: bool = False) -> ArmOutcome:
         """Reserve → load → prime → atomic revalidate → arm (P1.M1.T2.S3; §4.8.1).
+
+        P1.M1.T2.S5 (Mode A docs): with reject_busy=True (context-only starts) the reserve
+        block REJECTS with reason 'busy' instead of superseding an in-flight arm — nothing is
+        reserved (no _arm_seq bump, no token), so the in-flight arm / live session is untouched.
+        The default (False) keeps start()/toggle()/start_with_seed()'s supersede semantics.
 
         Reservation + the final arm decision run UNDER self._lock; the heavy waits (_load_host's
         spawn, the host's confirmed prime_prompt) run OUTSIDE it so status/stop/quit stay
@@ -2639,6 +2645,15 @@ class VoiceTypingDaemon:
         """
         t0 = time.monotonic()
         with self._lock:
+            if reject_busy and (  # P1.M1.T2.S5: context starts REJECT instead of superseding
+                self._arming is not None  # an arm is in flight (a live reservation token)
+                or self._loading  # a recorder load is in flight
+                or self._listening.is_set()  # already armed (a live session)
+                or self._drain  # graceful drain in progress
+            ):
+                # ATOMIC with the reservation (checked under _lock BEFORE the bump): no token is
+                # taken, no finally interaction — the in-flight arm / live session is unaffected.
+                return ArmOutcome(False, False, "busy", None, None, self._arm_seq)
             self._arm_seq += 1
             tok = self._arm_seq
             self._arming = tok  # a newer reservation supersedes an older one
@@ -2782,6 +2797,65 @@ class VoiceTypingDaemon:
         None). Callers (S5 focus-based starts, T3.S4 native owner) surface context_seeded/reason
         in their replies — never the seed text itself."""
         return self._start_fenced(seed, streaming=streaming, timeout=timeout)
+
+    def start_context(
+        self,
+        context: str | None,
+        *,
+        streaming: bool | None = None,
+        timeout: float = _START_DEADLINE_S,
+    ) -> dict:
+        """§4.8.1 A context-only start for NON-integrated callers (P1.M1.T2.S5; Mode A docs).
+
+        Arms the EXISTING focus-based delivery (keyboard injection into the focused window) with
+        `context` as the first-utterance decode seed — this is NOT a pinned native editor session
+        (§4.8.1 B). Rejected (error 'busy', nothing reserved or armed) while arming, listening or
+        draining. Empty / whitespace-only, config-disabled, or unavailable prompting starts
+        UNSEEDED through the plain fenced arm (which guarantees a known-clear prompt or no prompt
+        executor) and says so via context_seeded:false + context_reason. A non-empty enabled seed
+        captures only on the child's bounded acknowledgement (S2/S3); unknown ⇒ fail, not armed.
+        Returns a sanitized dict (fixed codes, counts, status) — the seed never appears in it, in
+        logs, or in status. Never raises.
+        """
+        try:
+            seed = _normalize_context(context)
+            unseeded_reason: str | None = None
+            if not seed:
+                seed, unseeded_reason = None, "empty"
+            elif not self._cfg.asr.context_prompt:
+                seed, unseeded_reason = None, "disabled"
+            out = self._start_fenced(
+                seed, streaming=streaming, timeout=timeout, reject_busy=True
+            )
+            return self._context_reply(out, unseeded_reason=unseeded_reason)
+        except Exception:
+            logger.exception("start-context failed (not armed)")  # no request data in the message
+            return {"ok": False, "listening": False, "context_seeded": False,
+                    "error": "start-context failed: internal error"}
+
+    def _context_reply(self, out: ArmOutcome, *, unseeded_reason: str | None) -> dict:
+        """Sanitized reply for start-context. Fixed error text per ArmOutcome.reason; no request data."""
+        if not out.ok:
+            errors = {
+                "busy": "start-context rejected: busy (arming, listening or draining)",
+                "seed-unconfirmed": "start-context failed: context seed unconfirmed (not armed)",
+                "prompt-unconfirmed": "start-context failed: prompt state unknown (not armed)",
+                "load-failed": f"model load failed: {self._load_error}",
+                "aborted": "start-context aborted",
+                "superseded": "start-context superseded",
+            }
+            error = errors.get(out.reason, f"start-context failed: {out.reason}")
+            return {"ok": False, "listening": False, "context_seeded": False, "error": error}
+        confirmed = out.context_seeded is True and callable(
+            getattr(self._host, "prime_prompt", None)
+        )
+        if confirmed:  # a best-effort put is NOT confirmation (§4.8.1 A)
+            reply = {"ok": True, "context_seeded": True}
+            if out.tokens is not None:
+                reply["context_tokens"] = out.tokens  # opaque count, never text
+            return {**reply, **self.status_snapshot()}
+        return {"ok": True, "context_seeded": False,
+                "context_reason": unseeded_reason or "unavailable", **self.status_snapshot()}
 
     def start(self, streaming: bool | None = None) -> None:
         """Arm the mic (lazy-loading the recorder-host child on the first arm) — via the fenced
@@ -3245,6 +3319,26 @@ class VoiceTypingDaemon:
 # empirical proof.
 
 
+_CONTEXT_MAX_BYTES: int = 4096  # §4.8.1 A: newest <= 4 KiB of pre-caret text (code-point boundary)
+
+
+def _normalize_context(text: object) -> str:
+    """Newest <= _CONTEXT_MAX_BYTES of `text`, UTF-8-safe, stripped; "" for anything non-str/empty.
+    Deliberately duplicated with ctl._utf8_suffix: the server must not trust the client (any
+    same-user process can hit the socket). Never raises.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    raw = text.encode("utf-8", errors="replace")
+    if len(raw) > _CONTEXT_MAX_BYTES:
+        raw = raw[-_CONTEXT_MAX_BYTES:]
+        i = 0
+        while i < 3 and i < len(raw) and 0x80 <= raw[i] <= 0xBF:  # drop a cut continuation byte
+            i += 1
+        raw = raw[i:]
+    return raw.decode("utf-8", errors="replace").strip()
+
+
 def _cmd_streaming(cmd: object) -> "bool | None":
     """Per-session output mode requested by a socket command: True = stream (live partials),
     False = block (whole final typed once at utterance end), None = the configured default
@@ -3275,6 +3369,17 @@ class ControlServer:
       {"cmd":"cancel"}                         -> {"ok":true, **daemon.status_snapshot()}  (idempotent; T7.S1)
       {"cmd":"quit"}                           -> {"ok":true,"shutting_down":true}  (+ request_shutdown)
       {"cmd":"session"}                        -> session reply (R.6 recovery surface; session_reply)
+      {"cmd":"start-context","context":"...","mode":"block"|"stream"}
+                                   -> §4.8.1 A context-only start (P1.M1.T2.S5): the EXISTING
+                                      focus-based delivery (keyboard injection into the focused
+                                      window) with a first-utterance decode seed — NOT a pinned
+                                      native editor session (§4.8.1 B; the native v1 owner/lease is
+                                      P1.M1.T3.S4 / P1.M1.T4.S7).
+                                      {"ok":true,"context_seeded":true,"context_tokens":N,**status}
+                                      | {"ok":true,"context_seeded":false,
+                                         "context_reason":"empty"|"disabled"|"unavailable",**status}
+                                      | {"ok":false,"listening":false,"context_seeded":false,"error":"..."}
+                                      'busy' while arming/listening/draining; the seed is never echoed.
       malformed JSON (incl. empty/whitespace-only lines — BUG-005: silence would hang a
                                    client forever on this timeout-less socket)
                                    -> {"ok":false,"error":"malformed JSON: ..."}
@@ -3472,6 +3577,18 @@ class ControlServer:
             return (
                 self._arm_response()
             )  # ok:false+error if the first arm's model load failed (§4.2bis)
+        if cmd == "start-context":  # P1.M1.T2.S5 (§4.8.1 A): context-only FOCUS start
+            mode_name = msg.get("mode")
+            if mode_name is not None and mode_name not in ("block", "stream"):
+                # Fixed message: the bad value is NEVER echoed back.
+                return {"ok": False, "listening": False, "context_seeded": False,
+                        "error": "start-context rejected: mode must be 'block' or 'stream'"}
+            if "context" not in msg or not isinstance(msg.get("context"), (str, type(None))):
+                # No str()-coercion (a dict/number context must not become prompt text).
+                return {"ok": False, "listening": False, "context_seeded": False,
+                        "error": "start-context rejected: 'context' must be a string"}
+            streaming = None if mode_name is None else (mode_name == "stream")
+            return self._daemon.start_context(msg["context"], streaming=streaming)
         if cmd == "stop":
             self._daemon.stop()
             return {"ok": True, **self._daemon.status_snapshot()}
