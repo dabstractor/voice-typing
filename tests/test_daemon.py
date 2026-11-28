@@ -5731,3 +5731,258 @@ def test_stream_to_block_rearm_leaves_the_typed_tail_alone():
     d._on_partial("ignored partial")
     d.on_final("blocked sentence")
     assert be.typed == ["streamed words", "blocked sentence "]  # no ("bs", n) entries
+
+
+# ===========================================================================
+# P1.M1.T2.S3 — fenced start: capture gated on current priming (D3.1 mandate,
+# system_context.md "Confirmed seed before capture"). The seam (_start_fenced)
+# reserves the arm under _lock, runs load + the confirmed prime_prompt OUTSIDE
+# it, and ATOMICALLY revalidates under _lock before the mic opens: a seed arm
+# captures only on 'applied'; a plain arm after a seeded session captures only
+# after a CONFIRMED clear (unconfirmable -> host isolated, never reused blind);
+# the legacy no-channel path is byte-identical to the pre-seam sequence. A
+# stop/shutdown/drain/newer reservation/dead host between prime and commit
+# aborts the commit — stale results are harmless. Counts-only assertions; the
+# fake mirrors S2's PrimeResult by attribute (never text in outcomes).
+# ===========================================================================
+
+
+class _PrimeResult:
+    """Duck-typed recorder_host.PrimeResult (S2's contract), consumed by attribute."""
+
+    def __init__(self, state, tokens, lanes, generation, reason):
+        self.state = state
+        self.tokens = tokens
+        self.lanes = lanes
+        self.generation = generation
+        self.reason = reason
+
+
+class _PrimeableFakeHost(_FakeHost):
+    """_FakeHost + a scripted confirmed-prime seam (P1.M1.T2.S3).
+
+    prime_prompt records every (text, timeout) call; an optional Event gate parks the caller
+    (a delayed ACK / in-flight prime); prime_raise simulates a host violating S2's never-raise
+    contract; prime_results scripts per-text outcomes (default: applied for a seed, clear for
+    None). The gate HONORS the timeout kwarg (like the real host): a wait that times out returns
+    the unconfirmed result instead of parking forever. device carries 'context_prompt': True so
+    _load_host's ready-evidence gate sees the capability (like the real PromptedExecutor child).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.prime_calls: list = []
+        self.prime_gate = None  # threading.Event | None
+        self.prime_raise = None
+        self.prime_results = {}  # keyed by text (a seed string, or None for the clear)
+        self.prompts: list = []  # set_prompt recording (the legacy clear must NOT fire here)
+        self.device = {
+            **self.device,
+            "context_prompt": True,  # ready evidence: the confirmed channel is up
+        }
+
+    def set_prompt(self, text):
+        self.prompts.append(text)
+
+    def prime_prompt(self, text, *, timeout=5.0):
+        self.prime_calls.append((text, timeout))
+        if self.prime_gate is not None and not self.prime_gate.wait(timeout=timeout):
+            return _PrimeResult("unconfirmed", None, 0, 1, "timeout")
+        if self.prime_raise is not None:
+            raise self.prime_raise
+        res = self.prime_results.get(text)
+        if res is None:
+            res = _PrimeResult(
+                state="applied" if text else "clear",
+                tokens=7 if text else None,
+                lanes=1 if text else 0,  # 0 lanes = KNOWN clear (S2 "no-lane")
+                generation=1,
+                reason="ok",
+            )
+        return res
+
+
+def _primeable_factory(script=None):
+    """host_factory returning a _PrimeableFakeHost, optionally scripted before the daemon sees it."""
+
+    def _factory(cfg, feedback, latency, on_final, on_partial, on_speech, **kw):
+        host = _PrimeableFakeHost(cfg, feedback, latency, on_final, on_partial, on_speech, **kw)
+        if script is not None:
+            script(host)
+        return host
+
+    return _factory
+
+
+def test_seed_arm_cold_order_load_prime_then_mic():
+    """COLD seed arm: load-complete -> prime_prompt(seed) -> set_microphone(True); NO set_prompt
+    between prime and capture; ArmOutcome is ok/seed-applied/context_seeded=True/tokens — no text."""
+    host_box = {}
+
+    def _script(h):
+        host_box["h"] = h
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    out = d.start_with_seed("the quick brown fox")
+    h = host_box["h"]
+    assert out.ok is True and out.context_seeded is True and out.tokens == 7
+    assert out.reason == "seed-applied"
+    assert h.prime_calls == [("the quick brown fox", pytest.approx(5.0, abs=1.0))]  # load → prime
+    assert h.recorder.mic == [True]  # capture opened AFTER the prime (single arm)
+    assert h.prompts == []  # no legacy clear anywhere near a seeded arm
+    assert d.is_listening() is True and d._seed_active is True
+    assert "the quick brown fox" not in repr(out)  # ArmOutcome is text-free
+
+
+def test_seed_arm_warm_reprime_no_clear_between_prime_and_mic():
+    """WARM seed arm: plain start first (no prior seed -> NO prime call), disarm, then a seed arm
+    re-primes the RESIDENT child (no reload) and only then opens the mic."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory())
+    d.start()
+    assert d._host.prime_calls == []  # plain, no prior seed: nothing to confirm (legacy-free skip)
+    d.stop()
+    assert _wait_for(lambda: not d.is_listening(), 2.0)
+    out = d.start_with_seed("seed text")
+    h = d._host
+    assert out.ok is True and out.context_seeded is True and out.reason == "seed-applied"
+    assert h.prime_calls[-1][0] == "seed text"  # re-prime on the resident child
+    assert h.recorder.mic[-1] is True  # capture AFTER the prime
+    assert h.prompts == []  # a seeded arm never clears
+    assert h.stop_calls == 0  # warm: no reload
+
+
+def test_plain_arm_after_seed_confirms_clear_before_mic():
+    """Plain arm after a seeded session must NOT inherit the seed: a CONFIRMED clear
+    (prime_prompt(None) -> clear) precedes capture; _seed_active flips False."""
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory())
+    d.start_with_seed("seed text")
+    assert d._seed_active is True
+    d.stop()
+    assert _wait_for(lambda: not d.is_listening(), 2.0)
+    d.start()  # PLAIN arm — must not inherit
+    h = d._host
+    assert h.prime_calls[-1][0] is None  # CONFIRMED clear (prime_prompt(None))
+    assert h.recorder.mic[-1] is True  # then capture
+    assert d._seed_active is False and d.is_listening() is True
+
+
+def test_plain_arm_unconfirmable_clear_isolates_host():
+    """Plain arm with an UNCONFIRMABLE clear (unknown prompt in a resident child): the host is
+    ISOLATED (dropped + bounded teardown, phase 'unloaded') — never captured, never reused blind."""
+    def _script(h):
+        h.prime_results[None] = _PrimeResult("unconfirmed", None, 1, 1, "executor-error")
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    d.start_with_seed("seed text")
+    d.stop()
+    assert _wait_for(lambda: not d.is_listening(), 2.0)
+    d.start()  # plain arm; the clear comes back unconfirmed
+    assert d.is_listening() is False  # NO capture
+    assert d._host is None and d._models_loaded is False  # host ISOLATED
+    assert d._seed_active is False
+    assert fb_phase(d) == "unloaded"
+    assert "prompt-unconfirmed" in (d._load_error or "")
+
+
+def fb_phase(d):
+    """The phase string from the daemon's feedback mirror (test helper for the S3 section)."""
+    return d._feedback.phases[-1]
+
+
+def test_seed_arm_unconfirmed_fails_closed_no_capture():
+    """Seed arm + unconfirmed prime (UNKNOWN prompt state): fail closed — no capture, ok=False,
+    context_seeded=None, sanitized reason; the host stays idle-resident."""
+    def _script(h):
+        h.prime_results["seed text"] = _PrimeResult("unconfirmed", None, 1, 1, "timeout")
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    out = d.start_with_seed("seed text")
+    assert out.ok is False and out.context_seeded is None and out.reason == "seed-unconfirmed"
+    assert d._host.recorder.mic == []  # mic NEVER opened
+    assert d.is_listening() is False and d._seed_active is False
+    assert d._load_error == "context seed unconfirmed"  # sanitized reason for _arm_response
+
+
+def test_seed_arm_timeout_budget_bounded_no_capture():
+    """The prime wait is bounded by the TOTAL start deadline: a gated prime past the budget returns
+    unconfirmed within ~budget+slack; the mic never opens; no thread is left parked."""
+    def _script(h):
+        h.prime_gate = threading.Event()  # never released within the budget
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    t0 = _time.monotonic()
+    out = d.start_with_seed("s", timeout=0.4)  # SHORT total deadline (test seam)
+    dt = _time.monotonic() - t0
+    assert out.ok is False and out.reason == "seed-unconfirmed" and out.context_seeded is None
+    assert dt < 3.0  # bounded by the 0.4 s deadline (+load), not the 5 s default
+    assert d._host.recorder.mic == []  # no capture
+    assert d.is_listening() is False
+    d._host.prime_gate.set()  # release the fake (cleanup)
+
+
+def test_stop_during_prime_aborts_commit_no_capture():
+    """A stop landing between the prime and the commit aborts it: no capture, and the installed
+    seed is CONFIRMED-cleaned (prime(None) -> clear) so nothing is left for the next arm."""
+    def _script(h):
+        h.prime_gate = threading.Event()
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    t = threading.Thread(target=lambda: d.start_with_seed("s"), daemon=True)
+    t.start()
+    assert _wait_for(lambda: len(d._host.prime_calls) == 1, 2.0)  # prime in flight (gated)
+    d.stop()  # the stop lands while the prime is parked (bumps the disarm marker)
+    d._host.prime_gate.set()  # NOW the prime returns applied — too late: the commit is fenced
+    t.join(3.0)
+    assert not t.is_alive()
+    assert d.is_listening() is False  # the fenced arm did NOT capture
+    assert d._seed_active is False  # abort cleanup confirmed the clear
+    assert d._host is not None and True not in d._host.recorder.mic  # mic never OPENED (stop's mic-off is fine)
+    assert d._host.prime_calls[-1][0] is None  # the abort's confirmed-cleanup prime
+
+
+def test_superseded_arm_stale_result_is_harmless():
+    """A superseded arm's late prime result changes nothing: its commit fails revalidation and its
+    installed seed is cleaned up (confirmed clear) — the stale arm never captures."""
+    def _script(h):
+        h.prime_gate = threading.Event()
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    t = threading.Thread(target=lambda: d.start_with_seed("first"), daemon=True)
+    t.start()
+    assert _wait_for(lambda: len(d._host.prime_calls) == 1, 2.0)
+    d._arm_seq += 1  # simulate the newer reservation superseding the in-flight arm
+    d._host.prime_gate.set()  # the FIRST arm's prime returns applied AFTER it went stale
+    t.join(3.0)
+    assert not t.is_alive()
+    assert d.is_listening() is False  # the stale arm did NOT capture
+    assert d._seed_active is False  # and left no seed behind (confirmed cleanup)
+    assert d._host.recorder.mic == []
+
+
+def test_failed_load_makes_no_prime_call():
+    """A failed load aborts the seam BEFORE any prime: no prime call, ok=False/load-failed."""
+    host_box = {}
+
+    def _script(h):
+        host_box["h"] = h
+        h.spawn_result = False
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    out = d.start_with_seed("s")
+    assert out.ok is False and out.reason == "load-failed"
+    assert d._host is None  # _load_host dropped the half-spawned host
+    assert host_box["h"].prime_calls == []  # the seam NEVER primed a dead host
+    assert d.is_listening() is False
+
+
+def test_host_prime_raising_fails_closed():
+    """A host violating S2's never-raise contract must not crash the arm: the seam converts the
+    raise into an unconfirmed fail-closed outcome (exception TYPE logged, never the text)."""
+    def _script(h):
+        h.prime_raise = RuntimeError("boom (fake contract violation)")
+
+    d, _fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    out = d.start_with_seed("s")
+    assert out.ok is False and out.reason == "seed-unconfirmed" and out.context_seeded is None
+    assert d._host.recorder.mic == []  # no capture
+    assert "boom" not in repr(out)  # sanitized outcome

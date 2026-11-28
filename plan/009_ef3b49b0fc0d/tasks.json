@@ -113,7 +113,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Confirm private prompt seeds before capture",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Implement reusable Start priming across warm and cold hosts, then expose focus-based context-only starts without changing plain start semantics.",
               "subtasks": [
                 {
@@ -167,7 +167,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "Gate warm and cold capture on current priming",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2",
@@ -193,7 +193,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S4",
                   "title": "Hand off the seed only on the first accepted final",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S3"
@@ -216,7 +216,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S5",
                   "title": "Expose bounded focus-based context starts",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S4",

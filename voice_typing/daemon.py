@@ -114,6 +114,7 @@ be a SEPARATE opt-in integration — it is NOT an output.delivery backend.
 from __future__ import annotations
 
 import collections
+from dataclasses import dataclass
 import inspect
 import json
 import logging
@@ -232,6 +233,34 @@ _DRAIN_TIMEOUT_S: float = 5.0
 # it cannot belong to the cancelled utterance (its audio was discarded at cancel time), so
 # on_final closes the window and PROCESSES it.
 _CANCEL_SUPPRESS_TIMEOUT_S: float = 5.0
+
+# Fenced start seam (P1.M1.T2.S3 — §4.8.1 "confirmed seed before capture"). The native start cap
+# is a TOTAL start deadline (single-flight load + confirmed prompt prime + commit), not per-step;
+# the prime wait is additionally bounded by its own budget (mirrors recorder_host's prime default)
+# so a slow prime can never consume the whole deadline.
+_START_DEADLINE_S: float = 30.0
+_PRIME_BUDGET_S: float = 5.0
+
+
+@dataclass(frozen=True)
+class ArmOutcome:
+    """Sanitized result of the fenced start seam (P1.M1.T2.S3) — safe to repr/log/return.
+
+    Consumers (P1.M1.T2.S4 handoff, S5 focus starts, T3.S4 native owner) read `context_seeded`
+    (True = a confirmed seed is installed and awaits handoff at the first accepted final; False =
+    plain/known-clear; None = unconfirmed/failed) + `reason` (a sanitized code, never user text)
+    + `tokens` (an opaque count, seed-applied only). There is deliberately NO prompt-text field:
+    outcomes travel through logs and control replies, so they must stay text-free.
+    """
+
+    ok: bool
+    listening: bool
+    reason: str  # "ok" | "seed-applied" | "seed-clear" | "seed-unconfirmed" |
+                 # "prompt-unconfirmed" | "seed-cleanup-unconfirmed" | "load-failed" |
+                 # "aborted" | "superseded"
+    context_seeded: bool | None
+    tokens: int | None
+    arm_seq: int
 
 # D3.3 RE-LATCH CHAIN BOUND (P1.M1.T4.S1): max CONSECUTIVE dropped finals since the last
 # HEALTHY close (sentinel consume / timeout self-heal / this cap / fresh arm). Deliberately
@@ -925,6 +954,19 @@ class VoiceTypingDaemon:
         # second arm while _loading blocks on the in-flight load, then sees its result. Condition(_lock) shares the
         # existing lock; existing `with self._lock:` code is unaffected.
         self._load_cond = threading.Condition(self._lock)
+        # P1.M1.T2.S3 — fenced start seam (§4.8.1 confirmed seed before capture). _arm_seq is the
+        # monotonic arm-reservation generation (a newer reservation supersedes an older one's
+        # commit); _arming is the outstanding reservation token (or None); _seed_active records
+        # that a CONFIRMED seed is resident in the child — it PERSISTS ACROSS DISARM (the child
+        # stays resident with the seed; the NEXT arm decides: re-prime on a seed arm, CONFIRMED
+        # clear on a plain arm), so clearing it here would let a plain arm inherit a seed.
+        self._arm_seq = 0
+        self._arming: int | None = None
+        self._seed_active = False
+        # Stop marker for the same seam: bumped by every disarm (stop/toggle-off/auto-stop) so a
+        # stop landing between a reservation and its commit aborts that commit (criterion: "a stop
+        # between prime and commit aborts the commit"). Bookkeeping only — disarm logic unchanged.
+        self._stop_seq = 0
         # Boot lifecycle phase (delta D2/D3): 'idle' if a recorder was injected (loaded), else 'unloaded' (the lazy
         # boot state). _load_host() drives loading->idle; a failed load returns to 'unloaded'. (The feedback
         # models_loaded FIELD + status_snapshot/ctl exposure is P1.M2.T2.S1; T1 tracks the daemon-side
@@ -1048,7 +1090,9 @@ class VoiceTypingDaemon:
         short-circuits True (instant warm arm); there is no mode machinery to compare or reload.
 
         Called by start()/toggle() BEFORE arming — NOT inside _arm() (which holds self._lock; this
-        method acquire-release-reacquires that same lock, so nesting would deadlock). Single-flight
+        method acquire-release-reacquires that same lock, so nesting would deadlock). P1.M1.T2.S3:
+        the fenced start seam `_start_fenced` also calls it OUTSIDE _lock (before a confirmed
+        prompt prime); its own contract is unchanged. Single-flight
         via _load_cond: a second caller while _loading WAITS for the in-flight spawn and returns ITS
         result (never starts a 2nd child). The heavy host.spawn() runs OUTSIDE _lock so concurrent
         status/stop stay responsive during the load.
@@ -1690,11 +1734,18 @@ class VoiceTypingDaemon:
                 )
 
     def _arm(self, streaming: bool | None = None) -> None:
-        """Private: arm mic + set listening + notify. Called under the lock by start/toggle.
+        """Private: arm mic + set listening + notify. Called under the lock by _start_fenced.
 
         `streaming` selects THIS session's output mode (see _session_streaming in __init__):
         None = the configured default, True = stream, False = block. Resolved at every arm
         (not at construction) so a config edited underneath a resident daemon is honored.
+
+        P1.M1.T2.S3: the context-prompt seed/clear POLICY is decided by the fenced seam BEFORE this
+        method runs (a confirmed seed skips the clear — the seed IS the prompt; a confirmed clear
+        proves the child prompt-None; hosts without a confirmed channel get the legacy best-effort
+        clear from the seam's commit step, still before the mic cmd below). This method only arms:
+        it must run LAST (it sets _listening first — once it returns, the run loop may enter
+        text()), so everything abortable happens before it.
 
         set_listening(True) fires the transient 'Recording' start toast (feedback.py). A COLD first
         arm is preceded by a 'Loading…' toast from _load_host(); a warm arm fires only 'Recording'.
@@ -1725,20 +1776,13 @@ class VoiceTypingDaemon:
         )  # P1.M2.T6.S2: NEW session
         if callable(stream_reset):
             stream_reset()  # a fresh arm legitimately unfreezes; engine strings reset for the session
-        # P1.M2.T5.S2: fresh session = fresh rolling context. Reset the daemon-side
-        # trackers, then queue the child prompt CLEAR *before* the arm/mic cmd below:
-        # the child reads its cmd queue FIFO between utterances, so this ordering is
-        # what guarantees a warm re-arm (the child stays resident across disarm/arm,
-        # §4.2bis) never conditions the session's FIRST decode on the previous
-        # session's text — the child blocks in text() right after arming. An
-        # idle-unload respawn starts a fresh child (prompt already None), so the
-        # clear is a harmless no-op there. Gated like the commit-time push (config
-        # AND the child's ready flag); the put is best-effort (S1 contract) — no retries.
-        # P1.M6.T3.S1: the put itself moved verbatim into _clear_context_prompt() — the
-        # FIFO pin (set_prompt("") BEFORE set_microphone(True) below) is load-bearing for
-        # warm re-arm.
+        # P1.M2.T5.S2: fresh session = fresh rolling context (daemon-side trackers reset here).
+        # P1.M1.T2.S3: the context-prompt CLEAR/SEED policy moved into _start_fenced — the prompt
+        # state is CONFIRMED (applied / proven clear) BEFORE this arm opens the mic, never an
+        # unconditional fire-and-forget clear (which would erase a confirmed seed). The legacy
+        # best-effort clear for hosts WITHOUT a confirmed channel fires in the seam's commit step,
+        # still BEFORE this mic cmd (the FIFO pin holds).
         self._rev1_committed = ""
-        self._clear_context_prompt()
         self._armed_monotonic = (
             time.monotonic()
         )  # keypress-disarm grace window anchor (note_user_keypress)
@@ -1778,6 +1822,7 @@ class VoiceTypingDaemon:
         (bugfix validation NEW-2)
         """
         self._listening.clear()
+        self._stop_seq += 1  # P1.M1.T2.S3: a stop landed — aborts any in-flight fenced arm's commit
         self._final_pending = False  # Issue 2: disarm clears any stale stray-partial flag (defense in depth)
         self._utterance_finalized = (
             False  # validation Issue 2: session ends -> no final on record
@@ -2492,17 +2537,180 @@ class VoiceTypingDaemon:
         except Exception:
             logger.exception("host.abort() raised (best-effort; ignored)")
 
-    def start(self, streaming: bool | None = None) -> None:
-        # `streaming`: None = config default, True/False = THIS session's output mode (_arm).
-        # Lazy load (PRD §4.2bis): spawn the recorder-host child on the first arm. _load_host() is a
-        # single-flight no-op once resident (Rev 2 single path — there is nothing to reload into).
-        # Called OUTSIDE _lock (it acquire-release-reacquires that lock; under _lock it would
-        # deadlock). A cold load fires a 'Loading…' toast inside _load_host before the spawn; the arm
-        # then fires the 'Recording' start toast.
-        if not self._load_host():
-            return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
+    def _start_fenced(self, seed: str | None, *, streaming: bool | None = None,
+                      timeout: float = _START_DEADLINE_S) -> ArmOutcome:
+        """Reserve → load → prime → atomic revalidate → arm (P1.M1.T2.S3; §4.8.1).
+
+        Reservation + the final arm decision run UNDER self._lock; the heavy waits (_load_host's
+        spawn, the host's confirmed prime_prompt) run OUTSIDE it so status/stop/quit stay
+        responsive and the reader is never blocked. The mic is never opened until the prompt state
+        is KNOWN: a seed arm captures only on 'applied' (or a known-clear), a plain arm after a
+        seeded session captures only after a CONFIRMED clear (unconfirmable → the host is isolated,
+        never reused blind), and a plain arm with no prior seed keeps the legacy best-effort clear
+        (hosts without a confirmed channel) or skips it (nothing to clear). A stop/shutdown/drain/
+        newer-reservation/dead-host between prime and commit aborts the commit — a late or stale
+        prime result can never re-arm (the _arming/_arm_seq token is the daemon-side fence; the
+        host token is recorder_host's). Never raises; never logs or returns prompt text.
+        """
+        t0 = time.monotonic()
         with self._lock:
-            self._arm(streaming=streaming)
+            self._arm_seq += 1
+            tok = self._arm_seq
+            self._arming = tok  # a newer reservation supersedes an older one
+            stop_seq0 = self._stop_seq
+        try:
+            # --- load OUTSIDE the lock (single-flight inside _load_host; it re-acquires the lock) ---
+            if not self._load_host():
+                return self._abort_start(tok, None, "load-failed")
+            host = self._host
+            primer = getattr(host, "prime_prompt", None) if host is not None else None
+            remaining = max(0.0, timeout - (time.monotonic() - t0))
+            want_seed = seed is not None
+            need_clear = (not want_seed) and self._seed_active
+            result = None
+            if callable(primer) and (want_seed or need_clear):
+                # --- confirmed prime OUTSIDE the lock, bounded by the start deadline ---
+                budget = min(_PRIME_BUDGET_S, remaining)
+                try:
+                    result = primer(seed if want_seed else None, timeout=budget)
+                except Exception as exc:  # defensive: a misbehaving host — TYPE name only (no text)
+                    logger.warning(
+                        "start: prime_prompt raised (%s) — treating as unconfirmed",
+                        type(exc).__name__,
+                    )
+                    result = None
+                state = getattr(result, "state", "unconfirmed")
+                if want_seed and state not in ("applied", "clear"):
+                    # UNKNOWN prompt state and the user asked for a SEEDED session: fail closed —
+                    # an unknown prompt is not a seeded session (no capture; host stays idle).
+                    return self._abort_start(tok, host, "seed-unconfirmed", installed=False)
+                if need_clear and state != "clear":
+                    # Unknown prompt in a resident child while the user asked for a PLAIN arm:
+                    # isolate the host so the next arm cold-loads a prompt-None child (fail closed).
+                    self._isolate_host("prompt-unconfirmed")
+                    return ArmOutcome(False, False, "prompt-unconfirmed", None, None, tok)
+            installed = bool(
+                want_seed and result is not None and getattr(result, "state", None) == "applied"
+            )
+            # --- ATOMIC revalidate + commit UNDER the lock (last abortable step before capture) ---
+            abort_reason = None
+            with self._lock:
+                stale = self._arm_seq != tok or self._arming != tok
+                # The listening gate applies ONLY to the primed path (want_seed/need_clear): those
+                # arms carry prompt semantics the fence must protect. The pure-legacy path (no
+                # confirmed channel, no seed, no prior seed) keeps the historical re-arm semantics
+                # (start() on a listening daemon re-arms — cancel-suppression resets + mic-probe
+                # TTL tests rely on it); a host without a prime channel can never hold a confirmed
+                # seed (_seed_active stays False), so nothing is unprotected.
+                primed = want_seed or need_clear
+                if (
+                    stale
+                    or self._shutdown.is_set()
+                    or (primed and self._listening.is_set())
+                    or self._drain
+                    or self._loading
+                    or self._host is not host
+                    or not getattr(host, "is_alive", True)
+                    or self._stop_seq != stop_seq0
+                ):
+                    abort_reason = "superseded" if stale else "aborted"
+                else:
+                    # Commit: the prompt state is KNOWN — apply the policy, then capture.
+                    if want_seed:
+                        self._seed_active = installed  # applied → the seed IS the prompt; clear → known-clear
+                    elif need_clear:
+                        self._seed_active = False  # CONFIRMED clear
+                    elif not callable(primer):
+                        self._clear_context_prompt()  # legacy best-effort (no confirmed channel)
+                    # else: plain arm, channel present, no prior seed → prompt provably None: skip
+                    self._load_error = None
+                    self._arming = None
+                    self._arm(streaming=streaming)
+                    return ArmOutcome(
+                        True,
+                        True,
+                        "seed-applied" if want_seed else ("seed-clear" if need_clear else "ok"),
+                        True if want_seed else False,
+                        getattr(result, "tokens", None) if want_seed else None,
+                        tok,
+                    )
+            return self._abort_start(tok, host, abort_reason, installed=installed)
+        finally:
+            # EVERY exit path clears our reservation (a stale non-None _arming would confuse the
+            # next reservation's revalidation). Another arm's newer token is left alone.
+            with self._lock:
+                if self._arming == tok:
+                    self._arming = None
+
+    def _abort_start(self, tok: int, host, reason: str, *, installed: bool = False) -> ArmOutcome:
+        """Abort a fenced start; if a seed may be resident in the child (THIS arm installed one, or
+        an earlier confirmed one is still active), CONFIRM its cleanup (prime(None) → clear) or
+        ISOLATE the host — never leave a seed for the next arm (P1.M1.T2.S3 §4.2). Called OUTSIDE
+        _lock (the cleanup prime must not run under it). Never raises; the only log content is an
+        exception TYPE name — never prompt text. Reasons: load-failed (host already dropped by
+        _load_host; its _load_error stands), seed-unconfirmed (no capture; host stays idle-resident;
+        _load_error carries the sanitized reason for _arm_response's ok:false), aborted/superseded
+        (commit lost a race; cleanup only when a seed may reside)."""
+        if reason in ("aborted", "superseded") and host is not None and (installed or self._seed_active):
+            primer = getattr(host, "prime_prompt", None)
+            cleared = False
+            if callable(primer):
+                try:
+                    cleared = getattr(primer(None, timeout=_PRIME_BUDGET_S), "state", None) == "clear"
+                except Exception as exc:
+                    logger.warning("start: abort cleanup prime raised (%s)", type(exc).__name__)
+            if cleared:
+                with self._lock:
+                    self._seed_active = False
+            else:
+                self._isolate_host("seed-cleanup-unconfirmed")
+        if reason == "seed-unconfirmed":
+            self._load_error = "context seed unconfirmed"
+        return ArmOutcome(False, False, reason, None, None, tok)
+
+    def _isolate_host(self, reason: str) -> None:
+        """Retire a host whose prompt state is UNKNOWN (fail closed, P1.M1.T2.S3): drop the handle
+        + phase 'unloaded' so the next arm cold-loads a fresh prompt-None child, then bounded
+        best-effort teardown OUTSIDE _lock (mirrors _bounded_shutdown's body — its own contract is
+        unchanged). Never raises; sets _load_error to the sanitized reason so the control socket
+        reports ok:false."""
+        with self._lock:
+            host = self._host
+            self._host = None
+            self._models_loaded = False
+            self._context_prompt_active = None  # no child → no capability
+            self._seed_active = False  # the child is going away; no seed can persist it
+            self._feedback.set_phase("unloaded")
+            self._feedback.set_models_loaded(False)
+            self._load_error = reason
+        if host is not None:
+            try:
+                host.stop(timeout=5.0)
+            except Exception:
+                logger.exception("start: isolating an unconfirmable host failed (ignored)")
+
+    def start_with_seed(self, seed: str | None, *, streaming: bool | None = None,
+                        timeout: float = _START_DEADLINE_S) -> ArmOutcome:
+        """Fenced start with a §4.8.1 initial-prompt seed (P1.M1.T2.S3). Returns a sanitized
+        ArmOutcome; the mic opens only on a CONFIRMED applied seed (or a known-clear when seed is
+        None). Callers (S5 focus-based starts, T3.S4 native owner) surface context_seeded/reason
+        in their replies — never the seed text itself."""
+        return self._start_fenced(seed, streaming=streaming, timeout=timeout)
+
+    def start(self, streaming: bool | None = None) -> None:
+        """Arm the mic (lazy-loading the recorder-host child on the first arm) — via the fenced
+        start seam (P1.M1.T2.S3).
+
+        `streaming`: None = config default, True/False = THIS session's output mode (_arm). The
+        seam RESERVES the arm under _lock, runs the heavy waits (the child spawn in _load_host, a
+        §4.8.1 confirmed prompt prime) OUTSIDE _lock, and ATOMICALLY revalidates under _lock before
+        the capture — the mic never opens until the context-prompt state is KNOWN (applied /
+        confirmed clear) or the host is isolated on uncertainty. A plain start carries no seed
+        (start_with_seed is the seeded entry, S5/T3.S4); with no seed and no prior seed the behavior
+        matches the pre-seam sequence (load → arm; the best-effort prompt clear still precedes the
+        mic cmd for hosts without a confirmed channel). A load failure still leaves _load_error set
+        so the control socket reports ok:false via _arm_response."""
+        self._start_fenced(None, streaming=streaming)
 
     def stop(self) -> None:
         # Graceful stop: if an utterance is in flight, let the final model finish + emit its text
@@ -2519,18 +2727,16 @@ class VoiceTypingDaemon:
 
         The read/act split is race-tolerant exactly like the abort()-outside-_lock design (the
         listening Event + on_final gate are the source of truth; toggle is user-paced): _listening
-        is read under _lock, then _load_host runs OUTSIDE _lock (it acquire-release-reacquires that
-        lock; calling it under _lock deadlocks), then _arm runs under _lock.
+        is read under _lock, then the fenced arm (`_start_fenced`, P1.M1.T2.S3) runs with NO lock
+        held across its waits — reserve under _lock, load/prime outside, atomic revalidate +
+        capture under _lock.
         """
         with self._lock:
             listening = self._listening.is_set()
         if listening:
             self._request_stop()  # armed → disarm
             return
-        if not self._load_host():
-            return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
-        with self._lock:
-            self._arm(streaming=streaming)
+        self._start_fenced(None, streaming=streaming)
 
     def request_shutdown(self) -> None:
         """Signal run() to exit + tear down the child so a blocked text() unblocks (BUG-1 fix).
