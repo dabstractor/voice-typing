@@ -1,0 +1,17 @@
+{
+  "role": "delta",
+  "item": "",
+  "key": "session",
+  "agent": "pioa",
+  "session": "prd-delta-009_ef3b49b0fc0d",
+  "tag": "delta-session-992233",
+  "cwd": "/home/dustin/projects/voice-typing",
+  "prompt_file": "/home/dustin/projects/voice-typing/plan/009_ef3b49b0fc0d/agents/delta-session.prompt.md",
+  "started": 1795844079,
+  "artifacts": [
+    "PRD as broken down: /home/dustin/projects/voice-typing/plan/009_ef3b49b0fc0d/prd_snapshot.md",
+    "Your architecture research: /home/dustin/projects/voice-typing/plan/009_ef3b49b0fc0d/architecture/",
+    "The task list you produced: /home/dustin/projects/voice-typing/plan/009_ef3b49b0fc0d/tasks.json"
+  ],
+  "args": []
+}
