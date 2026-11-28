@@ -134,6 +134,12 @@ import voice_typing.textproc as textproc
 import voice_typing.typing_backends as typing_backends
 from voice_typing import cuda_check
 from voice_typing.config import VoiceTypingConfig
+from voice_typing.editor_protocol import (
+    MAX_FRAME_BYTES,
+    FrameError,
+    FrameReader,
+    encode_line,
+)
 
 # P1.M2.T7.S2: passive evdev Backspace-cancel listener (PRD §4.2quater). Pure-python import —
 # evdev pulls no torch/RealtimeSTT into the daemon process (import-purity rule, §4.2bis).
@@ -3385,6 +3391,16 @@ class ControlServer:
                                    -> {"ok":false,"error":"malformed JSON: ..."}
       non-dict JSON                            -> {"ok":false,"error":"request must be a JSON object"}
       unknown/missing cmd                      -> {"ok":false,"error":"unknown command: ..."}
+
+    Framing (PRD §4.8.1 B; P1.M1.T3.S1): every request AND every reply/live event is ONE UTF-8
+    JSON line bounded by 32 KiB INCLUDING the newline, enforced on raw bytes WHILE READING
+    (editor_protocol.FrameReader — never an unbounded text readline). Oversized frame -> ONE
+    {"ok":false,"error":"frame too large (max 32768 bytes)"} reply, then the reader resyncs at
+    the next real frame boundary (one reply per bad frame — the lockstep). Invalid UTF-8 -> ONE
+    {"ok":false,"error":"invalid UTF-8 frame"} reply, connection continues. Partial frame at
+    EOF -> ONE {"ok":false,"error":"partial frame at EOF"} reply, then the connection closes.
+    Error replies NEVER echo the offending bytes. reader.unread preserves coalesced bytes past a
+    frame's newline for the native protocol handoff (P1.M1.T3.S3 consumes it).
     """
 
     def __init__(
@@ -3489,37 +3505,67 @@ class ControlServer:
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn: Any) -> None:
-        """Per-connection readline loop: parse JSON, dispatch, write one JSON line per request.
+        """Per-connection framed read loop: parse JSON, dispatch, write one JSON line per request.
 
         EVERY request line — including empty/whitespace-only ones (BUG-005) — gets exactly one
         response line: an empty line is just malformed JSON, and silence would hang a client
         forever on this timeout-less socket (the exact AGENTS.md wedge-hazard class).
+
+        Reads via editor_protocol.FrameReader: a 32 KiB byte bound PER FRAME INCLUDING the newline,
+        enforced while reading raw bytes (before any unbounded buffering — PRD §4.8.1 B). An
+        oversized frame gets ONE "frame too large (max 32768 bytes)" reply, then the reader resyncs
+        at the next real frame boundary (the runaway frame's tail + newline are consumed — never a
+        phantom empty frame, never a second spurious reply). Invalid UTF-8 (strict decode —
+        UnicodeDecodeError is a ValueError, NOT an OSError, so it must be caught explicitly) gets
+        ONE "invalid UTF-8 frame" reply and the connection CONTINUES. Bytes without a newline at
+        EOF get ONE "partial frame at EOF" reply, then the connection closes; clean EOF just
+        closes. Error replies never echo the offending bytes. reader.unread preserves coalesced
+        bytes past a frame's newline — the protocol-handoff seam the native owner pump (T3.S3)
+        consumes; no read deadline exists here by design (clients bound themselves with
+        VOICECTL_TIMEOUT; T3.S3 adds owner-pump timers around, not inside, the reader).
         """
-        rfile = wfile = None
+        reader = FrameReader(conn.recv)  # byte-bounded (32 KiB incl. newline); preserves unread for handoff
+        wfile = None
         try:
-            rfile = conn.makefile("r", encoding="utf-8", newline="\n")
-            wfile = conn.makefile("w", encoding="utf-8", newline="\n")
-            try:
-                for line in rfile:  # one JSON object per line (PRD §4.2(3))
-                    line = line.strip()
-                    # No empty-line special case (BUG-005): "" falls through to _dispatch,
-                    # where json.loads("") raises ValueError -> the standard malformed-JSON
-                    # error reply. One response line per request line, no exceptions.
-                    response = self._dispatch(line)
-                    wfile.write(json.dumps(response) + "\n")
-                    wfile.flush()  # CRITICAL: makefile("w") buffers; flush every reply
-                    if response.get("shutting_down"):
-                        break  # quit -> reply sent, then close this connection
-            finally:
-                for f in (rfile, wfile):
-                    if f is not None:
-                        try:
-                            f.close()
-                        except OSError:
-                            pass
+            wfile = conn.makefile("wb")  # binary: encode_line() emits BYTES (one JSON line each)
+            while True:
+                try:
+                    raw = reader.read_frame_bytes()
+                except FrameError as fe:
+                    if fe.reason == "eof":
+                        if fe.detail == "partial":  # bytes without a newline, then EOF
+                            wfile.write(encode_line({"ok": False, "error": "partial frame at EOF"}))
+                            wfile.flush()
+                        break  # clean EOF: client closed — done
+                    if fe.reason == "frame-too-large":
+                        text = f"frame too large (max {MAX_FRAME_BYTES} bytes)"
+                    else:  # "io": recv failed — nothing more to read
+                        break
+                    wfile.write(encode_line({"ok": False, "error": text}))  # no raw echo
+                    wfile.flush()
+                    continue  # lockstep: one reply per bad frame, then resynced
+                try:
+                    line = raw.decode("utf-8")  # strict; never errors="replace"
+                except UnicodeDecodeError:
+                    wfile.write(encode_line({"ok": False, "error": "invalid UTF-8 frame"}))
+                    wfile.flush()
+                    continue
+                # No empty-line special case (BUG-005): "" falls through to _dispatch,
+                # where json.loads("") raises ValueError -> the standard malformed-JSON
+                # error reply. One response line per request line, no exceptions.
+                response = self._dispatch(line.strip())
+                wfile.write(encode_line(response))
+                wfile.flush()  # CRITICAL: makefile("w") buffers; flush every reply
+                if response.get("shutting_down"):
+                    break  # quit -> reply sent, then close this connection
         except OSError:
-            pass  # client gone mid-line; worker exits cleanly
+            pass  # client gone mid-frame; worker exits cleanly
         finally:
+            if wfile is not None:
+                try:
+                    wfile.close()
+                except OSError:
+                    pass
             try:
                 conn.close()
             except OSError:
