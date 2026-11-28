@@ -14,12 +14,12 @@
 #   (4) prefetch models                      -> ~/.cache/huggingface (idempotent; warn-only on fail)
 #   (5) install + daemon-reload + enable + restart the systemd user unit
 #   (6) copy config.toml to $XDG_CONFIG_HOME/voice-typing/ IF ABSENT
-#   (7) print usage + Hyprland keybind instruction
+#   (7) print usage and troubleshooting commands
 #
 # The daemon starts NOT-listening (PRD §4.9) — it never hot-mics on boot; `voicectl toggle` arms it.
 #
 # This script's stdout IS the user-facing install/usage quick-start (Mode A docs). README (P2.M1.T2.S1)
-# copies the usage/hypr snippets verbatim — keep them stable.
+# documents the same CLI entry points.
 #
 # FULL PATHS are used for uv/python because the user's zsh aliases them (PRD §2). This is bash, not zsh.
 set -euo pipefail
@@ -172,11 +172,8 @@ else
 fi
 
 # --- (6b) install the stable voicectl launcher (VT-003) ---------------------------
-# hypr-binds.conf invokes voicectl via $HOME/.local/bin/voicectl (Hyprland runs `bind exec` through
-# /bin/sh -c, which expands $HOME). Maintain a symlink there -> $REPO/.venv/bin/voicectl so the
-# binds work regardless of which user runs it or where the repo was cloned, with NO hardcoded
-# /home/<user> path. Safe: only create when absent, or refresh when it already points here; never
-# clobber a foreign file the user may have at that path.
+# Provide a stable CLI entry point independent of the repo's location. Create it only when
+# absent; never clobber a launcher the user already has.
 LAUNCHER="$HOME/.local/bin/voicectl"
 mkdir -p "$HOME/.local/bin"
 if [ -e "$LAUNCHER" ] || [ -L "$LAUNCHER" ]; then
@@ -184,14 +181,14 @@ if [ -e "$LAUNCHER" ] || [ -L "$LAUNCHER" ]; then
     : # already correct (re-install / idempotent)
   else
     echo "install.sh: WARNING — $LAUNCHER already exists and is not this repo's voicectl;" \
-         "leaving it in place. hypr-binds.conf will use it; remove it or edit hypr-binds.conf if unintended." >&2
+         "leaving it in place. Use $REPO/.venv/bin/voicectl for this installation." >&2
   fi
 else
   ln -s "$REPO/.venv/bin/voicectl" "$LAUNCHER"
   echo "    installed launcher $LAUNCHER -> $REPO/.venv/bin/voicectl"
 fi
 
-# --- (7) print usage + hypr instruction ----------------------------------------------
+# --- (7) print usage ---------------------------------------------------------------
 echo "==> [6/7] daemon status"
 # Give systemd a beat to mark the unit active, then report.
 if systemctl --user is-active --quiet voice-typing.service; then
@@ -207,12 +204,10 @@ echo "CUDA   : ${VERDICT:-unknown}"
 echo "offline: daemon runs fully local (HF_HUB_OFFLINE=1 via launch_daemon.sh) — no network at runtime"
 echo
 echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|cancel|session|quit"
-echo "          (bind Ctrl+Alt+Super+D -> voicectl toggle; see the Hyprland note below)"
-echo "          (SUPER+ALT+Backspace -> voicectl cancel drops the pending fragment; see hypr-binds.conf)"
+echo "          (start-block / toggle-block choose final-only delivery; start-stream / toggle-stream choose live text)"
+echo "          (voicectl cancel drops the pending fragment)"
 echo "          (voicectl session [--copy] prints the last COMPLETED dictation; --copy stages it on the Wayland clipboard and prints 'copied N chars'; exit 1 when no completed session exists)"
-echo
- echo "Hyprland — source the repo's hypr-binds.conf from ~/.config/hypr/hyprland.conf (add this line):"
-echo "  source = $REPO/hypr-binds.conf"
+echo "stop a wedged service: systemctl --user stop voice-typing"
 echo
 echo "logs   : journalctl --user -u voice-typing -f"
 echo "config : $CFG_DIR/config.toml"

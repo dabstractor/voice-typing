@@ -2,22 +2,20 @@
 
 Fully-local voice typing for Linux. Speak into your mic and the recognized text is
 typed into whatever window has focus. Built on RealtimeSTT
-(faster-whisper / CTranslate2 on CUDA). Intended for an Arch + Wayland / Hyprland
-desktop. The recognizer runs 100% on your machine; nothing is sent to a cloud.
+(faster-whisper / CTranslate2 on CUDA or CPU). The default focus-based typing backend
+targets Wayland. The recognizer runs on your machine; nothing is sent to a cloud.
 Offline mode is enforced: the launch wrapper (`launch_daemon.sh`) sets `HF_HUB_OFFLINE=1`,
 so models load from the local cache with zero runtime network calls (the install prefetches
 them).
 
-This README is for two readers: dustin, six months from now, and anyone who clones
-the repo. It assumes a Linux power user who wants exact commands, not hand-holding.
-
 ## Requirements
 
-- Arch-ish Linux with a working systemd user session (`systemctl --user` works).
-- NVIDIA GPU with CUDA drivers. Optional: the daemon auto-falls-back to CPU (slower).
-- Wayland / Hyprland, for the default `wtype` typing backend and `hyprctl notify`.
+- Linux with a working systemd user session for the supplied installer and service.
+- Optional: an NVIDIA GPU with CUDA drivers. The daemon falls back to CPU (slower).
+- For default focus-based delivery: `wtype` and a Wayland compositor that supports its
+  virtual keyboard protocol. Existing `hyprctl` toasts are optional, not a requirement.
 - PipeWire (the daemon records the system default source).
-- `portaudio` (PyAudio build dep). Check it with `pacman -Q portaudio`.
+- PortAudio (PyAudio dependency; install it with your distro's package manager).
 
 ## Install
 
@@ -39,7 +37,7 @@ The script is idempotent and re-runnable. It does, in order:
 5. Installs, daemon-reloads, enables, and restarts the systemd user unit.
 6. Copies `config.toml` to `~/.config/voice-typing/config.toml` if absent (never
    overwrites an existing one).
-7. Prints the usage line, the Hyprland source line, and the logs command.
+7. Prints CLI usage and troubleshooting commands. It does not install keyboard bindings.
 
 When install.sh finishes, the daemon is **running, NOT listening, and NOT loaded**
 (~0 VRAM). It never hot-mics on boot and loads no models until the first
@@ -47,8 +45,8 @@ When install.sh finishes, the daemon is **running, NOT listening, and NOT loaded
 
 ## First run
 
-A real-microphone smoke you run by hand. Full paths are used because the desktop zsh
-aliases `python3` and `pip`.
+A real-microphone smoke you run by hand. Use `voicectl` from your `PATH`, or run
+`.venv/bin/voicectl` from the checkout if the launcher isn't on your `PATH`.
 
 The first `voicectl toggle` (or `start`) each session takes ~1-3s to load the model —
 `voicectl` prints `loading models… (first arm, ~1–3 s)` to stderr while it loads.
@@ -57,12 +55,12 @@ see [Model lifecycle & VRAM](#model-lifecycle--vram)).
 
 ```
 systemctl --user start voice-typing
-/home/<you>/projects/voice-typing/.venv/bin/voicectl toggle   # arms the mic
+voicectl toggle   # arms the mic
 # speak. Words are typed into the focused window LIVE, revised in place as you talk.
 # Watch the hyprctl toasts, or poll `voicectl status` / `state.json` for the live tail:
 #   the first arm shows "Loading…" then "Recording"; later arms just "Recording";
 #   disarming shows "Recording Stopped" (the ✔ final popup is optional — see feedback.notify_on_final).
-/home/<you>/projects/voice-typing/.venv/bin/voicectl toggle   # disarms
+voicectl toggle   # disarms
 ```
 
 Expected behavior while listening: hyprctl toasts track Recording / Recording Stopped,
@@ -79,76 +77,29 @@ If the mic never arms or no text appears, the two knobs to reach for are the
 microphone default source (Troubleshooting) and `asr.lite_post_speech_silence_duration`
 (Configuration).
 
-## Hotkey (Hyprland)
+## Dictation commands and optional shortcuts
 
-Bind **Ctrl+Alt+Super+D** to arm/disarm dictation, and **Super+Alt+Backspace** to
-cancel the in-flight fragment. Add this one line to `~/.config/hypr/hyprland.conf`
-(install.sh prints it; the repo never edits your hyprland.conf):
+Run these commands directly or bind them in your own desktop or launcher configuration.
+The project does not ship or modify desktop keybindings. If an older setup sourced a
+shortcut file from this checkout, remove that source line and keep any desired shortcuts
+in your own configuration.
 
-```
-source = /home/<you>/projects/voice-typing/hypr-binds.conf
-```
-
-Then reload:
-
-```
-hyprctl reload
-```
-
-The sourced file is `hypr-binds.conf` at the repo root. The first two binds invoke voicectl via
-the `$HOME/.local/bin/voicectl` launcher that `install.sh` maintains (Hyprland runs every `bind exec`
-through `/bin/sh -c`, so `$HOME` expands), so they work regardless of user / repo location; the
-third calls `systemctl` directly — no launcher, and deliberately no voicectl:
-
-```
-bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle
-bind = SUPER ALT, Backspace, exec, $HOME/.local/bin/voicectl cancel
-bind = SUPER ALT, Escape, exec, systemctl --user stop voice-typing
-```
-
-**Block mode vs streaming mode, per keybind.** Streaming (the default) types live partials as
-you speak and corrects them in place. Block mode types nothing until the utterance ends, then
-enters the finished sentence once. Both run on the same daemon and models; the mode is chosen
-per armed session by the command suffix — `toggle-block` / `start-block` arm in block mode,
-`toggle-stream` / `start-stream` in streaming mode, and plain `toggle` / `start` use your
-configured default (`[output] streaming`). So a second bind gives you both at once:
-
-```
-bind = CTRL SUPER, D, exec, $HOME/.local/bin/voicectl toggle-block   # block mode
-```
-
-`voicectl status` reports the armed session's mode as `output: stream|block`. In block mode
-Backspace-cancel still discards the utterance in flight (there is simply no on-screen tail to
-erase).
-
-The first bind arms the mic; pressing it again disarms it (the graceful drain lets the
-in-flight commit land first). The second runs the same cancel path as the daemon's
-physical-Backspace listener — see
-[Backspace-cancel](#backspace-cancel-erase-the-in-flight-fragment).
-
-The third is the **panic bind** for a wedged control socket: an explicit
-`systemctl --user stop voice-typing` that bypasses voicectl and the control socket entirely,
-so it works even when the daemon has stopped answering. It is **not an instant SIGKILL** —
-systemd SIGTERMs the main process and the daemon's bounded single-flight teardown (see
-[Model lifecycle & VRAM](#model-lifecycle--vram)) completes in seconds; SIGKILL fires only at
-the unit's outer `TimeoutStopSec=15` net. A stop is intentional (`Restart=on-failure` does
-not restart it), so bring the daemon back with `systemctl --user start voice-typing` once
-the wedge is cleared. The unit's portability checker (`tests/test_systemd_unit.py`) exempts
-exactly this one documented bind from its voicectl-launcher rule.
-
-Hyprland uses the last matching bind for a given MODS+key. Source this file LAST
-(at the bottom of `hyprland.conf`) so its binds win. If a bind is inert, your config may
-already bind that MODS+key elsewhere. Check `~/.config/hypr/custom/keybinds.conf`,
-or rebind to a free combo in `hypr-binds.conf`.
+- `voicectl toggle` arms or gracefully stops dictation using `[output] streaming`.
+- `voicectl toggle-block` / `start-block` enter only finalized text; `toggle-stream` /
+  `start-stream` show live partials. Both use the same daemon. `voicectl status` reports
+  the active mode as `output: stream|block`.
+- `voicectl cancel` drops the current fragment in either mode. See
+  [Backspace-cancel](#backspace-cancel-erase-the-in-flight-fragment).
+- If the control socket stops responding, `systemctl --user stop voice-typing` bypasses it.
+  This intentionally stops the service; run `systemctl --user start voice-typing` to resume.
 
 ## Upgrading from Rev 1 (two-mode builds)
 
 Rev 2 collapsed the two ASR modes into one streaming model, and the CLI shrank to six
 commands: `toggle`, `start`, `stop`, `status`, `cancel`, `quit` (Rev 4 later added a
 seventh, `session` — prints the last completed dictation, in either delivery mode; see
-[Session recovery](#session-recovery-voicectl-session)). If you are upgrading a
-machine whose Hyprland config (e.g. `~/.config/hypr/custom/keybinds.lua` or
-`keybinds.conf`) predates the change:
+[Session recovery](#session-recovery-voicectl-session)). If you have custom shortcuts
+that predate the change:
 
 - A bind ending in `voicectl toggle-lite` still works — `toggle-lite` is accepted as a
   deprecated migration alias for `toggle`. Rebind it to plain `voicectl toggle` when

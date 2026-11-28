@@ -28,7 +28,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 # Line-anchored regexes for launch_daemon.sh offline-export drift guard (bugfix Issue 1).
 # Anchored on `^export ` so the WHY comment block (which mentions HF_HUB_OFFLINE=1 in
@@ -63,11 +62,6 @@ def _launch_daemon_path() -> Path:
 def _install_sh_path() -> Path:
     # install.sh — repo root is the parent of tests/.
     return Path(__file__).resolve().parent.parent / "install.sh"
-
-
-def _hypr_binds_path() -> Path:
-    # hypr-binds.conf — repo root is the parent of tests/.
-    return Path(__file__).resolve().parent.parent / "hypr-binds.conf"
 
 
 def test_execstart_points_at_launch_daemon_wrapper():
@@ -222,53 +216,21 @@ def test_install_sh_offline_grep_and_summary():
     )
 
 
-def test_install_sh_usage_lists_all_commands_and_correct_keybinds():
-    """install.sh [7/7] usage lists the 5 commands + the single toggle keybind (Rev 2).
-
-    Rev 2 single-mode collapse (P1.M1.T2.S4): ctl.py _COMMANDS is exactly
-    (toggle, start, stop, status, quit) and hypr-binds.conf ships ONE bind
-    (Ctrl+Alt+Super+D -> voicectl toggle); the lite commands and the
-    standalone Alt+Super+D bind are deleted surfaces. Static read_text check
-    (same pattern as test_install_sh_offline_grep_and_summary) — closes the
-    gap that let a wrong hint ship (the config drift-guard checks only parsed
-    VALUES, not usage/help strings).
-    """
-    text = _install_sh_path().read_text()
-    # (a) usage line lists all 5 commands (ctl.py _COMMANDS; Rev 2 single-mode).
-    for cmd in ("toggle", "start", "stop", "status", "quit"):
-        assert cmd in text, f"install.sh usage omits '{cmd}' (Rev 2: 5 commands)."
-    # (b) the single keybind is stated (hypr-binds.conf: Ctrl+Alt+Super+D -> toggle).
-    assert "Ctrl+Alt+Super+D" in text, (
-        "install.sh bind hint is missing 'Ctrl+Alt+Super+D' "
-        "(Rev 2: the ONE dictation bind is Ctrl+Alt+Super+D -> voicectl toggle)."
-    )
-    # (c) NEGATIVE: the deleted lite surfaces must not survive anywhere in install.sh.
-    assert "toggle-lite" not in text, (
-        "install.sh still mentions 'toggle-lite' (Rev 2 deleted it — P1.M1.T2.S4)."
-    )
-    assert "start-lite" not in text, (
-        "install.sh still mentions 'start-lite' (Rev 2 deleted it — P1.M1.T2.S4)."
-    )
-    # The standalone lite bind is gone. NOTE 'Ctrl+Alt+Super+D' CONTAINS 'Alt+Super+D'
-    # as a substring, so strip the legit bind before asserting the bare form is absent.
-    assert "Alt+Super+D" not in text.replace("Ctrl+Alt+Super+D", ""), (
-        "install.sh still advertises the standalone lite bind 'Alt+Super+D' "
-        "(Rev 2 collapsed to one bind — P1.M1.T2.S4)."
-    )
-    # (d) the WRONG mapping is still gone. 'SUPER+ALT+D -> voicectl toggle' claimed the
-    #     lite bind maps to the single toggle — backwards even in the two-mode era.
-    assert "SUPER+ALT+D -> voicectl toggle" not in text, (
-        "install.sh still claims 'SUPER+ALT+D -> voicectl toggle' — wrong mapping "
-        "(the single bind is Ctrl+Alt+Super+D -> voicectl toggle)."
-    )
+def test_install_sh_documents_cli_without_desktop_bindings():
+    install = _install_sh_path()
+    text = install.read_text()
+    assert "voicectl toggle|start|stop|status|cancel|session|quit" in text
+    assert all(cmd in text for cmd in ("start-block", "toggle-block", "start-stream", "toggle-stream"))
+    assert "systemctl --user stop voice-typing" in text
+    assert "toggle-lite" not in text and "start-lite" not in text
+    assert "hypr" not in text.lower()
+    assert not (install.parent / "hypr-binds.conf").exists()
 
 
 # ---------------------------------------------------------------------------
 # VT-003: no hardcoded /home/<user> paths in executable wiring (portability).
 # The repo must not bake in a specific username / repo location. install.sh rewrites the unit's
-# __REPO__ placeholder + installs a stable voicectl launcher; hypr-binds.conf uses $HOME (Hyprland
-# runs `bind exec` through /bin/sh -c, which expands it). These static checks pin that no
-# /home/dustin (or any absolute /home/...) path leaks into a functional site.
+# __REPO__ placeholder and installs a stable, home-relative voicectl launcher.
 # ---------------------------------------------------------------------------
 
 
@@ -313,9 +275,7 @@ def test_install_sh_uv_path_is_portable():
 
 
 def test_install_sh_installs_stable_voicectl_launcher():
-    """VT-003: install.sh installs a stable $HOME/.local/bin/voicectl launcher (symlink -> the
-    repo's voicectl) so hypr-binds.conf can reference voicectl via $HOME (no hardcoded repo path).
-    Static check that the symlink install is present + never clobbers a foreign file."""
+    """VT-003: the stable CLI launcher is independent of the checkout's location."""
     text = _install_sh_path().read_text()
     assert "$HOME/.local/bin/voicectl" in text, (
         "install.sh must install the $HOME/.local/bin/voicectl launcher (VT-003)."
@@ -325,151 +285,6 @@ def test_install_sh_installs_stable_voicectl_launcher():
     assert "already exists" in text or "readlink -f" in text, (
         "install.sh must not clobber a foreign $HOME/.local/bin/voicectl (VT-003)."
     )
-
-
-# BUG-003: hypr-binds.conf:60 intentionally ships ONE documented hard-kill panic bind
-# (PRD Rev 3(4)) that deliberately bypasses voicectl AND the control socket — the escape
-# hatch for a wedged socket: `bind = SUPER ALT, Escape, exec, systemctl --user stop voice-typing`.
-# The VT-003 checker below pins that exact tuple (parsed, whitespace-tolerant, exactly once)
-# instead of over-generalizing the launcher rule to every bind line.
-
-_PANIC_BIND = ("SUPER ALT", "Escape", "exec", "systemctl --user stop voice-typing")
-
-# String fixtures (the two shipped ordinary lines verbatim + the exact panic line) — the
-# negative-space tests call _check_binds() on these directly; hypr-binds.conf is NEVER rewritten.
-_PORTABLE_TOGGLE = "bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle"
-_PORTABLE_CANCEL = "bind = SUPER ALT, Backspace, exec, $HOME/.local/bin/voicectl cancel"
-_PANIC_EXACT = "bind = SUPER ALT, Escape, exec, systemctl --user stop voice-typing"
-
-
-def _is_panic_bind(ln: str) -> bool:
-    """Exact parsed match of the documented panic bind (PRD Rev 3(4)) — BUG-003.
-
-    The line is split on commas into (mods, key, dispatcher, command); whitespace between
-    fields and tokens is ignored and SUPER_ALT == SUPER ALT. Everything else is EXACT: the
-    mods SET, the key, the dispatcher, and the command TOKEN LIST — so any deviation
-    (different chord/key/dispatcher, extra/missing/reordered/case-changed command token, a
-    chained `;`/`&&` command, extra args) is NOT the panic bind and must satisfy the ordinary
-    VT-003 rules. Deliberately NOT a substring or `# exempt`-marker check: a substring would
-    silently accept '… stop voice-typing; reboot'.
-    """
-    body = re.sub(r"^bind\s*=\s*", "", ln.strip())
-    parts = [p.strip() for p in body.split(",", 3)]  # mods, key, dispatcher, command
-    if len(parts) != 4 or not parts[0]:
-        return False
-    mods = parts[0].replace("_", " ").split()
-    if sorted(mods) != ["ALT", "SUPER"]:
-        return False
-    cmd = parts[3].split()  # token-list compare: whitespace-insensitive, otherwise exact
-    return parts[1] == "Escape" and parts[2] == "exec" and cmd == _PANIC_BIND[3].split()
-
-
-def _check_binds(bind_lines: list[str]) -> None:
-    """The VT-003 portability contract over raw bind lines — shared by the shipped-file test
-    and the string-fixture negative-space tests: exactly ONE exact panic bind (PRD Rev 3(4));
-    every OTHER line must invoke the stable $HOME launcher and hardcode no /home/ path."""
-    assert bind_lines, "no bind = lines"
-    panic = [ln for ln in bind_lines if _is_panic_bind(ln)]
-    assert panic, (
-        "the documented panic bind was removed — restore `bind = SUPER ALT, Escape, exec, "
-        "systemctl --user stop voice-typing` (PRD Rev 3(4); the escape hatch for a wedged socket)"
-    )
-    assert len(panic) == 1, (
-        f"two+ panic binds shipped — deduplicate (exactly one documented hard-kill route): {panic!r}"
-    )
-    for ln in bind_lines:
-        if _is_panic_bind(ln):
-            continue  # the exact panic tuple only; lookalikes fall through to the ordinary rules
-        assert "$HOME/.local/bin/voicectl" in ln, (
-            f"hypr bind must use $HOME/.local/bin/voicectl (VT-003); got {ln!r}"
-        )
-        assert "/home/" not in ln, f"hypr bind hardcodes an absolute home path: {ln!r}"
-
-
-def test_hypr_binds_use_portable_home_launcher():
-    """VT-003: hypr-binds.conf invokes voicectl via $HOME/.local/bin/voicectl (Hyprland runs `bind
-    exec` through /bin/sh -c, which expands $HOME) — NO hardcoded /home/<user> repo path, so the
-    binds work regardless of which user runs it or where the repo was cloned.
-
-    Panic exception (BUG-003): the config intentionally ships ONE documented hard-kill route
-    (PRD Rev 3(4)) — SUPER+ALT+Escape → `systemctl --user stop voice-typing` — which bypasses
-    voicectl and the control socket ON PURPOSE (the escape hatch when the socket is wedged).
-    The exemption is the exact parsed tuple (chord/key/dispatcher/command token list,
-    whitespace-only tolerance) and it must appear EXACTLY once; every other line — including
-    `;`/`&&`-chained lookalikes, wrong chords/commands and extra args — keeps BOTH ordinary
-    asserts. The stop is systemd's clean socket-bypassing stop (KillMode=mixed,
-    TimeoutStopSec=15) — NOT a SIGKILL — and Restart=on-failure still applies after a crash.
-    """
-    text = _hypr_binds_path().read_text()
-    bind_lines = [ln for ln in text.splitlines() if ln.lstrip().startswith("bind =")]
-    _check_binds(bind_lines)
-
-
-# --- negative space (string fixtures): every mutation of the panic bind must be rejected ----
-
-
-def test_panic_bind_lookalike_with_semicolon_chain_rejected():
-    """A trailing `; reboot` is NOT the panic bind — the command token list differs, so the
-    line falls back to the ordinary rules and fails (substring matching would accept it)."""
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_TOGGLE, _PORTABLE_CANCEL,
-                      "bind = SUPER ALT, Escape, exec, systemctl --user stop voice-typing; reboot"])
-
-
-def test_panic_bind_lookalike_with_and_chain_rejected():
-    """A chained `&& reboot` lookalike likewise falls back to the ordinary rules and fails."""
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_TOGGLE, _PORTABLE_CANCEL,
-                      "bind = SUPER ALT, Escape, exec, systemctl --user stop voice-typing && reboot"])
-
-
-def test_panic_bind_wrong_chord_rejected():
-    """`SUPER, Escape` (missing ALT) is not the panic tuple — ordinary rules fail the line."""
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_TOGGLE, _PORTABLE_CANCEL,
-                      "bind = SUPER, Escape, exec, systemctl --user stop voice-typing"])
-
-
-def test_panic_bind_wrong_command_rejected():
-    """`systemctl --user restart` drifts from the pinned command; extra args drift too."""
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_TOGGLE, _PORTABLE_CANCEL,
-                      "bind = SUPER ALT, Escape, exec, systemctl --user restart voice-typing"])
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_TOGGLE, _PORTABLE_CANCEL,
-                      "bind = SUPER ALT, Escape, exec, systemctl --user stop voice-typing --force"])
-
-
-def test_duplicate_panic_bind_rejected():
-    """Two exact panic binds = a copy-paste error; the contract is exactly one."""
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_TOGGLE, _PANIC_EXACT, _PANIC_EXACT])
-
-
-def test_missing_panic_bind_rejected():
-    """The panic bind is part of the shipped contract — removing it is a regression."""
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_TOGGLE, _PORTABLE_CANCEL])
-
-
-def test_nonportable_ordinary_bind_still_rejected():
-    """Ordinary rules are untouched: a hardcoded /home/dustin launcher (no $HOME form) fails,
-    and so does a $HOME launcher line that smuggles an absolute /home/ path."""
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_CANCEL,
-                      "bind = CTRL SUPER ALT, D, exec, /home/dustin/.local/bin/voicectl toggle"])
-    with pytest.raises(AssertionError):
-        _check_binds([_PORTABLE_CANCEL,
-                      "bind = CTRL SUPER ALT, D, exec, $HOME/.local/bin/voicectl toggle --conf /home/dustin/x"])
-
-
-def test_panic_bind_tolerates_whitespace_and_underscore_only():
-    """The POSITIVE edge of the normalization contract: whitespace runs between fields/tokens
-    and the SUPER_ALT spelling still match the exact tuple (exactly once), while the ordinary
-    binds pass alongside — proving the exemption is parsed, not a substring pass."""
-    _check_binds([_PORTABLE_TOGGLE,
-                  "bind = SUPER_ALT,  Escape , exec,\tsystemctl  --user   stop voice-typing",
-                  _PORTABLE_CANCEL])
 
 
 # ---------------------------------------------------------------------------
