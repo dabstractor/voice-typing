@@ -216,6 +216,33 @@ def test_install_sh_offline_grep_and_summary():
     )
 
 
+def test_install_sh_usage_is_generic_and_names_out_of_band_stop():
+    """P1.M1.T1.S4: install.sh's printed usage/troubleshooting (its stdout IS the user-facing
+    quick-start — header) keeps the WORKING stream/block examples, the generic fragment cancel
+    and the explicit session copy; names `systemctl --user stop voice-typing` as the out-of-band
+    stop for the unit it installs; reuses S1's migration wording; and makes no shipped-shortcut
+    or bulk-delivery claim. STATIC — install.sh is never executed (it restarts the user's service)."""
+    text = _install_sh_path().read_text()
+    for needle in (
+        "toggle|start|stop|status|cancel|session|quit",                 # the generic command set
+        "start-block / toggle-block", "start-stream / toggle-stream",   # working examples stay
+        "voicectl cancel drops the pending fragment",                   # generic fragment cancel stays
+        "voicectl session [--copy]", "copied N chars",                  # explicit session copy stays
+        "systemctl --user stop voice-typing",                           # out-of-band stop for the shipped unit
+        "journalctl --user -u voice-typing -e",                         # where to look on a failed start
+        'output.delivery="bulk-text" is retired',
+        'set delivery = "stream-edit"',  # S1 migration wording (config.py:204-207), reused
+        "user-owned",                                                   # no shipped shortcut (PRD §4.10)
+    ):
+        assert needle in text, f"install.sh is missing {needle!r}"
+    assert text.lower().count("bulk") == text.count('output.delivery="bulk-text" is retired'), (
+        "install.sh must name bulk only inside the retirement hint"
+    )
+    # "Do not ship binding changes": the installer must not claim to touch any compositor/shortcut config
+    for forbidden in ("hyprland.conf", "sets a shortcut", "installs a shortcut", "binds the key"):
+        assert forbidden not in text, f"install.sh makes a shipped-shortcut claim: {forbidden!r}"
+
+
 def test_install_sh_documents_cli_without_desktop_bindings():
     install = _install_sh_path()
     text = install.read_text()

@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import socket
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -507,6 +509,73 @@ def test_cancel_in_commands_docstring_and_epilog():
     assert "cancel" in (ctl.__doc__ or ""), "the module docstring's subcommand block must list cancel"
     epilog = ctl._build_parser().epilog or ""
     assert "cancel" in epilog, "the argparse epilog must list cancel"
+
+
+# --- P1.M1.T1.S4: usage baseline (troubleshooting help + no stale bulk + wedged remedy) ------
+
+
+def test_help_troubleshooting_names_out_of_band_stop_and_migration():
+    """P1.M1.T1.S4 (usage baseline): --help and the module docstring must tell a user whose
+    control socket is nonresponsive how to stop the installed user unit OUT OF BAND
+    (`systemctl --user stop voice-typing` — the supplied unit's dependable remedy; Restart=
+    on-failure never overrides an explicit stop), reuse S1's actionable migration wording, and
+    state that keybinds are user-owned (PRD §4.10 — nothing is shipped)."""
+    help_text = ctl._build_parser().format_help()
+    doc = ctl.__doc__ or ""
+    for needle in (
+        "systemctl --user stop voice-typing",                 # the out-of-band stop
+        "journalctl --user -u voice-typing",                  # where the startup error lands
+        'output.delivery="bulk-text" is retired',            # S1's wording (config.py:204-207)
+        'set delivery = "stream-edit"',                      # …with BOTH actionable verbs
+        "user-owned",                                        # no shipped shortcut (PRD §4.10)
+    ):
+        assert needle in help_text, f"{needle!r} missing from --help:\n{help_text}"
+        assert needle in doc, f"{needle!r} missing from the ctl module docstring"
+    # The retired delivery state machine is no longer advertised as a live status feature
+    assert "mode/state, reason/op" not in doc
+
+
+def test_voicectl_source_has_no_bulk_surface_beyond_migration_hint():
+    """P1.M1.T1.S4: the only 'bulk' token left in ctl.py is S1's retirement phrase (the
+    migration hint users must see). Mirrors S2/S3's no-bulk-surface pins on their modules."""
+    import inspect
+
+    src = inspect.getsource(ctl)
+    assert src.lower().count("bulk") == src.count('output.delivery="bulk-text" is retired'), (
+        "a stale bulk claim crept into ctl.py — only the migration phrase may name it"
+    )
+
+
+def test_wedged_timeout_names_out_of_band_stop(monkeypatch, tmp_path, capfd):
+    """P1.M1.T1.S4: a socket that accepts but NEVER replies must produce the wedged ValueError
+    with (a) the 'daemon wedged: no reply within' prefix kept byte-identical (existing match=
+    tests/users depend on it) and (b) `systemctl --user stop voice-typing` as the remedy.
+    main() routes ValueError -> stderr + exit 1; the fake server never touches a real daemon."""
+    sock_dir = tmp_path / "voice-typing"
+    sock_dir.mkdir()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_dir / "control.sock"))
+    server.listen(1)
+    held: list[socket.socket] = []
+
+    def accept_and_hold() -> None:
+        conn, _ = server.accept()
+        held.append(conn)  # accept, then NEVER reply
+
+    acceptor = threading.Thread(target=accept_and_hold, daemon=True)
+    acceptor.start()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))  # ctl resolves .../voice-typing/control.sock
+    monkeypatch.setenv("VOICECTL_TIMEOUT", "1")           # keep the test fast
+    try:
+        rc = ctl.main(["status"])
+    finally:
+        server.close()
+        for conn in held:
+            conn.close()
+    _, err = capfd.readouterr()
+    assert rc == 1, err
+    assert err.startswith("voicectl: daemon wedged: no reply within"), err  # prefix contract
+    assert "systemctl --user stop voice-typing" in err, err
 
 
 def test_format_cancel_renders_listening_on_and_off():

@@ -18,8 +18,8 @@
 #
 # The daemon starts NOT-listening (PRD §4.9) — it never hot-mics on boot; `voicectl toggle` arms it.
 #
-# This script's stdout IS the user-facing install/usage quick-start (Mode A docs). README (P2.M1.T2.S1)
-# documents the same CLI entry points.
+# This script's stdout IS the user-facing install/usage quick-start (Mode A docs). README (synced
+# across the changeset by P1.M2.T4.S1) documents the same CLI entry points.
 #
 # FULL PATHS are used for uv/python because the user's zsh aliases them (PRD §2). This is bash, not zsh.
 set -euo pipefail
@@ -195,6 +195,7 @@ if systemctl --user is-active --quiet voice-typing.service; then
   echo "    voice-typing.service: active"
 else
   echo "    voice-typing.service: NOT active — check 'journalctl --user -u voice-typing -e'" >&2
+  echo '    (a startup error saying output.delivery="bulk-text" is retired means: remove the key (default "stream-edit") or set delivery = "stream-edit" in '"$CFG_DIR"'/config.toml)' >&2
 fi
 
 echo
@@ -207,7 +208,8 @@ echo "usage  : $REPO/.venv/bin/voicectl toggle|start|stop|status|cancel|session|
 echo "          (start-block / toggle-block choose final-only delivery; start-stream / toggle-stream choose live text)"
 echo "          (voicectl cancel drops the pending fragment)"
 echo "          (voicectl session [--copy] prints the last COMPLETED dictation; --copy stages it on the Wayland clipboard and prints 'copied N chars'; exit 1 when no completed session exists)"
-echo "stop a wedged service: systemctl --user stop voice-typing"
+echo "          (keybinds are user-owned: this installer sets no shortcut — bind the voicectl commands in your compositor config)"
+echo "stop a wedged service: systemctl --user stop voice-typing   (out-of-band stop when voicectl reports 'daemon wedged')"
 echo
 echo "logs   : journalctl --user -u voice-typing -f"
-echo "config : $CFG_DIR/config.toml"
+echo 'config : '"$CFG_DIR"'/config.toml   (output.delivery="bulk-text" is retired: remove the key (default "stream-edit") or set delivery = "stream-edit")'

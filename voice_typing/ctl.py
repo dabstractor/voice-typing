@@ -20,13 +20,30 @@ Subcommands (PRD §4.8):
              second keybind can select either mode against the SAME daemon.
     stop     disarm the mic (stop listening)
     status   pretty-print listening + mode + phase + partial + last final + uptime + device + mic
-             + context-prompt + delivery (mode/state, reason/op when present)
+             + context-prompt + output delivery
     quit     request a clean daemon shutdown (releases GPU workers)
     cancel   drop the pending dictation fragment and keep listening (Backspace keybind fallback)
     session  print the most recent COMPLETED dictation session (arm→disarm recovery,
              R.6; never a moving draft). --copy stages it on the Wayland CLIPBOARD
              instead — exact bytes, no added newline, PRIMARY untouched, never
              types/erases/submits. Exit 1 when no completed session exists.
+
+        Troubleshooting — the daemon runs as the systemd USER unit that install.sh installs
+        (systemd/voice-typing.service); voicectl itself only talks to the control socket:
+
+            exit 2 (daemon not running)       systemctl --user status voice-typing
+                                                 journalctl --user -u voice-typing -e
+            "daemon wedged: no reply within"  the control socket is nonresponsive — voicectl gives up
+                                                 on its own after VOICECTL_TIMEOUT seconds. Stop the unit out
+                                                 of band, start it again when you want it back:
+                                                   systemctl --user stop voice-typing
+                                                   systemctl --user start voice-typing
+            startup error naming               output.delivery="bulk-text" is retired: remove the key
+            output.delivery                    (default "stream-edit") or set delivery = "stream-edit"
+                                                 in $XDG_CONFIG_HOME/voice-typing/config.toml
+
+        Keybinds are user-owned (PRD §4.10): this tool installs no shortcut — bind the commands
+        above (for example `voicectl toggle-stream`) in your own compositor config.
 
 Usage:  voicectl <toggle|start|stop|status|cancel|quit|session>
         toggle-block | start-block   arm in BLOCK mode (whole final typed once at the end)
@@ -167,9 +184,11 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         # (on / off (disabled by config) / off (degraded — context-free decoding) /
         # off (models not loaded)); a missing key (old daemon) reads as 'unknown'.
         context_prompt = response.get("context_prompt", "") or "unknown"
-        # P1.M3.T3.S2: bulk-delivery status surface (PRD §4.2sexies R.5). Missing/empty keys
-        # (old daemon / surface unwired) read as 'unknown' — the context_prompt tolerance
-        # precedent. reason/op render ONLY when non-empty.
+        # Output-delivery status fields. Since the alternate delivery experiment was retired
+        # (P1.M1.T1.S1 config rejection; P1.M1.T1.S2 daemon detach) the daemon only ever reports
+        # delivery_mode="stream-edit" / delivery_state="inactive" — kept for status-shape
+        # compatibility. Missing/empty keys (old daemon) read as 'unknown' like context_prompt;
+        # reason/op render ONLY when non-empty.
         delivery_mode = response.get("delivery_mode", "") or "unknown"
         delivery_state = response.get("delivery_state", "") or "unknown"
         delivery_reason = response.get("delivery_reason", "") or ""
@@ -241,9 +260,14 @@ def send_command(socket_path: str, cmd: str, extra: dict | None = None) -> dict:
                     break
                 buf.extend(chunk)
         except socket.timeout:
+            # P1.M1.T1.S4: name the OUT-OF-BAND stop for the unit install.sh installs. The control
+            # socket has no server-side deadline, so VOICECTL_TIMEOUT only gets the client back; the
+            # dependable way down is systemd's (Restart=on-failure never overrides an explicit stop).
             raise ValueError(
-                f"daemon wedged: no reply within {timeout:.0f}s "
-                "(systemctl --user restart voice-typing to recover)"
+                f"daemon wedged: no reply within {timeout:.0f}s — the control socket is "
+                "nonresponsive. Stop the installed user unit out of band with "
+                "'systemctl --user stop voice-typing' (or kill the voice-typing-daemon process if "
+                "you started it by hand); 'systemctl --user restart voice-typing' brings it back"
             ) from None
         line = bytes(buf).split(b"\n", 1)[0].decode("utf-8", errors="replace")
     if not line:
@@ -359,6 +383,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "until the utterance ends, then the whole final once); toggle-stream | start-stream\n"
             "arm in STREAM mode (live partials — the configured default). Plain toggle/start\n"
             "follow [output] streaming, so two keybinds can pick either mode on one daemon."
+            "\n"
+            "if the control socket is nonresponsive ('daemon wedged'):\n"
+            "systemctl --user stop voice-typing stops the installed user unit out of band\n"
+            "(start it again to resume; logs: journalctl --user -u voice-typing -e).\n"
+            'config: output.delivery="bulk-text" is retired — remove the key (default "stream-edit")\n'
+            'or set delivery = "stream-edit".\n'
+            "keybinds are user-owned: this tool installs no shortcut — bind commands in your\n"
+            "own compositor config."
         ),
     )
     parser.add_argument(

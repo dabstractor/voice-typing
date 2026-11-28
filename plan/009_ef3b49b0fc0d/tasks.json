@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Keep keyboard delivery and retire public bulk",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Migrate configuration and disconnect runtime bulk activation without changing the generic dictation or recovery contract.",
               "subtasks": [
                 {
@@ -88,7 +88,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S4",
                   "title": "Align installer and CLI generic usage",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -120,7 +120,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Fit and confirm an initial prompt in the executor",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S3"
