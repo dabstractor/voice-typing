@@ -143,7 +143,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Acknowledge priming across recorder IPC",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S1"
@@ -167,7 +167,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "Gate warm and cold capture on current priming",
-                  "status": "Researching",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2",

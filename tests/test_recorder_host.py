@@ -12,9 +12,11 @@ Run:
 """
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1461,3 +1463,317 @@ def test_stale_final_guard_is_a_noop_without_the_credit_counter() -> None:
     assert rec.clear_audio_queue_calls == 1
     assert recorder_host._purge_final_transcription_results(rec) == 0
     assert recorder_host._discard_stale_final_results(rec, timeout_s=0.01) == 0
+
+
+# ===========================================================================
+# P1.M1.T2.S2 — confirmed prompt priming across IPC ("prime" → "prime_ack")
+# (Daemon mints a token + stamps the host generation, waits in the CALLER's thread;
+#  the reader only stores the matching ack + sets _prime_evt — never waits, never
+#  holds a lock. ACK carries opaque state/token-count/lane-count — NEVER the seed.
+#  0 lanes = KNOWN clear (ready/capability proved the executor is not armed).)
+# ===========================================================================
+
+
+class _FakePromptExecutor:
+    """Duck-typed PromptedExecutor (S1's primitive, consumed by attribute in the child).
+
+    install_initial_prompt returns an object shaped like S1's PromptInstallResult
+    (.state.value + .tokens); may raise or gate on an Event to simulate a slow install.
+    """
+
+    def __init__(self, state="applied", tokens=7, raise_=None, gate=None, calls=None):
+        self._state = state
+        self._tokens = tokens
+        self._raise = raise_
+        self._gate = gate
+        self.calls = calls if calls is not None else []
+
+    def install_initial_prompt(self, text):
+        self.calls.append(text)
+        if self._gate is not None:
+            self._gate.wait(2.0)
+        if self._raise is not None:
+            raise self._raise
+        return SimpleNamespace(state=SimpleNamespace(value=self._state), tokens=self._tokens)
+
+    def set_prompt(self, _text):
+        pass  # the rolling channel — unused by the confirmed path
+
+
+class _RecordingQueue:
+    """A cmd_q stand-in that records every put (so tests can read the minted token)."""
+
+    def __init__(self) -> None:
+        self.items: list[tuple] = []
+
+    def put(self, item: tuple) -> None:
+        self.items.append(item)
+
+
+def _request_and_ack(host, ack_overrides=None, request_timeout=2.0):
+    """Run prime_prompt in a THREAD (the caller-thread rule) and dispatch a matching ack from
+    the test thread once the request has minted its token (the reader store+set path)."""
+    results: dict = {}
+
+    def _run():
+        results["res"] = host.prime_prompt("seed text", timeout=request_timeout)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 1.0
+    while host._prime_token is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert host._prime_token is not None, "the request never minted a token"
+    payload = {
+        "token": host._prime_token,
+        "generation": host._generation,
+        "state": "applied",
+        "tokens": 7,
+        "lanes": 1,
+    }
+    if ack_overrides:
+        payload.update(ack_overrides)
+    host._dispatch("prime_ack", payload)
+    t.join(2.0)
+    assert not t.is_alive(), "the waiter never resolved after a matching ack"
+    return results["res"]
+
+
+def test_prime_prompt_applied_one_lane():
+    """The applied path: a 1-lane ack carries the opaque token count; reason 'ok'; NO text."""
+    host = _make_host()
+    res = _request_and_ack(host, {"state": "applied", "tokens": 7, "lanes": 1})
+    assert res.state == "applied"
+    assert res.tokens == 7 and res.lanes == 1 and res.reason == "ok"
+    assert res.generation == host._generation
+    assert "seed" not in str(res) and "text" not in str(res)  # sanitized repr
+
+
+def test_prime_prompt_clear_known_empty_zero_lanes():
+    """0 lanes is a KNOWN empty (the child's ready/capability proved no executor is armed) —
+    state 'clear' with reason 'no-lane', NOT unconfirmed (unknown ≠ unavailable)."""
+    host = _make_host()
+    res = _request_and_ack(host, {"state": "clear", "tokens": None, "lanes": 0})
+    assert res.state == "clear" and res.lanes == 0 and res.reason == "no-lane"
+    assert res.tokens is None
+
+
+def test_prime_prompt_unconfirmed_on_executor_failure():
+    """An executor that reports UNCONFIRMED (cold/broken) yields unconfirmed + a sanitized
+    reason — never an exception, never an over-claim."""
+    host = _make_host()
+    res = _request_and_ack(host, {"state": "unconfirmed", "tokens": None, "lanes": 1})
+    assert res.state == "unconfirmed" and res.reason == "executor-error"
+    assert res.tokens is None
+
+
+def test_prime_prompt_timeout_is_sanitized_unconfirmed():
+    """No ack within the deadline → unconfirmed/'timeout'; the kwarg is honored (fast, not the
+    5 s default)."""
+    host = _make_host()
+    t0 = time.monotonic()
+    res = host.prime_prompt("seed text", timeout=0.1)
+    dt = time.monotonic() - t0
+    assert res.state == "unconfirmed" and res.reason == "timeout"
+    assert dt < 1.0, f"the timeout kwarg was not honored ({dt:.2f}s)"
+
+
+def test_prime_prompt_dead_child_wakes_immediately():
+    """A dead child (the reader finally sets _prime_evt alongside _dead) wakes the waiter at
+    once with reason 'dead' — it must not burn the full timeout (Gotcha #8)."""
+    host = _make_host()
+    results: dict = {}
+
+    def _run():
+        results["res"] = host.prime_prompt("seed text", timeout=5.0)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 1.0
+    while host._prime_token is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    host._dead = True          # the reader-finally path: EOF -> _dead AND _prime_evt.set()
+    host._prime_evt.set()
+    t.join(2.0)
+    assert not t.is_alive(), "a dead child must wake the waiter immediately"
+    res = results["res"]
+    assert res.state == "unconfirmed" and res.reason == "dead"
+
+
+def test_late_ack_for_timed_out_token_is_dropped():
+    """The token fence: A times out; B is outstanding; an ack carrying A's token must NOT
+    resolve B (dropped by _dispatch); only B's own ack resolves B (CRITICAL #2)."""
+    host = _make_host()
+    rq = _RecordingQueue()
+    host._cmd_q = rq
+    res_a = host.prime_prompt("seed text", timeout=0.1)
+    assert res_a.reason == "timeout"
+    tok_a = rq.items[0][1]["token"]  # A's (now retired) token from the recorded put
+
+    results: dict = {}
+
+    def _run():
+        results["res"] = host.prime_prompt("seed text", timeout=2.0)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 1.0
+    while len(rq.items) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    tok_b = rq.items[1][1]["token"]
+    assert tok_b != tok_a, "every request must mint a FRESH token"
+
+    host._dispatch("prime_ack", {"token": tok_a, "generation": host._generation,
+                                 "state": "applied", "tokens": 9, "lanes": 1})  # A's late ack
+    time.sleep(0.05)
+    assert t.is_alive(), "A's stale ack must NOT resolve B (token fence broken)"
+    host._dispatch("prime_ack", {"token": tok_b, "generation": host._generation,
+                                 "state": "applied", "tokens": 7, "lanes": 1})
+    t.join(2.0)
+    res_b = results["res"]
+    assert res_b.state == "applied" and res_b.tokens == 7
+
+
+def test_ack_from_previous_generation_is_fenced():
+    """The generation fence: an ack stamped with an OLD generation (a previous child, still in
+    the evt_q pipe after a respawn) is dropped and never resolves a live waiter (CRITICAL #2)."""
+    host = _make_host()
+    results: dict = {}
+
+    def _run():
+        results["res"] = host.prime_prompt("seed text", timeout=0.2)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 1.0
+    while host._prime_token is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    tok = host._prime_token
+    host._generation = host._generation + 1  # simulated respawn (spawn() bumps this)
+    host._dispatch("prime_ack", {"token": tok, "generation": host._generation - 1,  # the OLD gen
+                                 "state": "applied", "tokens": 7, "lanes": 1})
+    t.join(2.0)
+    res = results["res"]
+    assert res.state == "unconfirmed" and res.reason == "timeout", (
+        "an old-generation ack must be fenced, never resolve"
+    )
+
+
+def test_cancel_prime_fences_and_wakes():
+    """cancel_prime() wakes the blocked waiter with 'cancelled' promptly; the late ack is then
+    fenced (token cleared); a subsequent request gets a fresh token and works."""
+    host = _make_host()
+    rq = _RecordingQueue()
+    host._cmd_q = rq
+    results: dict = {}
+
+    def _run():
+        results["res"] = host.prime_prompt("seed text", timeout=5.0)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 1.0
+    while host._prime_token is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    tok = host._prime_token
+    t0 = time.monotonic()
+    host.cancel_prime()
+    t.join(2.0)
+    assert not t.is_alive() and time.monotonic() - t0 < 1.0, "cancel must wake the waiter"
+    assert results["res"].state == "unconfirmed" and results["res"].reason == "cancelled"
+    assert host._prime_token is None
+    host._dispatch("prime_ack", {"token": tok, "generation": host._generation,
+                                 "state": "applied", "tokens": 7, "lanes": 1})  # fenced
+    assert host._prime_token is None
+    # A subsequent request works (fresh token, not poisoned by the cancellation):
+    res = _request_and_ack(host, {"state": "applied", "tokens": 7, "lanes": 1})
+    assert res.state == "applied"
+
+
+def test_child_prime_command_acks_without_text(caplog):
+    """The child handler ACKs with exactly the 5 safe keys; the seed appears NOWHERE — not in
+    the payload, not in any log line (CRITICAL #5 privacy)."""
+    q: queue.Queue = queue.Queue()
+    seed = "SECRETSEED-editor-text-42"
+    with caplog.at_level(logging.DEBUG, logger="voice_typing.recorder_host"):
+        recorder_host._handle_prime(
+            {"token": 3, "generation": 2, "text": seed},
+            _FakePromptExecutor(state="applied", tokens=9),
+            q,
+        )
+    kind, payload = q.get_nowait()
+    assert kind == "prime_ack"
+    assert set(payload) == {"token", "generation", "state", "tokens", "lanes"}
+    assert payload["state"] == "applied" and payload["tokens"] == 9 and payload["lanes"] == 1
+    assert payload["token"] == 3 and payload["generation"] == 2
+    assert seed not in str(payload), "the ACK must never carry the seed text"
+    assert seed not in caplog.text, "the seed must never reach a log line"
+
+
+def test_child_prime_zero_lanes_is_known_clear():
+    """No executor armed (context-prompt off — proven by the child's ready/capability): the ACK
+    is a KNOWN clear (lanes=0), not unconfirmed (CRITICAL #3)."""
+    q: queue.Queue = queue.Queue()
+    recorder_host._handle_prime({"token": 1, "generation": 1, "text": "seed"}, None, q)
+    kind, payload = q.get_nowait()
+    assert kind == "prime_ack"
+    assert payload["state"] == "clear" and payload["lanes"] == 0 and payload["tokens"] is None
+
+
+def test_child_prime_dedupes_aliased_executors(monkeypatch):
+    """An aliased lane pair (the SAME executor object reported twice) installs ONCE and counts
+    as ONE confirmed lane (CRITICAL #4)."""
+    calls: list = []
+    exec_ = _FakePromptExecutor(state="applied", tokens=5, calls=calls)
+    monkeypatch.setattr(recorder_host, "_prompt_targets", lambda _pe: [exec_, exec_])
+    q: queue.Queue = queue.Queue()
+    recorder_host._handle_prime({"token": 1, "generation": 1, "text": "seed"}, exec_, q)
+    _, payload = q.get_nowait()
+    assert calls == ["seed"], "an aliased pair must install exactly ONCE"
+    assert payload["lanes"] == 1 and payload["state"] == "applied"
+
+
+def test_child_prime_partial_failure_is_unconfirmed(caplog):
+    """Two DISTINCT lanes, one failing: mixed states collapse to 'unconfirmed' (never
+    over-claim); the raised exception's TYPE name is logged but its message — which could
+    embed the seed — is NOT (CRITICAL #5)."""
+    ok = _FakePromptExecutor(state="applied", tokens=5)
+    bad = _FakePromptExecutor(raise_=RuntimeError("boom SECRETSEED-partial"))
+    monkeypatched = [ok, bad]
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(recorder_host, "_prompt_targets", lambda _pe: monkeypatched)
+    try:
+        q: queue.Queue = queue.Queue()
+        with caplog.at_level(logging.WARNING, logger="voice_typing.recorder_host"):
+            recorder_host._handle_prime(
+                {"token": 2, "generation": 1, "text": "seed text"}, ok, q
+            )
+        _, payload = q.get_nowait()
+        assert payload["state"] == "unconfirmed" and payload["lanes"] == 2
+        assert payload["tokens"] is None
+        assert "RuntimeError" in caplog.text, "the exception TYPE is logged (sanitized)"
+        assert "SECRETSEED-partial" not in caplog.text, "never str(exc) — it may embed the seed"
+    finally:
+        monkeypatch.undo()
+
+
+def test_prime_ack_dispatch_without_outstanding_request_is_dropped(caplog):
+    """An ack arriving with NO outstanding request (token None) is dropped at _dispatch and
+    disturbs nothing."""
+    host = _make_host()
+    with caplog.at_level(logging.DEBUG, logger="voice_typing.recorder_host"):
+        host._dispatch("prime_ack", {"token": 99, "generation": 0, "state": "applied",
+                                     "tokens": 1, "lanes": 1})
+    assert host._prime_ack is None and not host._prime_evt.is_set()
+
+
+def test_set_prompt_channel_unchanged():
+    """The ordinary rolling channel is byte-identical: ("prompt", {"text": ...}) fire-and-forget
+    (CRITICAL #7 — prime is a SEPARATE channel)."""
+    host = _make_host()
+    rq = _RecordingQueue()
+    host._cmd_q = rq
+    host.set_prompt("rolling update")
+    assert rq.items == [("prompt", {"text": "rolling update"})]
+    assert all(k != "prime" for k, _ in rq.items)
+

@@ -18,6 +18,10 @@ satisfy PRD §7.9 + §6 T6(d). See plan/003.../P1M3T2S2/research/residual_cuda_c
 IPC PROTOCOL (two multiprocessing queues + one event):
   cmd_queue (daemon -> child):  ("arm", {}) | ("disarm", {}) | ("text", {}) | ("shutdown", {})
                               | ("prompt", {"text": ...})   # P1.M2.T5.S1 rolling context prompt
+                              | ("prime", {"token", "generation", "text"})
+                                            # P1.M1.T2.S2 CONFIRMED priming (§4.8.1 initial seed;
+                                            #   ack'd — unlike fire-and-forget "prompt"),
+                                            #   text=None requests a plain clear
   abort_event (daemon -> child): a multiprocessing.Event SET by the daemon to interrupt a child
       blocked in recorder.text() (the cmd_queue is NOT read while text() blocks). A separate child
       thread polls it and calls recorder.abort(). ("abort", {}) on cmd_queue is belt-and-suspenders.
@@ -44,7 +48,27 @@ IPC PROTOCOL (two multiprocessing queues + one event):
                                  ("speech", {}) |          # on_speech -> _touch_speech (idle auto-stop reset)
                                  ("vad", {phase}) |        # "listening"|"speaking" (on_vad_detect_start/_start)
                                  ("speech_end", {}) |      # on_vad_stop -> latency.note_speech_end
+                                 ("prime_ack", {"token", "generation", "state", "tokens",
+                                                "lanes"}) | # P1.M1.T2.S2: the CONFIRMED-priming ack
+                                                            #   — OPAQUE outcome only, never text.
+                                                            #   state = applied|clear|unconfirmed;
+                                                            #   tokens = opaque count; lanes = the
+                                                            #   confirmed lane count. The reader only
+                                                            #   stores a (token, generation)-matching
+                                                            #   ack + sets _prime_evt; the CALLER waits
+                                                            #   (host.prime_prompt → sanitized
+                                                            #   PrimeResult; S3 gates capture on it).
                                  ("gone", {})              # child acked shutdown (clean exit)
+
+CONFIRMED PRIMING vs ROLLING PROMPT (P1.M1.T2.S2): ("prompt", ...) stays fire-and-forget — the
+  executor swallows its own failures, so it can never COUNT as confirmation. ("prime", ...) is the
+  acknowledged channel: the child installs the §4.8.1 initial seed via install_initial_prompt
+  (S1's tri-state primitive) and ACKs with an opaque outcome. The daemon fences stale/late acks by
+  (request token, host generation) — a late ack after a timeout, or an OLD child's ack after a
+  respawn, is dropped and never satisfies a live waiter. The WAITER lives in the caller's thread
+  (never the reader — that would strand text(); never under the daemon lock — that would wedge
+  every control client). PRIVACY: the ack, the logs, and PrimeResult carry counts/reason codes
+  ONLY — the seed text never crosses back and never reaches a log line.
 
 IDENTITY (P1.M6.T1.S1 — PRD §4.2sexies R.5): every final/partial payload carries the ADDITIVE keys
   utterance_id + session_gen (the 'cancelled' precedent — never renamed/removed). Payloads WITHOUT
@@ -93,6 +117,7 @@ daemon process imports only the RecorderHost handle (multiprocessing + threading
 from __future__ import annotations
 
 import collections
+import itertools
 import logging
 import multiprocessing as mp
 import os
@@ -102,6 +127,7 @@ import threading
 import time  # VT-008: _abort_handler's defer branch sleeps — the missing import killed the
 # thread with NameError on EVERY deferred cancel/abort, wedging all later stops into drain
 # timeouts and latching the cancel-suppression window (the mass-rewind regressions of Oct 2026)
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 if TYPE_CHECKING:
@@ -124,6 +150,41 @@ _SPAWN_READY_TIMEOUT_S: float = 180.0
 # SIGKILL releases VRAM immediately regardless. This supersedes the in-process _bounded_shutdown
 # timeout thread (P1.M1.T1.S2) — killing the process is strictly stronger + simpler.
 _STOP_JOIN_TIMEOUT_S: float = 5.0
+
+# The confirmed-priming ("prime" → "prime_ack", P1.M1.T2.S2) wait budget. The child ACKs in ms
+# when armed (the arm path primes while DISARMED, so cmd_q drains immediately); a cold/broken
+# executor answers UNCONFIRMED fast; a dead child wakes the waiter via the reader-finally Event.
+# The bound exists so a wedged/late child can never hang the arm — the daemon (S3) runs this
+# inside its own larger start deadline. Tests shrink it via the prime_prompt(timeout=) kwarg.
+_PRIME_TIMEOUT_S: float = 5.0
+
+
+@dataclass(frozen=True)
+class PrimeResult:
+    """Sanitized outcome of one confirmed priming request (P1.M1.T2.S2; PRD §4.8.1).
+
+    The daemon (S3) gates capture on this: "applied"/"clear" ⇒ proceed (known state),
+    "unconfirmed" ⇒ degrade to context-free capture + a private hint. NO seed text ever
+    appears here (frozen + text-free ⇒ repr is safe for logs by construction).
+
+    state:      "applied" (seed installed on every active lane) | "clear" (known-empty — 0
+                lanes, proven by the child's ready/capability evidence) | "unconfirmed"
+                (UNKNOWN: timeout / dead child / cancelled / executor failure — never
+                "unavailable"; unknown ≠ unavailable).
+    tokens:     opaque count of prompted tokens (None unless applied — counts only, no text).
+    lanes:      confirmed lane count (0 = known-empty; 1 = the one executor confirmed for BOTH
+                lanes — P1.M1.T1.S3's one-executor contract).
+    generation: the host lifetime this result belongs to (fence half; bumped on every spawn).
+    reason:     sanitized code — "ok" | "no-lane" | "timeout" | "dead" | "cancelled" | "stale"
+                | "executor-error" ("partial" lane failures collapse to unconfirmed/
+                executor-error child-side; never over-claimed).
+    """
+
+    state: str
+    tokens: "int | None"
+    lanes: int
+    generation: int
+    reason: str
 
 
 class RecorderHost:
@@ -225,6 +286,17 @@ class RecorderHost:
         self._cancel_mark = False
         self._final_evt = threading.Event()
         self._ready_evt = threading.Event()
+        # Confirmed prompt priming (P1.M1.T2.S2 / §4.8.1): the daemon mints a token per request
+        # and waits OUTSIDE the reader thread; the reader only stores the MATCHING ack + sets
+        # the Event (the _cancel_mark/_final_evt shape — a reader-side wait would strand text(),
+        # a lock-held wait would wedge every control client). Fenced by (token, generation):
+        # a late ack (after timeout/cancel) or an OLD child's ack (after a respawn) can never
+        # satisfy a live waiter. The ack payload is whitelisted to 5 safe keys — NEVER text.
+        self._prime_evt = threading.Event()
+        self._prime_ack: "dict | None" = None   # last matching ("prime_ack", ...) payload
+        self._prime_token: "int | None" = None  # outstanding request token (None = none)
+        self._prime_counter = itertools.count(1)  # strictly increasing request tokens
+        self._generation = 0                    # bumped on every spawn (host lifetime fence)
         self._device: dict[str, str] = {}
         # R.8 provenance (P1.M2.T1.S1): the upstream partial callback key the child installed,
         # from its 'ready' payload ("partial_callback"). "" until ready; a legacy child payload
@@ -308,6 +380,12 @@ class RecorderHost:
             name="voice-typing-recorder-host",
             daemon=True,
         )
+        # P1.M1.T2.S2 fence half: a NEW child lifetime. Any ack still in flight from the
+        # PREVIOUS child (the evt_q pipe may hold stragglers) carries the old generation and
+        # can never satisfy a request stamped with this one; its stored state is dropped too.
+        self._generation += 1
+        self._prime_ack = None
+        self._prime_evt.clear()
         self._proc.start()
         # Reader thread dispatches events -> never block the daemon main loop. daemon=True so it
         # never blocks daemon shutdown.
@@ -359,6 +437,78 @@ class RecorderHost:
             self._cmd_q.put(("prompt", {"text": text}))
         except (BrokenPipeError, OSError, EOFError):
             self._dead = True  # child gone; idempotent
+
+    def prime_prompt(
+        self, text: "str | None", *, timeout: float = _PRIME_TIMEOUT_S
+    ) -> PrimeResult:
+        """Confirmed prompt priming across IPC (P1.M1.T2.S2; PRD §4.8.1 initial seed).
+
+        The CONFIRMED channel — distinct from set_prompt()'s fire-and-forget rolling updates,
+        which "cannot count as confirmation" (its executor catches its own failures; the arch
+        note is the mandate). Puts ("prime", {token, generation, text}) with a fresh token +
+        the current generation, then WAITS IN THE CALLER'S THREAD on _prime_evt (bounded;
+        NEVER the reader thread, NEVER under any lock — either would strand text() or wedge
+        the control clients; the reader only stores the matching ack + sets the Event).
+
+        Fencing: only the ack whose (token, generation) matches THIS request resolves it. A
+        late ack (the caller already timed out) or an OLD child's ack (after a respawn) is
+        dropped by _dispatch (DEBUG, counts only) — a stale/late ack can never satisfy a live
+        waiter, and a duplicate ack resolves once (idempotent token check).
+
+        NEVER raises across IPC. Returns a sanitized frozen PrimeResult (no text; counts
+        only): unconfirmed on timeout ("timeout"), a dead child ("dead" — the reader-finally
+        Event wakes this wait immediately), cancellation ("cancelled"), or an executor that
+        reported unconfirmed / raised ("executor-error"); 0 lanes is a KNOWN "clear"
+        ("no-lane") per the child's ready/capability evidence. P1.M1.T2.S3 gates capture on
+        PrimeResult.state.
+        """
+        gen = self._generation
+        tok = next(self._prime_counter)
+        self._prime_ack = None
+        self._prime_token = tok
+        self._prime_evt.clear()
+        try:
+            self._cmd_q.put(("prime", {"token": tok, "generation": gen, "text": text}))
+        except (BrokenPipeError, OSError, EOFError):
+            self._dead = True  # child gone; idempotent (mirrors set_prompt's catch)
+            self._prime_token = None
+            return PrimeResult("unconfirmed", None, 0, gen, "dead")
+        # Wait in THIS thread (the caller's) — bounded; the reader thread only stores + sets.
+        resolved = self._prime_evt.wait(timeout=timeout)
+        if tok != self._prime_token:
+            # Superseded: cancel_prime() cleared the token (or a newer request took over).
+            # Our (possibly late) ack is now fenced — _dispatch drops it against the new
+            # outstanding token.
+            return PrimeResult("unconfirmed", None, 0, gen, "cancelled")
+        if not resolved:
+            self._prime_token = None  # retire the token: any late ack is fenced from here
+            return PrimeResult("unconfirmed", None, 0, gen, "dead" if self._dead else "timeout")
+        ack = self._prime_ack or {}
+        if self._dead and not ack:
+            # The reader-finally path (child died before answering): wake without an ack.
+            self._prime_token = None
+            return PrimeResult("unconfirmed", None, 0, gen, "dead")
+        self._prime_token = None  # resolved; idempotent vs a duplicate ack
+        if tok != ack.get("token") or gen != ack.get("generation"):
+            # Spurious wake with no usable ack (defensive; _dispatch only stores matching
+            # acks, so this is a belt-and-suspenders re-check).
+            return PrimeResult("unconfirmed", None, 0, gen, "stale")
+        state = str(ack.get("state", "unconfirmed"))
+        lanes = int(ack.get("lanes", 0) or 0)
+        tokens = ack.get("tokens") if state == "applied" else None
+        if state in ("applied", "clear"):
+            reason = "no-lane" if (state == "clear" and lanes == 0) else "ok"
+        else:
+            reason = "executor-error"  # unknown ⇒ unconfirmed; never "unavailable"
+        return PrimeResult(state, tokens, lanes, gen, reason)
+
+    def cancel_prime(self) -> None:
+        """Fence the outstanding priming request (P1.M1.T2.S2): its (possibly late) ack can no
+        longer resolve anything, and a blocked waiter wakes immediately with reason
+        "cancelled". Idempotent; never raises. The NEXT prime_prompt mints a fresh token and
+        works normally."""
+        self._prime_token = None
+        self._prime_evt.set()  # wake a blocked waiter → it sees the token cleared → "cancelled"
 
     def feed(self, pcm: Any, sr: int) -> None:
         """Queue one PCM slice for the child's feeder thread (G5 lab; feed_input=True only).
@@ -521,6 +671,7 @@ class RecorderHost:
             self._dead = True
             self._final_evt.set()
             self._ready_evt.set()  # unblock spawn() if it is still waiting (error path)
+            self._prime_evt.set()  # P1.M1.T2.S2: a blocked prime_prompt wakes at once (reason "dead")
 
     def _ids_settle(self, uid: int) -> None:
         """Record uid as SETTLED (its final has been seen) — closes the utterance boundary (R.5).
@@ -636,6 +787,28 @@ class RecorderHost:
             self._feedback.set_phase(phase)
         elif kind == "gone":
             pass  # handled by the read loop (return)
+        elif kind == "prime_ack":
+            # P1.M1.T2.S2: reader-side ONLY stores + wakes (the _cancel_mark/_final_evt shape).
+            # NEVER waits here — the caller's own thread waits on _prime_evt; a reader-side
+            # wait would strand text() and every other drained event. Fence: accept ONLY the
+            # ack matching the outstanding (token, generation); stale/late acks (a timed-out
+            # request, a cancelled request, or an OLD child after a respawn) are dropped with
+            # a counts-only DEBUG line. The stored dict is WHITELISTED to the 5 safe keys —
+            # the ack protocol never carries the seed text (CRITICAL privacy rule).
+            tok = payload.get("token")
+            gen = payload.get("generation")
+            if tok is not None and tok == self._prime_token and gen == self._generation:
+                self._prime_ack = {
+                    k: payload.get(k)
+                    for k in ("token", "generation", "state", "tokens", "lanes")
+                }
+                self._prime_evt.set()
+            else:
+                logger.debug(
+                    "recorder host reader: stale prime ack dropped (token=%s gen=%s)",
+                    tok,
+                    gen,
+                )
         else:
             logger.warning("recorder host reader: unknown event %r (ignored)", kind)
 
@@ -1021,6 +1194,14 @@ def _worker_main(
                             _exec.set_prompt(str(text) if text is not None else None)
                     else:
                         logger.debug("child: prompt command ignored (context-prompt not armed)")
+                elif kind == "prime":
+                    # P1.M1.T2.S2: CONFIRMED priming (vs the fire-and-forget "prompt" above).
+                    # Same between-utterances delivery timing (the loop blocks in text(); the
+                    # daemon primes while DISARMED so the command drains immediately). The ACK
+                    # carries opaque state/token-count/lane-count only — NEVER the seed text.
+                    _handle_prime(
+                        payload if isinstance(payload, dict) else {}, prompt_executor, evt_q
+                    )
                 elif kind == "shutdown":
                     running = False
                 else:
@@ -1109,6 +1290,88 @@ def _prompt_targets(prompt_executor: Any) -> list[Any]:
     (P1.M1.T2.S2) extends THIS seam. set_prompt itself never raises (prompt_engine contract).
     """
     return [prompt_executor] if prompt_executor is not None else []
+
+
+def _handle_prime(payload: dict, prompt_executor: Any, evt_q: Any) -> None:
+    """Child-side handler for the ("prime", {token, generation, text}) command (P1.M1.T2.S2).
+
+    CONFIRMED priming (PRD §4.8.1): installs the initial seed on every ACTIVE prompt lane via
+    the executor's confirmed primitive (S1's install_initial_prompt — consumed BY ATTRIBUTE:
+    .state.value / .tokens; PromptState is deliberately NOT imported — the daemon process must
+    never pull prompt_engine's deps at module load), then emits ONE ("prime_ack", ...) with
+    opaque state/token-count/lane-count ONLY — NEVER the seed text, NEVER str(exception) (an
+    exception may embed its input; the TYPE name alone is logged).
+
+    Semantics (the tri-state contract, fail to UNKNOWN):
+      - 0 targets (context-prompt not armed — ALREADY PROVEN by the child's ready/capability
+        payload) → state "clear", lanes 0: a KNOWN empty, not unconfirmed (unknown ≠
+        unavailable).
+      - An aliased lane pair (the same executor object in both kwargs, the P1.M1.T1.S3
+        one-executor contract) installs ONCE and counts as ONE lane — dedup by identity.
+      - All lanes applied → "applied" (tokens = the opaque count); all clear → "clear"; any
+        unconfirmed/raise/mixed-lane outcome → "unconfirmed" (never over-claim; "partial"
+        failures collapse here).
+    Never raises: the install is wrapped; the ACK is sent on every path via _safe_put.
+    """
+    tok = payload.get("token")
+    gen = payload.get("generation")
+    text = payload.get("text")
+    if not isinstance(text, str) and text is not None:
+        text = None  # a non-string seed is unusable — treat as None (clear-request semantics)
+    targets = list({id(t): t for t in _prompt_targets(prompt_executor)}.values())
+    if not targets:
+        # ready/capability already proved context-prompt is not armed → KNOWN empty (not
+        # unconfirmed — unknown ≠ unavailable; the arch note's "clear is known" clause).
+        _safe_put(
+            evt_q,
+            ("prime_ack", {"token": tok, "generation": gen, "state": "clear",
+                           "tokens": None, "lanes": 0}),
+        )
+        return
+    states: list[str] = []
+    tokens: "int | None" = None
+    failed = False
+    for _exec in targets:
+        try:
+            res = _exec.install_initial_prompt(text)
+            raw_state = getattr(res, "state", None)
+            st = getattr(raw_state, "value", None) or (str(raw_state) if raw_state is not None else "")
+            st_l = str(st).lower()
+            if "applied" in st_l:
+                st = "applied"
+            elif "clear" in st_l:
+                st = "clear"
+            else:
+                st = "unconfirmed"  # UNCONFIRMED / anything unknown — fail to UNKNOWN
+            states.append(st)
+            tokens = getattr(res, "tokens", None)
+        except Exception as exc:  # CRITICAL privacy rule: TYPE name only — never str(exc)
+            logger.warning(
+                "child: priming install raised (%s) — unconfirmed", type(exc).__name__
+            )
+            states.append("unconfirmed")
+            failed = True
+    if failed or any(s == "unconfirmed" for s in states):
+        state = "unconfirmed"
+    elif all(s == "applied" for s in states):
+        state = "applied"
+    elif all(s == "clear" for s in states):
+        state = "clear"
+    else:
+        state = "unconfirmed"  # mixed lanes → partial → UNKNOWN (never over-claim)
+    _safe_put(
+        evt_q,
+        (
+            "prime_ack",
+            {
+                "token": tok,
+                "generation": gen,
+                "state": state,
+                "tokens": tokens if state == "applied" else None,
+                "lanes": len(targets),
+            },
+        ),
+    )
 
 
 def _default_prompt_executor_factory(model: str, device: str, compute_type: str) -> Any:
