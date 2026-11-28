@@ -138,7 +138,7 @@ class AsrConfig:
 
 @dataclass
 class OutputConfig:
-    """[output] — typing-output backend selection."""
+    """[output] — system-wide keyboard injection and dictation behavior."""
 
     backend: str = "wtype"     # "wtype" | "ydotool" | "null" (types nothing)
     append_space: bool = True  # daemon appends one trailing space to each final
@@ -167,9 +167,12 @@ class OutputConfig:
         # here at load time with a clear ValueError (the TYPE is correct, the VALUE is not — mirrors
         # AsrConfig's device validation). make_backend() retains its own ValueError as a defensive
         # second gate.
-        if self.backend not in ("wtype", "ydotool", "tmux", "null"):
+        # Keep existing config files usable without reviving the removed tmux route.
+        if self.backend == "tmux":
+            self.backend = "ydotool"
+        if self.backend not in ("wtype", "ydotool", "null"):
             raise ValueError(
-                f'[output] backend must be "wtype", "ydotool", "tmux", or "null", got {self.backend!r}'
+                f'[output] backend must be "wtype", "ydotool", or "null", got {self.backend!r}'
             )
         # streaming must be a genuine bool (rejects int — `streaming = 1` is a typo, not a
         # flag; mirrors the AsrConfig.context_prompt guard).

@@ -197,6 +197,13 @@ def test_make_backend_ydotool():
     assert isinstance(b, YdotoolBackend)
 
 
+def test_legacy_tmux_config_uses_only_system_wide_keystrokes(recorder):
+    cfg = OutputConfig(backend="tmux")
+    assert cfg.backend == "ydotool"
+    make_backend(cfg).type_text("synthetic final")
+    assert recorder.argvs == [("ydotool", "type", "--key-delay", "1", "--", "synthetic final")]
+
+
 def test_make_backend_null():
     b = make_backend(OutputConfig(backend="null"))
     assert isinstance(b, NullBackend)

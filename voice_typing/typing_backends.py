@@ -44,7 +44,6 @@ mocked in unit tests (P1.M3.T1.S2).
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 import threading
 import time
@@ -160,123 +159,6 @@ class NullBackend(TypingBackend):
         logger.debug("null backend: suppressed %d backspaces", n)
 
 
-class TmuxBackend(TypingBackend):
-    """tmux-buffer delivery (2026-11-25): text enters the focused tmux pane as ONE
-    paste per call — no per-character key events, no clipboard, no cliphist exposure.
-
-    type_text: `tmux load-buffer -` + `tmux paste-buffer` into the ACTIVE pane of the
-    active window (word-chunk streaming makes each call one word — the measured
-    4 ms/600-char atomic path). press_backspace: ONE `tmux send-keys` call with n
-    BSpace arguments (measured 300 backspaces applied in <5 ms).
-
-    FOCUS GATE (the safety seam): every call first asks Hyprland for the focused
-    window's pid (`hyprctl -j activewindow`); only if that pid is a tmux client
-    process (its /proc/<pid>/exe resolves under tmux) is the tmux path used.
-    Otherwise the call falls through to the injected fallback backend (ydotool) —
-    so dictating into a browser or any non-tmux window keeps working unchanged.
-    tmux/hyprctl failures fall back too; a failed tmux op falls back ONCE per call.
-    """
-
-    def __init__(
-        self,
-        fallback: "TypingBackend | None" = None,
-        *,
-        runner=None,
-        focus_pid=None,
-        focus_is_tmux=None,
-    ) -> None:
-        # runner: subprocess.run stand-in (tests inject); focus_pid: callable
-        # returning the focused window's pid or None; focus_is_tmux: callable
-        # pid -> bool (tests inject; production checks /proc/<pid>/exe).
-        self._fallback = fallback if fallback is not None else YdotoolBackend()
-        self._runner = runner if runner is not None else subprocess.run
-        self._focus_pid = focus_pid if focus_pid is not None else _hypr_focused_pid
-        self._focus_is_tmux = (
-            focus_is_tmux if focus_is_tmux is not None else _pid_is_tmux
-        )
-
-    def _active_pane(self) -> str | None:
-        """`session:window.pane` of the active pane in the active window, or None."""
-        try:
-            out = self._runner(
-                ["tmux", "list-panes", "-a", "-F",
-                 "#{window_active} #{pane_active} #{session_name}:#{window_index}.#{pane_index}"],
-                check=True, capture_output=True, text=True, timeout=2,
-            ).stdout
-        except Exception:  # noqa: BLE001 — any tmux failure means "not tmux-focused"
-            return None
-        for line in out.splitlines():
-            parts = line.split(" ", 2)
-            if len(parts) == 3 and parts[0] == "1" and parts[1] == "1":
-                return parts[2]
-        return None
-
-    def _focused_on_tmux(self) -> bool:
-        pid = self._focus_pid()
-        if pid is None:
-            return False
-        return self._focus_is_tmux(pid)
-
-    def type_text(self, text: str) -> None:
-        if not text:
-            return
-        pane = self._active_pane() if self._focused_on_tmux() else None
-        if pane is None:
-            self._fallback.type_text(text)
-            return
-        try:
-            self._runner(
-                ["tmux", "load-buffer", "-"], input=text, check=True,
-                capture_output=True, text=True, timeout=2,
-            )
-            self._runner(
-                ["tmux", "paste-buffer", "-t", pane], check=True,
-                capture_output=True, text=True, timeout=2,
-            )
-        except (subprocess.CalledProcessError, OSError) as exc:
-            logger.warning("tmux paste failed (%s); falling back to key backend", exc)
-            self._fallback.type_text(text)
-
-    def press_backspace(self, n: int) -> None:
-        if n <= 0:
-            return
-        pane = self._active_pane() if self._focused_on_tmux() else None
-        if pane is None:
-            self._fallback.press_backspace(n)
-            return
-        try:
-            self._runner(
-                ["tmux", "send-keys", "-t", pane] + ["BSpace"] * n,
-                check=True, capture_output=True, text=True, timeout=2,
-            )
-        except (subprocess.CalledProcessError, OSError) as exc:
-            logger.warning("tmux backspace failed (%s); falling back to key backend", exc)
-            self._fallback.press_backspace(n)
-
-
-def _pid_is_tmux(pid: int) -> bool:
-    """True iff the process's executable resolves under tmux."""
-    try:
-        exe = os.readlink(f"/proc/{pid}/exe")
-    except OSError:
-        return False
-    return "tmux" in exe
-
-
-def _hypr_focused_pid() -> int | None:
-    """Focused Wayland window's pid via hyprctl, or None (no Hyprland / parse failure)."""
-    try:
-        out = subprocess.run(
-            ["hyprctl", "-j", "activewindow"],
-            check=True, capture_output=True, text=True, timeout=2,
-        ).stdout
-        import json
-
-        return int(json.loads(out).get("pid") or 0) or None
-    except Exception:  # noqa: BLE001 — non-Hyprland or timeout: not tmux-focused
-        return None
-
-
 class _WtypeWithFallback(TypingBackend):
     """wtype primary, ydotool fallback (PRD §4.3 auto-fallback; §8 risk).
 
@@ -333,8 +215,6 @@ def make_backend(cfg: OutputConfig) -> TypingBackend:
     Returns:
         - backend == "wtype"   -> wtype with auto-fallback to ydotool (default)
         - backend == "ydotool" -> ydotool (no further fallback)
-        - backend == "tmux"    -> TmuxBackend (paste into focused tmux pane;
-                                  non-tmux focus falls back to ydotool)
         - backend == "null"    -> NullBackend (types nothing)
 
     Raises:
@@ -349,8 +229,4 @@ def make_backend(cfg: OutputConfig) -> TypingBackend:
         return YdotoolBackend(client=YdotoolClient())
     if backend == "null":
         return NullBackend()
-    if backend == "tmux":
-        from voice_typing.ydotoold_client import YdotoolClient
-
-        return TmuxBackend(fallback=YdotoolBackend(client=YdotoolClient()))
     raise ValueError(f"unknown output.backend: {backend!r}")

@@ -32,7 +32,7 @@ from voice_typing.audio_ducking import PlayerState
 
 logger = logging.getLogger(__name__)
 
-_BUSCTL = "/usr/bin/busctl"  # absolute path (zsh aliases; typing_backends._TMUX convention)
+_BUSCTL = "/usr/bin/busctl"  # absolute path, independent of the service's PATH
 _TIMEOUT_S = 1.0             # PRD §4.2quinquies: every audio call bounded <=1 s
 
 _MPRIS_PREFIX = "org.mpris.MediaPlayer2."

@@ -85,9 +85,10 @@ shortcut file from this checkout, remove that source line and keep any desired s
 in your own configuration.
 
 - `voicectl toggle` arms or gracefully stops dictation using `[output] streaming`.
-- `voicectl toggle-block` / `start-block` enter only finalized text; `toggle-stream` /
-  `start-stream` show live partials. Both use the same daemon. `voicectl status` reports
-  the active mode as `output: stream|block`.
+- `voicectl toggle-block` / `start-block` type only finalized text; `toggle-stream` /
+  `start-stream` also type live partials. Both use system-wide keyboard injection by
+  default: **block means final-only, not paste**. `voicectl status` reports the active mode
+  as `output: stream|block`.
 - `voicectl cancel` drops the current fragment in either mode. See
   [Backspace-cancel](#backspace-cancel-erase-the-in-flight-fragment).
 - If the control socket stops responding, `systemctl --user stop voice-typing` bypasses it.
@@ -228,8 +229,9 @@ Evidence: scripted 12/12 PASS — `tests/D1_DUCK_EVIDENCE.md` (re-runnable:
 
 ## Bulk text delivery (opt-in, experimental)
 
-**Status: opt-in and unverified.** Set `output.delivery = "bulk-text"` to switch the output
-path; the default remains `"stream-edit"`. The G6 graduation gate — the assembled,
+**Legacy lab experiment, not the system-wide block mode or the planned editor integrations.**
+The `output.delivery = "bulk-text"` experiment remains opt-in and unverified; use the
+`"stream-edit"` default for ordinary dictation. The G6 graduation gate — the assembled,
 re-derivable verdict in `tests/G6_GRADUATION.md` — currently reads
 `G6 DECISION: STAY OPT-IN (unmet: A-g3-matrix, B-integrity, C-g5-timing, D-sessions)`
 (2026-11-24 @ 2909e03). Until it flips, everything in this section is mechanism-level
@@ -366,7 +368,7 @@ Real tunable keys (every key below is a real field in `voice_typing/config.py`):
 | `asr.device` | `"cuda"` | `"cuda"` or `"cpu"`. Auto-falls-back to `cpu` if no CUDA device is visible. |
 | `asr.compute_type` | `"float16"` | ctranslate2 compute type on the CUDA path. `"float16"` = Ampere+ native (~2x faster decode than float32 on large models). `"float32"` = for cards without usable fp16 (e.g. Maxwell 940MX). Always `"int8"` on the CPU path (config value ignored there). |
 | `asr.language` | `"en"` | ISO-639-1 code. |
-| `output.backend` | `"wtype"` | `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"null"` (types nothing; used by the headless E2E tests). `wtype` auto-falls-back to `ydotool`. |
+| `output.backend` | `"wtype"` | Legacy name for the system-wide keyboard injector: `"wtype"` (Wayland virtual keyboard), `"ydotool"` (uinput), or `"null"` (no typing). `wtype` can fall back to `ydotool`. Old `"tmux"` values load as `"ydotool"`; no tmux detection or paste. |
 | `output.append_space` | `true` | append one trailing space after each commit. |
 | `output.streaming` | `true` | type stabilized partials live + revise in place as the utterance grows. `false` = append-only finals (rollback hatch to the pre-Rev-2 typing behavior). |
 | `output.delivery` | `"stream-edit"` | `"bulk-text"` = opt-in bulk delivery (see [Bulk text delivery](#bulk-text-delivery-opt-in-experimental) — **unverified until G6**: `tests/G6_GRADUATION.md` says STAY OPT-IN). Requires `output.streaming=true`, `asr.graceful_stop=false`, `cancel.keypress_action="disarm"` — the loader rejects other combos with a single ValueError naming all violations. |
