@@ -290,7 +290,14 @@ class NativeRecoverySnapshot:
     """Immutable recovery read — the 1:1 source of T5.S1's {ok, id, text, truncated,
     possibly_applied} reply (final_count / end_reason / ended_monotonic are diagnostics,
     never on the wire). Built under the store lock and handed off lock-free; carries no
-    live references into the store."""
+    live references into the store.
+
+    WIRE (P1.M1.T5.S1): readable ONLY via the owner-only control socket
+    ({"cmd":"editor-recover"}; consumers `voicectl recover` / editor adapters). The reply
+    carries exactly {ok, id, text, truncated, possibly_applied}; the last three snapshot
+    fields (final_count / end_reason / ended_monotonic) never reach the wire. One-shot
+    and NON-CONSUMING: the text is never replayed, re-inserted, copied, typed, or
+    logged; reading never mutates the store."""
 
     session_id: str
     text: str  # unacknowledged finals in seq order, single-space joined (the RECOVERY text)
@@ -432,7 +439,13 @@ class NativeRecovery:
         NOT decide `busy` — the wire layer (T5.S1) checks active_id() == id first and
         answers busy itself). Built under the lock: a fresh single-space join of the
         retained finals in seq order; possibly_applied = ANY retained final's
-        offer_attempted; truncated = a cap pass dropped and/or clipped finals here."""
+        offer_attempted; truncated = a cap pass dropped and/or clipped finals here.
+
+        WIRE (P1.M1.T5.S1): selection precedence on the owner socket is shape → busy →
+        not_found → reply; busy/not_found are DERIVED here but decided by the daemon
+        (active_id() == id → busy; a None from this call → not_found). The read is
+        non-consuming and side-effect free — nothing is armed/disarmed, settled,
+        cleared, typed, copied, or logged; state.json/feedback/status are untouched."""
         with self._lock:
             if session_id is None:
                 if not self._ended:
@@ -447,7 +460,11 @@ class NativeRecovery:
 
     def active_id(self) -> str | None:
         """The ACTIVE session's UUIDv4 (None when none) — T5.S1's `busy` check reads
-        this; the store itself never refuses a recover() for the active id."""
+        this; the store itself never refuses a recover() for the active id.
+
+        WIRE (P1.M1.T5.S1): an explicit id equal to this value is answered `busy` on the
+        owner socket, and an OMITTED id never selects the active session — only ENDED
+        snapshots are ever returned for the recovery reply."""
         with self._lock:
             return self._active.session_id if self._active is not None else None
 

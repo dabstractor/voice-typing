@@ -149,7 +149,9 @@ from voice_typing.editor_protocol import (
     PumpClosed,
     encode_line,
     is_uuid_v4,
+    native_error_reply,
     remaining,
+    send_line_capped,
     validate_event,
     validate_request,
     write_reject,
@@ -380,6 +382,62 @@ class NativeEndState:
             if self.possibly_applied:
                 msg += " (may already be partially typed)"
         return msg
+
+
+# ---------------------------------------------------------------------------
+# P1.M1.T5.S1 (PRD §4.8.1 C): the owner-only capped recovery reply (`editor-recover`).
+# Pure module-level helpers: the wire layer only SELECTS (store public API) and BUILDS
+# (immutable snapshot -> reply dict); it never types, copies, replays, clears, or logs text.
+# ---------------------------------------------------------------------------
+
+MAX_RECOVERY_REPLY_BYTES: int = 7 << 20  # §4.8.1 C — escaped JSON line INCLUDING '\n' (code constant, NOT config)
+
+_RECOVER_KEYS = frozenset({"cmd", "id"})  # the ONLY keys an editor-recover request may carry
+
+
+def _encode_reply_line(reply: dict) -> bytes:
+    """P1.M1.T5.S1: the recovery reply's OWN line encoding — escaped JSON + '\\n'.
+
+    NOT editor_protocol.encode_line: that encoder is bounded by MAX_FRAME_BYTES (32 KiB)
+    for LIVE frames. §4.8.1 C bounds the recovery reply separately at
+    MAX_RECOVERY_REPLY_BYTES (7 MiB, newline included), encoded with ensure_ascii=False.
+    Defence-in-depth: worst-case escaping is 6× (a 1-byte control char -> the 6-byte
+    \\u00XX sequence) and the store caps text at 1 MiB UTF-8, so the largest reply the
+    default store can produce is ~6.01 MiB < 7 MiB."""
+    return (json.dumps(reply, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def build_recovery_reply(snapshot, *, max_bytes: int = MAX_RECOVERY_REPLY_BYTES) -> dict:
+    """P1.M1.T5.S1 (pure): the §4.8.1 C recovery reply from a NativeRecoverySnapshot —
+    EXACTLY the five keys {ok, id, text, truncated, possibly_applied} (final_count /
+    end_reason / ended_monotonic are diagnostics, never on the wire).
+
+    The encoded line (escaped JSON + '\\n', via _encode_reply_line) is bounded at
+    max_bytes: while it does not fit, clip ``text`` UTF-8-safely KEEPING ITS START
+    (session_recovery._fit_text) and force truncated=True. Deterministic; terminates
+    (each pass at least halves the text — 1 MiB reaches "" in ≤ 21 passes)."""
+    reply = {"ok": True, "id": snapshot.session_id, "text": snapshot.text,
+             "truncated": bool(snapshot.truncated),
+             "possibly_applied": bool(snapshot.possibly_applied)}
+    for _ in range(64):
+        if len(_encode_reply_line(reply)) <= max_bytes:
+            return reply
+        text = reply["text"]
+        reply["text"] = session_recovery._fit_text(text, len(text.encode("utf-8")) // 2)
+        reply["truncated"] = True
+    raise AssertionError("recovery reply did not converge")  # unreachable: halving ⇒ ≤ ~21 passes
+
+
+def select_native_recovery(store, session_id):
+    """P1.M1.T5.S1 (pure w.r.t. the store's public API; no I/O, no logs): the §4.8.1 C
+    selection order — ("busy", None) when store.active_id() == session_id (decided by
+    active_id(), NEVER by recover(), which returns a live snapshot for the active id);
+    ("not_found", None) when store.recover(session_id) is None; else ("ok", snapshot).
+    An omitted id selects the store's LATEST ENDED session (never the active one)."""
+    if session_id is not None and store.active_id() == session_id:
+        return "busy", None
+    snapshot = store.recover(session_id)
+    return ("ok", snapshot) if snapshot is not None else ("not_found", None)
 
 
 @dataclass(frozen=True)
@@ -5000,6 +5058,23 @@ class ControlServer:
                         self._run_native_session(sess)
                     return  # the generic loop NEVER runs on an owner connection again
                 response = self._dispatch(stripped)
+                # P1.M1.T5.S1: the recovery reply is the ONE response with its own bound
+                # (7 MiB incl. newline — NOT the 32 KiB live-frame limit) and its own
+                # whole-write cap (2 s via send_line_capped): a client that stops reading
+                # must never wedge this thread on a multi-MiB line (the AGENTS.md hang
+                # class). NEVER sendall it uncapped. On a capped/failed write, log ONE
+                # codes-only debug line and move on — the daemon owes that client nothing
+                # further (the client owns its one-shot close). Every other reply keeps
+                # the byte-identical encode_line + flush path below.
+                if isinstance(peek, dict) and peek.get("cmd") == "editor-recover":
+                    line = _encode_reply_line(response)
+                    try:
+                        sent = send_line_capped(conn, line)
+                    except OSError:
+                        sent = False
+                    if not sent:
+                        logger.debug("native recover: write capped or failed bytes=%d", len(line))
+                    continue  # one reply per request (BUG-005 contract preserved)
                 wfile.write(encode_line(response))
                 wfile.flush()  # CRITICAL: makefile("w") buffers; flush every reply
                 if response.get("shutting_down"):
@@ -5034,6 +5109,38 @@ class ControlServer:
             return {"ok": False, "error": f"model load failed: {load_error}"}
         return {"ok": True, **self._daemon.status_snapshot()}
 
+    def _recover_reply(self, msg: Any) -> dict:
+        """P1.M1.T5.S1 (§4.8.1 C): shape -> select -> build for `editor-recover`.
+
+        Request (validated HERE — _REQUEST_SPECS/validate_request untouched): a dict with
+        keys ⊆ {cmd, id}; `id` optional, else a canonical UUIDv4 str. Outcomes in
+        precedence order: invalid_request (malformed shape) → busy (the id is the ACTIVE
+        session) → not_found (no retained recovery) → the 5-key reply {ok, id, text,
+        truncated, possibly_applied}. NON-CONSUMING (no clear/settle/replay/copy/typing),
+        no backend, no subprocess, no clipboard; status/state.json/feedback untouched.
+        Logs ONE codes-only line per request (code/id/byte count/flags — NEVER the text
+        or the context). getattr guard → not_found on stub daemons without a store."""
+        if not isinstance(msg, dict) or not set(msg) <= _RECOVER_KEYS:
+            return native_error_reply("invalid_request")
+        sid = msg.get("id")
+        if sid is not None and not (isinstance(sid, str) and is_uuid_v4(sid)):
+            return native_error_reply("invalid_request")
+        store = getattr(self._daemon, "_native_recovery", None)
+        if store is None:
+            code, snap = "not_found", None
+        else:
+            code, snap = select_native_recovery(store, sid)
+        if code != "ok":
+            logger.info("native recover: %s id=%s", code, sid or "latest")
+            return native_error_reply(code)
+        reply = build_recovery_reply(snap)
+        logger.info(
+            "native recover: ok id=%s bytes=%d truncated=%s possibly_applied=%s",
+            snap.session_id, len(_encode_reply_line(reply)),
+            reply["truncated"], reply["possibly_applied"],
+        )
+        return reply
+
     def _dispatch(self, line: str) -> dict:
         """Parse one request line -> dispatch cmd -> response dict. Never raises (robustness).
 
@@ -5048,6 +5155,12 @@ class ControlServer:
         if not isinstance(msg, dict):
             return {"ok": False, "error": "request must be a JSON object"}
         cmd = msg.get("cmd")
+        # P1.M1.T5.S1 (§4.8.1 C): owner-only recovery read — validated HERE (never in
+        # _REQUEST_SPECS: the shared codec + vectors stay byte-identical), answered with
+        # the native error shape {"ok":false,"error":<code>} (native_error_reply — NOT
+        # the generic busy-flag arm shapes below). Read-only and NON-CONSUMING.
+        if cmd == "editor-recover":
+            return self._recover_reply(msg)
         mode = _cmd_streaming(cmd)  # None for the plain commands (config default)
         if cmd in ("toggle", "toggle-lite", "toggle-stream", "toggle-block"):
             # 'toggle-lite' is the Rev 1 two-mode name, kept ONLY as a deprecated migration

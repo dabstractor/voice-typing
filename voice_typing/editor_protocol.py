@@ -38,6 +38,39 @@ DISPATCH (P1.M1.T4.S7 — the wiring that makes this module live on the REAL soc
   Timers: lease 6 s (pump) · Start cap 30 s (daemon watchdog) · ACK 5 s (OfferQueue deadline
   checked on the session's ≤ 0.5 s tick) · write cap 2 s (writer, per whole line).
 
+RECOVERY REPLY (P1.M1.T5.S1 — PRD §4.8.1 C; implemented in voice_typing.daemon):
+  On a connection to the owner-only control socket a client may send
+    {"cmd":"editor-recover"}                  → the LATEST ENDED session's recovery
+    {"cmd":"editor-recover","id":"<UUIDv4>"}  → that session's recovery
+  and gets EXACTLY ONE reply, then the connection stays generic (one reply per line —
+  editor-recover is NOT a first-frame owner route; only cmd == "editor-start" hands a
+  connection to the native path). The daemon owes no further frames after the reply:
+  the client owns its one-shot close (the CLI/adapters close after reading).
+
+  Replies (selection precedence: shape → busy → not_found → reply):
+    {"ok":true,"id":sid,"text":<unacknowledged accepted finals in seq order,
+     single-space joined>,"truncated":bool,"possibly_applied":bool}   — success, exactly 5 keys
+    {"ok":false,"error":"busy"}          — the id is the ACTIVE session
+    {"ok":false,"error":"not_found"}     — no retained recovery (absent id, nothing ended,
+                                           or daemon restarted — no durable recovery)
+    {"ok":false,"error":"invalid_request"} — malformed shape (extra keys, non-UUIDv4 id);
+                                           validated in daemon._recover_reply, NOT via
+                                           _REQUEST_SPECS/validate_request (untouched)
+
+  Bounds: MAX_FRAME_BYTES (32 KiB) and encode_line() do NOT apply to this reply — it has
+  its OWN bound, daemon.MAX_RECOVERY_REPLY_BYTES = 7 MiB, measured on the ESCAPED JSON
+  line INCLUDING the newline (defence-in-depth over the store's 1 MiB UTF-8 text cap:
+  worst-case escaping is 6×, so a full store reply is ≤ ~6.01 MiB). On overflow the text
+  is clipped UTF-8-safely KEEPING ITS START with truncated=true. The reply is written via
+  send_line_capped (whole-line 2 s cap) — a client that stops reading can never wedge the
+  connection thread on a multi-MiB line; NEVER an uncapped sendall.
+
+  Semantics: one-shot and NON-CONSUMING (a repeat request returns the same snapshot; the
+  daemon never replays, re-inserts, copies, or types the text; daemon exit clears the
+  store). status/state.json/feedback/`voicectl session` and the clipboard are untouched,
+  and nothing about the text is ever logged (codes/ids/byte counts only). Consumers:
+  `voicectl recover` (P1.M1.T5.S2) and the editor adapters (P1.M2.T1/T2).
+
 Pure stdlib (json). No sockets are opened here; tests inject recv.
 """
 from __future__ import annotations

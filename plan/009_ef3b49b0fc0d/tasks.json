@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Daemon contract and safe migration",
-          "status": "Planned",
+          "status": "Ready",
           "description": "Keep desktop stream/block and ordinary recovery; add confirmed context priming, exclusive native ownership, bounded delivery and separate recovery on the existing owner-only socket.",
           "tasks": [
             {
@@ -542,14 +542,14 @@
               "type": "Task",
               "id": "P1.M1.T5",
               "title": "Expose explicit native recovery without replay",
-              "status": "Planned",
+              "status": "Ready",
               "description": "Add the bounded one-shot recovery API and CLI, separate from ordinary session recovery and clipboard copy.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T5.S1",
                   "title": "Serve an owner-only capped recovery reply",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T3.S1",
@@ -574,7 +574,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T5.S2",
                   "title": "Print native recovery text and stderr warnings",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S5",
@@ -614,7 +614,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Establish mounted wrapper and stock runtime compatibility",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T4.S7"
