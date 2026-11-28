@@ -948,6 +948,12 @@ class VoiceTypingDaemon:
         # pinned the hatch keystroke-identical), so the commit-time prompt refresh
         # sources from here instead. Reset at every _arm().
         self._rev1_committed: str = ""
+        # P1.M1.T2.S4 — seed handoff (§4.8.1 "confirmed seed before capture"): a confirmed
+        # seed installed by the fenced seam is recognition-only conditioning; it is REPLACED
+        # exactly once, on this session's FIRST ACCEPTED final (see _handoff_context_prompt).
+        self._seed_handoff_pending = False  # a confirmed seed is resident AND not yet replaced (set ONLY by the fenced seam's hook)
+        self._seed_handoff_done = False  # this armed session replaced its seed via the accumulator (per-session; reset in _arm)
+        self._session_accepted: list[str] = []  # THIS session's accepted finals only — never seed / tail / partial text (reset in _arm)
         self._loading = False
         self._load_error: str | None = None
         # Single-flight load wait (PRD §4.2bis "waits on the in-flight one"): a Condition over the SAME _lock so a
@@ -1406,7 +1412,17 @@ class VoiceTypingDaemon:
             )
 
     def on_final(self, text: str) -> None:
-        """Gate → clean → type → record + log latency. Fired by RealtimeSTT in a NEW thread."""
+        """Gate → clean → type → record + log latency. Fired by RealtimeSTT in a NEW thread.
+
+        P1.M1.T2.S4 (§4.8.1 seed privacy): a confirmed initial-prompt seed is
+        recognition-only conditioning — it never reaches displayed text, spacing, latency,
+        logs, status, feedback, recovery, replies, or the next session. Immediately after
+        the acceptance point below (textproc.clean returned non-empty and the final was not
+        dropped), _handoff_context_prompt appends the accepted final to the session
+        accumulator and — on the FIRST acceptance of a seeded session — replaces the seed
+        with this session's rolling context (or a known-empty prompt). A rejected final
+        returns BEFORE that call and never consumes the seed ("say it again").
+        """
         t_final_ready = time.monotonic()  # entry stamp (PRD §4.2 latency logging)
         if (
             not self._listening.is_set()
@@ -1574,6 +1590,7 @@ class VoiceTypingDaemon:
             self._utterance_finalized = (
                 True  # validation Issue 2: mark this text() invocation done
             )
+            self._handoff_context_prompt(cleaned)  # P1.M1.T2.S4: seed → rolling on the FIRST accepted final — BEFORE any typing/commit
             if self._streaming_now():
                 # P1.M2.T6.S2 streaming commit path (the correction pass): the engine
                 # corrects the on-screen tail in place (rewind+retype only when the
@@ -1747,6 +1764,10 @@ class VoiceTypingDaemon:
         it must run LAST (it sets _listening first — once it returns, the run loop may enter
         text()), so everything abortable happens before it.
 
+        P1.M1.T2.S4: the arm also resets the seed-handoff per-session state — the accepted-finals
+        accumulator (_session_accepted) and the done flag (_seed_handoff_done). _seed_handoff_pending
+        is the fenced seam's (set beside _seed_active on an applied prime) and is NEVER reset here.
+
         set_listening(True) fires the transient 'Recording' start toast (feedback.py). A COLD first
         arm is preceded by a 'Loading…' toast from _load_host(); a warm arm fires only 'Recording'.
         """
@@ -1783,6 +1804,12 @@ class VoiceTypingDaemon:
         # best-effort clear for hosts WITHOUT a confirmed channel fires in the seam's commit step,
         # still BEFORE this mic cmd (the FIFO pin holds).
         self._rev1_committed = ""
+        # P1.M1.T2.S4: per-session seed-handoff state. _seed_handoff_pending is deliberately
+        # NOT reset here — the fenced seam sets it (beside _seed_active on an applied prime)
+        # BEFORE this body runs; resetting it would erase the seam's mark (CRITICAL: the seed
+        # arm's hook fires before _arm is called).
+        self._session_accepted = []  # fresh session = THIS session's accepted finals only
+        self._seed_handoff_done = False
         self._armed_monotonic = (
             time.monotonic()
         )  # keypress-disarm grace window anchor (note_user_keypress)
@@ -2120,6 +2147,58 @@ class VoiceTypingDaemon:
         if callable(freeze):
             freeze(reason, session=True)
 
+    def _handoff_context_prompt(self, accepted: str) -> None:
+        """P1.M1.T2.S4 (§4.8.1 "confirmed seed before capture"): replace the seed exactly once.
+
+        Called from on_final at the ACCEPTANCE point (textproc.clean returned non-empty),
+        BEFORE any typing/commit — a raising backend, a frozen engine, or a downstream
+        early return can never skip it. Every accepted final is appended to
+        _session_accepted (the accepted-only, session-scoped accumulator — never seed
+        text, never a frozen tail, never a partial; reset in _arm). While
+        _seed_handoff_pending (a confirmed seed is resident — set by the fenced seam's
+        hook beside _seed_active on an APPLIED prime), the FIRST accepted final REPLACES
+        it: exactly one host.set_prompt(rolling_context_prompt(" ".join(_session_accepted)))
+        when the rolling prompt is enabled and the child lane is active, else
+        set_prompt("") — a known-EMPTY prompt, NEVER a skip (skipping is the whole-session
+        seed leak this closes; on a seam-less host the setter is a harmless no-op). A
+        rejected final never reaches this method (it returns in on_final before the
+        acceptance point), so the seed stays pending ("say it again"). After the handoff,
+        _refresh_context_prompt sources from the accumulator (its _seed_handoff_done
+        branch) — StreamingOutput.committed is deliberately NOT the source: it can absorb
+        an unaccepted frozen tail and does not exist on the native path.
+
+        PRIVACY (Mode A / arch "Confirmed seed before capture"): the seed is
+        recognition-only conditioning — it never reaches committed text, spacing, latency,
+        logs, status, feedback, SessionRecovery, replies, or the next session. This method
+        logs a WORD COUNT only and the seed string never enters any method it calls (the
+        argument is the ACCEPTED final). Runs on the on_final reader thread under
+        _on_final_lock (NOT _lock): set_prompt is a non-blocking queue put (S2 contract) —
+        no waits, no _lock, never raises (whole body defensively wrapped).
+        """
+        try:
+            self._session_accepted.append(accepted)
+            if not self._seed_handoff_pending:
+                return
+            self._seed_handoff_pending = False
+            self._seed_handoff_done = True
+            if self._cfg.asr.context_prompt and self._context_prompt_active is True:
+                text = prompt_engine.rolling_context_prompt(
+                    " ".join(self._session_accepted)
+                )
+            else:
+                text = ""  # rolling disabled/degraded → the replacement is a known EMPTY prompt
+            setter = getattr(self._host, "set_prompt", None)
+            if callable(setter):
+                setter(text)
+                logger.debug(
+                    "context-prompt: seed handed off to rolling context (%d words)",
+                    len(text.split()),
+                )
+            else:
+                logger.debug("context-prompt handoff skipped: host has no set_prompt seam")
+        except Exception:
+            logger.debug("context-prompt handoff failed (ignored)", exc_info=True)
+
     def _refresh_context_prompt(self) -> None:
         """Push the rolling context prompt to the recorder-host child (P1.M2.T5.S2 — formal).
 
@@ -2136,6 +2215,10 @@ class VoiceTypingDaemon:
         self._stream.committed (the engine's post-commit mirror); in the Rev 1 rollback
         hatch it is self._rev1_committed (the daemon-side accumulator) — StreamingOutput is
         NOT touched in that mode (T6.S2 pinned it keystroke-identical).
+        P1.M1.T2.S4: once this session has handed its seed off (_seed_handoff_done), the
+        source is ONLY _session_accepted — the accepted-finals accumulator — in BOTH modes:
+        StreamingOutput.committed can absorb an unaccepted frozen tail and does not exist
+        on the native path, so the decoder is conditioned on accepted dictation alone.
 
         Defensive getattr seam (unchanged from the T6.S2 thin version): a host without
         set_prompt (unit-test fakes, the legacy recorder adapter) is a silent DEBUG
@@ -2153,7 +2236,9 @@ class VoiceTypingDaemon:
                 or self._context_prompt_active is not True
             ):
                 return
-            if self._streaming_now():
+            if self._seed_handoff_done:  # P1.M1.T2.S4: accepted-only accumulator, BOTH modes
+                source = " ".join(self._session_accepted)
+            elif self._streaming_now():
                 source = self._stream.committed
             else:
                 source = self._rev1_committed
@@ -2618,6 +2703,7 @@ class VoiceTypingDaemon:
                     # Commit: the prompt state is KNOWN — apply the policy, then capture.
                     if want_seed:
                         self._seed_active = installed  # applied → the seed IS the prompt; clear → known-clear
+                        self._seed_handoff_pending = installed  # P1.M1.T2.S4: an APPLIED seed awaits the first accepted final
                     elif need_clear:
                         self._seed_active = False  # CONFIRMED clear
                     elif not callable(primer):

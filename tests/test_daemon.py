@@ -5275,6 +5275,196 @@ def test_arm_and_disarm_reset_the_stream_session():
     assert be.typed[-1] == "Next"  # fresh session start: case preserved, typed anew
 
 
+# --- P1.M1.T2.S4: seed handoff — the §4.8.1 seed is recognition-only conditioning that is
+# --- replaced EXACTLY ONCE, on the first ACCEPTED final, by THIS session's accepted-finals
+# --- rolling context (never a skip, never the seed); rejected finals never consume it.
+# --- Most tests set _seed_handoff_pending directly after d.start() (the fenced seam's hook
+# --- is exercised by test_fenced_seed_arm_marks_handoff_pending, which reuses S3's
+# --- _PrimeableFakeHost/_primeable_factory/_PrimeResult defined later in this file —
+# --- module scope resolves at call time). Push-count note: on the handoff final BOTH the
+# --- handoff AND the pre-existing _refresh_context_prompt fire; the refresh sources from
+# --- the SAME accumulator, so the two pushes carry identical text.
+
+
+def _seeded(cfg=None, *, context_prompt=True):
+    """Started daemon on a _PromptRecordingHost with a seed marked resident.
+
+    Mirrors the T6.S2 idiom (test_on_final_streaming_pushes_context_prompt_to_host), then
+    sets _seed_handoff_pending AFTER d.start() — the fenced seam sets it beside _seed_active
+    on an applied prime; driving the flag directly keeps these tests focused on the handoff
+    semantics (the seam wiring has its own test below). Returns (d, fb, rec, be, host).
+    """
+    cfg = cfg if cfg is not None else VoiceTypingConfig()
+    cfg.asr.context_prompt = context_prompt
+    host = _PromptRecordingHost(
+        cfg, _DaemonFakeFeedback(), daemon.LatencyLog(), None, None, None
+    )
+    host.device["context_prompt"] = True  # the child's ready payload: prompt lane armed
+    host.spawn()  # alive so _load_host() fast-paths (keeps OUR host)
+    d, fb, rec, be = _make_daemon(cfg=cfg, recorder_host=host)
+    d.start()
+    d._seed_handoff_pending = True  # a confirmed seed is resident (the seam's hook, simulated)
+    return d, fb, rec, be, host
+
+
+def test_seed_handoff_rejected_finals_keep_seed():
+    """Rejected finals (blocklist / min_chars) return BEFORE the acceptance point: no
+    handoff push, the seed stays pending ("say it again"), the accumulator stays empty."""
+    d, fb, rec, be, host = _seeded()
+    assert host.prompts == [""]  # arm-time legacy clear only
+    d.on_final("thank you.")  # default blocklist -> clean() -> None -> rejected branch
+    d.on_final("a")  # below min_chars (2) -> rejected
+    assert host.prompts == [""]  # NO push from the handoff
+    assert d._seed_handoff_pending is True  # the seed is NOT consumed
+    assert d._seed_handoff_done is False
+    assert d._session_accepted == []  # rejected finals never enter the accumulator
+    assert fb.finals == []
+
+
+def test_seed_handoff_first_accepted_pushes_session_only_rolling():
+    """The FIRST accepted final replaces the seed exactly ONCE with
+    rolling_context_prompt(accepted finals) — never the seed, never a skip. The third push
+    is the pre-existing _refresh_context_prompt on the same final, sourcing from the SAME
+    accumulator (identical text on this final — the handoff made it the refresh source)."""
+    d, fb, rec, be, host = _seeded()
+    d.on_final("First one. second")
+    assert host.prompts == ["", "second", "second"]
+    #        arm clear ^  handoff ^  refresh (accumulator source, same text) ^
+    assert d._seed_handoff_pending is False
+    assert d._seed_handoff_done is True
+    assert d._session_accepted == ["First one. second"]  # accepted finals ONLY
+    assert fb.finals == ["First one. second"]
+
+
+def test_seed_handoff_is_once_then_refresh_uses_accumulator():
+    """After the one-time handoff, later commits refresh from the accumulator ONLY: a
+    GHOST tail poked into StreamingOutput.committed (the unaccepted-frozen-tail shape)
+    must not leak into the prompt."""
+    d, fb, rec, be, host = _seeded()
+    d.on_final("First one. second")  # handoff + refresh (both "second")
+    d._stream._committed = "GHOST tail "  # poison the display-engine mirror
+    d.on_final("Third one")  # handoff is ONCE: this final only refreshes
+    # rolling("First one. second Third one") -> text since the last '.' — accumulator
+    # sourced, NOT the GHOST tail and NOT stream.committed.
+    assert host.prompts == ["", "second", "second", "second Third one"]
+    assert not any("GHOST" in p for p in host.prompts)
+    assert d._session_accepted == ["First one. second", "Third one"]
+
+
+def test_seed_handoff_with_rolling_disabled_clears_seed():
+    """Config-off STILL replaces (skipping is the whole-session seed leak this task
+    closes): the replacement is a known-EMPTY prompt push. The arm-time clear is
+    config-gated, so the handoff's '' is the FIRST and ONLY push."""
+    d, fb, rec, be, host = _seeded(context_prompt=False)
+    assert host.prompts == []  # config-off: the arm-time clear does not push either
+    d.on_final("First one. second")
+    assert host.prompts == [""]  # exactly one push, and it is the known-empty prompt
+    assert d._seed_handoff_pending is False and d._seed_handoff_done is True
+
+
+def test_seed_handoff_runs_before_typing_failure():
+    """The handoff precedes typing/commit: a raising backend cannot skip it (the engine's
+    fail-safe freeze swallows the type error; record + refresh still run)."""
+    d, fb, rec, be, host = _seeded()
+
+    def _boom(payload):
+        raise RuntimeError("backend exploded")
+
+    be.type_text = _boom  # shared backend instance: the engine's commit raises inside
+    d.on_final("First one. second")
+    assert d._seed_handoff_pending is False and d._seed_handoff_done is True
+    assert host.prompts[-1] == "second"  # the handoff push still happened
+    assert fb.finals == ["First one. second"]  # record still happened
+
+
+def test_seed_handoff_rev1_mode_uses_accumulator():
+    """Rev 1 hatch (output.streaming=False): the same handoff semantics; the refresh
+    sources from the accumulator (the Rev 1 committed mirror is bypassed for prompts)."""
+    cfg = VoiceTypingConfig()
+    cfg.output.streaming = False
+    d, fb, rec, be, host = _seeded(cfg)
+    d.on_final("First one. second")
+    assert be.typed == ["First one. second "]  # Rev 1 hatch keystroke-identical
+    assert host.prompts == ["", "second", "second"]  # arm clear, handoff, refresh
+    assert d._seed_handoff_done is True
+
+
+def test_seed_handoff_missing_set_prompt_seam_is_silent():
+    """No set_prompt seam (plain _FakeHost): the handoff must not raise; the flags still
+    advance (the replacement degrades to a harmless no-op on a seam-less host)."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._seed_handoff_pending = True
+    d.on_final("hello world")  # must not raise
+    assert d._seed_handoff_pending is False
+    assert d._seed_handoff_done is True
+    assert fb.finals == ["hello world"]
+
+
+def test_seed_handoff_does_not_touch_status_feedback_recovery():
+    """Privacy surfaces: the status context_prompt label is identical to a non-seeded
+    run; feedback finals and the SessionRecovery draft hold ONLY dictated finals."""
+    d, fb, rec, be, host = _seeded()
+    d.on_final("First one. second")
+    control, *_ = _seeded()  # identical construction, no final driven
+    assert d.status_snapshot()["context_prompt"] == (
+        control.status_snapshot()["context_prompt"]
+    )
+    assert fb.finals == ["First one. second"]
+    assert d._session_recovery._draft_finals == ["First one. second"]
+    assert d._session_accepted == ["First one. second"]
+
+
+def test_seed_handoff_no_text_in_logs(caplog):
+    """Log privacy: the handoff logs a WORD COUNT only — never the seed marker (and it
+    never adds a text-bearing line beyond the pre-existing latency contract)."""
+    d, fb, rec, be, host = _seeded()
+    d._session_accepted = ["SEEDMARK forced sentence"]  # poison the accumulator
+    with caplog.at_level(logging.DEBUG, logger="voice_typing.daemon"):
+        d.on_final("Hello there.")  # accepted; handoff text rolls to "" (ends a sentence)
+    assert "SEEDMARK" not in caplog.text
+    assert not any("SEEDMARK" in p for p in host.prompts)  # never reaches the child lane here
+    assert any("seed handed off" in r.getMessage() for r in caplog.records)
+
+
+def test_seed_handoff_resets_next_session():
+    """A fresh arm resets the per-session handoff state (accumulator + done); pending is
+    the fenced seam's and is deliberately NOT reset in _arm."""
+    d, fb, rec, be, host = _seeded()
+    d.on_final("First one. second")  # handoff done
+    assert d._seed_handoff_done is True and d._session_accepted
+    d.start()  # fresh arm (the recording host has no prime channel: legacy re-arm path)
+    assert d._session_accepted == []
+    assert d._seed_handoff_done is False
+
+
+def test_fenced_seed_arm_marks_handoff_pending():
+    """S3 seam integration: an APPLIED seed arm sets _seed_handoff_pending beside
+    _seed_active (BEFORE the _arm body runs — it survives the arm's resets); a plain arm
+    on a fresh daemon leaves it False. Reuses S3's _PrimeableFakeHost +
+    _primeable_factory + _PrimeResult (defined later in this file)."""
+    host_box = {}
+
+    def _script(h):
+        host_box["h"] = h
+
+    d, fb = _make_lazy_daemon(host_factory=_primeable_factory(_script))
+    d.start()  # plain arm on a seedless daemon: the fence skips priming entirely
+    h = host_box["h"]
+    assert d._seed_handoff_pending is False
+    assert d._seed_handoff_done is False
+    assert h.prime_calls == []  # plain arm + channel + no prior seed -> no prime call
+    d._disarm()
+    outcome = d.start_with_seed("Editor pre-caret text")  # fenced seeded arm (applied)
+    assert outcome.ok is True and outcome.reason == "seed-applied"
+    assert outcome.context_seeded is True
+    assert d._seed_active is True
+    assert d._seed_handoff_pending is True  # awaits the first accepted final
+    assert d._seed_handoff_done is False  # the arm reset it; pending survived (set BEFORE _arm)
+    assert h.prompts == []  # a primed arm pushes NO legacy clear (the seed IS the prompt)
+    assert h.prime_calls[-1][0] == "Editor pre-caret text"  # exactly one confirmed prime
+
+
 # --- P1.M2.T6.S3: user-keypress seam + stranded-tail freeze wiring (PRD rules 4/5) ---
 
 

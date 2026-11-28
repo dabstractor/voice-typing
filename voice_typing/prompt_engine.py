@@ -24,6 +24,14 @@ WHY AN EXECUTOR (verified line-by-line against the installed RealtimeSTT 1.0.2):
     object with .text and .info; the consumer reads .info.language /
     .info.language_probability (core/transcription_api.py:113-115).
 
+SEED vs ROLLING CONTEXT (§4.8.1, P1.M1.T2.S4): the initial-prompt SEED is pre-caret editor
+text installed ONCE by a confirmed prime (the fenced start seam) and used only until the
+session's FIRST accepted final — it is recognition-only conditioning and is never mixed
+into the rolling source. The ROLLING source is this session's accepted finals only (the
+daemon-side accumulator; see daemon._handoff_context_prompt / _refresh_context_prompt),
+delivered via rolling_context_prompt() below — the handoff's replacement target. Neither
+the seed nor dictated text is ever logged with content (word counts only).
+
 IMPORT PURITY: this module is importable ANYWHERE — module scope is stdlib-only (dataclasses,
 enum, logging, threading); faster_whisper + numpy are imported LAZILY inside methods, so importing
 the module never touches CUDA. The executor OBJECTS, however, own CUDA contexts and are not
@@ -134,6 +142,12 @@ def rolling_context_prompt(committed: str) -> str:
     composition `context_after_last_boundary(c) or trim_prompt(c)` is WRONG
     because "" is ambiguous between the ends-with-terminator case (prompt stays
     empty) and the no-boundary case (prompt must be everything).
+
+    P1.M1.T2.S4: this is also the SEED-handoff target — the first accepted final
+    of a seeded session replaces the resident seed with
+    rolling_context_prompt(session_accepted) (or "" when the rolling prompt is
+    disabled), after which every commit refreshes from the same accepted-finals
+    source.
     """
     committed = committed or ""
     last = max(committed.rfind(ch) for ch in _CONTEXT_BOUNDARY_CHARS)
