@@ -17,6 +17,8 @@ Pure CPU, hermetic: fake backend + fake feedback, no daemon, no subprocess.
 """
 from __future__ import annotations
 
+import pytest
+
 from voice_typing.streaming import StreamingOutput, _word_flush_point
 
 
@@ -24,12 +26,16 @@ class FakeBackend:
     def __init__(self) -> None:
         self.typed: list[str] = []
         self.backspaces: list[int] = []
+        self.visible = ""
 
     def type_text(self, text: str) -> None:
         self.typed.append(text)
+        self.visible += text
 
     def press_backspace(self, n: int) -> None:
         self.backspaces.append(n)
+        if n:
+            self.visible = self.visible[:-n]
 
 
 class FakeFeedback:
@@ -88,6 +94,33 @@ def test_char_mode_types_every_delta_immediately() -> None:
     assert be.typed == ["hello"]
     eng.on_partial("hello world")
     assert be.typed == ["hello", " world"]
+
+
+@pytest.mark.parametrize("revision", ["partial", "final"])
+@pytest.mark.parametrize("corrected", ["Next word", "Other words now"])
+def test_rewind_preserves_separator_before_live_words(revision, corrected) -> None:
+    eng, be, _ = make(stream_chunks="word", revision_debounce_s=0)
+    # An unchanged final defers its separator to the first live chunk that follows.
+    eng.on_partial("Previous sentence.")
+    eng.commit("Previous sentence.")
+    eng.reset_boundary()
+    assert be.visible == "Previous sentence."
+
+    eng.on_partial("Next wrong words here")
+    assert be.visible == "Previous sentence. Next wrong words "
+
+    if revision == "partial":
+        eng.on_partial(corrected)
+        trailing_space = ""
+    else:
+        eng.commit(corrected)
+        trailing_space = " "
+
+    # Cover both a shared prefix ("Next w") and a full rewrite. In neither case
+    # is the leading separator part of the suffix being deleted.
+    kept = len("Next w") if corrected.startswith("Next") else 0
+    assert be.visible == f"Previous sentence. {corrected}{trailing_space}"
+    assert be.backspaces == [len("Next wrong words ") - kept]
 
 
 # --- the sentence-eater guard -----------------------------------------------------

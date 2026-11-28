@@ -167,9 +167,9 @@ class OutputConfig:
         # here at load time with a clear ValueError (the TYPE is correct, the VALUE is not — mirrors
         # AsrConfig's device validation). make_backend() retains its own ValueError as a defensive
         # second gate.
-        if self.backend not in ("wtype", "ydotool", "null"):
+        if self.backend not in ("wtype", "ydotool", "tmux", "null"):
             raise ValueError(
-                f'[output] backend must be "wtype", "ydotool", or "null", got {self.backend!r}'
+                f'[output] backend must be "wtype", "ydotool", "tmux", or "null", got {self.backend!r}'
             )
         # streaming must be a genuine bool (rejects int — `streaming = 1` is a typo, not a
         # flag; mirrors the AsrConfig.context_prompt guard).

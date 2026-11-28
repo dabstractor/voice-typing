@@ -723,8 +723,8 @@ class StreamingOutput:
             guarded = textproc.apply_streaming_guards(
                 self._guard_context(self._tail[:keep_n]), text[k:]
             )
-            # press_backspace(0) is a backend no-op; _safe_backspace also guards it.
-            if not self._safe_backspace(len(self._tail) - k):
+            # Count against the actual typed tail, including the separator in keep_n.
+            if not self._safe_backspace(len(self._tail) - keep_n):
                 self._feedback.update_partial(self._tail)
                 return  # freeze already recorded by _safe_backspace
             if guarded and not self._safe_type(guarded):
@@ -788,8 +788,9 @@ class StreamingOutput:
             as _guard_context_delta). NOT debounced: commits are authoritative,
             never wobble (the revision debounce exists only for partial cycles).
           - final DIFFERS (revise/rewrite/shorter/fresh): MINIMAL-DIFF rewind (the
-            same common-prefix rule as partial typing): press_backspace(len(tail) −
-            k), type only the guarded corrected suffix. NOT debounced: a commit
+            same common-prefix rule as partial typing): backspace only the typed
+            suffix beyond the kept prefix (including any leading separator in the
+            kept prefix), then type the guarded corrected suffix. NOT debounced: a commit
             is once per utterance — the ONE authoritative end-of-utterance
             correction the debounced partial path defers to.
         Then append the trailing space iff append_space, advance the checkpoint
@@ -889,7 +890,7 @@ class StreamingOutput:
                 guarded = textproc.apply_streaming_guards(
                     self._guard_context(self._tail[:keep_n]), text[k:]
                 )
-                if not self._safe_backspace(len(self._tail) - k):
+                if not self._safe_backspace(len(self._tail) - keep_n):
                     return  # frozen; on-screen state unknown — touch nothing further
                 if guarded:
                     # Space GLUED into the retype payload (never a lone spawn).
