@@ -28,7 +28,7 @@ import types
 import pytest
 
 from voice_typing import prompt_engine
-from voice_typing.config import AsrConfig, OutputConfig, VoiceTypingConfig
+from voice_typing.config import AsrConfig, VoiceTypingConfig
 from voice_typing.prompt_engine import (
     PromptProbeResult,
     PromptedExecutor,
@@ -394,36 +394,40 @@ def test_ready_payload_flag_true_and_false():
     assert "context_prompt" not in base  # input dict not mutated
 
 
-# ---------------------------------------------------------------------------
-# BUG-002 / validation round 3 — the dedicated bulk REALTIME lane (child wiring)
-#
-# The qualification round measured the collapse of the shared-lane build (~3.7
-# update callbacks per ~17.5 s replay; the 57-word sentence-end dump). For
-# bulk-text builds the child splits the lanes: a DEDICATED beam-1
-# PromptedExecutor takes kwargs["realtime_transcription_executor"] (overriding
-# the shared object) while finals keep the beam-5 context-prompt lane. Any
-# probe failure degrades to the shared executor — the split is an optimization,
-# never a new failure mode. Stream-edit builds never split.
-# ---------------------------------------------------------------------------
-
-
-def _cfg_delivery(delivery: str, context_prompt: bool = True) -> VoiceTypingConfig:
-    return VoiceTypingConfig(
-        asr=AsrConfig(context_prompt=context_prompt),
-        output=OutputConfig(delivery=delivery),
-    )
-
-
-def test_prompt_targets_fanout_helper():
-    """_prompt_targets: single lane unchanged; bulk split fans out to BOTH; no executor = none."""
+def test_prompt_targets_single_executor_contract():
+    """_prompt_targets (P1.M1.T1.S3): the ONE-executor contract — exactly the armed executor, or none."""
     main = _FakeExecutor("m", "d", "c")
-    rt = _FakeExecutor("m", "d", "c")
-    # Pre-split shape (stream-edit or degraded bulk): exactly the shared executor.
-    assert _prompt_targets({"realtime_transcription_executor": main}, main) == [main]
-    # Split shape: the distinct realtime executor joins the fan-out.
-    assert _prompt_targets(
-        {"realtime_transcription_executor": rt, "transcription_executor": main}, main
-    ) == [main, rt]
-    # Nothing armed: no targets (the command loop logs and ignores).
-    assert _prompt_targets(None, None) == []
-    assert _prompt_targets({}, None) == []
+    assert _prompt_targets(main) == [main]   # one object, one target
+    assert _prompt_targets(None) == []       # nothing armed: no targets (the loop logs + ignores)
+
+
+def test_recorder_host_has_no_bulk_lane_surface():
+    """P1.M1.T1.S3: the Rev-4 bulk realtime-lane SPLIT is gone from recorder_host — ONE executor
+    contract. No split helper exists, the module carries no bulk/beam wiring, augment arms the SAME
+    object into both kwargs, the prompt fan-out reaches exactly that object, and the config layer
+    (S1) rejects the only delivery value that could have requested a split."""
+    import inspect
+
+    import voice_typing.recorder_host as rh
+
+    assert not hasattr(rh, "arm_bulk_realtime_executor")
+    assert not hasattr(rh, "_default_bulk_realtime_executor_factory")
+    src = inspect.getsource(rh)
+    assert "bulk" not in src.lower() and "beam" not in src.lower(), "bulk/beam wiring survived"
+    assert "extra_kwargs" not in inspect.signature(rh._prompt_targets).parameters  # 1-arg seam
+    # the ONE object lands in BOTH kwargs (context-prompt on, fake factory)
+    kwargs: dict = {"model": "small.en", "device": "cuda"}
+    executor = rh.augment_kwargs_with_executor(
+        kwargs,
+        VoiceTypingConfig(asr=AsrConfig(context_prompt=True)),
+        _RESOLVED_CUDA,
+        _LOG,
+        executor_factory=_FakeExecutor,
+    )
+    assert executor is not None
+    assert kwargs["transcription_executor"] is executor
+    assert kwargs["realtime_transcription_executor"] is executor   # SAME object — no split
+    assert rh._prompt_targets(executor) == [executor]
+    # S1's chain: no constructible config can request the retired lane
+    with pytest.raises(ValueError, match="retired"):
+        VoiceTypingConfig.from_toml({"output": {"delivery": "bulk-text"}})
