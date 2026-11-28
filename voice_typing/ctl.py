@@ -13,6 +13,11 @@ Subcommands (PRD §4.8):
 
     toggle   arm/disarm the mic (flip the listening gate)
     start    arm the mic (start listening)
+    toggle-block | start-block     arm in BLOCK mode: nothing typed until the utterance ends,
+             then the whole final typed once (the tool's original output behavior)
+    toggle-stream | start-stream   arm in STREAM mode: live partials typed as you speak
+             (the configured default). Plain toggle/start follow [output] streaming, so a
+             second keybind can select either mode against the SAME daemon.
     stop     disarm the mic (stop listening)
     status   pretty-print listening + mode + phase + partial + last final + uptime + device + mic
              + context-prompt + delivery (mode/state, reason/op when present)
@@ -24,6 +29,8 @@ Subcommands (PRD §4.8):
              types/erases/submits. Exit 1 when no completed session exists.
 
 Usage:  voicectl <toggle|start|stop|status|cancel|quit|session>
+        toggle-block | start-block   arm in BLOCK mode (whole final typed once at the end)
+        toggle-stream| start-stream  arm in STREAM mode (live partials) — the config default
         (the full usage table is in the project README; this is the user-facing CLI surface.)
 
 Stdlib-only: argparse, json, os, shutil, socket, subprocess, sys, threading, time + the shared
@@ -49,6 +56,10 @@ from voice_typing.daemon import (
 _COMMANDS: tuple[str, ...] = (
     "toggle",
     "start",
+    "toggle-block",
+    "toggle-stream",
+    "start-block",
+    "start-stream",
     "stop",
     "status",
     "quit",
@@ -56,12 +67,18 @@ _COMMANDS: tuple[str, ...] = (
     "session",
 )  # Rev 2 single-mode (P1.M1.T2.S3); 'cancel' = Backspace-cancel fallback (P1.M2.T7.S1);
 # 'session' = R.6 recovery surface (P1.M6.T2.S3)
+# Per-session output mode (2026-11-27): toggle-block / start-block arm in BLOCK mode (nothing
+# typed until the utterance ends, then the whole final once); toggle-stream / start-stream arm
+# in STREAM mode (live partials). Plain toggle/start keep the configured default ([output]
+# streaming) — so two keybinds can share one daemon. The toggle-*/start-* commands take the
+# SAME arm path as toggle/start (loading hint included); only the arm side honors the suffix.
 # Migration shim (validation Issue 2): Rev 1's two-mode CLI survives in the wild — e.g. this
 # machine's own pre-Rev-2 Hyprland keybind wrapper still ends in `voicectl toggle-lite`.
 # main() remaps it to the canonical command BEFORE the _COMMANDS validation so stale callers
 # keep working. Deliberately NOT a member of _COMMANDS and NOT listed in any help surface
 # (--help / module docstring): the documented Rev 2 surface stays the six commands above.
 _ALIASES: dict[str, str] = {"toggle-lite": "toggle"}
+
 # BSD sysexits.h: command-line usage error. Usage errors (unknown/missing command) exit 64
 # so exit 2 stays exclusive to "daemon not running" (PRD §4.8, bugfix Issue 7).
 _EX_USAGE: int = 64
@@ -166,6 +183,7 @@ def format_result(cmd: str, response: dict) -> tuple[str, int]:
         text = (
             f"listening: {listening}\n"
             f"mode: {mode}\n"
+            f"output: {response.get('output_mode') or 'unknown'}\n"
             f"phase: {phase}\n"
             f"partial: {partial}\n"
             f"last: {last_final}\n"
@@ -325,12 +343,23 @@ def _build_parser() -> argparse.ArgumentParser:
     argparse's SystemExit(2) which would collide with the daemon-not-running code (PRD §4.8)."""
     parser = argparse.ArgumentParser(
         prog="voicectl",
+        # Raw: the help text is rendered verbatim. The default formatter re-wraps the epilog
+        # and textwrap splits hyphenated tokens at a line boundary (toggle-\nblock), so the
+        # per-session mode commands could vanish from `--help` on narrow terminals.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Control the voice-typing daemon. Connects to the control socket, sends one command, "
             "prints the result. Exits 0 on success, 1 on a logical failure, 2 if the daemon is not "
             "running, 64 on a usage error (unknown/missing command)."
         ),
-        epilog="subcommands: toggle, start, stop, status, quit, cancel, session [--copy]  (see the project README for the full usage table)",
+        epilog=(
+            "subcommands: toggle, start, stop, status, quit, cancel, session [--copy]"
+            "  (see the project README for the full usage table)\n"
+            "per-session output mode: toggle-block | start-block   arm in BLOCK mode (nothing typed\n"
+            "until the utterance ends, then the whole final once); toggle-stream | start-stream\n"
+            "arm in STREAM mode (live partials — the configured default). Plain toggle/start\n"
+            "follow [output] streaming, so two keybinds can pick either mode on one daemon."
+        ),
     )
     parser.add_argument(
         "cmd",
@@ -406,7 +435,8 @@ def main(argv: list[str] | None = None) -> int:
     #    daemon logs it; the copy itself is CLIENT-side — P1.M6.T2.S3).
     try:
         extra = {"copy": True} if (cmd == "session" and args.copy) else None
-        if cmd in ("start", "toggle"):
+        # Per-session mode commands (toggle-*/start-*) take the SAME arm path -> loading hint.
+        if cmd in ("start", "toggle") or cmd.startswith(("start-", "toggle-")):
             response = _send_command_with_loading_hint(socket_path, cmd)
         else:
             response = send_command(socket_path, cmd, extra=extra)

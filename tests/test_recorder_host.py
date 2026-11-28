@@ -12,9 +12,12 @@ Run:
 """
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from typing import Any
+
+import pytest
 
 
 from voice_typing import recorder_host
@@ -1295,3 +1298,166 @@ def test_dispatch_ready_exposes_partial_callback_on_the_host():
     host2 = _make_host()
     host2._dispatch("ready", {"device": "cuda"})
     assert host2.partial_callback == ""
+
+
+# ===========================================================================
+# Stale-final credit purge — the "killed turn replaces the new turn" bug.
+#
+# RealtimeSTT's perform_final_transcription submits audio ONLY when
+# recorder.transcribe_count == 0 and decrements once per received result; an
+# abort makes it return "" BEFORE decrementing. The worker's late result parks
+# in the untagged FIFO and the NEXT session's first utterance "receives" it in
+# place of its own decode. The fake below models that contract exactly on both
+# result channels; the units under test are the audio-seam purge
+# (_purge_final_transcription_results, wired into _clear_recorder_audio) and
+# the text()-entry discard (_discard_stale_final_results).
+# ===========================================================================
+
+
+class _FakePipe:
+    """pipe stand-in: poll()/recv() over a queue.Queue (the built-in worker channel)."""
+
+    def __init__(self, q: Any) -> None:
+        self._q = q
+
+    def poll(self, timeout: float = 0.0) -> bool:
+        return not self._q.empty()
+
+    def recv(self) -> Any:
+        return self._q.get_nowait()
+
+
+class _CreditFakeRecorder:
+    """Recorder double with the library's credit semantics (transcription_api.py).
+
+    text(cb) IS perform_final_transcription: submit iff transcribe_count == 0, then receive
+    until the count reaches 0. `slow=True` models a final model still decoding: the worker
+    answers only once the test sets `release`. On `interrupt` the receive loop returns ""
+    WITHOUT decrementing — the leak that parks the worker's result in `pending`.
+    """
+
+    def __init__(self, channel: str = "queue") -> None:
+        import queue as _q
+
+        self.transcribe_count = 0
+        self.transcription_lock = threading.Lock()
+        self.interrupt = False
+        self.slow = False
+        self.release = threading.Event()
+        self.pending: Any = _q.Queue()
+        self.own: tuple = ("success", "own decode")
+        self.submits = 0
+        if channel == "queue":  # context_prompt=true builds: external-executor result queue
+            self._uses_external_transcription_executor = True
+            self._external_transcription_results = self.pending
+        else:  # built-in transcription worker process
+            self._uses_external_transcription_executor = False
+            self.parent_transcription_pipe = _FakePipe(self.pending)
+
+    def text(self, callback) -> Any:
+        if self.transcribe_count == 0:
+            self.submits += 1
+            self.transcribe_count += 1
+            if self.slow:
+                threading.Thread(  # the worker is still decoding this utterance
+                    target=lambda: (self.release.wait(5), self.pending.put(self.own)),
+                    daemon=True,
+                ).start()
+            else:
+                self.pending.put(self.own)
+        result = ""
+        while self.transcribe_count > 0:
+            try:
+                result = self.pending.get(timeout=0.01)
+            except Exception:
+                if self.interrupt:
+                    return ""  # LEAK: count NOT decremented (the library's abort branch)
+                continue
+            self.transcribe_count -= 1
+        if self.interrupt:
+            return ""
+        callback(result[1])
+        return None
+
+
+def _killed_turn(rec: "_CreditFakeRecorder", channel_finals: list) -> None:
+    """Session N: the hotkey kills the recording while the last utterance decodes."""
+    rec.slow, rec.interrupt = True, True
+    rec.own = ("success", "stale end of the killed turn")
+    aborted = threading.Event()
+    aborted.set()  # the child's abort handler ran recorder.abort()
+    recorder_host._run_text_and_emit_final(
+        rec, queue.Queue(), lambda t: channel_finals.append(t), aborted, None, None
+    )
+    assert rec.transcribe_count == 1  # the library leak — the precondition of the bug
+    assert channel_finals == []
+
+
+@pytest.mark.parametrize("channel", ["queue", "pipe"])
+def test_killed_turn_final_cannot_replace_new_turn(channel) -> None:
+    """End to end: kill mid-decode -> toggle off -> toggle on -> first new utterance.
+
+    The stale result has already parked in the FIFO by the time the arm purges."""
+    rec = _CreditFakeRecorder(channel)
+    finals: list = []
+    _killed_turn(rec, finals)
+    rec.release.set()  # the worker finishes anyway; nobody is receiving
+    # (blocking get: the fake worker thread parks its result asynchronously)
+    assert rec.pending.get(timeout=1)[1] == "stale end of the killed turn"
+    rec.pending.put(("success", "stale end of the killed turn"))  # put it back (unread)
+
+    # toggle-off's 'disarm' + toggle-on's 'arm' both run the audio purge
+    recorder_host._clear_recorder_audio(rec)
+    recorder_host._clear_recorder_audio(rec)
+    assert rec.transcribe_count == 0 and rec.pending.empty()
+    assert getattr(rec, recorder_host._STALE_FINAL_ATTR, 0) == 0
+
+    # Session N+1, first utterance: its final must be ITS OWN decode.
+    rec.slow, rec.interrupt = False, False
+    rec.own = ("success", "new speech")
+    recorder_host._run_text_and_emit_final(rec, queue.Queue(), finals.append)
+    assert finals == ["new speech"]
+    assert rec.submits == 2  # session N+1 submitted its audio instead of skipping it
+
+
+@pytest.mark.parametrize("channel", ["queue", "pipe"])
+def test_purge_counts_in_flight_result_and_text_entry_discards_it(channel) -> None:
+    """The stale result is still decoding at the arm seam: the purge zeroes the credit and
+    records ONE in flight; the next text() waits for it, discards it, then decodes its own."""
+    rec = _CreditFakeRecorder(channel)
+    finals: list = []
+    _killed_turn(rec, finals)
+    recorder_host._clear_recorder_audio(rec)  # 'disarm'
+    assert rec.transcribe_count == 0
+    assert getattr(rec, recorder_host._STALE_FINAL_ATTR) == 1  # in flight, not yet arrived
+
+    threading.Timer(0.2, rec.release.set).start()  # the worker answers mid-wait
+    rec.slow, rec.interrupt = False, False
+    rec.own = ("success", "new speech")
+    recorder_host._run_text_and_emit_final(rec, queue.Queue(), finals.append)
+    assert finals == ["new speech"]
+    assert getattr(rec, recorder_host._STALE_FINAL_ATTR) == 0
+    assert rec.pending.empty()
+
+
+def test_stale_result_that_never_arrives_gives_up_after_the_bound(caplog) -> None:
+    """A dead worker must not wedge text() forever: the wait is bounded, the lock released,
+    the credit already zeroed, and one WARNING logged."""
+    rec = _CreditFakeRecorder()
+    _killed_turn(rec, [])
+    recorder_host._clear_recorder_audio(rec)
+    with caplog.at_level("WARNING", logger="voice_typing.recorder_host"):
+        assert recorder_host._discard_stale_final_results(rec, timeout_s=0.2) == 1
+    assert any("never arrived" in r.getMessage() for r in caplog.records)
+    assert rec.transcription_lock.acquire(blocking=False)  # released
+    rec.transcription_lock.release()
+    assert rec.transcribe_count == 0
+
+
+def test_stale_final_guard_is_a_noop_without_the_credit_counter() -> None:
+    """Unit doubles / a future library rename: no transcribe_count -> nothing to purge."""
+    rec = _CancelFakeRecorder()
+    recorder_host._clear_recorder_audio(rec)
+    assert rec.clear_audio_queue_calls == 1
+    assert recorder_host._purge_final_transcription_results(rec) == 0
+    assert recorder_host._discard_stale_final_results(rec, timeout_s=0.01) == 0

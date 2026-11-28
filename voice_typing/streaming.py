@@ -401,6 +401,18 @@ class StreamingOutput:
                 self._frozen = False
                 self._frozen_session = False
 
+    def set_streaming(self, enabled: bool) -> None:
+        """Select THIS session's mode: True = stream (live partials), False = block (mirror-only).
+
+        Called by daemon._arm() BEFORE reset_session() with the session's resolved mode, so
+        the engine and the daemon agree from the first partial on (the daemon routes finals
+        itself: commit() when streaming, the direct one-shot type_text when block). Switching
+        either way between sessions is clean: reset_session() folds any typed tail into the
+        committed checkpoint without keystrokes, and a block session leaves tail "" anyway.
+        """
+        with self._lock:
+            self._streaming = bool(enabled)
+
     def reset_session(self) -> None:
         """A NEW armed session (P1.M2.T6.S2): clear committed + tail + suppressed + FROZEN.
 

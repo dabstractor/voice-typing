@@ -467,7 +467,19 @@ def test_help_surfaces_list_all_commands():
     --help (positional help + epilog), and the module docstring — and NO stale lite entries
     anywhere (bugfix Issue 3's consistency guard, inverted for the collapse).
     """
-    commands = {"toggle", "start", "stop", "status", "quit", "cancel", "session"}
+    commands = {
+        "toggle",
+        "start",
+        "stop",
+        "status",
+        "quit",
+        "cancel",
+        "session",
+        "toggle-block",
+        "start-block",  # per-session output mode (2026-11-27)
+        "toggle-stream",
+        "start-stream",
+    }
     assert set(ctl._COMMANDS) == commands, sorted(ctl._COMMANDS)   # _COMMANDS = the source of truth
     # (1) argparse --help (format_help renders BOTH the positional help AND the epilog):
     help_text = ctl._build_parser().format_help()
@@ -488,7 +500,10 @@ def test_help_surfaces_list_all_commands():
 def test_cancel_in_commands_docstring_and_epilog():
     """'cancel' is a first-class subcommand: the _COMMANDS entry, the module docstring subcommand
     block, and the --help epilog all list it."""
-    assert ctl._COMMANDS == ("toggle", "start", "stop", "status", "quit", "cancel", "session")
+    assert ctl._COMMANDS == (
+        "toggle", "start", "toggle-block", "toggle-stream", "start-block", "start-stream",
+        "stop", "status", "quit", "cancel", "session",
+    )
     assert "cancel" in (ctl.__doc__ or ""), "the module docstring's subcommand block must list cancel"
     epilog = ctl._build_parser().epilog or ""
     assert "cancel" in epilog, "the argparse epilog must list cancel"

@@ -2212,6 +2212,7 @@ def test_status_snapshot_keys_and_cuda_values(tmp_path, monkeypatch):
         == {
             "listening",
             "mode",
+            "output_mode",  # 2026-11-27: per-session block/stream (additive)
             "phase",
             "models_loaded",
             "load_error",
@@ -3746,7 +3747,7 @@ def test_status_snapshot_has_single_model_key():
     assert snap["mode"] == "lite"  # constant before AND after arming
     assert "model" in snap
     assert "final_model" not in snap and "realtime_model" not in snap
-    assert len(snap) == 18
+    assert len(snap) == 19  # + 'output_mode' (2026-11-27: per-session block/stream)
     d.start()
     assert d.status_snapshot()["mode"] == "lite"
 
@@ -5949,3 +5950,80 @@ def test_stop_during_startup_tears_down():
     assert proc.stop_calls >= 1, "teardown ran (stopper and/or the stale worker)"
     assert all(s[0] != "active" for s in fb.delivery_states), "never publish active"
     assert d._bulk_delivery_active is False
+
+
+# ---------------------------------------------------------------------------
+# Per-session output mode (2026-11-27): block vs stream is chosen by the ARM command
+# (start-block / start-stream / toggle-*), not frozen in the config. Same daemon, same
+# models; the config stays the default for plain start/toggle.
+# ---------------------------------------------------------------------------
+
+
+def test_start_block_arms_a_block_session_on_a_streaming_config():
+    """`start(streaming=False)` (= start-block): the config says streaming, THIS session is
+    block — partials still mirror to feedback but type nothing; the final is typed ONCE
+    directly, the engine checkpoint never advances, status reports output_mode=block."""
+    d, fb, rec, be = _make_daemon()  # hermetic cfg: streaming=True
+    d.start(streaming=False)
+    assert d.status_snapshot()["output_mode"] == "block"
+    assert d._stream._streaming is False  # the engine agrees from the first partial on
+    d._on_partial("hello wor")
+    assert be.typed == []  # nothing on screen while speaking
+    assert fb.partials == ["hello wor"]  # still mirrored for state.json / voicectl status
+    d.on_final("hello world")
+    assert be.typed == ["hello world "]  # the whole final, once (byte-identical Rev 1)
+    assert d._stream.committed == ""  # engine checkpoint untouched in block mode
+
+
+def test_plain_toggle_follows_the_configured_default_after_a_block_session():
+    """The mode is per SESSION: a block arm, then a plain re-arm, is back to the config
+    default (streaming) — and the engine was switched back with it."""
+    d, fb, rec, be = _make_daemon()
+    d.toggle(streaming=False)
+    assert d._streaming_now() is False
+    d.toggle()  # disarm (the arm-side argument is irrelevant on the disarm side)
+    d.toggle()  # plain arm -> configured default
+    assert d._streaming_now() is True and d._stream._streaming is True
+    assert d.status_snapshot()["output_mode"] == "stream"
+    d._on_partial("live part")
+    assert be.typed == ["live part"]  # streaming again
+
+
+def test_dispatch_block_and_stream_commands_pick_the_session_mode():
+    """Socket surface: toggle-block/start-block arm in block, *-stream in stream, the plain
+    commands keep the config default; every arm response carries output_mode."""
+    d, _fb, _rec, _be = _make_daemon()
+    srv = daemon.ControlServer(d)
+    resp = srv._dispatch(json.dumps({"cmd": "toggle-block"}))
+    assert resp["ok"] is True and resp["listening"] is True
+    assert resp["output_mode"] == "block" and d._streaming_now() is False
+    srv._dispatch(json.dumps({"cmd": "stop"}))
+    resp = srv._dispatch(json.dumps({"cmd": "start-stream"}))
+    assert resp["output_mode"] == "stream" and d._streaming_now() is True
+    srv._dispatch(json.dumps({"cmd": "stop"}))
+    resp = srv._dispatch(json.dumps({"cmd": "start"}))
+    assert resp["output_mode"] == "stream"  # config default (hermetic cfg streams)
+    srv._dispatch(json.dumps({"cmd": "stop"}))
+    resp = srv._dispatch(json.dumps({"cmd": "toggle-stream"}))
+    assert resp["output_mode"] == "stream"
+    assert srv._dispatch(json.dumps({"cmd": "start-lite"})) == {
+        "ok": False,
+        "error": "unknown command: 'start-lite'",
+    }
+
+
+def test_stream_to_block_rearm_leaves_the_typed_tail_alone():
+    """Switching stream -> block between sessions: the typed streaming tail is folded into
+    the engine checkpoint with ZERO keystrokes (reset_session), and the block session's
+    direct-typed final lands after it without the engine revising anything."""
+    d, fb, rec, be = _make_daemon()
+    d.start()
+    d._on_partial("streamed words")
+    assert be.typed == ["streamed words"]
+    d.stop()
+    d.start(streaming=False)
+    assert be.typed == ["streamed words"]  # no rewind at the seam
+    assert d._stream.tail == "" and d._stream.committed == "streamed words"
+    d._on_partial("ignored partial")
+    d.on_final("blocked sentence")
+    assert be.typed == ["streamed words", "blocked sentence "]  # no ("bs", n) entries

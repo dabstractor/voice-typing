@@ -106,6 +106,21 @@ bind = SUPER ALT, Backspace, exec, $HOME/.local/bin/voicectl cancel
 bind = SUPER ALT, Escape, exec, systemctl --user stop voice-typing
 ```
 
+**Block mode vs streaming mode, per keybind.** Streaming (the default) types live partials as
+you speak and corrects them in place. Block mode types nothing until the utterance ends, then
+enters the finished sentence once. Both run on the same daemon and models; the mode is chosen
+per armed session by the command suffix — `toggle-block` / `start-block` arm in block mode,
+`toggle-stream` / `start-stream` in streaming mode, and plain `toggle` / `start` use your
+configured default (`[output] streaming`). So a second bind gives you both at once:
+
+```
+bind = CTRL SUPER, D, exec, $HOME/.local/bin/voicectl toggle-block   # block mode
+```
+
+`voicectl status` reports the armed session's mode as `output: stream|block`. In block mode
+Backspace-cancel still discards the utterance in flight (there is simply no on-screen tail to
+erase).
+
 The first bind arms the mic; pressing it again disarms it (the graceful drain lets the
 in-flight commit land first). The second runs the same cancel path as the daemon's
 physical-Backspace listener — see

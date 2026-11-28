@@ -1349,6 +1349,155 @@ def _clear_recorder_audio(recorder: Any) -> None:
         recorder.audio = None
     except Exception:
         logger.debug("child: clearing recorder.audio raised (ignored)", exc_info=True)
+    # STALE-FINAL GUARD: the buffers above are only HALF of what an aborted utterance leaves
+    # behind — its final-transcription credit/result is the other half. See the block below.
+    _purge_final_transcription_results(recorder)
+
+
+# -----------------------------------------------------------------------------
+# STALE-FINAL RESULT PURGE — the "killed turn replaces the new turn" bug.
+#
+# RealtimeSTT's perform_final_transcription keeps a request CREDIT counter
+# (recorder.transcribe_count): it submits the utterance's audio ONLY when the count is 0
+# (an early-transcription request may already cover it) and decrements once per result it
+# receives. Results travel over an UNTAGGED FIFO (the worker pipe, or the external-executor
+# queue when context_prompt=true) — a result cannot be matched to the audio that produced it.
+#
+# A stop/cancel abort that lands while the final model is still decoding the utterance makes
+# that function return "" on its next 0.1 s poll WITHOUT decrementing (transcription_api.py:
+# the interrupt branch sits before the `-= 1`). The worker still finishes; its result parks in
+# the FIFO. The child's aborted text() returns, the daemon disarms and re-arms on the next
+# keypress, and the NEW session's first utterance reaches perform_final_transcription with
+# count == 1: it SKIPS submitting its own audio and "receives" the KILLED session's last
+# utterance instead. That stale text is relayed as the new utterance's final — the engine
+# commits it (rewinds the freshly typed tail, types the old words) and the host settles that
+# uid, so the new utterance's own partials/final are then dropped as post-final: "the new
+# turn gets wiped out forever". The audio purge above never touched this half (it is not
+# audio), and neither the cross-session gen filter nor the settled-uid filter can see it (the
+# stale result is adopted by a legitimate text() of the NEW session, stamped with its ids).
+#
+# Fix, two halves that are both safe by construction:
+#   1. _purge_final_transcription_results() — at EVERY audio-purge seam (disarm, arm, cancel:
+#      all on the cmd-loop thread BETWEEN text() calls, so no final transcription is active):
+#      zero the credit counter and discard whatever results have already arrived.
+#   2. _discard_stale_final_results() — at the next text() entry: bounded-wait for any result
+#      the purge found still IN FLIGHT and discard it before text() can adopt it. Waiting here
+#      is free: the mic is already on, the recording worker captures audio independently of
+#      the cmd loop (wait_audio() finds the queued recording afterwards), and realtime
+#      partials keep flowing. The library's counter is never reset anywhere else (verified
+#      against the installed source: init, += on submit, -= on receive, nothing on abort).
+# -----------------------------------------------------------------------------
+
+_STALE_FINAL_ATTR = "_vt_stale_final_results"  # per-recorder: results still to discard
+_STALE_FINAL_DRAIN_TIMEOUT_S = 10.0  # bound on the in-flight wait at text() entry
+
+
+def _receive_final_result(recorder: Any, timeout: float) -> Any:
+    """One final-transcription result if one arrives within `timeout`, else None.
+
+    Mirrors RealtimeSTT core/transcription.py receive_transcription_result() against the
+    recorder's OWN attributes instead of importing it (the daemon process imports this module
+    and must stay free of the ASR package; the child has it loaded already). Both result
+    channels: the external-executor queue (context_prompt=true builds inject a
+    transcription_executor) and the built-in worker pipe. Never raises."""
+    try:
+        if getattr(recorder, "_uses_external_transcription_executor", False):
+            return recorder._external_transcription_results.get(timeout=timeout)
+        pipe = getattr(recorder, "parent_transcription_pipe", None)
+        if pipe is not None and pipe.poll(timeout):
+            return pipe.recv()
+    except Exception:  # queue.Empty; EOFError/OSError on a dead worker; attribute drift
+        return None
+    return None
+
+
+def _purge_final_transcription_results(recorder: Any) -> int:
+    """Audio-purge seam: zero the final-transcription credit counter, discard arrived results.
+
+    Returns the number of results still IN FLIGHT (also recorded on the recorder for
+    _discard_stale_final_results). Idempotent. A recorder without the counter (unit-test
+    doubles, a future library rename) is a no-op. Never raises."""
+    count = getattr(recorder, "transcribe_count", None)
+    if not isinstance(count, int) or count <= 0:
+        return 0
+    lock = getattr(recorder, "transcription_lock", None)  # free by construction here
+    acquired = False
+    if lock is not None:
+        try:
+            acquired = bool(lock.acquire(blocking=False))
+        except Exception:
+            acquired = False
+    try:
+        recorder.transcribe_count = 0
+        remaining = count
+        # Only under the lock: perform_final_transcription receives on the same channel. A busy
+        # lock is not expected here; its results are simply left for the text()-entry discard.
+        while acquired and remaining > 0 and _receive_final_result(recorder, 0) is not None:
+            remaining -= 1
+    finally:
+        if acquired:
+            try:
+                lock.release()
+            except Exception:
+                pass
+    if remaining:
+        setattr(
+            recorder,
+            _STALE_FINAL_ATTR,
+            int(getattr(recorder, _STALE_FINAL_ATTR, 0) or 0) + remaining,
+        )
+        logger.info(
+            "child: %d aborted final-transcription result(s) still in flight; they will be "
+            "discarded before the next text() (stale-final guard)",
+            remaining,
+        )
+    return remaining
+
+
+def _discard_stale_final_results(
+    recorder: Any, timeout_s: float = _STALE_FINAL_DRAIN_TIMEOUT_S
+) -> int:
+    """text() entry: bounded-wait for and discard every result the last purge found in flight.
+
+    Holds recorder.transcription_lock — the ONE lock perform_final_transcription takes — so
+    the wait is serialized with any final transcription by construction (none is active at
+    text() entry; the lock keeps that true even if a future caller changes). Returns the number
+    still outstanding at timeout (0 = clean). Idempotent; never raises."""
+    remaining = int(getattr(recorder, _STALE_FINAL_ATTR, 0) or 0)
+    if remaining <= 0:
+        return 0
+    lock = getattr(recorder, "transcription_lock", None)
+    acquired = False
+    if lock is not None:
+        try:
+            acquired = bool(lock.acquire(timeout=min(timeout_s, 1.0)))
+        except Exception:
+            acquired = False
+    deadline = time.monotonic() + timeout_s
+    try:
+        while remaining > 0:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            if _receive_final_result(recorder, min(0.1, left)) is not None:
+                remaining -= 1
+    finally:
+        setattr(recorder, _STALE_FINAL_ATTR, remaining)
+        if acquired:
+            try:
+                lock.release()
+            except Exception:
+                pass
+    if remaining:
+        logger.warning(
+            "child: %d stale final-transcription result(s) never arrived within %.1fs; giving "
+            "up the wait (a late one would be adopted by the next final)",
+            remaining,
+            timeout_s,
+        )
+    else:
+        logger.debug("child: stale final-transcription result(s) discarded before text()")
+    return remaining
 
 
 def _drain_stale_abort_signals(cancel_event: Any, abort_event: Any) -> str | None:
@@ -1453,7 +1602,11 @@ def _run_text_and_emit_final(
     _with_identity, stamped with the CURRENT id at emission (sentinels settle the current
     utterance — they never rotate it, R.5). Default None keeps the payloads id-less (the legacy
     path — the existing test doubles stay green untouched).
+    STALE-FINAL GUARD: before text() is entered, _discard_stale_final_results() consumes any
+    final-transcription result an aborted utterance left in flight (see the purge block above) —
+    the one place it may wait safely. No-op without a pending stale result.
     """
+    _discard_stale_final_results(recorder)
     if text_running is not None:
         text_running.acquire()
     try:

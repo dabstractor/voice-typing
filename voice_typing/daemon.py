@@ -1180,6 +1180,14 @@ class VoiceTypingDaemon:
             append_space=cfg.output.append_space,
             stream_chunks=cfg.output.stream_chunks,
         )
+        # PER-SESSION OUTPUT MODE (2026-11-27): "stream" = live partials typed as you speak
+        # (the engine); "block" = nothing on screen until the utterance ends, then the whole
+        # final is typed ONCE (the Rev 1 hatch below — the tool's original behavior). The
+        # config flag stays the DEFAULT for plain start/toggle; start-block/start-stream (and
+        # the toggle-* twins) override it for one armed session, so two keybinds can coexist
+        # against one daemon. Every session-scoped decision reads _streaming_now(), never the
+        # config directly.
+        self._session_streaming = None  # per-session override; None = the config is read live
         # P1.M2.T7.S2 (PRD §4.2quater): the passive evdev listener behind Backspace-cancel —
         # routes a physical Backspace press -> cancel() (S1) and any other keypress ->
         # note_user_keypress() (T6.S3 freeze, PRD §4.2quater rule 5) while armed. Constructed
@@ -1646,7 +1654,7 @@ class VoiceTypingDaemon:
                     # across utterances, so THIS commit rewound "way farther than it ever
                     # typed". Absorb whatever tail accumulated (no keystrokes) and process
                     # this final as a fresh utterance.
-                    if self._cfg.output.streaming and self._pending_tail_len() > 0:
+                    if self._streaming_now() and self._pending_tail_len() > 0:
                         self._stream.freeze(
                             "cancel-suppression window closed (tail absorbed)",
                             session=True,
@@ -1682,7 +1690,7 @@ class VoiceTypingDaemon:
                     # the force-closed final could never type (P1.M1.T4.S1). A pending tail
                     # still absorbs + resets the boundary exactly as before (the tail can
                     # never grow across dropped finals into a mass rewind).
-                    if self._cfg.output.streaming and self._pending_tail_len() > 0:
+                    if self._streaming_now() and self._pending_tail_len() > 0:
                         self._stream.freeze(
                             "final dropped (cancel suppression window latched)",
                             session=True,
@@ -1731,7 +1739,7 @@ class VoiceTypingDaemon:
                 # is rewound) and resets the boundary; the drain/idle flags still run so
                 # a pending drain sees the utterance as finished. Rev 1 mode stays
                 # today's plain early return, byte for byte.
-                if self._cfg.output.streaming:
+                if self._streaming_now():
                     # P1.M2.T6.S3 class tag: a rejected final is an UNTRUSTWORTHY decode —
                     # deliberately a SESSION-class freeze. The reset_boundary() on the next
                     # line is this utterance's boundary event (it clears the tail so late
@@ -1776,7 +1784,7 @@ class VoiceTypingDaemon:
             self._utterance_finalized = (
                 True  # validation Issue 2: mark this text() invocation done
             )
-            if self._cfg.output.streaming:
+            if self._streaming_now():
                 # P1.M2.T6.S2 streaming commit path (the correction pass): the engine
                 # corrects the on-screen tail in place (rewind+retype only when the
                 # final differs), appends the trailing space, advances the checkpoint.
@@ -1848,7 +1856,7 @@ class VoiceTypingDaemon:
                 record["t_final_ready"],
                 record["t_typed"],
             )
-            if self._cfg.output.streaming:
+            if self._streaming_now():
                 # P1.M2.T6.S3: the utterance-boundary event — lifts a PER-UTTERANCE freeze
                 # (e.g. user keypress) exactly once per utterance, AFTER the commit: a frozen
                 # commit absorbs the tail first, then the boundary unfreezes the engine so the
@@ -1937,13 +1945,26 @@ class VoiceTypingDaemon:
                     "context-prompt clear skipped: host has no set_prompt seam"
                 )
 
-    def _arm(self) -> None:
+    def _arm(self, streaming: bool | None = None) -> None:
         """Private: arm mic + set listening + notify. Called under the lock by start/toggle.
+
+        `streaming` selects THIS session's output mode (see _session_streaming in __init__):
+        None = the configured default, True = stream, False = block. Resolved at every arm
+        (not at construction) so a config edited underneath a resident daemon is honored.
 
         set_listening(True) fires the transient 'Recording' start toast (feedback.py). A COLD first
         arm is preceded by a 'Loading…' toast from _load_host(); a warm arm fires only 'Recording'.
         """
         self._listening.set()
+        # Per-session output mode: resolve BEFORE the engine's reset_session() so the engine
+        # and the daemon agree from the first partial on. Defensive getattr (engine doubles).
+        # None = plain start/toggle: the config stays the source of truth for this session
+        # (read live, so a config edited underneath a resident daemon is honored); a *-block /
+        # *-stream arm PINS the mode for this one session only.
+        self._session_streaming = None if streaming is None else bool(streaming)
+        set_mode = getattr(self._stream, "set_streaming", None)
+        if callable(set_mode):
+            set_mode(self._streaming_now())
         # P1.M6.T2.S2 (R.6): fresh recovery draft per arm (resets any stale draft state).
         self._session_recovery.open_session()
         if self._bulk_mode():  # P1.M6.T2.S1 (G5): gen bump BEFORE the arm cmd put below (the
@@ -2542,6 +2563,17 @@ class VoiceTypingDaemon:
             if self._host is not None:
                 self._safe_abort()
 
+    def _streaming_now(self) -> bool:
+        """THIS session's output mode: True = stream (live partials), False = block.
+
+        The one reader for every session-scoped streaming decision (on_final's commit vs
+        direct-type branch, the rejected-final freeze, cancel/stranded-tail gates, the context
+        prompt source). The per-session override is set only by an explicit start-block /
+        start-stream (toggle-*) arm; a plain arm clears it and the config is read live."""
+        if self._session_streaming is None:
+            return self._cfg.output.streaming
+        return self._session_streaming
+
     def _pending_tail_len(self) -> int:
         """Chars of the tentative tail typed since the last commit checkpoint. 0 = nothing pending.
 
@@ -2685,7 +2717,7 @@ class VoiceTypingDaemon:
         no-op when the engine is a Rev 1 pass-through (its tail is always empty there) and when
         the S3 freeze API is absent. Never raises.
         """
-        if not self._cfg.output.streaming:
+        if not self._streaming_now():
             return
         if self._pending_tail_len() <= 0:
             return
@@ -2755,7 +2787,7 @@ class VoiceTypingDaemon:
                 if not self._bulk_wired():
                     return  # no controller: no source of truth; arm-clear left it context-free
                 source = self._bulk_ctrl.confirmed_visible()
-            elif self._cfg.output.streaming:
+            elif self._streaming_now():
                 source = self._stream.committed
             else:
                 source = self._rev1_committed
@@ -3146,7 +3178,8 @@ class VoiceTypingDaemon:
         except Exception:
             logger.exception("host.abort() raised (best-effort; ignored)")
 
-    def start(self) -> None:
+    def start(self, streaming: bool | None = None) -> None:
+        # `streaming`: None = config default, True/False = THIS session's output mode (_arm).
         # Lazy load (PRD §4.2bis): spawn the recorder-host child on the first arm. _load_host() is a
         # single-flight no-op once resident (Rev 2 single path — there is nothing to reload into).
         # Called OUTSIDE _lock (it acquire-release-reacquires that lock; under _lock it would
@@ -3155,15 +3188,16 @@ class VoiceTypingDaemon:
         if not self._load_host():
             return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
         with self._lock:
-            self._arm()
+            self._arm(streaming=streaming)
 
     def stop(self) -> None:
         # Graceful stop: if an utterance is in flight, let the final model finish + emit its text
         # before disarming (drain); otherwise disarm immediately + abort. See _request_stop.
         self._request_stop()
 
-    def toggle(self) -> None:
+    def toggle(self, streaming: bool | None = None) -> None:
         """Single-path toggle (Rev 2 §4.2quater): disarm iff listening, arm otherwise.
+        `streaming` only matters on the arm side (None = config default; see _arm).
 
         Pressing the key while idle arms the ONE recorder; pressing it while armed disarms. There
         is no cross-mode switching (the two-mode substrate is gone): a re-arm while the resident
@@ -3182,7 +3216,7 @@ class VoiceTypingDaemon:
         if not self._load_host():
             return  # load failed → stay unarmed (phase already 'unloaded'; _load_error set)
         with self._lock:
-            self._arm()
+            self._arm(streaming=streaming)
 
     def request_shutdown(self) -> None:
         """Signal run() to exit + tear down the child so a blocked text() unblocks (BUG-1 fix).
@@ -3383,6 +3417,7 @@ class VoiceTypingDaemon:
         return {
             "listening": self.is_listening(),
             "mode": "lite",  # Rev 2 constant (§4.6 schema stable)
+            "output_mode": "stream" if self._streaming_now() else "block",  # this session
             "phase": snap.get(
                 "phase", "unloaded"
             ),  # P1.M2.T2.S1: lifecycle phase (§4.2bis)
@@ -3612,6 +3647,18 @@ class VoiceTypingDaemon:
 # empirical proof.
 
 
+def _cmd_streaming(cmd: object) -> "bool | None":
+    """Per-session output mode requested by a socket command: True = stream (live partials),
+    False = block (whole final typed once at utterance end), None = the configured default
+    (plain start/toggle, and every non-arm command)."""
+    if isinstance(cmd, str):
+        if cmd.endswith("-stream"):
+            return True
+        if cmd.endswith("-block"):
+            return False
+    return None
+
+
 class ControlServer:
     """AF_UNIX SOCK_STREAM control socket speaking one-JSON-object-per-line (PRD §4.2(3), §4.8).
 
@@ -3801,13 +3848,17 @@ class ControlServer:
         if not isinstance(msg, dict):
             return {"ok": False, "error": "request must be a JSON object"}
         cmd = msg.get("cmd")
-        if cmd in ("toggle", "toggle-lite"):
+        mode = _cmd_streaming(cmd)  # None for the plain commands (config default)
+        if cmd in ("toggle", "toggle-lite", "toggle-stream", "toggle-block"):
             # 'toggle-lite' is the Rev 1 two-mode name, kept ONLY as a deprecated migration
             # alias for `toggle` (validation Issue 2: pre-Rev-2 Hyprland keybind wrappers
             # still call it). It behaves EXACTLY like toggle — the same single arm/disarm
             # path, same response. 'start-lite' stays unknown-command (below).
             was_listening = self._daemon.is_listening()
-            self._daemon.toggle()
+            if mode is None:
+                self._daemon.toggle()  # duck-typed daemons keep the no-arg contract
+            else:
+                self._daemon.toggle(streaming=mode)
             # A toggle arms (from idle) or disarms (when armed) — Rev 2 single path, no cross-mode
             # switch. On every arm path a load may have failed: route through _arm_response whenever
             # an arm was ATTEMPTED so voicectl surfaces _load_error honestly (validation Issue
@@ -3815,8 +3866,11 @@ class ControlServer:
             if not was_listening or self._daemon.is_listening():
                 return self._arm_response()
             return {"ok": True, **self._daemon.status_snapshot()}
-        if cmd == "start":
-            self._daemon.start()
+        if cmd in ("start", "start-stream", "start-block"):
+            if mode is None:
+                self._daemon.start()
+            else:
+                self._daemon.start(streaming=mode)
             return (
                 self._arm_response()
             )  # ok:false+error if the first arm's model load failed (§4.2bis)
