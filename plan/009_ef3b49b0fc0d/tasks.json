@@ -456,7 +456,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T4.S5",
                   "title": "Stop, cancel and drain one native utterance",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S4",
@@ -484,7 +484,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T4.S6",
                   "title": "Finalize ownership and surface private failure hints",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T3.S4",

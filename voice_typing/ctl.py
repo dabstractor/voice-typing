@@ -18,11 +18,13 @@ Subcommands (PRD §4.8):
     toggle-stream | start-stream   arm in STREAM mode: live partials typed as you speak
              (the configured default). Plain toggle/start follow [output] streaming, so a
              second keybind can select either mode against the SAME daemon.
-    stop     disarm the mic (stop listening)
+    stop     disarm the mic (stop listening); on a native editor session: emergency graceful
+             stop (finishes the in-flight utterance, then ends the session)
     status   pretty-print listening + mode + phase + partial + last final + uptime + device + mic
              + context-prompt + output delivery
     quit     request a clean daemon shutdown (releases GPU workers)
-    cancel   drop the pending dictation fragment and keep listening (Backspace keybind fallback)
+    cancel   drop the pending dictation fragment and keep listening (Backspace keybind fallback);
+             busy while a native editor session owns the mic - use the editor's Cancel
     session  print the most recent COMPLETED dictation session (arm→disarm recovery,
              R.6; never a moving draft). --copy stages it on the Wayland CLIPBOARD
              instead — exact bytes, no added newline, PRIMARY untouched, never

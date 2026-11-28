@@ -71,7 +71,10 @@ __all__ = [
 class Stage(str, enum.Enum):
     STARTING = "starting"    # reservation acquired; load/priming may be running; capture NOT open
     LISTENING = "listening"  # arm committed under the daemon lock: capture open
-    DRAINING = "draining"    # stop/idle/lost wind-down ("finishing"); T4.S5 owns the policy
+    DRAINING = "draining"    # stop/idle/lost wind-down ("finishing"); P1.M1.T4.S5 owns the policy:
+    #                          at most the in-flight utterance drains (bounded ASR drain), then
+    #                          ≤ NATIVE_SETTLE_TIMEOUT_S of ACK settlement — except a LOSS, whose
+    #                          revoked queue drains recovery-only with NO settlement wait
     ENDED = "ended"          # terminal; the owner token is tombstoned from here on
 
 
@@ -92,7 +95,7 @@ class EndRecord:
     owner: Owner
     stage: Stage          # the stage just before ENDED
     reason: str           # §4.8.1 B ended.reason (an END_REASONS member)
-    cause: str | None     # "start-cap" | "stop-during-start" | "host-died" | "shutdown" | a LossCause value | None
+    cause: str | None     # "start-cap" | "stop-during-start" | "host-died" | "shutdown" | "cancel" | "settle-timeout" | a LossCause value | None
     ended_at: float
 
 
@@ -398,7 +401,10 @@ class OfferQueue:
         """REVOKE the queue — sticky, first reason wins (later calls return None). The
         queue stops offering and accepting (enqueue retains only; begin_offer is None);
         retained finals stay in recovery exactly as they are (possibly_applied survives).
-        `reason` is an END_REASONS code ("timeout" | "delivery_failed" | "cancelled")."""
+        `reason` is an END_REASONS code ("timeout" | "delivery_failed" | "cancelled" | a loss
+        reason). P1.M1.T4.S5 callers: native_cancel ("cancelled"), native_lost (the loss
+        reason, BEFORE the drain), _native_settle_step_locked ("timeout" at the settle
+        deadline) — always under the daemon's _lock."""
         if reason not in END_REASONS:
             raise ValueError("unknown end reason")
         if self._revoked:
@@ -408,16 +414,17 @@ class OfferQueue:
         return reason
 
     def clear_pending(self) -> int:
-        """Drop the UNATTEMPTED pending finals (T4.S5 stop/cancel: no more offers); the
-        outstanding offer stands, recovery is untouched (their finals stay recoverable).
-        Returns the number dropped."""
+        """Drop the UNATTEMPTED pending finals (native_cancel / native_lost invalidate the
+        session before ending: no more offers); the outstanding offer stands, recovery is
+        untouched (their finals stay recoverable). Returns the number dropped."""
         n = len(self._pending)
         self._pending.clear()
         return n
 
     def drain_pending(self) -> bool:
         """True while unsettled work remains (an outstanding offer or pending finals) —
-        T4.S5's 'let the in-flight offer finish' check."""
+        _native_mic_closed_locked's 'let the in-flight offer finish' check (P1.M1.T4.S5:
+        decides whether the ACK-settlement window arms) and _native_end_facts.recoverable."""
         return self._outstanding is not None or bool(self._pending)
 
     def close(self) -> None:

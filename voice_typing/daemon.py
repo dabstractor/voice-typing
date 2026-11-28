@@ -242,6 +242,31 @@ _COLD_LOAD_NOTIFY_LOADING = "Loading…"
 # transcription time (~0.5–1.5s); raise if you load a much larger model.
 _DRAIN_TIMEOUT_S: float = 5.0
 
+# P1.M1.T4.S5 (PRD §4.8.1 B): the TOTAL post-drain ACK settlement budget for a native
+# editor session's queued offers (a code constant, not config). Applied only AFTER the
+# bounded ASR drain completes; a native stop/idle waits at most this long for the editor's
+# ACKs before ending with reason 'timeout'. Waiting is a timer handle + pump kicks — never
+# Event.wait(), never a settlement thread.
+NATIVE_SETTLE_TIMEOUT_S: float = 5.0
+
+# P1.M1.T4.S5 vocabularies (both subsets of END_REASONS — terminate()/revoke() raise on
+# anything else): what native_stop / native_lost may record. Lease expiry is 'timeout'.
+_STOP_REASONS = frozenset({"stopped", "idle"})
+_LOSS_REASONS = frozenset({"target_lost", "disconnected", "timeout"})
+
+
+@dataclass(frozen=True)
+class NativeEndFacts:
+    """Transcript-free facts stashed by _end_native_locked for T4.S6 (the `ended` frame +
+    desktop hints). reason = the EndRecord.reason actually recorded; revoked = the
+    OfferQueue.revocation_reason at end (None = delivery was never revoked); recoverable =
+    OfferQueue.drain_pending() at end (some accepted final is not known applied). Codes,
+    codes and a boolean only — never recognition text (G6)."""
+
+    reason: str
+    revoked: str | None
+    recoverable: bool
+
 # Cancel-suppression window bound (the Backspace stuck-suppression bug). cancel() latches
 # _cancel_suppress_final, and ONLY the child's MARKED sentinel final (or a fresh _arm()) was
 # allowed to clear it — if the sentinel was LOST (a cancel landing while the child sat BETWEEN
@@ -1020,6 +1045,19 @@ class VoiceTypingDaemon:
         self._native_timers = ThreadTimers(time.monotonic)
         self._native_end_cb = None                  # T4.S6/T4.S7: receives the EndRecord once, off-lock
         self._native_end_delivered = False
+        # P1.M1.T4.S5 — the wind-down policy state. _native_drain_boundary is the LOCK-FREE
+        # "DRAINING" sentinel on the reader thread: a whole-value _CaptureBoundary snapshot
+        # taken at native_stop/native_lost (None during LISTENING — set under _lock BEFORE
+        # anything else). The DRAINING verdict compares the relayed event against THIS, never
+        # against self._native.stage (which is _lock-guarded) or a re-read host.capture_boundary.
+        # _native_settle_deadline/_native_settle_timer are the ≤ NATIVE_SETTLE_TIMEOUT_S ACK
+        # settlement window armed by _native_mic_closed_locked (same seam/handling as
+        # _native_timer); _native_end_facts is the NativeEndFacts snapshot T4.S6 reads when
+        # on_end fires.
+        self._native_drain_boundary = None      # whole-value _CaptureBoundary snapshot | None
+        self._native_settle_deadline: float | None = None
+        self._native_settle_timer = None        # _native_timers handle (same as _native_timer)
+        self._native_end_facts: NativeEndFacts | None = None
         # P1.M1.T4.S4 — the native acceptance route (§4.8.1 B). _native_recovery is DAEMON-WIDE
         # (it outlives sessions: T5.S1 `voicectl recover` serves retained finals after the
         # session ended); _native_fence is the OPEN native capture's (host.generation,
@@ -1991,11 +2029,13 @@ class VoiceTypingDaemon:
         self._feedback.set_phase(
             "idle"
         )  # Issue 2 / P1.M2.T1.S1: 'loaded / not listening' ⇒ phase idle (PRD §4.2bis, §4.6)
-        # P1.M1.T3.S4: the native owner's mic just closed — end its reservation HERE (under _lock) with
-        # the drain reason recorded by _request_stop/_maybe_auto_stop (else 'stopped'); the record is
-        # delivered off-lock by the session's parked worker, never under this lock.
+        # P1.M1.T4.S5: the native owner's mic just closed — its tail settles or ends (under
+        # _lock; Timer.arm/cancel are the only non-attribute calls allowed here). A DRAINING
+        # session with unsettled offers gets the bounded ACK-settlement window; anything else
+        # ends right here with the recorded drain reason ('stopped' if none). on_end is
+        # delivered off-lock by the kicker/watchdog, never under this lock.
         if self._native_owner_live_locked():
-            self._end_native_locked(self._native.end_reason, None)
+            self._native_mic_closed_locked()
         # NOTE: caller MUST call self._safe_abort() AFTER releasing _lock (see start/stop/toggle).
 
     def _touch_speech(self) -> None:
@@ -2089,10 +2129,35 @@ class VoiceTypingDaemon:
         Issue 2 within-session residual): a stray post-final realtime partial cannot resurrect a
         ~5s drain the way it could when _final_pending was set on every partial.
 
-        P1.M1.T3.S4: a native LISTENING owner is tagged 'stopped' so _disarm ends it with that
-        reason.
+        NATIVE (P1.M1.T4.S5): a LISTENING native owner is routed to native_stop — always
+        drains the in-flight utterance, independent of asr.graceful_stop; STARTING →
+        _stop_native_start; DRAINING → no-op (first reason wins). Only a daemon with NO
+        native reservation reaches the generic branch below, byte-identical behaviour.
         """
-        self._native_drain_or_stop("stopped")
+        with self._lock:
+            r = self._native
+            native_stage = r.stage if (r is not None and r.live) else None
+        if native_stage is Stage.LISTENING:
+            # P1.M1.T4.S5: a native stop ALWAYS drains the in-flight utterance — the generic
+            # graceful_stop heuristic below never dictates native semantics (§4.8.1 B).
+            self.native_stop("stopped")
+            return
+        if native_stage is Stage.STARTING and self._stop_native_start():
+            return
+        if native_stage is Stage.DRAINING:
+            # P1.M1.T4.S5: already winding down — first reason wins; a repeated control stop
+            # neither restarts nor FORCE-ENDS the drain (the in-flight utterance keeps its
+            # bounded wait). It only completes an ALREADY-SETTLED wind-down (mic closed,
+            # nothing in text()): the tail then ends with the recorded reason, or starts the
+            # ACK-settlement window — mirroring what _complete_drain just did. A legacy tag
+            # (_native_drain_or_stop) followed by stop() still ends the session this way.
+            with self._lock:
+                if not self._text_in_flight.is_set():
+                    self._native_mic_closed_locked()
+            self._flush_native_end()
+            return
+        if native_stage is not None:
+            return  # STARTING but raced (lost/ended between the two lock holds): idempotent
         if (
             self._cfg.asr.graceful_stop
             and self._host is not None
@@ -2418,8 +2483,9 @@ class VoiceTypingDaemon:
         this issues no backspace and still replies ok — further Backspaces are plain user edits,
         never compensated (only typed dictation may be deleted, and only by this path).
 
-        P1.M1.T3.S4: cancel is not an owner command — while a native editor session owns the mic
-        it replies busy and performs no backspace/host cancel (§4.8.1 B).
+        P1.M1.T3.S4 / P1.M1.T4.S5: cancel is not an owner command — while a native owner holds
+        the mic it replies busy with NO side effects; the owner's cancel is native_cancel
+        (invalidate-then-abort, §4.8.1 B).
         """
         with self._lock:
             if self._native_owner_live_locked():   # P1.M1.T3.S4: cancel is not an owner command
@@ -2451,11 +2517,26 @@ class VoiceTypingDaemon:
         return {"ok": True, "listening": True, **self.status_snapshot()}
 
     def _begin_drain(self) -> None:
-        """Mark a drain in progress + arm the hang watchdog. Idempotent vs a re-press of the hotkey."""
-        with self._lock:
-            if self._drain:
-                return  # already draining (e.g. the hotkey was pressed again mid-drain)
-            self._drain = True
+        """Mark a drain in progress + arm the hang watchdog. Idempotent vs a re-press of the hotkey.
+
+        P1.M1.T4.S5: this is ALSO the NATIVE bounded ASR drain — native_stop/native_lost use
+        the _begin_drain_locked/_arm_drain_watchdog split so the flag flips under _lock and
+        the Timer starts off-lock (self-locking _begin_drain would deadlock a lock-holding
+        native path). A watchdog timeout loses the in-flight utterance (never recoverable);
+        the session's end reason is unchanged."""
+        if not self._begin_drain_locked():
+            return  # already draining (e.g. the hotkey was pressed again mid-drain)
+        self._arm_drain_watchdog()
+
+    def _begin_drain_locked(self) -> bool:
+        """Flip the drain flag (caller holds _lock). True iff THIS call started the drain."""
+        if self._drain:
+            return False
+        self._drain = True
+        return True
+
+    def _arm_drain_watchdog(self) -> None:
+        """Arm the hang watchdog (caller must NOT hold _lock: Timer construction + start)."""
         self._drain_timer = threading.Timer(_DRAIN_TIMEOUT_S, self._drain_timeout)
         self._drain_timer.daemon = True
         self._drain_timer.start()
@@ -2470,6 +2551,10 @@ class VoiceTypingDaemon:
         gate cleared, 'Recording Stopped' toast, phase idle) and cancels the watchdog. No abort is
         needed here — text() has already returned, so the run loop won't re-enter it before the
         _listening re-check.
+
+        P1.M1.T4.S5: this ALSO completes a NATIVE bounded ASR drain (armed by
+        native_stop/native_lost); the native tail inside _disarm then starts or finishes the
+        ACK settlement (or ends the session outright when nothing is unsettled).
         """
         timer = None
         with self._lock:
@@ -2497,6 +2582,9 @@ class VoiceTypingDaemon:
         nothing ever rewinds). Mainly closes the abort→_complete_drain→_disarm race window and
         documents intent. _freeze_stranded_tail is a no-op without a pending tail and runs OUTSIDE
         self._lock (Timer thread; engine lock is the serializer).
+
+        P1.M1.T4.S5: the same watchdog bounds the NATIVE ASR drain; a native timeout loses the
+        in-flight utterance — never recoverable — and the session's end reason is unchanged.
         """
         if self._drain and self._host is not None and self._text_in_flight.is_set():
             logger.info(
@@ -2512,24 +2600,35 @@ class VoiceTypingDaemon:
         Re-checks the idle deadline UNDER the lock so a partial arriving between the watchdog's
         1s tick and here cancels the stop (no false disarm). threshold<=0 disables (no-op). Called
         by _idle_watchdog ~once/second; also safe to call directly (unit tests do).
+
+        P1.M1.T4.S5: a native owner is routed to native_stop('idle') — tagged/routed ONLY when
+        this idle check actually holds (a non-idle native session stays LISTENING; the old
+        first-statement tag rejected every later final of a still-talking session).
         """
         threshold = self._cfg.asr.auto_stop_idle_seconds
         if threshold <= 0:
             return
-        self._native_drain_or_stop("idle")  # P1.M1.T3.S4: auto-stop of a native owner records 'idle'
+        native_idle = False
         disarmed = False
         with self._lock:
             if not self._listening.is_set() or self._last_speech_monotonic is None:
                 return
             if time.monotonic() - self._last_speech_monotonic < threshold:
                 return
-            logger.info(
-                "voice-typing auto-stop: %.1fs of no recognized speech; disarming "
-                "(set [asr] auto_stop_idle_seconds=0 to disable)",
-                threshold,
-            )
-            self._disarm()
-            disarmed = True
+            if self._native_owner_live_locked():
+                # P1.M1.T4.S5: idle holds — route through native finishing ('idle').
+                native_idle = True
+            else:
+                logger.info(
+                    "voice-typing auto-stop: %.1fs of no recognized speech; disarming "
+                    "(set [asr] auto_stop_idle_seconds=0 to disable)",
+                    threshold,
+                )
+                self._disarm()
+                disarmed = True
+        if native_idle:
+            self.native_stop("idle")  # P1.M1.T4.S5: native routes through native finishing
+            return
         # abort() moved OUT of _lock (validation NEW-2; see _disarm docstring) + gated on
         # _text_in_flight (validation Issue 1; see _safe_abort). Auto-stop fires only after
         # auto_stop_idle_seconds of NO speech, so the last utterance finalized long ago — nothing to
@@ -3039,10 +3138,12 @@ class VoiceTypingDaemon:
                                        fence — a previous arm's or a respawned host's final
           "ok"                         eligible — clean → handoff → refresh → enqueue
 
-        T4.S5 EXTENSION SEAM (documented, NOT implemented here): under Stage.DRAINING
-        acceptance must be narrowed to (host_generation, arm_seq, session_gen,
-        utterance_id) == host.capture_boundary (whole-value snapshot; at most 1 event may
-        be superseded)."""
+        P1.M1.T4.S5 (DRAINING): after the fence passes, acceptance narrows to the utterance
+        in flight at stop/loss — the whole-value _native_drain_boundary snapshot taken at
+        native_stop/native_lost (host_generation, arm_seq, session_gen, utterance_id must
+        all match; at most 1 event may be superseded off the reader thread, hence the SNAPSHOT
+        is compared — never a re-read of host.capture_boundary). Verdict "drain": a final of
+        any OTHER utterance during the wind-down is dropped."""
         if ev is None:
             return "missing"
         if ev.kind != "final":
@@ -3053,6 +3154,12 @@ class VoiceTypingDaemon:
             return "missing"
         if (ev.host_generation, ev.arm_seq) != self._native_fence:
             return "fence"
+        if self._native_drain_boundary is not None:  # P1.M1.T4.S5: DRAINING — lock-free sentinel
+            b = self._native_drain_boundary
+            if b.utterance_id is None or (
+                ev.host_generation, ev.arm_seq, ev.session_gen, ev.utterance_id
+            ) != tuple(b):
+                return "drain"  # only the utterance in flight at stop/loss may land
         return "ok"
 
     def _native_reject_final(self, why: str) -> None:
@@ -3214,12 +3321,28 @@ class VoiceTypingDaemon:
 
     def _end_native_locked(self, reason: str, cause: str | None,
                            *, now: float | None = None) -> EndRecord | None:
-        """Transition the live reservation to ENDED under _lock; retire the watchdog (Timer.cancel is a
-        flag set — the ONE thing allowed under the lock); wake a parked worker. Idempotent."""
+        """THE terminal action (P1.M1.T4.S5): transition the live reservation to ENDED under
+        _lock — every native end cause (stop/loss/cancel/drain/settle/shutdown/host death)
+        funnels HERE and nowhere else. Stashes NativeEndFacts BEFORE T4.S4's hook drops the
+        queue; retires BOTH watchdogs (Timer.cancel is a flag set — the ONE thing allowed
+        under the lock); wakes a parked worker. Idempotent."""
         r = self._native
         if r is None or not r.live:
             return None
         rec = r.terminate(reason, cause, now=self._native_clock() if now is None else now)
+        # P1.M1.T4.S5: stash the transcript-free facts BEFORE T4.S4's hook drops the queue,
+        # and retire the ACK-settlement watchdog + the DRAINING reader sentinel.
+        q = self._native_queue
+        self._native_end_facts = NativeEndFacts(
+            reason=rec.reason,
+            revoked=q.revocation_reason if q is not None else None,
+            recoverable=q.drain_pending() if q is not None else False,
+        )
+        settle_handle, self._native_settle_timer = self._native_settle_timer, None
+        if settle_handle is not None:
+            self._native_timers.cancel(settle_handle)
+        self._native_settle_deadline = None
+        self._native_drain_boundary = None
         # P1.M1.T4.S4: the capture is over on EVERY end cause — clear the fence + close the
         # offer queue in this same lock hold (a late final can no longer be routed native;
         # a later enqueue would return CLOSED without retaining — no session resurrection).
@@ -3289,6 +3412,213 @@ class VoiceTypingDaemon:
             self._end_native_locked("stopped", "stop-during-start")
         self._flush_native_end()
         return True
+
+    # === P1.M1.T4.S5 — the native wind-down policy (§4.8.1 B) ======================
+    # Pattern: ONE lock hold that only decides + stores, then off-lock side effects
+    # (Timer start → on_end delivery → host abort/cancel). No waiting under _lock, no
+    # abort/cancel under _lock, no settlement thread; the terminal action is idempotent
+    # when stop / loss / exit / EOF race (first reason wins).
+
+    def native_stop(self, reason: str = "stopped",
+                    *, token: int | None = None) -> EndRecord | None:
+        """THE graceful funnel (§4.8.1 B): owner `stop` / `voicectl stop` / idle auto-stop.
+
+        Behaviour:
+          STARTING  → end at once ('stop-during-start'): stop during startup aborts the
+                      reservation without opening capture.
+          LISTENING → DRAINING(reason): wake the pump, snapshot host.capture_boundary as
+                      the lock-free reader sentinel, then EITHER the bounded ASR drain
+                      (_DRAIN_TIMEOUT_S; run() completes it in _complete_drain) for the
+                      ONE utterance in flight at stop, OR mic-off now (abort off-lock via
+                      _safe_abort) when nothing is in flight. After the ASR drain the
+                      queued offers settle for at most NATIVE_SETTLE_TIMEOUT_S
+                      (_native_mic_closed_locked arms the watchdog; the pump kicks
+                      native_settle_kick after every ack/check_deadline).
+          DRAINING  → None (already winding down — first reason wins).
+
+        Drains REGARDLESS of cfg.asr.graceful_stop — the generic heuristic never dictates
+        native semantics. Never waits; never aborts under _lock.
+
+        CONSUMER CONTRACT (T4.S7 owner-connection pump, all with owner token):
+          owner "stop"   → d.native_stop("stopped", token=tok)
+          owner "cancel" → d.native_cancel(token=tok)
+          owner "lost" / local invalidation → d.native_lost("target_lost", <LossCause>, token=tok)
+          transport EOF / write failure        → d.native_lost("disconnected", <LossCause>, token=tok)
+          lease expiry (6 s without valid ping) → d.native_lost("timeout", "lease-expired", token=tok)
+          after EVERY d._lock-guarded q.ack(...) / q.check_deadline(...) → d.native_settle_kick()
+          (off-lock); without the kick `ended` still arrives, but only at the 5 s deadline.
+        """
+        if reason not in _STOP_REASONS:
+            raise ValueError("unknown stop reason")
+        timer_due = abort = flush = False
+        rec = None
+        with self._lock:
+            r = self._native
+            if r is None or not r.live or (token is not None and r.owner.token != token):
+                return None
+            if r.stage is Stage.STARTING:
+                rec = self._end_native_locked(reason, "stop-during-start")
+                flush = True
+            elif r.stage is Stage.LISTENING:
+                r.begin_drain(reason)
+                self._native_offer_evt.set()  # wake the pump: `finishing` before any offer
+                host = self._host
+                b = getattr(host, "capture_boundary", None) if host is not None else None
+                self._native_drain_boundary = b  # reader sentinel + THE utterance that may land
+                if self._text_in_flight.is_set() and b is not None and b.utterance_id is not None:
+                    timer_due = self._begin_drain_locked()  # bounded ASR drain; Timer off-lock
+                else:
+                    self._disarm()  # nothing in flight: mic off NOW; its tail ends/settles
+                    abort = True
+                    rec = r.end  # the terminal action ran in the _disarm tail
+                    flush = True  # deliver off-lock HERE (the parked worker's claim no-ops)
+            else:
+                return None  # DRAINING: already winding down — first reason wins
+        if timer_due:
+            self._arm_drain_watchdog()
+        if flush:
+            self._flush_native_end()
+        if abort:
+            self._safe_abort()
+        return rec
+
+    def _native_mic_closed_locked(self) -> None:
+        """The _disarm tail for a live native owner (caller holds _lock; called ONLY from
+        _disarm — never waits, never aborts, never releases the lock). Cases:
+          queue revoked (loss/cancel/pump) → nothing can settle: end with the revocation reason.
+          no queue / nothing unsettled     → fully settled (or nothing ever queued): end now.
+          DRAINING with unsettled offers   → arm the ≤ NATIVE_SETTLE_TIMEOUT_S settlement
+                                             window (Timer.arm — the ONLY non-attribute call
+                                             allowed inside this lock hold) and return; the
+                                             pump's kicks / the watchdog fire end the session.
+        on_end is delivered off-lock (kicker/watchdog, or the stop/lost funnel that triggered
+        this disarm — the parked worker's claim then no-ops; exactly-once holds)."""
+        r = self._native
+        if r is None or not r.live:
+            return
+        q = self._native_queue
+        if q is not None and q.revoked:
+            self._end_native_locked(q.revocation_reason, None)
+            return
+        if q is None or not q.drain_pending():
+            self._end_native_locked(r.end_reason, None)
+            return
+        now = self._native_clock()
+        self._native_settle_deadline = now + NATIVE_SETTLE_TIMEOUT_S
+        tok = r.owner.token
+        self._native_settle_timer = self._native_timers.arm(
+            self._native_settle_deadline, lambda tok=tok: self.native_settle_kick(token=tok))
+        logger.info("voice-typing native: settling offers token=%d budget=%.0fs pending=%d",
+                    tok, NATIVE_SETTLE_TIMEOUT_S, q.pending_count)
+
+    def _native_settle_step_locked(self, now: float) -> EndRecord | None:
+        """One settlement decision (caller holds _lock). Ends the session iff delivery is
+        revoked (its reason wins), the queue is fully settled (the drain reason), or the
+        budget is spent with work unsettled ('timeout' / 'settle-timeout' — the queue is
+        revoked and the text stays recoverable). None = still settling."""
+        r = self._native
+        if r is None or r.stage is not Stage.DRAINING or self._native_settle_deadline is None:
+            return None
+        q = self._native_queue
+        if q is not None and q.revoked:
+            reason, cause = q.revocation_reason, None
+        elif q is None or not q.drain_pending():
+            reason, cause = r.end_reason, None
+        elif now >= self._native_settle_deadline:
+            q.revoke("timeout")
+            reason, cause = "timeout", "settle-timeout"  # budget spent, work unsettled
+        else:
+            return None
+        return self._end_native_locked(reason, cause, now=now)
+
+    def native_settle_kick(self, *, token: int | None = None) -> EndRecord | None:
+        """One settlement step: decide under _lock, deliver off-lock. Called by the T4.S7
+        pump after EVERY _lock-guarded q.ack(...)/q.check_deadline(...) and by the settle
+        watchdog fire; `token` fences a late watchdog fire of a PREVIOUS owner (no-op).
+
+        CONSUMER CONTRACT (T4.S7 pump, verbatim): without the kick `ended` still arrives,
+        but only at the 5 s deadline; a stale set after close is harmless (q is None);
+        while DRAINING the queue stays open and unrevoked for stop/idle — keep offering
+        pending finals."""
+        with self._lock:
+            r = self._native
+            if token is not None and (r is None or r.owner.token != token):
+                return None  # late fire of a previous owner's watchdog: fenced
+            rec = self._native_settle_step_locked(self._native_clock())
+        self._flush_native_end()
+        return rec
+
+    def native_cancel(self, *, token: int | None = None) -> EndRecord | None:
+        """§4.8.1 B: invalidate FIRST, then abort; NEVER drains. Order is load-bearing —
+        revoke queue + drop unattempted finals → _end_native_locked (tombstone, close queue,
+        clear fence) → mic off in the SAME hold → [off-lock] host.cancel() (gated on
+        _text_in_flight, exactly like _safe_abort: cancel BLOCKS forever unless a thread is
+        inside text()) to discard the utterance's audio and unblock text(). A late final is
+        neither retained nor typed (the fence is cleared by the end)."""
+        rec = None
+        with self._lock:
+            r = self._native
+            if r is None or not r.live or (token is not None and r.owner.token != token):
+                return None
+            q = self._native_queue
+            if q is not None:
+                q.revoke("cancelled")
+                q.clear_pending()
+            rec = self._end_native_locked("cancelled", "cancel")
+            if self._listening.is_set():
+                self._disarm()  # mic off in the SAME hold (its native tail is now a no-op)
+        self._flush_native_end()
+        host = self._host  # off-lock: discard the utterance's audio + unblock text()
+        if host is not None and self._text_in_flight.is_set():
+            try:
+                host.cancel()
+            except Exception:
+                logger.exception("host.cancel() raised (best-effort; ignored)")
+        return rec
+
+    def native_lost(self, reason: str, cause: str | None = None,
+                    *, token: int | None = None) -> EndRecord | None:
+        """§4.8.1 B: loss/disconnect — revoke delivery FIRST, then drain for recovery only.
+
+        STARTING / DRAINING → end at once (no capture / no settlement wait). LISTENING →
+        revoke + DRAINING(reason): at most the in-flight utterance drains INTO RECOVERY
+        ONLY (the queue is already revoked, so its enqueue returns REVOKED and the pump is
+        never woken — no ACK can arrive); then an immediate end, NO settle timer. Loss while
+        starting aborts without capture."""
+        if reason not in _LOSS_REASONS:
+            raise ValueError("unknown loss reason")
+        timer_due = abort = flush = False
+        rec = None
+        with self._lock:
+            r = self._native
+            if r is None or not r.live or (token is not None and r.owner.token != token):
+                return None
+            q = self._native_queue
+            if q is not None:
+                q.revoke(reason)  # revoke delivery FIRST
+                q.clear_pending()
+            if r.stage is Stage.STARTING or r.stage is Stage.DRAINING:
+                rec = self._end_native_locked(reason, cause)
+                flush = True
+            else:
+                r.begin_drain(reason)  # LISTENING: recovery-only drain of the in-flight utterance
+                host = self._host
+                b = getattr(host, "capture_boundary", None) if host is not None else None
+                self._native_drain_boundary = b
+                if self._text_in_flight.is_set() and b is not None and b.utterance_id is not None:
+                    timer_due = self._begin_drain_locked()
+                else:
+                    self._disarm()
+                    abort = True
+                    rec = r.end  # the terminal action ran in the _disarm tail
+                    flush = True  # deliver off-lock HERE (the parked worker's claim no-ops)
+        if timer_due:
+            self._arm_drain_watchdog()
+        if flush:
+            self._flush_native_end()
+        if abort:
+            self._safe_abort()
+        return rec
 
     def _native_start_worker(self, token: int, *, seed: str | None, streaming: bool | None) -> None:
         """The native session's lifecycle thread. (1) runs the fenced start carrying its owner token
